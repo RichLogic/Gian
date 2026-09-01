@@ -20,7 +20,14 @@ until Developer ID signing and notarization are available.
 
 ### Changed
 
-- Published Codex Proxy 0.2.11, Kimi Proxy 0.2.6, and ZCode Proxy 0.1.0.
+- Published Codex Proxy 0.2.11, Kimi Proxy 0.2.6, DSH Proxy 0.1.4, and
+  ZCode Proxy 0.1.0.
+- DSH now targets latest Harness 0.1.1-rc.2, waits for late Provider
+  registration, exposes Provider-specific model and reasoning controls, and
+  shows the Provider selector beside Model in both composers. Selections apply
+  to the actual model request; reasoning remains separate from visible text,
+  same-Session concurrent Turns fail busy, and shared Sessions isolate
+  interrupts correctly.
 - Kimi now provides the ACP terminal service used by its native command tools
   and preserves catalog controls and terminal availability across runtime
   invalidation, detach, and reattach.
@@ -37,6 +44,8 @@ until Developer ID signing and notarization are available.
   events that share native identities. Permission retries remain one card,
   interrupts cancel the actual foreground execution, and provider request
   headers and identifiers stay out of conversation events.
+- Existing DSH Agents now rebind their Gian-owned profile to the Bridge bundled
+  with the current App instead of silently retaining an older Bridge symlink.
 
 ### Known limitations
 
@@ -44,6 +53,8 @@ until Developer ID signing and notarization are available.
 - ZCode requires a separately configured ZCode CLI provider account. Gian
   does not import Desktop authorization or modify `~/.zcode`.
 - ZCode Proxy 0.1.0 accepts text only; file and image inputs are not exposed.
+- DSH Proxy 0.1.4 accepts text and workspace tools. Typed file/image inputs
+  and interactive approval/question routing remain unadvertised.
 - Scheduled Automations and Grok are not included in the 0.5.4 product
   surface.
 

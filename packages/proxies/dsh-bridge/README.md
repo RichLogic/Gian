@@ -12,6 +12,10 @@ one-shot runner, and it keeps stdout exclusively for bridge JSON-RPC.
 - Server: `src/server.ts` (bridge/1.0 request routing and correlation).
 - Real runtime seam: `src/cordis-host.ts`; deterministic fake: `src/fake-host.ts`.
 
+The current production baseline is `@deepseek-ai/dsh@0.1.1-rc.2`. The Bridge
+waits for late Provider registration before its first Catalog and projects the
+selected Provider, model, and reasoning effort into the Agent's actual request.
+
 ## Test
 
 ```sh

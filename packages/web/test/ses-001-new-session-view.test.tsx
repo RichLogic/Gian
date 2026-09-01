@@ -351,7 +351,7 @@ describe('NewSessionView', () => {
     dsh.defaults = {
       model: 'deepseek-reasoner',
       thinking: 'high',
-      mode: 'never',
+      mode: '',
     };
     vi.mocked(loadAgents).mockResolvedValue([dsh]);
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
@@ -359,6 +359,18 @@ describe('NewSessionView', () => {
       catalogRevision: 'dsh-v2',
       input: [{ type: 'text' }],
       configOptions: [
+        {
+          id: 'provider',
+          displayName: 'Provider',
+          binding: 'turn',
+          control: 'select',
+          required: false,
+          defaultValue: 'deepseek-official',
+          choices: [
+            { value: 'deepseek-official', displayName: 'DeepSeek' },
+            { value: 'opencode-go', displayName: 'opencode-go' },
+          ],
+        },
         {
           id: 'model',
           displayName: 'Model',
@@ -385,19 +397,6 @@ describe('NewSessionView', () => {
             { value: 'high', displayName: 'High' },
           ],
         },
-        {
-          id: 'approval_policy',
-          displayName: 'Approval policy',
-          binding: 'turn',
-          role: 'approval_mode',
-          control: 'select',
-          required: false,
-          defaultValue: 'ask',
-          choices: [
-            { value: 'ask', displayName: 'Ask' },
-            { value: 'never', displayName: 'Never' },
-          ],
-        },
       ],
       slashCommands: [],
       capabilities: {},
@@ -414,9 +413,10 @@ describe('NewSessionView', () => {
 
     const { onCreate } = renderView({ initialAgentId: 'agent-dsh-1' });
     expect(await screen.findByTestId('ns-agent-picker')).toHaveTextContent('DeepSeek Harness');
+    expect(await screen.findByTestId('ns-catalog-options')).toHaveTextContent('Provider: DeepSeek');
     await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('DeepSeek Reasoner'));
     expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('High');
-    expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Never');
+    expect(screen.queryByTestId('ns-mode-chip')).toBeNull();
 
     typeInlineComposer(screen.getByTestId('ns-message-input'), 'use configured defaults');
     await userEvent.click(screen.getByTestId('ns-send'));
@@ -426,6 +426,97 @@ describe('NewSessionView', () => {
       agentId: 'agent-dsh-1',
       executor: 'dsh',
       firstMessage: 'use configured defaults',
+    });
+  });
+
+  it('switches DSH Provider visibly and submits the resolved OpenCode config', async () => {
+    const dsh = agent('dsh', 'DeepSeek Harness');
+    vi.mocked(loadAgents).mockResolvedValue([dsh]);
+    const providerOption = {
+      id: 'provider', displayName: 'Provider', binding: 'turn' as const,
+      control: 'select' as const, required: false, defaultValue: 'deepseek-official',
+      choices: [
+        { value: 'deepseek-official', displayName: 'DeepSeek' },
+        { value: 'opencode-go', displayName: 'opencode-go' },
+      ],
+    };
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.1',
+      catalogRevision: 'dsh-base',
+      input: [{ type: 'text' }],
+      configOptions: [
+        providerOption,
+        {
+          id: 'model', displayName: 'Model', binding: 'turn', control: 'select',
+          required: true, defaultValue: 'deepseek-v4-flash',
+          choices: [{ value: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash' }],
+        },
+        {
+          id: 'effort', displayName: 'Reasoning effort', binding: 'turn', control: 'select',
+          required: false, defaultValue: 'high',
+          choices: [{ value: 'high', displayName: 'High' }],
+        },
+      ],
+      specialCatalogs: { model: 'model', thinking: 'effort' },
+      slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 },
+      models: [],
+      modes: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
+      catalogRevision: 'dsh-opencode',
+      input: [{ type: 'text' }],
+      configOptions: [
+        { ...providerOption, defaultValue: 'opencode-go' },
+        {
+          id: 'model', displayName: 'Model', binding: 'turn', role: 'model',
+          control: 'select', required: true, defaultValue: 'deepseek-v4-flash',
+          choices: [{ value: 'deepseek-v4-flash', displayName: 'opencode-DS V4 Flash' }],
+        },
+        {
+          id: 'effort', displayName: 'Reasoning effort', binding: 'turn', role: 'effort',
+          control: 'select', required: false, defaultValue: 'off',
+          choices: [{ value: 'off', displayName: 'Off' }],
+        },
+      ],
+      slashCommands: [],
+      resolvedDefaults: {
+        sessionConfig: {},
+        turnConfig: { provider: 'opencode-go', model: 'deepseek-v4-flash', effort: 'off' },
+      },
+    });
+
+    const { onCreate } = renderView({ initialAgentId: 'agent-dsh-1' });
+    const provider = await screen.findByTestId('ns-catalog-options');
+    expect(provider).toHaveTextContent('Provider: DeepSeek');
+    await userEvent.click(provider);
+    await userEvent.click(await screen.findByTestId('catalog-option-provider-opencode-go'));
+    await waitFor(() => expect(loadResolvedProxyCatalog).toHaveBeenCalledWith('dsh', {
+      catalogRevision: 'dsh-base',
+      sessionConfig: {},
+      turnConfig: { provider: 'opencode-go' },
+    }, 'agent-dsh-1'));
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-catalog-options')).toHaveTextContent('Provider: opencode-go');
+      expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('opencode-DS V4 Flash');
+      expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Off');
+    });
+
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'use OpenCode');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      name: '',
+      agentId: 'agent-dsh-1',
+      executor: 'dsh',
+      model: 'deepseek-v4-flash',
+      thinkingEffort: 'off',
+      turnConfig: {
+        provider: 'opencode-go',
+        model: 'deepseek-v4-flash',
+        effort: 'off',
+      },
+      firstMessage: 'use OpenCode',
     });
   });
 

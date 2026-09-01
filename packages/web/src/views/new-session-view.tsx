@@ -18,6 +18,7 @@ import {
   MAX_MESSAGE_CONTEXT_ITEMS,
   MAX_PASTED_TEXT_BYTES,
   composerDocumentUserText,
+  isApprovalMode,
   normalizeBrowserElementCapture,
   normalizeComposerDocument,
   usesCliCapabilitySurface,
@@ -54,6 +55,10 @@ import {
 import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
 import { AgentLogo } from '../components/AgentLogo.js';
+import {
+  CatalogOptionsMenu,
+  catalogOptionSummary,
+} from '../components/composer/catalog-options-menu.js';
 import { useUpDrop } from '../components/composer/option-drops.js';
 import {
   ContextReferencePopover,
@@ -616,19 +621,33 @@ export function NewSessionView({
       turnConfig: configs.turn_config,
     }, agentId).then((resolved) => {
       if (!alive) return;
+      const nextOptions = resolved.configOptions;
+      const nextDefaults = {
+        ...resolved.resolvedDefaults.sessionConfig,
+        ...resolved.resolvedDefaults.turnConfig,
+      };
       setCatalog({
         catalogRevision: resolved.catalogRevision,
-        configOptions: resolved.configOptions,
+        configOptions: nextOptions,
         input: resolved.input,
         slashCommands: resolved.slashCommands,
         resolveAdvertised: true,
       });
-      const fromCatalog = modelsFromCatalog(optionByRole(resolved.configOptions, 'model'));
+      const resolvedModel = optionByRole(nextOptions, 'model');
+      const resolvedEffort = optionByRole(nextOptions, 'effort');
+      const resolvedApproval = optionByRole(nextOptions, 'approval_mode');
+      const resolvedFast = optionByRole(nextOptions, 'fast');
+      const fromCatalog = modelsFromCatalog(resolvedModel);
       if (fromCatalog.length > 0) setModels(fromCatalog);
-      setCatalogValues(current => applyResolvedDefaults(current, {
-        ...resolved.resolvedDefaults.sessionConfig,
-        ...resolved.resolvedDefaults.turnConfig,
-      }));
+      const modelValue = resolvedModel ? nextDefaults[resolvedModel.id] : undefined;
+      if (typeof modelValue === 'string') setModel(modelValue);
+      const effortValue = resolvedEffort ? nextDefaults[resolvedEffort.id] : undefined;
+      if (typeof effortValue === 'string') setEffort(effortValue);
+      const approvalValue = resolvedApproval ? nextDefaults[resolvedApproval.id] : undefined;
+      if (isApprovalMode(approvalValue)) setMode(approvalValue);
+      const fastValue = resolvedFast ? nextDefaults[resolvedFast.id] : undefined;
+      if (typeof fastValue === 'boolean') setServiceTier(fastValue ? 'fast' : null);
+      setCatalogValues(current => applyResolvedDefaults(current, nextDefaults));
       setCatalogResolveError(null);
     }).catch((error: unknown) => {
       if (!alive) return;
@@ -844,6 +863,12 @@ export function NewSessionView({
     && option.id !== catalogApproval?.id
     && optionVisible(option, catalogViewValues)
   ));
+  const turnExtras = catalog.configOptions.filter((option) => (
+    option.binding === 'turn'
+    && !specialOptionIds.has(option.id)
+    && optionVisible(option, catalogViewValues)
+  ));
+  const turnExtrasSummary = catalogOptionSummary(turnExtras, catalogViewValues);
   const canAttachLocalFile = catalog.input.length === 0
     || inputTypeAdvertised(catalog, 'localFile', catalogValues);
 
@@ -1480,6 +1505,20 @@ export function NewSessionView({
             </ReferencePopover>
           )}
           <div className="composer-bar">
+            {turnExtras.length > 0 && (
+              <CatalogOptionsMenu
+                summary={turnExtrasSummary}
+                options={turnExtras}
+                values={catalogViewValues}
+                optionDisabled={option => creating || !optionEnabled(option, catalogViewValues)}
+                onOptionChange={(option, value) => setCatalogValues(current => ({
+                  ...current,
+                  [option.id]: value,
+                }))}
+                testId="ns-catalog-options"
+              />
+            )}
+            {turnExtras.length > 0 && modelControlVisible && <ControlSeparator />}
             {showModelChip && executor && (
               <>
                 <button

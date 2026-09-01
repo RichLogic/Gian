@@ -285,21 +285,18 @@
     "dsh": {
       "displayName": "DeepSeek Harness Bridge",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.3",
+      "pluginVersion": "0.1.4",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
       "cheapestConfig": {
+        "provider": "opencode-go",
         "model": "deepseek-v4-flash"
       },
       "capabilities": [
-        "input.localFile",
-        "input.localImage",
         "catalog.resolve",
         "session.replay",
-        "interaction",
         "event.reasoning",
-        "event.diff",
         "event.usage",
         "event.step",
         "event.request"
@@ -316,8 +313,6 @@
         "activity.updated",
         "step.updated",
         "request.updated",
-        "interaction.requested",
-        "interaction.resolved",
         "usage.updated",
         "catalog.changed"
       ]
@@ -420,7 +415,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Read the attached file. Reply with exactly the unique marker found inside it and nothing else.",
       "steps": ["create marker.txt fixture", "attach localFile", "start turn", "wait for terminal"],
-      "providers": {"claude":"required","codex":"unsupported","kimi":"required","grok":"required","dsh":"contract_only","zcode":"spec_gap"}
+      "providers": {"claude":"required","codex":"unsupported","kimi":"required","grok":"required","dsh":"unsupported","zcode":"spec_gap"}
     },
     {
       "id": "input.local_image",
@@ -431,7 +426,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Inspect the attached image. Reply with exactly the large uppercase word shown in it and nothing else.",
       "steps": ["create a local PNG with one marker word", "attach localImage", "start turn", "wait for terminal"],
-      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"spec_gap"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"unsupported","zcode":"spec_gap"}
     },
     {
       "id": "input.skill",
@@ -464,7 +459,7 @@
       "notifications": ["activity.updated", "content.completed", "turn.completed"],
       "prompt": "Perform every step using tools: (1) read source.txt, (2) search the workspace for ACCEPTANCE_NEEDLE, (3) create draft.txt containing TOOL_FLOW_OK, (4) rename it to final.txt, (5) create then delete obsolete.txt, and (6) run `node verify.mjs`. Finish only after the command succeeds, then reply exactly TOOL_FLOW_OK.",
       "steps": ["prepare isolated workspace fixtures", "start turn in ask mode", "respond to every safe workspace approval", "verify filesystem outcome", "wait for terminal"],
-      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"not_run","zcode":"required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "activity.plan",
@@ -486,7 +481,7 @@
       "notifications": ["activity.updated", "diff.updated", "turn.completed"],
       "prompt": "Edit change-me.txt, replacing BEFORE_ACCEPTANCE with AFTER_ACCEPTANCE. Use the normal file-edit tool and then reply exactly DIFF_FLOW_OK.",
       "steps": ["prepare change-me.txt", "start turn", "approve workspace edit", "verify diff and file", "wait for terminal"],
-      "providers": {"claude":"unsupported","codex":"required","kimi":"unsupported","grok":"required","dsh":"contract_only","zcode":"unsupported"}
+      "providers": {"claude":"unsupported","codex":"required","kimi":"unsupported","grok":"required","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "activity.subagent",
@@ -518,7 +513,7 @@
       "notifications": ["interaction.requested", "interaction.resolved", "turn.completed"],
       "prompt": "Use a tool that requires approval to write permission.txt with PERMISSION_FLOW_OK. Do not avoid the requested write.",
       "steps": ["start turn in ask mode", "capture native actions", "choose one safe allow action", "respond with a unique responseId", "repeat identical response", "wait for resolved and terminal"],
-      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"unsupported","zcode":"required"}
     },
     {
       "id": "interaction.question",
@@ -529,7 +524,7 @@
       "notifications": ["interaction.requested", "interaction.resolved", "turn.completed"],
       "prompt": "Before doing any work, use your native user-question tool to ask which marker to write. Offer ALPHA and BETA when the runtime supports choices. After the answer, write the selected marker and finish.",
       "steps": ["start turn", "wait for question interaction", "supply ALPHA", "assert response before resolved", "wait for terminal"],
-      "providers": {"claude":"required","codex":"required","kimi":"conditional","grok":"unsupported","dsh":"contract_only","zcode":"unsupported"}
+      "providers": {"claude":"required","codex":"required","kimi":"conditional","grok":"unsupported","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "interaction.exit_plan_confirmation",
@@ -562,7 +557,7 @@
       "notifications": ["turn.started", "turn.completed"],
       "prompt": "Run `node long-running.mjs` and wait for it to finish before replying.",
       "steps": ["start long command turn", "attempt a second turn and expect SESSION_BUSY", "interrupt active turn", "assert response before terminal", "assert stopReason interrupted"],
-      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "concurrency.process_scope",

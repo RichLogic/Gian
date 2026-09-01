@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.1.3';
+export const PLUGIN_VERSION = '0.1.4';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -30,7 +30,7 @@ export interface AttachedSession {
   sequence: number;
   closed: boolean;
   turnConfigOptionsRevision: string | null;
-  acceptedTurns: Set<string>;
+  acceptedTurns: Map<string, string>;
   activeTurn: string | null;
   sourceTurnByGianTurn: Map<string, string>;
   turnState: Map<string, TurnState>;
@@ -119,12 +119,20 @@ export function stepIdFor(sourceTurnIdValue: string, nativeStep: number): string
 }
 
 /**
- * One content stream per native step. `gian.proxy/2` freezes `kind` / `format`
- * / `stepId` for a contentId, so a later DSH step cannot reuse the turn-wide
- * assistant id from step 1.
+ * One content stream per native step and assistant block. `gian.proxy/2`
+ * freezes `kind` / `format` / `stepId` for a contentId, so text and reasoning
+ * must never share an identity or leak into each other's presentation.
  */
-export function contentIdFor(sourceTurnIdValue: string, nativeStep: number): string {
-  return `assistant-${stepIdFor(sourceTurnIdValue, nativeStep)}`;
+export function contentIdFor(
+  sourceTurnIdValue: string,
+  nativeStep: number,
+  kind = 'text',
+  index = 0,
+): string {
+  const stepId = stepIdFor(sourceTurnIdValue, nativeStep);
+  return kind === 'text' && index === 0
+    ? `assistant-${stepId}`
+    : `assistant-${kind}-${index}-${stepId}`;
 }
 
 const ASSISTANT_CONTENT_KIND = 'text';
@@ -195,7 +203,7 @@ export class DshProxyService {
       sequence: 0,
       closed: false,
       turnConfigOptionsRevision: null,
-      acceptedTurns: new Set(),
+      acceptedTurns: new Map(),
       activeTurn: null,
       sourceTurnByGianTurn: new Map(),
       turnState: new Map(),
@@ -618,15 +626,20 @@ export class DshProxyService {
     });
   }
 
-  private assistantContent(turn: TurnState, step: number): ContentState {
+  private assistantContent(
+    turn: TurnState,
+    step: number,
+    kind: 'text' | 'reasoning',
+    index: number,
+  ): ContentState {
     const stepId = stepIdFor(turn.sourceTurnId, step);
-    const contentId = contentIdFor(turn.sourceTurnId, step);
+    const contentId = contentIdFor(turn.sourceTurnId, step, kind, index);
     const prior = turn.content.get(contentId);
     if (prior) return prior;
     const state: ContentState = {
       id: contentId,
-      kind: ASSISTANT_CONTENT_KIND,
-      format: ASSISTANT_CONTENT_FORMAT,
+      kind,
+      ...(kind === ASSISTANT_CONTENT_KIND ? { format: ASSISTANT_CONTENT_FORMAT } : {}),
       stepId,
       open: true,
     };
@@ -639,9 +652,18 @@ export class DshProxyService {
     if (!turn) return;
     const step = numberField(data, 'step');
     const chunk = (data.chunk ?? {}) as Record<string, unknown>;
+    const kind = chunk.type === 'reasoning-delta'
+      ? 'reasoning'
+      : chunk.type === 'text-delta'
+        ? 'text'
+        : null;
+    if (!kind) return;
+    const index = typeof chunk.index === 'number' && Number.isSafeInteger(chunk.index)
+      ? chunk.index
+      : 0;
     const delta = typeof chunk.text === 'string' ? chunk.text : String(chunk.delta ?? '');
     if (delta === '') return;
-    const state = this.assistantContent(turn, step);
+    const state = this.assistantContent(turn, step, kind, index);
     if (state.open === false) return;
     session.sequence += 1;
     this.emit('content.delta', {
@@ -667,33 +689,33 @@ export class DshProxyService {
     if (!turn) return;
     const step = numberField(data, 'step');
     const message = (data.message ?? {}) as Record<string, unknown>;
-    const content = Array.isArray(message.content) && message.content.length > 0
-      ? (message.content as Array<Record<string, unknown>>).map((block) => (
-        block.type === 'text' ? String(block.text ?? '')
-          : block.type === 'reasoning' ? String(block.text ?? '')
-            : ''
-      )).join('')
-      : '';
-    const state = this.assistantContent(turn, step);
-    if (state.open === false) return;
-    state.open = false;
-    session.sequence += 1;
-    this.emit('content.completed', {
-      eventId: this.nextEventId(session, 'content-completed', nativeSeq),
-      sessionId: session.id,
-      streamId: session.streamId,
-      sequence: session.sequence,
-      turnId: turn.gianTurnId,
-      sourceTurnId: turn.sourceTurnId,
-      emittedAt: nowIso(),
-      data: {
-        contentId: state.id,
-        kind: state.kind,
-        ...(state.format !== undefined ? { format: state.format } : {}),
-        ...(state.stepId !== undefined ? { stepId: state.stepId } : {}),
-        content,
-      },
-    });
+    const blocks = Array.isArray(message.content)
+      ? message.content as Array<Record<string, unknown>>
+      : [];
+    for (const [index, block] of blocks.entries()) {
+      const kind = block.type === 'reasoning' ? 'reasoning' : block.type === 'text' ? 'text' : null;
+      if (!kind) continue;
+      const state = this.assistantContent(turn, step, kind, index);
+      if (state.open === false) continue;
+      state.open = false;
+      session.sequence += 1;
+      this.emit('content.completed', {
+        eventId: this.nextEventId(session, 'content-completed', nativeSeq, state.id),
+        sessionId: session.id,
+        streamId: session.streamId,
+        sequence: session.sequence,
+        turnId: turn.gianTurnId,
+        sourceTurnId: turn.sourceTurnId,
+        emittedAt: nowIso(),
+        data: {
+          contentId: state.id,
+          kind: state.kind,
+          ...(state.format !== undefined ? { format: state.format } : {}),
+          ...(state.stepId !== undefined ? { stepId: state.stepId } : {}),
+          content: String(block.text ?? ''),
+        },
+      });
+    }
 
     // Per-step usage → Turn-scoped usage.updated delta + stepId, at most once.
     const usage = data.usage as Record<string, unknown> | undefined;
@@ -701,6 +723,9 @@ export class DshProxyService {
       turn.usageSteps.add(stepIdFor(turn.sourceTurnId, step));
       const inputTokens = numberField(usage, 'inputTokens') ?? 0;
       const outputTokens = numberField(usage, 'outputTokens') ?? 0;
+      const cacheReadTokens = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0;
+      const cacheWriteTokens = typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0;
+      const cachedInputTokens = cacheReadTokens + cacheWriteTokens;
       session.sequence += 1;
       this.emit('usage.updated', {
         eventId: this.nextEventId(session, 'usage-updated', nativeSeq),
@@ -712,7 +737,13 @@ export class DshProxyService {
         emittedAt: nowIso(),
         data: {
           stepId: stepIdFor(turn.sourceTurnId, step),
-          conversation: { mode: 'delta', inputTokens, outputTokens },
+          conversation: {
+            mode: 'delta',
+            inputTokens,
+            outputTokens,
+            ...(cachedInputTokens === 0 ? {} : { cachedInputTokens }),
+            totalTokens: inputTokens + outputTokens + cachedInputTokens,
+          },
         },
       });
     }

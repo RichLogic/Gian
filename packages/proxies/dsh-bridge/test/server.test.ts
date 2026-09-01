@@ -58,7 +58,7 @@ test('initialize returns frozen bridge identity and capabilities', async () => {
   assert.equal(typed.plugin.id, 'ai.deepseek.harness');
   assert.equal(typed.plugin.bundle, '@gian/dsh-bridge');
   assert.equal(typed.runtime.package, '@deepseek-ai/dsh');
-  assert.equal(typed.runtime.version, '0.1.0-rc.7');
+  assert.equal(typed.runtime.version, '0.1.1-rc.2');
   assert.equal(typed.runtime.sessionFormatVersion, 0);
   assert.equal(typed.capabilities['session.resume'], 1);
   assert.equal(typed.capabilities.interaction, 1);

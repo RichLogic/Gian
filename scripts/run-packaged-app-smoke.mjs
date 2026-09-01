@@ -352,6 +352,25 @@ async function waitForProcessExit(pid, timeoutMs = 10_000) {
   await expect.poll(() => processIsAlive(pid), { timeout: timeoutMs }).toBe(false);
 }
 
+async function resizePackagedWindow(electronApp, size) {
+  const result = await electronApp.evaluate(({ BrowserWindow }, requestedSize) => {
+    const target = BrowserWindow.getFocusedWindow()
+      ?? BrowserWindow.getAllWindows().find(candidate => candidate.isVisible());
+    if (!target) return null;
+    if (target.isMaximized()) target.unmaximize();
+    const before = target.getContentSize();
+    const next = [
+      requestedSize.width ?? before[0] + (requestedSize.widthDelta ?? 0),
+      requestedSize.height ?? before[1] + (requestedSize.heightDelta ?? 0),
+    ];
+    target.setContentSize(next[0], next[1], false);
+    return { before, after: target.getContentSize() };
+  }, size);
+  assert.ok(result, 'packaged smoke could not find the visible main window');
+  assert.notDeepEqual(result.after, result.before, 'packaged main window did not resize');
+  return result;
+}
+
 async function installPackagedWebSocketCloseHook(window) {
   await window.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
@@ -407,9 +426,7 @@ async function runPackagedTerminalJourney({
     timeout: 30_000,
   });
 
-  await electronApp.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.setSize(1440, 900);
-  });
+  await resizePackagedWindow(electronApp, { width: 1_400, height: 860 });
   await window.getByTestId('dock-terminal').click();
   await expect(window.getByTestId('sheet-tab-term')).toHaveCount(1);
   await expect(terminalGroup(window)).toBeVisible();
@@ -477,15 +494,7 @@ async function runPackagedTerminalJourney({
   assert.match(beforeSize, /^\d+ \d+\n?$/);
   const beforeBounds = await first.locator('.xterm-screen').boundingBox();
   assert.ok(beforeBounds, 'packaged terminal has no pre-resize bounds');
-  await electronApp.evaluate(({ BrowserWindow }) => {
-    const target = BrowserWindow.getAllWindows()[0];
-    if (!target) return;
-    const [width, height] = target.getSize();
-    target.setSize(
-      width >= 1_300 ? width - 240 : width + 240,
-      height >= 700 ? height - 140 : height + 140,
-    );
-  });
+  await resizePackagedWindow(electronApp, { widthDelta: -240, heightDelta: -140 });
   await expect.poll(async () => {
     const afterBounds = await first.locator('.xterm-screen').boundingBox();
     return Boolean(afterBounds) && (
@@ -520,6 +529,9 @@ async function runPackagedTerminalJourney({
     const close = window.__gianCloseLatestPackagedWs;
     if (!close) throw new Error('packaged WebSocket close hook was not installed');
     close();
+  });
+  await expect(window.getByTestId('app-shell')).not.toHaveAttribute('data-connection', 'ready', {
+    timeout: 5_000,
   });
   await expect.poll(() => fileText(join(workspacePath, '.packaged-offline-done')), {
     timeout: 10_000,
@@ -784,7 +796,9 @@ export async function main(args = process.argv.slice(2)) {
     const finalState = await onboardingResponse.json();
     assert.equal(finalState.completed, true);
     assert.equal(finalState.projectRoot, projectRoot);
-    assert.equal(finalState.agents.find(agent => agent.proxy === 'claude')?.ready, true);
+    const configuredClaude = finalState.agents.find(agent => agent.proxy === 'claude');
+    assert.equal(configuredClaude?.ready, true);
+    assert.equal(configuredClaude?.cliPath, fakeClaude);
     const optionalCodex = finalState.agents.find(agent => agent.proxy === 'codex');
     if (optionalCodex) assert.equal(optionalCodex.ready, false);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
@@ -836,7 +850,7 @@ export async function main(args = process.argv.slice(2)) {
     const relaunchedResponse = await desktopFetch(
       origin,
       desktopToken,
-      '/api/agents/claude?refresh=1',
+      `/api/agents/${encodeURIComponent(configuredClaude.id)}?refresh=1`,
     );
     assert.equal(relaunchedResponse.status, 200);
     const relaunched = await relaunchedResponse.json();

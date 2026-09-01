@@ -12,8 +12,8 @@ import { BridgeWriter, runBridgeInput } from './jsonrpc.js';
 import { FakeDshRuntime } from './fake-host.js';
 
 const runtime = new FakeDshRuntime({
-  bridgeVersion: '0.1.0',
-  dshVersion: process.env.DSH_FAKE_VERSION ?? '0.1.0-rc.7',
+  bridgeVersion: '0.1.1',
+  dshVersion: process.env.DSH_FAKE_VERSION ?? '0.1.1-rc.2',
 });
 const writer = new BridgeWriter(process.stdout);
 const server = new BridgeServer({ host: runtime, writer });

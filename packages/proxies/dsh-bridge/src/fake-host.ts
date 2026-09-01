@@ -74,8 +74,8 @@ export class FakeDshRuntime implements BridgeHost {
   private early: BridgeHostEvent[] = [];
 
   constructor(private readonly options: FakeHostOptions = {}) {
-    this.bridgeVersion = options.bridgeVersion ?? '0.1.0';
-    this.dshVersion = options.dshVersion ?? '0.1.0-rc.7';
+    this.bridgeVersion = options.bridgeVersion ?? '0.1.1';
+    this.dshVersion = options.dshVersion ?? '0.1.1-rc.2';
   }
 
   attachSink(sink: (event: BridgeHostEvent) => void): void {

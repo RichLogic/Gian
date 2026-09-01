@@ -324,6 +324,8 @@ export async function runDshBridgeCanary(options = {}) {
     assert.equal(initialized?.plugin?.id, 'ai.deepseek.harness');
     assert.equal(initialized?.runtime?.package, '@deepseek-ai/dsh');
     assert.equal(initialized?.runtime?.version, dshVersion);
+    assert.equal(initialized?.capabilities?.interaction, undefined);
+    assert.equal(initialized?.capabilities?.['session.resume'], undefined);
 
     const catalog = await client.request('catalog.list');
     assert.equal(typeof catalog?.catalogRevision, 'string');

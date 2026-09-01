@@ -72,6 +72,30 @@ const OPEN_CONTENT_THEN_END: NativeRecord[] = [
   { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
 ];
 
+const REASONING_AND_TEXT_TURN: NativeRecord[] = [
+  { type: 'turn/start', data: { turn: 1 } },
+  { type: 'step/start', data: { turn: 1, step: 1 } },
+  { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'private thought' } } },
+  { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: 'visible answer' } } },
+  {
+    type: 'assistant/message',
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'private thought' },
+          { type: 'text', text: 'visible answer' },
+        ],
+      },
+      usage: { inputTokens: 4, outputTokens: 3, reasoningTokens: 2 },
+    },
+  },
+  { type: 'step/end', data: { turn: 1, step: 1 } },
+  { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+];
+
 function fakeBridge(records: NativeRecord[] = SINGLE_STEP_TURN) {
   const listeners = new Set<(n: FakeBridgeEvent) => void>();
   return {
@@ -134,7 +158,13 @@ async function drive(
     : { jsonrpc: '2.0', id, error: outcome.error };
   validator.acceptLine(JSON.stringify(envelope));
   for (const notification of outcome.notifications) {
-    validator.acceptLine(JSON.stringify({ jsonrpc: '2.0', method: notification.method, params: notification.params }));
+    try {
+      validator.acceptLine(JSON.stringify({ jsonrpc: '2.0', method: notification.method, params: notification.params }));
+    } catch (error) {
+      throw new Error(`invalid ${notification.method}: ${JSON.stringify(notification.params)}`, {
+        cause: error,
+      });
+    }
   }
   return outcome;
 }
@@ -246,6 +276,16 @@ test('HostProtocolValidator accepts turn-end finalizing an open content stream',
   assert.equal(completed[0]?.params.data?.kind, 'text');
   assert.equal(completed[0]?.params.data?.format, 'markdown');
   assert.equal(completed[0]?.params.data?.stepId, 's_open:turn:1:step:1');
+});
+
+test('DSH reasoning stays separate from visible text', async () => {
+  const notifications = await runTurn('s_reasoning', 't_reasoning', REASONING_AND_TEXT_TURN);
+  const completed = notifications.filter((event) => event.method === 'content.completed');
+  const byKind = new Map(completed.map(event => [event.params.data?.kind, event.params.data]));
+  assert.equal(byKind.get('reasoning')?.content, 'private thought');
+  assert.equal(byKind.get('text')?.content, 'visible answer');
+  assert.notEqual(byKind.get('reasoning')?.contentId, byKind.get('text')?.contentId);
+  assert.equal(notifications.some(event => event.method === 'usage.updated'), true);
 });
 
 test('HostProtocolValidator accepts turn-end with multiple leftover activities', async () => {

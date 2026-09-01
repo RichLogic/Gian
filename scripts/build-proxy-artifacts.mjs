@@ -64,7 +64,7 @@ const definitions = [
     runtime: {
       id: 'dsh',
       displayName: 'DeepSeek Harness',
-      verifiedCliVersions: ['0.1.0-rc.7'],
+      verifiedCliVersions: ['0.1.1-rc.2'],
     },
   },
   {

@@ -91,7 +91,7 @@ const VERIFIED_CLI_VERSIONS: Record<Executor, string[]> = {
   grok: ['1.0.4'],
   // Resolved from the official npm latest dist-tag at install/probe time;
   // this value is only a diagnostic fallback (plan §0).
-  dsh: ['0.1.0-rc.7'],
+  dsh: ['0.1.1-rc.2'],
   // WP0-verified exact version (Revision 2 §1.3: precise SemVer only).
   zcode: ['0.16.5'],
 };
@@ -834,11 +834,39 @@ export class AgentManager {
     if (persisted.schemaVersion === 3) {
       manager.config = persisted;
       if (needsSave) await manager.saveConfig();
-      return manager;
+    } else {
+      manager.config = await manager.migrateV1(persisted);
+      await manager.saveConfig();
     }
-    manager.config = await manager.migrateV1(persisted);
-    await manager.saveConfig();
+    await manager.reconcileDshProfile();
     return manager;
+  }
+
+  private dshInstaller(): DshRuntimeInstaller {
+    const dshHome = this.options.dshHome
+      ?? process.env.DSH_HOME
+      ?? join(homedir(), '.dsh');
+    if (typeof this.options.dshBridgePackageDir !== 'string') {
+      throw new Error(
+        'dshBridgePackageDir is required to install the @gian/dsh-bridge bundle into the gian profile.',
+      );
+    }
+    return new DshRuntimeInstaller({
+      runtimesRoot: join(this.options.dataDir, 'runtimes', 'deepseek-harness'),
+      dshHome,
+      bridgePackageDir: this.options.dshBridgePackageDir,
+      ...(this.options.npmPath ? { npmPath: this.options.npmPath } : {}),
+      ...(this.options.dshRegistry ? { registry: this.options.dshRegistry } : {}),
+    });
+  }
+
+  private async reconcileDshProfile(): Promise<void> {
+    if (!this.config.agents.some(agent => agent.proxy === 'dsh')) return;
+    try {
+      await this.dshInstaller().ensureGianProfile();
+    } catch (error) {
+      console.warn(`[dsh] could not reconcile the Gian profile Bridge: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** v1 → v2 migration. Each PRODUCT kind gets at most one default Agent,
@@ -1526,22 +1554,7 @@ export class AgentManager {
     id: Executor,
     updateOwner: AgentUpdateLease,
   ): Promise<AgentInstallResult> {
-    const dshHome = this.options.dshHome
-      ?? process.env.DSH_HOME
-      ?? join(homedir(), '.dsh');
-    if (typeof this.options.dshBridgePackageDir !== 'string') {
-      throw new Error(
-        'dshBridgePackageDir is required to install the @gian/dsh-bridge bundle into the gian profile.',
-      );
-    }
-    const bridgePackageDir = this.options.dshBridgePackageDir;
-    const installer = new DshRuntimeInstaller({
-      runtimesRoot: join(this.options.dataDir, 'runtimes', 'deepseek-harness'),
-      dshHome,
-      bridgePackageDir,
-      ...(this.options.npmPath ? { npmPath: this.options.npmPath } : {}),
-      ...(this.options.dshRegistry ? { registry: this.options.dshRegistry } : {}),
-    });
+    const installer = this.dshInstaller();
     const result = await installer.installLatest();
     await installer.recordUpdateCheck();
     this.invalidateStatus(id);

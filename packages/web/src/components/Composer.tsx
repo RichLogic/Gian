@@ -25,6 +25,10 @@ import { ImageZoomContext } from '../transcript/items.js';
 import { publishScreenshotTarget } from '../screenshot-target.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
+  CatalogOptionsMenu,
+  catalogOptionSummary,
+} from './composer/catalog-options-menu.js';
+import {
   ContextReferencePopover,
   REFERENCE_ICONS,
   ReferencePopover,
@@ -885,6 +889,17 @@ export function Composer({
   const nativeModeOption = nativeOptions.find(option =>
     nativeOptionRole(option) === 'mode' && option.type === 'select');
   const fastOption = viewOptions.find(option => option.role === 'fast' && option.binding === 'turn');
+  const specialTurnOptionIds = new Set(
+    [catalogModelOption, catalogEffortOption, catalogApprovalOption, fastOption]
+      .filter((option): option is ConfigOption => Boolean(option))
+      .map(option => option.id),
+  );
+  const extraTurnOptions = viewOptions.filter(option => (
+    option.binding === 'turn'
+    && !specialTurnOptionIds.has(option.id)
+    && optionVisible(option, configValues)
+  ));
+  const extraTurnSummary = catalogOptionSummary(extraTurnOptions, configValues);
   const showFast = (fixed || Boolean(onSetServiceTier)) && (
     fastOption
       ? optionVisible(fastOption, configValues)
@@ -1713,6 +1728,19 @@ export function Composer({
             </span>
           )}
           {!fixed && <ContextUsageIndicator session={session} />}
+
+          {!fixed && extraTurnOptions.length > 0 && (
+            <CatalogOptionsMenu
+              summary={extraTurnSummary}
+              options={extraTurnOptions}
+              values={configValues}
+              optionDisabled={option => disabled || !optionEnabled(option, configValues)}
+              onOptionChange={setCatalogOption}
+              testId="composer-catalog-options"
+            />
+          )}
+
+          {!fixed && extraTurnOptions.length > 0 && modelControlVisible && <ControlSeparator />}
 
           {fixed && modelControlVisible && !modelControlInteractive && (
             <span

@@ -6,8 +6,8 @@ the `gian` profile with `@gian/dsh-bridge`.
 
 ## Layout
 
-- `manifest.json` — Manifest v2 (`id: ai.deepseek.harness`, `process.scope:
-  shared`, protocol range `>=2.0 <3.0`).
+- `manifest.json` — Manifest v3 (`id: ai.deepseek.harness`, `process.scope:
+  shared`, protocol range `>=2.1 <3.0`).
 - `src/core/service.ts` — session/turn projection, stable `sourceTurnId` /
   `stepId` / `eventId` identity, terminal-state enforcement.
 - `src/protocol/v2-adapter.ts` — `gian.proxy/2.1` dispatcher and capability
@@ -27,3 +27,8 @@ The suite runs the complete `gian.proxy/2.1` contract through
 initialize identity, capabilities (including `event.step`/`event.request`),
 catalog, session create/idempotency, turn lifecycle, step/request/usage
 projection, and hostServices fail-closed — zero model calls.
+
+The production Bridge targets `@deepseek-ai/dsh@0.1.1-rc.2`. Catalog Provider,
+model, and reasoning selections are applied through DSH's per-Agent request
+waterfalls. Typed file/image inputs and interactive approval/question routing
+remain unadvertised until the real Bridge owns those native boundaries.

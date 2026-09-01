@@ -1250,3 +1250,36 @@ test('development proxy status reports the vendored plugin package version', asy
     updateAvailable: false,
   });
 });
+
+test('configured DSH Agent startup atomically rebinds the Gian profile to the current Bridge', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-dsh-profile-rebind-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  const homeDir = join(root, 'home');
+  const dshHome = join(root, 'dsh-home');
+  const bridgeA = join(root, 'bridge-a');
+  const bridgeB = join(root, 'bridge-b');
+  await Promise.all([mkdir(bridgeA), mkdir(bridgeB)]);
+  const options = {
+    dataDir,
+    releaseVersion: '0.5.4',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir,
+    dshHome,
+    pathEnv: '',
+  } as const;
+
+  const initial = await AgentManager.create({ ...options, dshBridgePackageDir: bridgeA });
+  await initial.createAgent({ name: 'DeepSeek Harness', proxy: 'dsh' });
+  await AgentManager.create({ ...options, dshBridgePackageDir: bridgeA });
+  const bridgeLink = join(dshHome, 'profiles', 'gian', 'node_modules', '@gian', 'dsh-bridge');
+  assert.equal(await readlink(bridgeLink), bridgeA);
+
+  await AgentManager.create({ ...options, dshBridgePackageDir: bridgeB });
+  assert.equal(await readlink(bridgeLink), bridgeB);
+  const profile = JSON.parse(await readFile(join(dshHome, 'profiles', 'gian', 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>;
+  };
+  assert.equal(profile.dependencies['@gian/dsh-bridge'], `file:${bridgeB}`);
+});

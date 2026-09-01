@@ -328,7 +328,7 @@ export async function runDshProxyCanary(options = {}) {
       protocol: { name: 'gian.proxy', versions: ['2.1'] },
       host: { name: 'Gian DSH proxy canary', version: '0.0.0' },
     });
-    assert.equal(initialized?.protocol?.version, '2.0');
+    assert.equal(initialized?.protocol?.version, '2.1');
     assert.equal(initialized?.plugin?.id, 'ai.deepseek.harness');
     assert.equal(initialized?.process?.scope, 'shared');
     assert.equal(initialized?.capabilities?.['event.step'], 1);
@@ -338,7 +338,10 @@ export async function runDshProxyCanary(options = {}) {
     const catalog = await client.request('catalog.list');
     assert.equal(typeof catalog?.catalogRevision, 'string');
     assert.ok(Array.isArray(catalog?.configOptions));
-    assert.ok(catalog.configOptions.some(option => option?.id === 'model'));
+    const modelOption = catalog.configOptions.find(option => option?.id === 'model');
+    assert.ok(modelOption);
+    const model = modelOption.defaultValue ?? modelOption.choices?.[0]?.value;
+    assert.equal(typeof model, 'string');
 
     const sessionId = `gian-dsh-proxy-${randomUUID()}`;
     const created = await client.request('session.create', {
@@ -360,7 +363,7 @@ export async function runDshProxyCanary(options = {}) {
       streamId,
       turnId,
       input: [{ type: 'text', text: 'hello from the DSH proxy canary' }],
-      config: { model: 'deepseek-chat' },
+      config: { model },
     });
     assert.equal(started?.accepted, true);
     assert.equal(started?.turnId, turnId);
@@ -402,7 +405,10 @@ export async function runDshProxyCanary(options = {}) {
     assert.ok(mockServer.requests.length >= 1, 'mock LLM server received no chat completion request.');
     const mockRequest = mockServer.requests[0];
     assert.ok(mockRequest.path.endsWith('/chat/completions'));
-    assert.equal(typeof mockRequest.body?.model, 'string');
+    assert.ok(
+      mockServer.requests.some(request => request.body?.model === model),
+      `mock LLM server did not receive the Catalog-selected model ${model}`,
+    );
 
     const remainingProcesses = await waitForEmptyProcessGroup(processGroupId, 2_000);
     assert.deepEqual(

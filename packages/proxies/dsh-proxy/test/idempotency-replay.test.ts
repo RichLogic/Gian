@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { DshV2Adapter } from '../src/protocol/v2-adapter.js';
 
-function fakeBridge() {
+function fakeBridge(counter: { turns: number } = { turns: 0 }) {
   let turnCount = 0;
   return {
     request: async (method: string, params: Record<string, unknown>) => {
@@ -11,6 +11,7 @@ function fakeBridge() {
       if (method === 'catalog.list') return { catalogRevision: 'fake-1', models: [{ id: 'deepseek-chat', provider: 'deepseek', label: 'DeepSeek Chat' }] };
       if (method === 'session.create') return {};
       if (method === 'turn.start') {
+        counter.turns += 1;
         turnCount += 1;
         return { accepted: true, nativeTurn: turnCount - 1 };
       }
@@ -36,8 +37,8 @@ function fakeBridge() {
   };
 }
 
-async function setup() {
-  const adapter = new DshV2Adapter(fakeBridge() as never, { pluginVersion: '0.1.0' });
+async function setup(counter: { turns: number } = { turns: 0 }) {
+  const adapter = new DshV2Adapter(fakeBridge(counter) as never, { pluginVersion: '0.1.0' });
   adapter.setEmitSink(() => undefined);
   await adapter.dispatch({ id: 'init', method: 'initialize', params: { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'Gian', version: '0.5.0' } } });
   const create = await adapter.dispatch({
@@ -49,7 +50,8 @@ async function setup() {
 }
 
 test('turn.start is idempotent for identical params in one attach generation', async () => {
-  const { adapter, streamId } = await setup();
+  const counter = { turns: 0 };
+  const { adapter, streamId } = await setup(counter);
   const params = {
     sessionId: 's1',
     streamId,
@@ -61,6 +63,22 @@ test('turn.start is idempotent for identical params in one attach generation', a
   const second = await adapter.dispatch({ id: 'b', method: 'turn.start', params });
   assert.equal(first.ok, true);
   assert.equal(second.ok, true);
+  assert.equal(counter.turns, 1);
+
+  const conflict = await adapter.dispatch({
+    id: 'c',
+    method: 'turn.start',
+    params: { ...params, input: [{ type: 'text', text: 'different' }] },
+  });
+  assert.equal(conflict.error?.data?.domainCode, 'CONFLICT');
+
+  const busy = await adapter.dispatch({
+    id: 'd',
+    method: 'turn.start',
+    params: { ...params, turnId: 'other-turn' },
+  });
+  assert.equal(busy.error?.data?.domainCode, 'SESSION_BUSY');
+  assert.equal(counter.turns, 1);
 });
 
 test('session.replay projects external user messages as input.recorded', async () => {

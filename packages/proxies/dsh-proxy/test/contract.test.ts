@@ -21,10 +21,33 @@ interface FakeBridge {
   push(method: string, params: Record<string, unknown>): void;
 }
 
-function fakeBridge(turnNumber = 0): FakeBridge {
+function fakeBridge(
+  turnNumber = 0,
+  catalogState: { revision: string } = { revision: 'fake-1' },
+): FakeBridge {
   const listeners = new Set<(n: { method: string; params: Record<string, unknown> }) => void>();
   let session = 0;
   const sessions = new Map<string, { events: Array<{ type: string; data: Record<string, unknown>; seq: number }> }>();
+  const models = [
+    {
+      id: 'deepseek-chat',
+      provider: 'deepseek',
+      label: 'DeepSeek Chat',
+      reasoning: {
+        efforts: [{ id: 'low', label: 'Low' }, { id: 'high', label: 'High' }],
+        defaultEffort: 'high',
+      },
+    },
+    {
+      id: 'deepseek-reasoner',
+      provider: 'deepseek',
+      label: 'DeepSeek Reasoner',
+      reasoning: {
+        efforts: [{ id: 'off', label: 'Off' }, { id: 'max', label: 'Max' }],
+        defaultEffort: 'max',
+      },
+    },
+  ];
   return {
     request: async (method, params) => {
       const sid = params.sessionId as string | undefined;
@@ -38,14 +61,19 @@ function fakeBridge(turnNumber = 0): FakeBridge {
           };
         case 'catalog.list':
           return {
-            catalogRevision: 'fake-1',
-            models: [
-              { id: 'deepseek-chat', provider: 'deepseek', label: 'DeepSeek Chat' },
-              { id: 'deepseek-reasoner', provider: 'deepseek', label: 'DeepSeek Reasoner' },
-            ],
+            catalogRevision: catalogState.revision,
+            providers: [{ id: 'deepseek', label: 'DeepSeek' }],
+            defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
+            models,
           };
         case 'catalog.resolve':
-          return { catalogRevision: 'fake-1', models: [], resolvedDefaults: { sessionConfig: {}, turnConfig: (params.turnConfig ?? {}) } };
+          return {
+            catalogRevision: catalogState.revision,
+            providers: [{ id: 'deepseek', label: 'DeepSeek' }],
+            defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
+            models,
+            resolvedDefaults: { sessionConfig: {}, turnConfig: (params.turnConfig ?? {}) },
+          };
         case 'session.create':
           session += 1;
           sessions.set(sid ?? '', { events: [] });
@@ -143,8 +171,10 @@ test('initialize: only accepts gian.proxy 2.1 and returns exact identity', async
   assert.equal(result.plugin.id, PLUGIN_ID);
   assert.equal(result.plugin.version, '0.1.3');
   assert.equal(result.process.scope, 'shared');
-  assert.equal(result.capabilities['input.localFile'], 1);
-  assert.equal(result.capabilities['input.localImage'], 1);
+  assert.equal(result.capabilities['input.localFile'], undefined);
+  assert.equal(result.capabilities['input.localImage'], undefined);
+  assert.equal(result.capabilities.interaction, undefined);
+  assert.equal(result.capabilities['event.diff'], undefined);
   assert.equal(result.capabilities['turn.interrupt'], undefined);
   assert.equal(result.capabilities['event.step'], 1);
   assert.equal(result.capabilities['event.request'], 1);
@@ -252,7 +282,7 @@ test('turn.start correlates pending Gian turn ids FIFO for native turn ordinals'
   assert.equal(terminal?.params.turnId, 't_user_1');
 });
 
-test('interaction.question interaction is a capability claim', async () => {
+test('catalog exposes only the real Bridge input and control surface', async () => {
   const bridge = fakeBridge();
   const { adapter } = adapterWith(bridge);
   await call(adapter, 'initialize', {
@@ -261,6 +291,54 @@ test('interaction.question interaction is a capability claim', async () => {
   });
   const catalog = await call(adapter, 'catalog.list', {});
   const result = catalog.result as { input: Array<{ type: string }>; configOptions: Array<{ id: string }> };
-  assert.equal(result.input.some((i) => i.type === 'text'), true);
+  assert.deepEqual(result.input, [{ type: 'text' }]);
   assert.equal(result.configOptions.some((o) => o.id === 'model'), true);
+  assert.equal(result.configOptions.some((o) => o.id === 'approval_policy'), false);
+  const unsupported = await call(adapter, 'interaction.respond', {});
+  assert.equal(unsupported.error?.data?.domainCode, 'CAPABILITY_NOT_SUPPORTED');
+});
+
+test('catalog.resolve rebuilds effort choices for the selected latest DSH model', async () => {
+  const { adapter } = adapterWith(fakeBridge());
+  await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  const resolved = await call(adapter, 'catalog.resolve', {
+    catalogRevision: 'dsh-catalog-0.1.3',
+    sessionConfig: {},
+    turnConfig: { model: 'deepseek-reasoner' },
+  });
+  const result = resolved.result as {
+    configOptions: Array<{
+      id: string;
+      defaultValue: unknown;
+      choices?: Array<{ value: unknown }>;
+    }>;
+    resolvedDefaults: { turnConfig: Record<string, unknown> };
+  };
+  const effort = result.configOptions.find(option => option.id === 'effort');
+  assert.deepEqual(effort?.choices?.map(choice => choice.value), ['off', 'max']);
+  assert.equal(effort?.defaultValue, 'max');
+  assert.deepEqual(result.resolvedDefaults.turnConfig, {
+    provider: 'deepseek',
+    model: 'deepseek-reasoner',
+    effort: 'max',
+  });
+});
+
+test('catalog.list refreshes the revision after a late DSH Provider change', async () => {
+  const state = { revision: 'fake-before' };
+  const { adapter } = adapterWith(fakeBridge(0, state));
+  await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  const before = await call(adapter, 'catalog.list', {});
+  state.revision = 'fake-after';
+  const after = await call(adapter, 'catalog.list', {});
+  assert.notEqual(
+    (before.result as { catalogRevision: string }).catalogRevision,
+    (after.result as { catalogRevision: string }).catalogRevision,
+  );
 });

@@ -309,15 +309,24 @@ class ValidatedProxyClient extends EventEmitter {
 }
 
 async function resolveBinary(provider, providerConfig) {
-  const configured = typeof providerConfig.binary === 'string'
-    ? providerConfig.binary.replace(/^~(?=\/)/, homedir())
-    : undefined;
+  const configured = configuredProviderBinary(provider, providerConfig);
   if (configured && isAbsolute(configured)) return resolveProviderBinary(provider, configured);
   if (provider === 'dsh' && configured) return resolveProviderBinary(provider, resolve(rootDir, configured));
   if (provider === 'kimi') {
     return resolveProviderBinary(provider, process.env.KIMI_BIN ?? join(homedir(), '.kimi-code/bin/kimi'));
   }
   return resolveProviderBinary(provider);
+}
+
+export function configuredProviderBinary(provider, providerConfig, environment = process.env) {
+  const environmentName = binaryEnvironment[provider];
+  const environmentPath = typeof environmentName === 'string'
+    ? environment[environmentName]?.trim()
+    : '';
+  const configured = environmentPath || (
+    typeof providerConfig.binary === 'string' ? providerConfig.binary.trim() : ''
+  );
+  return configured ? configured.replace(/^~(?=\/)/, homedir()) : undefined;
 }
 
 async function prepareDshProfile(tempRoot, binaryPath) {
@@ -525,6 +534,30 @@ function assembledContent(notifications) {
   return [...streams.values(), ...completed].join('\n');
 }
 
+export async function verifyWorkspaceToolOutcome(workspace) {
+  const finalText = await readFile(join(workspace, 'final.txt'), 'utf8').catch(() => null);
+  const obsoleteMissing = await access(join(workspace, 'obsolete.txt')).then(
+    () => false,
+    () => true,
+  );
+  return {
+    ok: finalText?.trim() === 'TOOL_FLOW_OK' && obsoleteMissing,
+    finalMarker: finalText?.trim() ?? null,
+    obsoleteMissing,
+  };
+}
+
+export function concurrencyHoldStrategy(providerConfig) {
+  return providerConfig.capabilities.includes('interaction')
+    ? 'interaction'
+    : 'running_activity';
+}
+
+export function reasoningExpectedFor(runtimeCatalog, turnConfig) {
+  const thinkingOption = runtimeCatalog.specialCatalogs?.thinking;
+  return typeof thinkingOption === 'string' && turnConfig[thinkingOption] !== 'off';
+}
+
 function assessScenario(catalog, provider, scenario, notifications, extra = {}) {
   const expected = expectedNotificationsFor(catalog, provider, scenario);
   const observed = new Set(notifications.map(notification => notification.method));
@@ -606,9 +639,19 @@ async function runPromptScenario(context, scenario, session) {
       && notification.params.data.kind === 'reasoning'
     ));
     assessment.reasoningObserved = reasoning;
-    if (catalog.providers[provider].capabilities.includes('event.reasoning') && !reasoning) {
+    const reasoningExpected = reasoningExpectedFor(context.runtimeCatalog, turnConfig);
+    if (reasoningExpected && !reasoning) {
       assessment.status = 'UNOBSERVED';
       assessment.issues.push('event.reasoning advertised but no reasoning content was observed');
+    }
+    assessment.reasoningExpected = reasoningExpected;
+  }
+  if (scenario.id === 'activity.workspace_tools') {
+    const outcome = await verifyWorkspaceToolOutcome(workspace);
+    assessment.workspaceOutcome = outcome;
+    if (!outcome.ok) {
+      assessment.status = 'BEHAVIOR_FAIL';
+      assessment.issues.push('workspace tool filesystem outcome did not match the acceptance fixture');
     }
   }
   if (scenario.id === 'activity.subagent') {
@@ -730,7 +773,7 @@ async function runInterruptScenario(context, scenario) {
 }
 
 async function runConcurrencyScenario(context, scenario) {
-  const { client, catalog, provider, turnConfig } = context;
+  const { client, catalog, provider, providerConfig, turnConfig } = context;
   const first = await createAttachedSession(context, 'concurrent-a');
   const second = await createAttachedSession(context, 'concurrent-b');
   const firstTurnId = randomUUID();
@@ -740,11 +783,17 @@ async function runConcurrencyScenario(context, scenario) {
   if (provider === 'codex') {
     firstConfig.approval_mode = 'ask';
   }
+  const holdStrategy = concurrencyHoldStrategy(providerConfig);
   await client.request('turn.start', {
     sessionId: first.id,
     streamId: first.streamId,
     turnId: firstTurnId,
-    input: [{ type: 'text', text: 'Write HOLD_SESSION_A to concurrency-hold.txt using a native file tool. Do not reply before the write succeeds.' }],
+    input: [{
+      type: 'text',
+      text: holdStrategy === 'interaction'
+        ? 'Write HOLD_SESSION_A to concurrency-hold.txt using a native file tool. Do not reply before the write succeeds.'
+        : 'Run `node long-running.mjs` and wait for it to finish before replying. Do not skip or background the command.',
+    }],
     config: firstConfig,
   });
   await client.waitForNotification(
@@ -754,12 +803,15 @@ async function runConcurrencyScenario(context, scenario) {
   );
   await client.waitForNotification(
     notification => (
-      notification.method === 'interaction.requested'
-      && notification.params.sessionId === first.id
+      notification.params.sessionId === first.id
       && notification.params.turnId === firstTurnId
+      && (holdStrategy === 'interaction'
+        ? notification.method === 'interaction.requested'
+        : notification.method === 'activity.updated'
+          && notification.params.data?.status === 'running')
     ),
     from,
-    'Session A approval hold',
+    holdStrategy === 'interaction' ? 'Session A approval hold' : 'Session A running activity hold',
     60_000,
   );
   await client.request('turn.start', {
@@ -794,6 +846,7 @@ async function runConcurrencyScenario(context, scenario) {
     observedNotifications: [...new Set(notifications.map(notification => notification.method))],
     firstStopReason: firstResult.terminal.params.data.stopReason ?? null,
     secondStopReason: secondResult.terminal.params.data.stopReason ?? null,
+    holdStrategy,
   };
   await client.request('session.close', { sessionId: first.id, streamId: first.streamId });
   await client.request('session.close', { sessionId: second.id, streamId: second.streamId });
@@ -918,12 +971,23 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
       if (!option) throw new Error(`Current ${provider} catalog has no override option ${id}.`);
       (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
     }
+    let selectedCatalog = runtimeCatalog;
+    if (initialized.capabilities['catalog.resolve'] === 1) {
+      selectedCatalog = await client.request('catalog.resolve', {
+        catalogRevision: runtimeCatalog.catalogRevision,
+        sessionConfig,
+        turnConfig,
+      });
+      const resolvedDefaults = selectedCatalog.resolvedDefaults ?? {};
+      Object.assign(sessionConfig, resolvedDefaults.sessionConfig ?? {});
+      Object.assign(turnConfig, resolvedDefaults.turnConfig ?? {});
+    }
     const context = {
       provider,
       providerConfig,
       client,
       catalog,
-      runtimeCatalog,
+      runtimeCatalog: selectedCatalog,
       initialized,
       sessionConfig,
       turnConfig,
@@ -932,6 +996,7 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
       imagePath,
     };
     results[results.length - 1].selectedConfig = { sessionConfig, turnConfig };
+    results[results.length - 1].resolvedCatalog = selectedCatalog;
 
     const promptScenarios = scenarios.filter(scenario => scenario.trigger === 'real_prompt');
     if (promptScenarios.length > 0) {

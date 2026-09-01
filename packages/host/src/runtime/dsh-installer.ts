@@ -11,7 +11,8 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -194,28 +195,49 @@ export class DshRuntimeInstaller {
 
   /** Create `$DSH_HOME/profiles/gian` with the bridge bundle; never touches
    * sibling profiles. */
-  private async ensureGianProfile(): Promise<void> {
+  async ensureGianProfile(): Promise<void> {
     const profileDir = join(this.options.dshHome, 'profiles', 'gian');
-    await mkdir(join(profileDir, 'node_modules', '@gian'), { recursive: true });
-    await writeFile(
-      join(profileDir, 'package.json'),
-      `${JSON.stringify({
-        name: 'gian-dsh-gian-profile',
-        private: true,
-        dependencies: { '@gian/dsh-bridge': `file:${this.options.bridgePackageDir}` },
-        dsh: {
-          profile: {
-            bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'],
-          },
-        },
-      }, null, 2)}\n`,
-      'utf8',
-    );
+    const modulesDir = join(profileDir, 'node_modules', '@gian');
+    await mkdir(modulesDir, { recursive: true });
+    const packagePath = join(profileDir, 'package.json');
+    const packageTemp = `${packagePath}.tmp-${randomUUID()}`;
     try {
-      await symlink(this.options.bridgePackageDir, join(profileDir, 'node_modules', '@gian', 'dsh-bridge'), 'dir');
+      await writeFile(
+        packageTemp,
+        `${JSON.stringify({
+          name: 'gian-dsh-gian-profile',
+          private: true,
+          dependencies: { '@gian/dsh-bridge': `file:${this.options.bridgePackageDir}` },
+          dsh: {
+            profile: {
+              bundles: ['@deepseek-ai/dsh-base', '@gian/dsh-bridge'],
+            },
+          },
+        }, null, 2)}\n`,
+        'utf8',
+      );
+      await rename(packageTemp, packagePath);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw error;
+      await rm(packageTemp, { force: true });
+      throw error;
+    }
+    const bridgeLink = join(modulesDir, 'dsh-bridge');
+    try {
+      const metadata = await lstat(bridgeLink);
+      if (!metadata.isSymbolicLink()) {
+        throw new Error(`Refusing to replace non-symlink Gian DSH bridge path: ${bridgeLink}`);
+      }
+      if (await readlink(bridgeLink) === this.options.bridgePackageDir) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const bridgeTemp = `${bridgeLink}.tmp-${randomUUID()}`;
+    try {
+      await symlink(this.options.bridgePackageDir, bridgeTemp, 'dir');
+      await rename(bridgeTemp, bridgeLink);
+    } catch (error) {
+      await rm(bridgeTemp, { force: true });
+      throw error;
     }
   }
 }

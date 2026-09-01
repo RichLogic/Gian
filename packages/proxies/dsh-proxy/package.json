@@ -1,8 +1,8 @@
 {
   "name": "@gian/dsh-proxy",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
-  "description": "ai.deepseek.harness — shared-scope Gian Proxy translating gian.proxy/2.0 over gian.dsh.bridge/1.0",
+  "description": "ai.deepseek.harness — shared-scope Gian Proxy translating gian.proxy/2.1 over gian.dsh.bridge/1.0",
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
   "scripts": {

@@ -49,14 +49,9 @@ export interface ConfigOption {
 }
 
 const CAPABILITIES: Record<string, number> = {
-  // The first bridge accepts text plus local file and image references.
-  'input.localFile': 1,
-  'input.localImage': 1,
   'catalog.resolve': 1,
   'session.replay': 1,
-  interaction: 1,
   'event.reasoning': 1,
-  'event.diff': 1,
   'event.usage': 1,
   'event.step': 1,
   'event.request': 1,
@@ -81,13 +76,17 @@ function fingerprint(params: { input: unknown; config: unknown }): string {
 }
 
 interface CatalogState {
+  catalogRevision: string;
   configOptions: ConfigOption[];
 }
 
 export class DshV2Adapter {
   private initialized = false;
   private readonly service: DshProxyService;
-  private catalogState: CatalogState = { configOptions: this.defaultConfigOptions() };
+  private catalogState: CatalogState = {
+    catalogRevision: `dsh-catalog-${PLUGIN_VERSION}-bootstrap`,
+    configOptions: this.defaultConfigOptions(),
+  };
   private queue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
 
   constructor(
@@ -147,7 +146,7 @@ export class DshV2Adapter {
       case 'initialize':
         return this.initialize(params);
       case 'catalog.list':
-        return this.catalog();
+        return this.catalogList();
       case 'catalog.resolve':
         return this.catalogResolve(params);
       case 'session.create':
@@ -161,7 +160,10 @@ export class DshV2Adapter {
       case 'turn.steer':
         return this.turnSteer(params);
       case 'interaction.respond':
-        return this.interactionRespond(params);
+        throw new ServiceError(
+          'CAPABILITY_NOT_SUPPORTED',
+          'Interactive DSH approval and question routing is not advertised.',
+        );
       case 'session.close':
         return this.sessionClose(params);
       case 'session.replay':
@@ -181,6 +183,16 @@ export class DshV2Adapter {
 
   private defaultConfigOptions(): ConfigOption[] {
     return [
+      {
+        id: 'provider',
+        displayName: 'Provider',
+        description: 'DSH model provider route.',
+        binding: 'turn',
+        control: 'select',
+        required: false,
+        defaultValue: 'deepseek-official',
+        choices: [{ value: 'deepseek-official', displayName: 'DeepSeek' }],
+      },
       {
         id: 'model',
         displayName: 'Model',
@@ -207,18 +219,6 @@ export class DshV2Adapter {
           { value: 'high', displayName: 'High' },
         ],
       },
-      {
-        id: 'approval_policy',
-        displayName: 'Approval policy',
-        binding: 'turn',
-        control: 'select',
-        required: false,
-        defaultValue: 'ask',
-        choices: [
-          { value: 'ask', displayName: 'Ask' },
-          { value: 'never', displayName: 'Never' },
-        ],
-      },
     ];
   }
 
@@ -235,7 +235,10 @@ export class DshV2Adapter {
     // Bridge initialize: fail hard when the child cannot establish the bridge.
     await this.bridge.request('initialize', { protocol: { versions: ['1.0'] } });
     const catalog = await this.bridge.request('catalog.list', {});
-    this.catalogState.configOptions = this.catalogOptionsFrom(catalog);
+    this.catalogState = {
+      catalogRevision: this.catalogRevisionFrom(catalog),
+      configOptions: this.catalogOptionsFrom(catalog),
+    };
     this.initialized = true;
     return {
       protocol: { name: 'gian.proxy', version: '2.1' },
@@ -245,50 +248,136 @@ export class DshV2Adapter {
     };
   }
 
-  private catalogOptionsFrom(catalog: Record<string, unknown>): ConfigOption[] {
+  private catalogOptionsFrom(
+    catalog: Record<string, unknown>,
+    selectedModel?: string,
+    selectedProvider?: string,
+  ): ConfigOption[] {
     const models = Array.isArray(catalog.models) ? catalog.models as Array<Record<string, unknown>> : [];
+    const providers = Array.isArray(catalog.providers)
+      ? catalog.providers as Array<Record<string, unknown>>
+      : [];
+    const defaults = catalog.defaultSelection !== null && typeof catalog.defaultSelection === 'object'
+      ? catalog.defaultSelection as Record<string, unknown>
+      : {};
     const base = this.defaultConfigOptions();
-    if (models.length > 0) {
-      const modelOption = base[0];
+    const providerOption = base.find(option => option.id === 'provider');
+    if (providerOption && providers.length > 0) {
+      providerOption.choices = providers.map(provider => ({
+        value: String(provider.id),
+        displayName: String(provider.label ?? provider.name ?? provider.id),
+      }));
+      const defaultProvider = selectedProvider
+        ?? (typeof defaults.provider === 'string' ? defaults.provider : undefined)
+        ?? providerOption.choices[0]?.value;
+      if (defaultProvider !== undefined) providerOption.defaultValue = defaultProvider;
+    }
+    const effectiveProvider = String(providerOption?.defaultValue ?? selectedProvider ?? '');
+    const providerModels = models.filter(model => model.provider === effectiveProvider);
+    const visibleModels = providerModels.length > 0 ? providerModels : models;
+    if (visibleModels.length > 0) {
+      const modelOption = base.find(option => option.id === 'model');
       if (modelOption) {
-        base[0] = {
+        const defaultModel = selectedModel
+          ?? (defaults.provider === effectiveProvider && typeof defaults.model === 'string'
+            ? defaults.model
+            : undefined)
+          ?? visibleModels[0]?.id;
+        const index = base.indexOf(modelOption);
+        base[index] = {
           ...modelOption,
-          choices: models.map((model) => ({
+          choices: visibleModels.map((model) => ({
             value: String(model.id ?? model),
             displayName: String(model.label ?? model.id ?? model),
           })),
-          defaultValue: String(models[0]?.id ?? models[0] ?? 'deepseek-chat'),
+          defaultValue: String(defaultModel ?? 'deepseek-chat'),
         };
       }
+    }
+    const effectiveModel = selectedModel
+      ?? String(base.find(option => option.id === 'model')?.defaultValue ?? '');
+    const model = visibleModels.find(candidate => candidate.id === effectiveModel) ?? visibleModels[0];
+    const reasoning = model?.reasoning !== null && typeof model?.reasoning === 'object'
+      ? model.reasoning as Record<string, unknown>
+      : null;
+    const efforts = Array.isArray(reasoning?.efforts)
+      ? reasoning.efforts as Array<Record<string, unknown>>
+      : [];
+    if (efforts.length > 0) {
+      const effortOption = base.find(option => option.id === 'effort');
+      if (effortOption) {
+        effortOption.choices = efforts.map(effort => ({
+          value: String(effort.id),
+          displayName: String(effort.label ?? effort.name ?? effort.id),
+          ...(typeof effort.description === 'string'
+            ? { description: effort.description }
+            : {}),
+        }));
+        const defaultEffort = typeof reasoning?.defaultEffort === 'string'
+          ? reasoning.defaultEffort
+          : effortOption.choices[0]?.value;
+        if (defaultEffort !== undefined) effortOption.defaultValue = defaultEffort;
+      }
+    } else {
+      const effortIndex = base.findIndex(option => option.id === 'effort');
+      if (effortIndex >= 0) base.splice(effortIndex, 1);
     }
     return base;
   }
 
-  private catalog(): unknown {
+  private catalogRevisionFrom(catalog: Record<string, unknown>): string {
+    const nativeRevision = typeof catalog.catalogRevision === 'string'
+      ? catalog.catalogRevision
+      : 'unknown';
+    const digest = createHash('sha256').update(nativeRevision).digest('hex').slice(0, 16);
+    return `dsh-catalog-${PLUGIN_VERSION}-${digest}`;
+  }
+
+  private async catalogList(): Promise<unknown> {
+    const native = await this.bridge.request('catalog.list', {});
+    this.catalogState = {
+      catalogRevision: this.catalogRevisionFrom(native),
+      configOptions: this.catalogOptionsFrom(native),
+    };
+    return this.catalog();
+  }
+
+  private catalog(
+    configOptions = this.catalogState.configOptions,
+    catalogRevision = this.catalogState.catalogRevision,
+  ): unknown {
+    const hasThinking = configOptions.some(option => option.id === 'effort');
     return {
-      catalogRevision: `dsh-catalog-${PLUGIN_VERSION}`,
-      input: [{ type: 'text' }, { type: 'localFile' }, { type: 'localImage' }],
-      configOptions: this.catalogState.configOptions,
+      catalogRevision,
+      input: [{ type: 'text' }],
+      configOptions,
       specialCatalogs: {
         model: 'model',
-        thinking: 'effort',
-        approvalMode: 'approval_policy',
+        ...(hasThinking ? { thinking: 'effort' } : {}),
       },
       slashCommands: [],
     };
   }
 
   private async catalogResolve(params: Record<string, unknown>): Promise<unknown> {
-    const result = this.catalog();
     const turnConfig = (params.turnConfig ?? {}) as Record<string, ConfigValue>;
     const bridgeResolved = await this.bridge.request('catalog.resolve', params).catch(() => null);
-    const resolvedDefaults = bridgeResolved && typeof bridgeResolved === 'object'
-      ? (bridgeResolved as { resolvedDefaults?: unknown }).resolvedDefaults ?? {
-          sessionConfig: {},
-          turnConfig,
-        }
-      : { sessionConfig: {}, turnConfig };
-    const base = result as Record<string, unknown>;
+    const selectedModel = typeof turnConfig.model === 'string' ? turnConfig.model : undefined;
+    const selectedProvider = typeof turnConfig.provider === 'string' ? turnConfig.provider : undefined;
+    const options = bridgeResolved && typeof bridgeResolved === 'object'
+      ? this.catalogOptionsFrom(bridgeResolved, selectedModel, selectedProvider)
+      : this.catalogState.configOptions;
+    const catalogRevision = bridgeResolved && typeof bridgeResolved === 'object'
+      ? this.catalogRevisionFrom(bridgeResolved)
+      : this.catalogState.catalogRevision;
+    const resolvedTurnConfig = { ...turnConfig };
+    for (const option of options) {
+      if (option.binding === 'turn' && resolvedTurnConfig[option.id] === undefined) {
+        resolvedTurnConfig[option.id] = option.defaultValue;
+      }
+    }
+    const resolvedDefaults = { sessionConfig: {}, turnConfig: resolvedTurnConfig };
+    const base = this.catalog(options, catalogRevision) as Record<string, unknown>;
     return { ...base, resolvedDefaults };
   }
 
@@ -355,8 +444,18 @@ export class DshV2Adapter {
     const config = (params.config ?? {}) as Record<string, ConfigValue>;
     this.validateConfigSnapshot(config, 'turn');
 
-    const accepted = session.acceptedTurns.has(turnId);
-    if (!accepted) session.acceptedTurns.add(turnId);
+    const turnFingerprint = fingerprint({ input, config });
+    const acceptedFingerprint = session.acceptedTurns.get(turnId);
+    if (acceptedFingerprint !== undefined) {
+      if (acceptedFingerprint !== turnFingerprint) {
+        throw new ServiceError('CONFLICT', `Turn ${turnId} was reused with different params.`);
+      }
+      return { accepted: true, turnId };
+    }
+    if (session.activeTurn !== null || session.pendingGianTurns.length > 0 || session.state === 'running') {
+      throw new ServiceError('SESSION_BUSY', `Session ${sessionId} already has an active turn.`);
+    }
+    session.acceptedTurns.set(turnId, turnFingerprint);
 
     this.notify('session.updated', {
       eventId: hashIdLocal(['session-updated', session.id, session.sequence + 1]),
@@ -370,13 +469,31 @@ export class DshV2Adapter {
     session.state = 'running';
     this.service.prepareTurn(sessionId, turnId);
 
-    const bridgeTurn = await this.bridge.request('turn.start', {
-      sessionId,
-      turnId,
-      input: coerceInput(input),
-      config,
-    });
-    return { accepted: true, turnId, ...(bridgeTurn && typeof bridgeTurn === 'object' ? {} : {}) };
+    try {
+      const bridgeTurn = await this.bridge.request('turn.start', {
+        sessionId,
+        turnId,
+        input: coerceInput(input),
+        config,
+      });
+      return { accepted: true, turnId, ...(bridgeTurn && typeof bridgeTurn === 'object' ? {} : {}) };
+    } catch (error) {
+      session.acceptedTurns.delete(turnId);
+      const pendingIndex = session.pendingGianTurns.lastIndexOf(turnId);
+      if (pendingIndex >= 0) session.pendingGianTurns.splice(pendingIndex, 1);
+      session.state = 'idle';
+      session.updatedAt = new Date().toISOString();
+      session.sequence += 1;
+      this.notify('session.updated', {
+        eventId: hashIdLocal(['session-updated', session.id, session.sequence]),
+        sessionId: session.id,
+        streamId: session.streamId,
+        sequence: session.sequence,
+        emittedAt: session.updatedAt,
+        data: { state: 'idle', updatedAt: session.updatedAt },
+      });
+      throw error;
+    }
   }
 
   private async turnInterrupt(params: Record<string, unknown>): Promise<unknown> {

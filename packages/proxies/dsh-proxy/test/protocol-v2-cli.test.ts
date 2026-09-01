@@ -52,7 +52,7 @@ class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;
   readonly validator = new HostProtocolValidator({
     pluginId: 'ai.deepseek.harness',
-    pluginVersion: '0.1.3',
+    pluginVersion: '0.1.4',
     processScope: 'shared',
   });
   readonly notifications: ProxyNotification[] = [];
@@ -317,63 +317,27 @@ test('Mock Gian Core validates DSH replay response schema on the real stdio boun
   core.assertCleanWire();
 });
 
-test('Mock Gian Core validates interaction response ordering through DSH Proxy stdio', async (t) => {
-  const core = new MockGianCore('question-no-claim');
+test('Mock Gian Core rejects interaction.respond when the real Bridge does not advertise it', async (t) => {
+  const core = new MockGianCore('success');
   t.after(() => {
     if (core.child.exitCode === null) core.child.kill('SIGKILL');
   });
 
   await initialize(core);
-  await core.request('catalog.list', {});
-  const session = await createSession(core, 'dsh-question-session');
-  await core.request('turn.start', {
-    sessionId: 'dsh-question-session',
-    streamId: session.streamId,
-    turnId: 'dsh-question-turn',
-    input: [{ type: 'text', text: 'ask me' }],
-    config: { model: 'deepseek-chat' },
-  });
-  const requested = await core.waitForNotification(
-    'interaction.requested',
-    (notification) => 'turnId' in notification.params
-      && notification.params.turnId === 'dsh-question-turn',
-  );
-  const data = requested.params.data as {
-    interactionId: string;
-    actions: Array<{ id: string }>;
-  };
-  assert.deepEqual(data.actions.map((action) => action.id), ['submit']);
-
-  const response = await core.request('interaction.respond', {
-    responseId: 'dsh-question-response',
-    sessionId: 'dsh-question-session',
-    streamId: session.streamId,
-    turnId: 'dsh-question-turn',
-    interactionId: data.interactionId,
-    actionId: 'submit',
-    values: { file: 'a' },
-  });
-  assert.deepEqual(response.result, {
-    accepted: true,
-    interactionId: data.interactionId,
-    responseId: 'dsh-question-response',
-  });
-  await core.waitForNotification(
-    'interaction.resolved',
-    (notification) => (
-      notification.params.data as { interactionId?: string }
-    ).interactionId === data.interactionId,
-  );
-  await core.waitForNotification(
-    'turn.completed',
-    (notification) => 'turnId' in notification.params
-      && notification.params.turnId === 'dsh-question-turn',
-  );
-
-  await core.request('session.close', {
-    sessionId: 'dsh-question-session',
-    streamId: session.streamId,
-  });
+  assert.throws(() => core.validator.registerRequest({
+    jsonrpc: '2.0',
+    id: 'unsupported-interaction',
+    method: 'interaction.respond',
+    params: {
+      responseId: 'dsh-question-response',
+      sessionId: 'dsh-question-session',
+      streamId: 'dsh-question-stream',
+      turnId: 'dsh-question-turn',
+      interactionId: 'dsh-question-interaction',
+      actionId: 'submit',
+      values: { file: 'a' },
+    },
+  }), /interaction|capability/i);
   await core.request('shutdown', {});
   assert.equal(await waitForExit(core.child), 0);
   core.assertCleanWire();

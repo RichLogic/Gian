@@ -26,6 +26,18 @@ export interface CatalogMenuToggle {
   onChange: (checked: boolean) => void;
 }
 
+export function catalogOptionSummary(
+  options: ConfigOption[],
+  values: Record<string, ConfigValue>,
+): string[] {
+  return options.map(option => {
+    const value = values[option.id] ?? option.defaultValue;
+    const choice = option.choices?.find(candidate => Object.is(candidate.value, value));
+    const displayValue = choice?.displayName ?? String(value ?? '');
+    return displayValue ? `${option.displayName}: ${displayValue}` : option.displayName;
+  });
+}
+
 export function CatalogOptionsMenu({
   summary,
   model,

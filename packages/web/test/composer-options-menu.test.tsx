@@ -6,6 +6,7 @@ import type { Executor, Session } from '@gian/shared';
 import { Composer } from '../src/components/Composer.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { loadResolvedProxyCatalog } from '../src/api.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(async (executor: 'claude' | 'codex') => executor === 'codex'
@@ -32,6 +33,62 @@ vi.mock('../src/api.js', () => ({
   loadSlashCommands: vi.fn().mockResolvedValue([]),
   loadSessionSlashCommands: vi.fn().mockResolvedValue([]),
   loadNativeConfig: vi.fn().mockResolvedValue(null),
+  loadProxyCapabilities: vi.fn(async (executor: Executor) => executor === 'dsh' ? ({
+    catalogRevision: 'dsh-base',
+    capabilities: { 'catalog.resolve': 1 },
+    input: [{ type: 'text' }],
+    configOptions: [
+      {
+        id: 'provider', displayName: 'Provider', binding: 'turn', control: 'select',
+        required: false, defaultValue: 'deepseek-official',
+        choices: [
+          { value: 'deepseek-official', displayName: 'DeepSeek' },
+          { value: 'opencode-go', displayName: 'opencode-go' },
+        ],
+      },
+      {
+        id: 'model', displayName: 'Model', binding: 'turn', control: 'select',
+        required: true, defaultValue: 'deepseek-v4-flash',
+        choices: [{ value: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash' }],
+      },
+      {
+        id: 'effort', displayName: 'Reasoning effort', binding: 'turn', control: 'select',
+        required: false, defaultValue: 'high',
+        choices: [{ value: 'high', displayName: 'High' }],
+      },
+    ],
+    specialCatalogs: { model: 'model', thinking: 'effort' },
+    slashCommands: [],
+  }) : ({})),
+  loadResolvedProxyCatalog: vi.fn(async () => ({
+    catalogRevision: 'dsh-opencode',
+    input: [{ type: 'text' }],
+    configOptions: [
+      {
+        id: 'provider', displayName: 'Provider', binding: 'turn', control: 'select',
+        required: false, defaultValue: 'opencode-go',
+        choices: [
+          { value: 'deepseek-official', displayName: 'DeepSeek' },
+          { value: 'opencode-go', displayName: 'opencode-go' },
+        ],
+      },
+      {
+        id: 'model', displayName: 'Model', binding: 'turn', control: 'select',
+        required: true, defaultValue: 'deepseek-v4-flash', role: 'model',
+        choices: [{ value: 'deepseek-v4-flash', displayName: 'opencode-DS V4 Flash' }],
+      },
+      {
+        id: 'effort', displayName: 'Reasoning effort', binding: 'turn', control: 'select',
+        required: false, defaultValue: 'off', role: 'effort',
+        choices: [{ value: 'off', displayName: 'Off' }],
+      },
+    ],
+    slashCommands: [],
+    resolvedDefaults: {
+      sessionConfig: {},
+      turnConfig: { provider: 'opencode-go', model: 'deepseek-v4-flash', effort: 'off' },
+    },
+  })),
 }));
 
 function makeSession(executor: Executor, overrides: Partial<Session> = {}): Session {
@@ -158,5 +215,29 @@ describe('Composer independent catalog controls', () => {
 
     expect(callbacks.onSetModel).toHaveBeenCalledWith('sonnet');
     expect(document.querySelector('.model-pop')).toBeNull();
+  });
+
+  it('shows an ordinary DSH Provider chip and resolves Model/Thinking after selection', async () => {
+    const user = userEvent.setup();
+    const onSetTurnConfig = vi.fn();
+    renderComposer(makeSession('dsh', {
+      model: 'deepseek-v4-flash',
+      approval_mode: null,
+      thinking_effort: null,
+      turn_config: {},
+    }), { onSetTurnConfig });
+
+    const provider = await screen.findByTestId('composer-catalog-options');
+    expect(provider).toHaveTextContent('Provider: DeepSeek');
+    await user.click(provider);
+    await user.click(await screen.findByTestId('catalog-option-provider-opencode-go'));
+
+    expect(onSetTurnConfig).toHaveBeenCalledWith('provider', 'opencode-go');
+    await waitFor(() => {
+      expect(loadResolvedProxyCatalog).toHaveBeenCalled();
+      expect(screen.getByTestId('composer-catalog-options')).toHaveTextContent('Provider: opencode-go');
+      expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('opencode-DS V4 Flash');
+      expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('Off');
+    });
   });
 });
