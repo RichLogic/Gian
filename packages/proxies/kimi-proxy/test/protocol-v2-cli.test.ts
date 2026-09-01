@@ -61,7 +61,7 @@ test('Kimi CLI negotiates gian.proxy/2.1 independently from its ACP runtime vers
   assert.equal(initialized.id, 'req-1');
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
-  assert.equal(result.plugin.version, '0.2.3');
+  assert.equal(result.plugin.version, '0.2.6');
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);

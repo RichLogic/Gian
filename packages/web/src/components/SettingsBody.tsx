@@ -51,7 +51,11 @@ import {
 } from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { confirm, toast } from '../feedback.js';
-import { agentEntityKey, agentIdEntityKey } from '../operations/agents.js';
+import {
+  agentEntityKey,
+  agentIdEntityKey,
+  type CreateAgentOperationResult,
+} from '../operations/agents.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
 import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
 import { BROWSER_PROFILE_ENTITY_KEY } from '../operations/browser.js';
@@ -1033,6 +1037,7 @@ function AgentInstallBlock() {
   const [draft, setDraft] = useState<AgentDraftState | null>(null);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [catalogKind, setCatalogKind] = useState<ProductExecutor | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
   /** Per-kind result of the last manual Proxy update check (issue #86). */
   const [proxyChecks, setProxyChecks] = useState<
     Partial<Record<string, AgentProxyUpdateCheck>>
@@ -1144,14 +1149,33 @@ function AgentInstallBlock() {
   async function saveDraft() {
     if (!draft || draftNameError(draft, agents)) return;
     if (!(await confirmRestart())) return;
-    const ok = await run('agent.create', {
+    setError('');
+    const dispatched = dispatch('agent.create', {
       name: draft.name.trim(),
       proxy: draft.proxy,
       cliPath: draft.cliPath.trim() || null,
       restart: desktopApp,
-      restartFailedMessage: t('settings.agents.restartFailed'),
     });
-    if (ok) setDraft(null);
+    const settled: OperationRun = await waitForRunSettle(store, dispatched.id);
+    if (settled.phase !== 'confirmed') {
+      setError(settled.error ?? 'Agent operation failed');
+      return;
+    }
+    const result = settled.result as CreateAgentOperationResult;
+    setRestartRequired(result.restartRequired);
+    setDraft(null);
+    await refresh();
+  }
+
+  async function retryRestart() {
+    setError('');
+    const settled = await waitForRunSettle(
+      store,
+      dispatch('agent.restartApp', {}).id,
+    );
+    if (settled.phase === 'confirmed') return;
+    setRestartRequired(true);
+    setError(t('settings.agents.restartRetryFailed'));
   }
 
   async function savePath(agent: UserAgentStatus, path: string | null): Promise<boolean> {
@@ -1396,6 +1420,23 @@ function AgentInstallBlock() {
       )}
 
       {error && <p className="s2-help" role="alert">{error}</p>}
+
+      {restartRequired && (
+        <div className="s2-card" role="status" data-testid="agent-restart-required">
+          <div className="exec-row">
+            <p className="s2-help">{t('settings.agents.restartRequired')}</p>
+            <div className="card-actions">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => { void retryRestart(); }}
+              >
+                {t('settings.agents.restartRetry')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {catalogOpen && (
         <div className="confirm-overlay" role="dialog" aria-modal="true">

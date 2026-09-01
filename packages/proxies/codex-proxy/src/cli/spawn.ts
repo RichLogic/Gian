@@ -38,7 +38,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.10';
+  return '0.2.11';
 }
 
 const PLUGIN_VERSION = readPluginVersion();

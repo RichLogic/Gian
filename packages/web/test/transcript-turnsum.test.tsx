@@ -132,7 +132,7 @@ describe('P2 turnsum: 完成即折', () => {
 
   it('a completed turn folds its process events; the same boundary reads Working while live', () => {
     const completed: TranscriptItem[] = [
-      userMsg(), command(), fileRead(), diff(), turnEnd(), assistantMsg(),
+      userMsg(), command(), fileRead(), diff(), assistantMsg(), turnEnd(),
     ];
     const { container, rerender } = renderTranscript(completed);
 
@@ -186,7 +186,7 @@ describe('P2 turnsum: 完成即折', () => {
 
   it('messages stay outside the fold — order is user, turnsum, assistant', () => {
     const { container } = renderTranscript([
-      userMsg(), command(), turnEnd(), assistantMsg(),
+      userMsg(), command(), assistantMsg(), turnEnd(),
     ]);
     const kids = Array.from(container.querySelector('.transcript')!.children);
     const order = kids.map(el =>

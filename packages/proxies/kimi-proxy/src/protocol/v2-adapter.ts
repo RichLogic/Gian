@@ -476,10 +476,18 @@ function todoListPlanData(
   }, sourceTurnId);
 }
 
-function actionStyle(optionId: string): 'primary' | 'secondary' | 'danger' {
-  const id = optionId.toLowerCase();
-  if (id.includes('reject') || id.includes('deny') || id.includes('cancel')) return 'danger';
-  if (id.includes('allow') || id.includes('accept') || id.includes('approve')) return 'primary';
+/** ACP PermissionOption.kind closed set (gian.proxy/2.1 §2.2). */
+const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
+
+function permissionOptionKind(value: unknown): string | null {
+  return typeof value === 'string' && ACP_PERMISSION_KINDS.has(value) ? value : null;
+}
+
+/** Action style comes from the ACP permission kind — never guessed from the
+ *  Provider's opaque optionId text. */
+function actionStyleForKind(kind: string | null): 'primary' | 'secondary' | 'danger' {
+  if (kind === 'reject_once' || kind === 'reject_always') return 'danger';
+  if (kind === 'allow_once') return 'primary';
   return 'secondary';
 }
 
@@ -1578,14 +1586,17 @@ export class KimiProtocolV2Adapter {
         const payload = record(data.payload);
         const toolCall = record(payload.toolCall);
         const nativeOptions = Array.isArray(data.nativeOptions) ? data.nativeOptions : [];
+        const permissionOptionKinds: Record<string, string> = {};
         const actions = nativeOptions.flatMap((raw) => {
           const option = record(raw);
           const id = nonEmptyString(option.optionId) ?? nonEmptyString(option.id);
           if (!id) return [];
+          const kind = permissionOptionKind(option.kind);
+          if (kind) permissionOptionKinds[id] = kind;
           return [{
             id,
             label: String(option.name ?? option.label ?? id),
-            style: actionStyle(id),
+            style: actionStyleForKind(kind),
           }];
         });
         if (actions.length === 0) {
@@ -1630,7 +1641,19 @@ export class KimiProtocolV2Adapter {
           presentation: { kind, tone: kind === 'permission' ? 'warning' : 'neutral' },
           inputs: [],
           actions,
-          ...(payload.toolCall !== undefined ? { context: { subject: jsonValue(payload.toolCall) } } : {}),
+          ...(payload.toolCall !== undefined || Object.keys(permissionOptionKinds).length > 0
+            ? {
+              context: {
+                ...(payload.toolCall !== undefined ? { subject: jsonValue(payload.toolCall) } : {}),
+                // Schema-valid context extension (gian.proxy/2.1): the ACP
+                // PermissionOption.kind per native optionId. Older Hosts
+                // ignore it; strict interaction.resolved is untouched.
+                ...(Object.keys(permissionOptionKinds).length > 0
+                  ? { permissionOptionKinds }
+                  : {}),
+              },
+            }
+            : {}),
         });
         return;
       }

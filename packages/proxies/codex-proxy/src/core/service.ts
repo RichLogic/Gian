@@ -142,12 +142,27 @@ function extractTurnId(params: unknown): string | null {
   return null;
 }
 
-function runtimeErrorWillRetry(params: unknown) {
-  return Boolean(
-    params
-    && typeof params === 'object'
-    && (params as Record<string, unknown>).willRetry === true,
-  );
+function runtimeErrorDetails(params: unknown) {
+  const root = params && typeof params === 'object'
+    ? params as Record<string, unknown>
+    : {};
+  const error = root.error && typeof root.error === 'object'
+    ? root.error as Record<string, unknown>
+    : {};
+  const message = typeof error.message === 'string' && error.message.trim()
+    ? error.message.trim()
+    : typeof root.message === 'string' && root.message.trim()
+      ? root.message.trim()
+      : 'Codex runtime error.';
+  const code = typeof error.codexErrorInfo === 'string' && error.codexErrorInfo.trim()
+    ? error.codexErrorInfo.trim()
+    : undefined;
+  return {
+    message,
+    code,
+    runtimeWillRetry: root.willRetry === true,
+    userRetryable: code === 'serverOverloaded',
+  };
 }
 
 function inProgressTurnId(snapshot: unknown): string | null {
@@ -1544,13 +1559,14 @@ export class CodexProxyService {
     if (message.method === 'error') {
       // Codex owns response-stream retries and will publish the eventual turn
       // completion or terminal error. Keep the active turn intact meanwhile.
-      if (runtimeErrorWillRetry(message.params)) {
+      const error = runtimeErrorDetails(message.params);
+      if (error.runtimeWillRetry) {
         return;
       }
       const updatedSession = this.updateSession(session, {
-        status: 'error',
+        status: error.userRetryable ? 'idle' : 'error',
         activeTurnId: null,
-        lastError: JSON.stringify(message.params ?? {}),
+        lastError: error.userRetryable ? null : error.message,
       });
       this.activeTurnsByThreadId.delete(threadId);
       this.emitEvent('runtime.error', {
@@ -1558,7 +1574,9 @@ export class CodexProxyService {
         sessionId: updatedSession.id,
         turnId,
         data: {
-          message: updatedSession.lastError,
+          message: error.message,
+          ...(error.code ? { code: error.code } : {}),
+          retryable: error.userRetryable,
         },
         rawRuntimeEvent: message,
       });

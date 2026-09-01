@@ -1,4 +1,4 @@
-import { GIAN_TOOL_METHODS, type GianToolMethod } from '@gian/shared';
+import { EXECUTOR_IDS, GIAN_TOOL_METHODS, type GianToolMethod } from '@gian/shared';
 
 export type GianMcpToolName = GianToolMethod | 'gian_call';
 
@@ -154,7 +154,7 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     task_id: nullableString('Task ID filter; null selects unassigned Sessions.'),
     workspace_id: nullableString('Workspace ID filter.'),
     agent_id: nullableString('Agent ID filter.'),
-    proxy: enumValue(['claude', 'codex', 'kimi', 'grok', 'dsh'], 'Underlying Proxy filter.'),
+    proxy: enumValue([...EXECUTOR_IDS], 'Underlying Proxy filter.'),
     status: enumArray(['new', 'running', 'pending', 'error', 'done'], 'Session statuses.'),
     archived: enumValue(['active', 'archived', 'all'], 'Archive filter.'),
     limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Maximum rows.' },

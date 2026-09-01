@@ -14,10 +14,15 @@ function capabilityAdvertised(
   return capabilities[name] !== undefined;
 }
 
-/** Cached native-listing facade per (kind, resolved CLI path) — two Agents
- *  on one kind with different CLI paths never share a listing process. */
-export function nativeSessionsCacheKey(executor: Executor, cliPath?: string | null): string {
-  return `__native_sessions_${executor}__${cliPath ?? ''}`;
+/** Cached native-listing facade per immutable runtime pair — two Agents on one
+ *  kind with different CLI paths or Proxy versions never share a process. */
+export function nativeSessionsCacheKey(
+  executor: Executor,
+  cliPath?: string | null,
+  proxyVersion?: string | null,
+): string {
+  const base = `__native_sessions_${executor}__${cliPath ?? ''}`;
+  return proxyVersion ? `${base}\u0000${proxyVersion}` : base;
 }
 
 interface NativeSessionCallbacks {

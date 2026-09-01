@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, ComposerDocument, ConfigValue, Executor, MessageContextItem, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { ModeDropdown } from '../components/ModeDropdown.js';
@@ -6,12 +6,18 @@ import type { Mode } from '../components/Topbar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { RailLayoutController } from '../components/RailLayout.js';
 import type { ActionControlState } from '../components/action-gating.js';
-import { useSessionOperationPending } from '../operations/use-operations.js';
+import {
+  useOperationDispatchOptional,
+  useSessionOperationPending,
+  useSessionOrderOverlay,
+} from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
-import { sessionNeedsAttention, buildRailSections } from '../session-routing.js';
+import { sessionNeedsAttention, buildRailSections, orderByIds } from '../session-routing.js';
+import { moveById, useDragReorder } from '../dnd-reorder.js';
+import type { DropPlace, RowDragProps } from '../dnd-reorder.js';
 import { SessionMain } from './SessionMain.js';
 import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
 import { clearNewSessionDraft, NewSessionView } from './new-session-view.js';
@@ -476,48 +482,48 @@ function Sidebar({
   // (2026-08-03); the rest render under "Projects".
   const sections = buildRailSections(filtered, workspaces);
 
-  function renderRow(s: Session) {
+  function renderRow(s: Session, drag?: { props: RowDragProps; className: string }) {
     return (
       <SessionRow
         key={s.id}
         session={s}
         wsHidden={s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1}
+        drag={drag}
         {...makeRowHandlers(s)}
       />
     );
   }
 
-  function renderGroup(wsId: string) {
-    const list = sections.byWs.get(wsId)!;
-    const ws = wsById.get(wsId);
-    const name = ws?.name ?? wsId;
-    const isCollapsed = collapsed.has(wsId);
-    // Group count = sessions that NEED the user (待处理), not the raw total —
-    // the total says nothing actionable (2026-07-31). Hidden when zero.
-    const attn = list.filter(sessionNeedsAttention).length;
-    return (
-      <div key={wsId}>
-        <div className="sb-group" onClick={() => toggleGroup(wsId)}>
-          <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
-          <span>{name}</span>
-          {attn > 0 && <span className="count">{attn}</span>}
-          <span className="sb-group-acts">
-            <button
-              type="button"
-              className="sb-act"
-              data-testid={`sb-new-session-${wsId}`}
-              aria-label={t('coding.sidebar.ws.new')}
-              title={t('coding.sidebar.ws.new')}
-              onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
-            >
-              <SvgIcon d={ICON.plus} size={13} />
-            </button>
-          </span>
-        </div>
-        {!isCollapsed && list.map(s => renderRow(s))}
-      </div>
-    );
-  }
+  // Drag reorder (2026-08-29): workspace GROUP headers drag within their own
+  // section (pinned groups among pinned, project groups among projects — the
+  // two controllers never cross), and session rows drag within their
+  // workspace group (SidebarGroup owns that controller). Both dispatch
+  // whole-list reorder operations (operations/workspace.ts · session.ts).
+  const dispatch = useOperationDispatchOptional();
+  const reorderWorkspacesByDrag = (dragId: string, targetId: string, place: DropPlace) => {
+    if (!dispatch) return;
+    const current = workspaces.map(w => w.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) dispatch('workspace.reorder', { ids: next });
+  };
+  const pinnedWsDnd = useDragReorder(reorderWorkspacesByDrag);
+  const projectWsDnd = useDragReorder(reorderWorkspacesByDrag);
+
+  // The unfiled (无归属) rows drag among themselves — scope 'workspace' with
+  // a NULL parent (see POST /api/sessions/reorder).
+  const unfiledOrder = useSessionOrderOverlay('workspace', null);
+  const unfiledRows = useMemo(
+    () => (unfiledOrder ? orderByIds(sections.unfiled, unfiledOrder) : sections.unfiled),
+    [sections, unfiledOrder],
+  );
+  const unfiledDnd = useDragReorder((dragId, targetId, place) => {
+    if (!dispatch) return;
+    const current = unfiledRows.map(s => s.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) {
+      dispatch('session.reorder', { scope: 'workspace', parentId: null, ids: next });
+    }
+  });
 
   return (
     <aside className="sidebar">
@@ -557,7 +563,19 @@ function Sidebar({
               <span className="sb-section-label">{t('coding.sidebar.section.pinned')}</span>
             </div>
             {sections.pinnedSessions.map(s => renderRow(s))}
-            {sections.pinnedWsIds.map(renderGroup)}
+            {sections.pinnedWsIds.map(wsId => (
+              <SidebarGroup
+                key={wsId}
+                wsId={wsId}
+                list={sections.byWs.get(wsId)!}
+                workspace={wsById.get(wsId)}
+                isCollapsed={collapsed.has(wsId)}
+                onToggle={() => toggleGroup(wsId)}
+                onNewForWorkspace={onNewForWorkspace}
+                renderRow={renderRow}
+                groupDrag={{ props: pinnedWsDnd.rowProps(wsId), className: pinnedWsDnd.rowClass(wsId) }}
+              />
+            ))}
           </>
         )}
         {sections.hasPinned && sections.projectWsIds.length > 0 && (
@@ -565,7 +583,19 @@ function Sidebar({
             <span className="sb-section-label">{t('coding.sidebar.section.projects')}</span>
           </div>
         )}
-        {sections.projectWsIds.map(renderGroup)}
+        {sections.projectWsIds.map(wsId => (
+          <SidebarGroup
+            key={wsId}
+            wsId={wsId}
+            list={sections.byWs.get(wsId)!}
+            workspace={wsById.get(wsId)}
+            isCollapsed={collapsed.has(wsId)}
+            onToggle={() => toggleGroup(wsId)}
+            onNewForWorkspace={onNewForWorkspace}
+            renderRow={renderRow}
+            groupDrag={{ props: projectWsDnd.rowProps(wsId), className: projectWsDnd.rowClass(wsId) }}
+          />
+        ))}
         {/* 无归属: sessions of hidden workspaces stay reachable here instead
             of disappearing from the rail. Same collapsible affordance as the
             task 完成 section; the collapse state shares the rail's persisted
@@ -582,7 +612,10 @@ function Sidebar({
               <span className="sb-section-label">{t('coding.sidebar.section.unfiled')}</span>
               <span className="count">{sections.unfiled.length}</span>
             </button>
-            {!collapsed.has(UNFILED_GROUP_KEY) && sections.unfiled.map(s => renderRow(s))}
+            {!collapsed.has(UNFILED_GROUP_KEY) && unfiledRows.map(s => renderRow(s, {
+              props: unfiledDnd.rowProps(s.id),
+              className: unfiledDnd.rowClass(s.id),
+            }))}
           </>
         )}
       </div>
@@ -590,8 +623,84 @@ function Sidebar({
   );
 }
 
+/** One workspace group in the Sessions rail (2026-08-29: extracted from the
+ *  Sidebar's renderGroup so the session list can own hooks): the `.sb-group`
+ *  header toggles collapse on click and drags for WORKSPACE reorder via the
+ *  Sidebar's section controller; its session rows drag WITHIN the group via
+ *  this component's own controller (`session.reorder`, scope 'workspace'). */
+function SidebarGroup({
+  wsId,
+  list,
+  workspace,
+  isCollapsed,
+  onToggle,
+  onNewForWorkspace,
+  renderRow,
+  groupDrag,
+}: {
+  wsId: string;
+  /** The group's rail-sorted sessions (all unpinned — pinned rows live in the
+   *  Pinned section, see buildRailSections). */
+  list: Session[];
+  workspace: Workspace | undefined;
+  isCollapsed: boolean;
+  onToggle: () => void;
+  onNewForWorkspace: (workspaceId: string) => void;
+  renderRow: (s: Session, drag?: { props: RowDragProps; className: string }) => React.ReactNode;
+  /** Workspace-level drag (owned by the Sidebar's pinned/projects controller). */
+  groupDrag: { props: RowDragProps; className: string };
+}) {
+  const t = useT();
+  const dispatch = useOperationDispatchOptional();
+  // Session drag reorder within the group: while the run is in flight its
+  // whole-group overlay (the dragged id order) wins over the canonical sort;
+  // on confirm the Host's workspace_order column reproduces it.
+  const orderOverlay = useSessionOrderOverlay('workspace', wsId);
+  const rows = useMemo(
+    () => (orderOverlay ? orderByIds(list, orderOverlay) : list),
+    [list, orderOverlay],
+  );
+  const sessionDnd = useDragReorder((dragId, targetId, place) => {
+    if (!dispatch) return;
+    const current = rows.map(s => s.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) {
+      dispatch('session.reorder', { scope: 'workspace', parentId: wsId, ids: next });
+    }
+  });
+  const name = workspace?.name ?? wsId;
+  // Group count = sessions that NEED the user (待处理), not the raw total —
+  // the total says nothing actionable (2026-07-31). Hidden when zero.
+  const attn = list.filter(sessionNeedsAttention).length;
+  return (
+    <div>
+      <div className={`sb-group${groupDrag.className}`} onClick={onToggle} {...groupDrag.props}>
+        <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
+        <span>{name}</span>
+        {attn > 0 && <span className="count">{attn}</span>}
+        <span className="sb-group-acts">
+          <button
+            type="button"
+            className="sb-act"
+            data-testid={`sb-new-session-${wsId}`}
+            aria-label={t('coding.sidebar.ws.new')}
+            title={t('coding.sidebar.ws.new')}
+            onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
+          >
+            <SvgIcon d={ICON.plus} size={13} />
+          </button>
+        </span>
+      </div>
+      {!isCollapsed && rows.map(s => renderRow(s, {
+        props: sessionDnd.rowProps(s.id),
+        className: sessionDnd.rowClass(s.id),
+      }))}
+    </div>
+  );
+}
+
 function SessionRow({
-  session, active, wsHidden, onSelect, onPin, onArchive,
+  session, active, wsHidden, onSelect, onPin, onArchive, drag,
 }: {
   session: Session;
   active: boolean;
@@ -599,6 +708,9 @@ function SessionRow({
   onSelect: () => void;
   onPin: (pinned: boolean) => void;
   onArchive: () => void;
+  /** Drag-reorder wiring (the owning list's controller); absent for the
+   *  standalone pinned rows, which keep their pinned_at order. */
+  drag?: { props: RowDragProps; className: string };
 }) {
   const t = useT();
   const pinned = session.pinned_at != null;
@@ -607,7 +719,7 @@ function SessionRow({
   const deleting = useSessionOperationPending(session.id, 'session.delete');
   return (
     <div
-      className={`rail-item session-row${active ? ' active' : ''}${deleting ? ' deleting' : ''}`}
+      className={`rail-item session-row${active ? ' active' : ''}${deleting ? ' deleting' : ''}${drag?.className ?? ''}`}
       data-testid={`session-row-${session.id}`}
       role="button"
       tabIndex={0}
@@ -615,6 +727,7 @@ function SessionRow({
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
       }}
+      {...(drag?.props ?? {})}
     >
       <div className="ri-body">
         <div className="ri-row1">

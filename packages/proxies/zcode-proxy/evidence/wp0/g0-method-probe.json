@@ -1,0 +1,159 @@
+{
+  "gate": "G0",
+  "isolatedHomeSessions": 0,
+  "findings": [
+    {
+      "method": "session/list",
+      "exists": true,
+      "shape": {
+        "sessions": {
+          "array": 0
+        }
+      }
+    },
+    {
+      "method": "workspace/readState",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/upsertModelProvider",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; provider: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/removeModelProvider",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; providerId: Invalid input: expected string, received undefined"
+    },
+    {
+      "method": "workspace/setDefaultModel",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; model: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/setDefaultMode",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; mode: Invalid option: expected one of \"plan\"|\"build\"|\"edit\"|\"yolo\"|\"auto\""
+    },
+    {
+      "method": "workspace/setDefaultThoughtLevel",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; thoughtLevel: Invalid input: expected string, received undefined"
+    },
+    {
+      "method": "workspace/updateModelIoPreferences",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; preferences: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/updateProviderRegistry",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; registry: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/updateInteractionPreferences",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; preferences: Invalid input: expected object, received undefined"
+    },
+    {
+      "method": "workspace/generateText",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — workspace: Invalid input: expected object, received undefined; modelRef: Invalid input: expected object, received undefined; querySource: Invalid input: expected string, received unde"
+    },
+    {
+      "method": "workspace/hooks/trustGrant",
+      "exists": false,
+      "code": -32603,
+      "message": "[\n  {\n    \"expected\": \"object\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"workspace\"\n    ],\n    \"message\": \"Invalid input: expected object, received undefined\"\n  },\n  {\n    \"expected\": \"string\""
+    },
+    {
+      "method": "usage/stats",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — range: Invalid option: expected one of \"all\"|\"7d\"|\"30d\""
+    },
+    {
+      "method": "session/usage",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — sessionId: Invalid input: expected string, received undefined"
+    },
+    {
+      "method": "automation/list",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: automation/list"
+    },
+    {
+      "method": "automation/checkTaskBinding",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: automation/checkTaskBinding"
+    },
+    {
+      "method": "v4/usage/stats",
+      "exists": false,
+      "code": -32602,
+      "message": "Invalid params — range: Invalid option: expected one of \"all\"|\"7d\"|\"30d\""
+    },
+    {
+      "method": "v4/connection/flow",
+      "exists": false,
+      "code": -32603,
+      "message": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"connectionId\"\n    ],\n    \"message\": \"Invalid input: expected string, received undefined\"\n  },\n  {\n    \"code\": \"invalid_"
+    },
+    {
+      "method": "v4/commands/query",
+      "exists": false,
+      "code": -32603,
+      "message": "[\n  {\n    \"expected\": \"array\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"commands\"\n    ],\n    \"message\": \"Invalid input: expected array, received undefined\"\n  }\n]"
+    },
+    {
+      "method": "server/discover",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: server/discover"
+    },
+    {
+      "method": "subscriptions/listen",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: subscriptions/listen"
+    },
+    {
+      "method": "catalog/list",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: catalog/list"
+    },
+    {
+      "method": "settings/read",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: settings/read"
+    },
+    {
+      "method": "model/list",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: model/list"
+    },
+    {
+      "method": "provider/list",
+      "exists": false,
+      "code": -32601,
+      "message": "Method not found: provider/list"
+    }
+  ]
+}

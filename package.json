@@ -1,8 +1,8 @@
 {
   "name": "gian",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
-  "description": "One local desktop app for Codex, Claude Code, Kimi Code, and DeepSeek Harness",
+  "description": "One local desktop app for Codex, Claude Code, Kimi Code, DeepSeek Harness, and ZCode",
   "packageManager": "pnpm@10.33.2",
   "engines": {
     "node": ">=24 <25"
@@ -44,7 +44,7 @@
     "desktop:pack": "pnpm -F @gian/desktop package:mac",
     "desktop:dmg": "pnpm -F @gian/desktop make:mac",
     "canary:attachment:grok": "pnpm --filter @gian/shared build && pnpm --filter @gian/host build && pnpm --filter @gian/grok-proxy build && node scripts/run-provider-attachment-canary.mjs --provider grok",
-    "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/proxy-protocol build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && pnpm --filter @gian/dsh-bridge build && pnpm --filter @gian/dsh-proxy build && node scripts/build-proxy-artifacts.mjs",
+    "release:proxies": "pnpm --filter @gian/shared build && pnpm --filter @gian/proxy-protocol build && pnpm --filter @gian/cc-proxy build && pnpm --filter @gian/codex-proxy build && pnpm --filter @gian/kimi-proxy build && pnpm --filter @gian/dsh-bridge build && pnpm --filter @gian/dsh-proxy build && pnpm --filter @gian/zcode-proxy build && node scripts/build-proxy-artifacts.mjs",
     "quality:traceability": "node scripts/check-traceability.js",
     "quality:docs": "node scripts/check-doc-links.mjs",
     "quality:functional-evidence": "node scripts/check-functional-evidence.mjs",

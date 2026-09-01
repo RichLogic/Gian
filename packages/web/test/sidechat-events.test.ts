@@ -51,6 +51,40 @@ function notify(
 const OPTIONS = { uncertainTurnMessage: 'Turn interrupted — outcome uncertain.' };
 
 describe('projectSideChatSnapshot', () => {
+  it('preserves the ordered composer document for inline quote rendering', () => {
+    const quote = {
+      type: 'pastedText' as const,
+      id: 'quote-1',
+      text: 'selected answer',
+      lineCount: 1,
+      byteSize: 15,
+      origin: 'selection' as const,
+    };
+    const composerDocument = {
+      version: 1 as const,
+      segments: [
+        { type: 'reference' as const, id: quote.id, referenceType: 'context' as const, label: 'selected answer' },
+        { type: 'text' as const, text: ' follow up' },
+      ],
+    };
+
+    const items = projectSideChatSnapshot(snapshot({
+      user_inputs: [{
+        turn_id: 'pt-1',
+        input: [{ type: 'text', text: 'follow up' }],
+        context_items: [quote],
+        composer_document: composerDocument,
+        created_at: '2026-08-20T08:00:30.000Z',
+      }],
+    }), 'codex', OPTIONS);
+
+    expect(items[0]).toMatchObject({
+      kind: 'user',
+      contextItems: [quote],
+      composerDocument,
+    });
+  });
+
   it('projects user inputs ahead of their turn and runtime events in order, with sequential turn numbers', () => {
     const items = projectSideChatSnapshot(snapshot({
       user_inputs: [

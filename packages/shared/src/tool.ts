@@ -9,6 +9,7 @@ import type {
   Task,
   Workspace,
 } from './model.js';
+import { EXECUTOR_IDS } from './executors.js';
 import type { UserAgent } from './agents.js';
 
 export const GIAN_TOOL_METHODS = [
@@ -312,7 +313,7 @@ const MUTATIONS = new Set<string>(GIAN_TOOL_MUTATION_METHODS);
 const ERROR_CODES = new Set<string>(GIAN_TOOL_ERROR_CODES);
 const TASK_STATUSES = new Set(['open', 'done', 'archived']);
 const SESSION_STATUSES = new Set(['new', 'running', 'pending', 'error', 'done']);
-const EXECUTORS = new Set(['claude', 'codex', 'kimi', 'grok', 'dsh']);
+const EXECUTORS = new Set(EXECUTOR_IDS);
 const APPROVAL_MODES = new Set(['plan', 'ask', 'auto', 'custom', 'full-access']);
 const DECISIONS = new Set([
   'allow_once',

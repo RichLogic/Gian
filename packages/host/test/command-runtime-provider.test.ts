@@ -4,7 +4,55 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import test from 'node:test';
 import { CommandRuntimeProvider } from '../src/runtime/command-provider.js';
+import { DshRuntimeProvider } from '../src/runtime/dsh-provider.js';
 import { CliRuntimeManager } from '../src/runtime/manager.js';
+
+test('managed DSH keeps its npm launcher and finds the Host Node runtime', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-dsh-provider-'));
+  t.after(async () => { await rm(directory, { recursive: true, force: true }); });
+
+  const runtimesRoot = join(directory, 'runtimes');
+  const version = '9.8.7';
+  const packageBin = join(
+    runtimesRoot,
+    version,
+    'node_modules',
+    '@deepseek-ai',
+    'dsh',
+    'lib',
+    'bin.js',
+  );
+  const versionBin = join(runtimesRoot, version, 'node_modules', '.bin');
+  const launcher = join(runtimesRoot, 'current', 'node_modules', '.bin', 'dsh');
+  await mkdir(dirname(packageBin), { recursive: true });
+  await mkdir(versionBin, { recursive: true });
+  await writeFile(
+    packageBin,
+    '#!/usr/bin/env node\nprocess.stdout.write("9.8.7\\n");\n',
+    'utf8',
+  );
+  await chmod(packageBin, 0o755);
+  await symlink('../@deepseek-ai/dsh/lib/bin.js', join(versionBin, 'dsh'));
+  await symlink(version, join(runtimesRoot, 'current'), 'dir');
+
+  const provider = new DshRuntimeProvider({
+    dataDir: directory,
+    runtimesRoot,
+    // Reproduce a Finder-launched packaged App: no Node directory is
+    // contributed by the inherited discovery PATH.
+    pathEnv: '/usr/bin:/bin',
+  });
+  const installed = await provider.inspectInstalled();
+
+  assert.equal(installed.length, 1);
+  assert.equal(installed[0]?.binaryPath, launcher);
+  assert.equal(installed[0]?.source, 'managed');
+  assert.equal(provider.managedEnv().PATH?.split(delimiter)[0], dirname(process.execPath));
+
+  const probe = await provider.probe(installed[0]!);
+  assert.equal(probe.version, version);
+  assert.equal(probe.binaryPath, launcher);
+});
 
 test('command runtime keeps the launcher path and its companion runtime on PATH', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-command-runtime-'));

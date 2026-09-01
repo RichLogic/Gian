@@ -12,6 +12,7 @@ import {
 } from '../operations/use-operations.js';
 import { AdoptDialog } from '../views/spaces-native-sessions.js';
 import { useT } from '../i18n/index.js';
+import { moveById, useDragReorder } from '../dnd-reorder.js';
 
 const ICONS = {
   archive: 'M21 8v13H3V8 M1 3h22v5H1z M10 12h4',
@@ -19,8 +20,8 @@ const ICONS = {
   refresh: 'M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7',
   search: 'M21 21l-4.3-4.3 M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0z',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
-  up: 'M12 19V5 M5 12l7-7 7 7',
-  down: 'M12 5v14 M19 12l-7 7-7-7',
+  // grip-vertical — the Settings > Workspaces drag affordance (2026-08-29).
+  grip: 'M9 5h.01 M15 5h.01 M9 12h.01 M15 12h.01 M9 19h.01 M15 19h.01',
 } as const;
 
 function Icon({ path, size = 16 }: { path: string; size?: number }) {
@@ -347,16 +348,15 @@ export function SettingsWorkspacesPage({ workspaces }: { workspaces: Workspace[]
   const visible = workspaces.filter(workspace => workspace.name !== '__gian_root__' && workspace.hidden !== 1);
   const hidden = workspaces.filter(workspace => workspace.name !== '__gian_root__' && workspace.hidden === 1);
 
-  function move(index: number, direction: -1 | 1) {
-    const target = index + direction;
-    if (target < 0 || target >= visible.length) return;
-    const ids = workspaces.map(workspace => workspace.id);
-    const from = ids.indexOf(visible[index]!.id);
-    const to = ids.indexOf(visible[target]!.id);
-    if (from < 0 || to < 0) return;
-    [ids[from], ids[to]] = [ids[to]!, ids[from]!];
-    dispatch('workspace.reorder', { ids });
-  }
+  // Drag reorder (2026-08-29, replaces the up/down arrows): visible rows drag
+  // to reorder; the dispatched id array always covers EVERY workspace (the
+  // host rewrites sort_order wholesale) — hidden/root rows keep their
+  // relative positions because moveById only relocates the dragged id.
+  const dnd = useDragReorder((dragId, targetId, place) => {
+    const current = workspaces.map(workspace => workspace.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) dispatch('workspace.reorder', { ids: next });
+  });
 
   return (
     <section className="settings-page workspaces-settings-page" data-testid="settings-workspaces-page">
@@ -368,16 +368,19 @@ export function SettingsWorkspacesPage({ workspaces }: { workspaces: Workspace[]
         </div>
         <div className="management-list">
           {visible.length === 0 && <ManagementEmpty>{t('settings.workspaces.empty')}</ManagementEmpty>}
-          {visible.map((workspace, index) => (
-            <div className="management-row workspace-management-row" key={workspace.id}>
+          {visible.map(workspace => (
+            <div
+              className={`management-row workspace-management-row${dnd.rowClass(workspace.id)}`}
+              key={workspace.id}
+              {...dnd.rowProps(workspace.id)}
+            >
+              <span className="management-drag-grip" aria-hidden>
+                <Icon path={ICONS.grip} />
+              </span>
               <div className="management-row-copy">
                 <strong>{workspace.name}</strong>
                 <span className="mono">{workspace.path}</span>
               </div>
-              <button className="iconbtn" title={t('spaces.moveup.title')} aria-label={t('spaces.moveup.title')}
-                      disabled={index === 0} onClick={() => move(index, -1)}><Icon path={ICONS.up} /></button>
-              <button className="iconbtn" title={t('spaces.movedown.title')} aria-label={t('spaces.movedown.title')}
-                      disabled={index === visible.length - 1} onClick={() => move(index, 1)}><Icon path={ICONS.down} /></button>
               <button className="btn sm secondary" onClick={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: true })}>
                 <Icon path={ICONS.eyeOff} /> {t('settings.workspaces.hide')}
               </button>

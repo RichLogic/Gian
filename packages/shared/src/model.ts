@@ -1,28 +1,73 @@
-export type Executor = 'codex' | 'claude' | 'kimi' | 'grok' | 'dsh';
+import {
+  EXECUTOR_DEFS,
+  EXECUTOR_IDS,
+  PRODUCT_EXECUTOR_IDS,
+  type ExecutorId,
+  type ProductExecutorId,
+} from './executors.js';
+
+/** Canonical executor identity. The registration source lives in
+ * `executors.ts`; this alias keeps the historical name used across layers. */
+export type Executor = ExecutorId;
 
 /** Proxy kinds exposed in the product AI Agents catalog. `grok` remains a
  *  valid protocol/vendor `Executor` (its Proxy and Host adapter stay in the
- *  tree) but is no longer offered anywhere in the product surface. */
-export const PRODUCT_EXECUTORS = ['claude', 'codex', 'kimi', 'dsh'] as const;
-export type ProductExecutor = (typeof PRODUCT_EXECUTORS)[number];
+ *  tree) but is no longer offered anywhere in the product surface.
+ *  Derived from the executor registry; parity is pinned by
+ *  `test/executors.test.mjs`. */
+export const PRODUCT_EXECUTORS = PRODUCT_EXECUTOR_IDS;
+export type ProductExecutor = ProductExecutorId;
 
 export function isProductExecutor(value: unknown): value is ProductExecutor {
   return typeof value === 'string'
     && (PRODUCT_EXECUTORS as readonly string[]).includes(value);
 }
 
-/** Kimi, Grok and DSH expose opaque native config options instead of the
- * Gian ApprovalMode segmented control, so the product renders their catalog
- * options verbatim. */
-export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' | 'dsh' {
-  return executor === 'kimi' || executor === 'grok' || executor === 'dsh';
+const CLI_CAPABILITY_EXECUTORS: readonly string[] = ['claude', 'codex'];
+const NATIVE_CONFIG_EXECUTORS: readonly string[] = ['kimi', 'grok', 'dsh'];
+const NATIVE_SESSION_EXECUTORS: readonly string[] = [
+  'claude',
+  'codex',
+  'kimi',
+  'grok',
+  'zcode',
+];
+
+/** Legacy per-CLI capability surface (/models + /slash). Catalog-driven
+ * protocol-v2 agents answer everything through gian.proxy catalogs instead. */
+export function usesCliCapabilitySurface(executor: Executor): executor is 'claude' | 'codex' {
+  return EXECUTOR_DEFS[executor]?.cliCapabilitySurface === true;
 }
 
-/** Executors Gin can list/adopt provider-native sessions through a dedicated
+/** Kimi, Grok and DSH expose opaque native config options instead of the
+ * Gian ApprovalMode segmented control, so the product renders their catalog
+ * options verbatim. Total for any runtime input: unknown ids answer false. */
+export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' | 'dsh' {
+  return EXECUTOR_DEFS[executor]?.nativeExecutorConfig === true;
+}
+
+/** Executors Gian can list/adopt provider-native sessions through a dedicated
  * native history surface. DSH does not declare session.native.list, so it is
  * excluded even though its config is native. */
 export function supportsNativeSessions(executor: Executor): boolean {
-  return executor === 'claude' || executor === 'codex' || executor === 'kimi' || executor === 'grok';
+  return EXECUTOR_DEFS[executor]?.nativeSessions === true;
+}
+
+/** Runtime parity check between the literal predicate unions above and the
+ * executor registry (called by tests; keeps drift impossible to merge). */
+export function executorRegistryParity(): Array<{ id: ExecutorId; ok: boolean }> {
+  const nativeConfigLiteral = (id: ExecutorId): boolean =>
+    NATIVE_CONFIG_EXECUTORS.includes(id);
+  const nativeSessionsLiteral = (id: ExecutorId): boolean =>
+    NATIVE_SESSION_EXECUTORS.includes(id);
+  const productLiteral: readonly string[] = ['claude', 'codex', 'kimi', 'dsh', 'zcode'];
+  return EXECUTOR_IDS.map((id) => ({
+    id,
+    ok: EXECUTOR_DEFS[id].cliCapabilitySurface === CLI_CAPABILITY_EXECUTORS.includes(id)
+      && EXECUTOR_DEFS[id].nativeExecutorConfig === nativeConfigLiteral(id)
+      && EXECUTOR_DEFS[id].nativeSessions === nativeSessionsLiteral(id)
+      && EXECUTOR_DEFS[id].productVisible === productLiteral.includes(id),
+  }));
 }
 
 export type SessionType = 'coding' | 'subtask' | 'manager';
@@ -253,6 +298,14 @@ export interface Session {
    *  sessions sort above the rest within their workspace group,
    *  most-recently-pinned first (pinned_at DESC). */
   pinned_at: string | null;
+  /** Manual drag position within the workspace group (or the NULL-workspace
+   *  unfiled group) in the Sessions rail (migration 067). NULL = automatic
+   *  order (updated_at DESC); absent on hosts predating the migration. */
+  workspace_order?: number | null;
+  /** Manual drag position among the Task's open, unpinned subtasks in the
+   *  Tasks rail (migration 067). NULL = automatic order (created_at DESC);
+   *  absent on hosts predating the migration. */
+  task_order?: number | null;
   /** Unread marker. Set to 1 when a background turn finishes (done/error) and
    *  cleared to 0 when the user opens/views the session. Also togglable by hand
    *  via the session menu ("Mark as unread"). Drives the sidebar unread dot.
@@ -367,6 +420,10 @@ export interface Task {
   /** When the task was pinned (ISO-8601), or null when not pinned. Pinned tasks
    *  sort above the rest, most-recently-pinned first (pinned_at DESC). */
   pinned_at: string | null;
+  /** Manual drag position within its status group (migration 067). NULL =
+   *  automatic order (created_at DESC); absent on hosts predating the
+   *  migration. */
+  sort_order?: number | null;
 }
 
 export interface Approval {

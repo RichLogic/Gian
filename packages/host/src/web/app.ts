@@ -70,6 +70,11 @@ export interface AppContext {
     pluginVersion: string;
     processScope: 'shared' | 'session';
   };
+  zcodeProxyEntry?: string;
+  zcodeProxy?: {
+    pluginVersion: string;
+    processScope: 'shared' | 'session';
+  };
   codexBin?: string;
   runtimeManager?: CliRuntimeManager;
   agentManager?: AgentManager;
@@ -109,6 +114,8 @@ export function createApp(ctx: AppContext): AppHandle {
     grokProxy: ctx.grokProxy,
     dshProxyEntry: ctx.dshProxyEntry,
     dshProxy: ctx.dshProxy,
+    zcodeProxyEntry: ctx.zcodeProxyEntry,
+    zcodeProxy: ctx.zcodeProxy,
     codexBin: ctx.codexBin,
     runtimeManager: ctx.runtimeManager,
     ...(ctx.agentManager

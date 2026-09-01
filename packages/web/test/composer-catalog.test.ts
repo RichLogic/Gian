@@ -151,6 +151,17 @@ describe('catalog condition evaluation', () => {
     expect(merged.map(option => option.id)).toEqual(['workspace', 'verbosity']);
   });
 
+  it('inherits Special Catalog roles when a persisted 2.1 turn snapshot is role-free', () => {
+    const merged = mergeTurnCatalog([model, vision], [
+      { ...model, role: undefined, defaultValue: 'vision-model' },
+      { ...vision, role: undefined, defaultValue: true },
+    ]);
+    expect(merged.map(option => [option.id, option.role])).toEqual([
+      ['model', 'model'],
+      ['vision', 'custom_vision'],
+    ]);
+  });
+
   it('drops leftover effort values that the current catalog does not advertise', () => {
     const payload = createConfigsFromCatalog('kimi', [
       {

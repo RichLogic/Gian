@@ -21,6 +21,9 @@
 @import url('./trace.css');
 @import url('./browser.css');
 @import url('./onboarding.css');
+/* Drag-reorder indicators (sidebar lists + settings rows); loaded last — the
+   rules carry no layout properties, only the insertion-line shadow. */
+@import url('./dnd.css');
 
 * {
   box-sizing: border-box;

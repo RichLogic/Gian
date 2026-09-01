@@ -432,7 +432,7 @@ async function dispatch(
       return;
     }
     case 'session:set_model': {
-      sessions.setModel(msg.session_id, msg.model);
+      await sessions.setModel(msg.session_id, msg.model);
       return;
     }
     case 'session:set_native_config': {
@@ -440,7 +440,7 @@ async function dispatch(
       return;
     }
     case 'session:set_turn_config': {
-      sessions.setTurnConfigValue(msg.session_id, msg.option_id, msg.value);
+      await sessions.setTurnConfigValue(msg.session_id, msg.option_id, msg.value);
       return;
     }
     case 'queue:add': {

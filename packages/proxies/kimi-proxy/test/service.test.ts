@@ -2715,3 +2715,108 @@ test('Kimi gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
   );
   await service.close();
 });
+
+test('Kimi gian.proxy/2 relays ACP permission kinds in context and keeps optionId opaque', async () => {
+  let permissionResponse: unknown;
+  const permissionIssued = deferred<void>();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: transportFactory((remote) => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-kinds' }),
+      prompt: async (params: { sessionId: string }) => {
+        const response = remote.requestPermission({
+          sessionId: params.sessionId,
+          toolCall: {
+            toolCallId: 'tool-kinds',
+            title: 'Read',
+            kind: 'read',
+          },
+          options: [
+            { optionId: 'approve_once', name: 'Approve once', kind: 'allow_once' },
+            { optionId: 'approve_always', name: 'Approve for this session', kind: 'allow_always' },
+            { optionId: 'deny', name: 'Reject', kind: 'reject_once' },
+          ],
+        });
+        permissionIssued.resolve();
+        permissionResponse = await response;
+        return { stopReason: 'end_turn' };
+      },
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.6', (method, params) => {
+    notifications.push({ method, params });
+    // The context extension must survive the strict gian.proxy/2 schema.
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-kinds',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-kinds',
+    streamId: created.session.streamId,
+    turnId: 'host-kinds-turn',
+    input: [{ type: 'text', text: 'read it' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'interaction.requested'),
+    'interaction.requested was not emitted',
+  );
+
+  const requested = notifications.find(item => item.method === 'interaction.requested');
+  const requestedData = requested?.params.data as {
+    actions: Array<{ id: string; style: string }>;
+    context?: { permissionOptionKinds?: Record<string, string> };
+  };
+  // Style is derived from the ACP kind, not the opaque id text.
+  assert.deepEqual(requestedData.actions, [
+    { id: 'approve_once', label: 'Approve once', style: 'primary' },
+    { id: 'approve_always', label: 'Approve for this session', style: 'secondary' },
+    { id: 'deny', label: 'Reject', style: 'danger' },
+  ]);
+  assert.deepEqual(requestedData.context?.permissionOptionKinds, {
+    approve_once: 'allow_once',
+    approve_always: 'allow_always',
+    deny: 'reject_once',
+  });
+
+  // Respond through the wire method with the opaque native optionId.
+  const interactionId = (requested?.params.data as { interactionId: string }).interactionId;
+  await adapter.handle(v2Request('4', 'interaction.respond', {
+    sessionId: 'host-kinds',
+    streamId: created.session.streamId,
+    turnId: 'host-kinds-turn',
+    interactionId,
+    responseId: 'resp-1',
+    actionId: 'approve_always',
+    values: {},
+  }));
+  await waitFor(() => permissionResponse !== undefined, 'permission response was not delivered');
+  assert.deepEqual(permissionResponse, {
+    outcome: { outcome: 'selected', optionId: 'approve_always' },
+  });
+  await waitFor(
+    () => notifications.some(item => item.method === 'interaction.resolved'),
+    'interaction.resolved was not emitted',
+  );
+  const resolvedData = notifications.find(item => item.method === 'interaction.resolved')?.params.data;
+  // interaction.resolved stays strict: only interactionId/outcome/actionId.
+  assert.deepEqual(resolvedData, {
+    interactionId,
+    outcome: 'submitted',
+    actionId: 'approve_always',
+  });
+
+  await service.close();
+});

@@ -1,5 +1,6 @@
 import { ProxyProtocolError } from '@gian/proxy-protocol';
 import type { Hono } from 'hono';
+import { EXECUTOR_IDS } from '@gian/shared';
 import type { Executor, ProductExecutor } from '@gian/shared';
 import type { SessionManager } from '../../session/manager.js';
 import type { Db } from '../../storage/db.js';
@@ -11,7 +12,7 @@ export type AgentRuntimePathResolver = (agentId: string) => {
   cliPath: string | null;
 };
 
-const KNOWN_EXECUTORS = new Set(['codex', 'claude', 'kimi', 'grok', 'dsh']);
+const KNOWN_EXECUTORS = new Set<string>(EXECUTOR_IDS);
 
 export function registerProxyRoutes(
   app: Hono,

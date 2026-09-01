@@ -1,0 +1,751 @@
+{
+  "gate": "G4",
+  "results": {
+    "steps": [
+      {
+        "name": "session/create",
+        "ok": true,
+        "result": {
+          "messages": [],
+          "projection": {
+            "activeToolCalls": [],
+            "backgroundJobs": [],
+            "contextUsed": 0,
+            "contextWindow": 1000000,
+            "mode": "build",
+            "pendingPermissions": [],
+            "sessionId": "unknown",
+            "status": "idle",
+            "target": null,
+            "totalTokenCount": 0,
+            "turnCount": 0
+          },
+          "protocol": {
+            "name": "ZCode Protocol",
+            "version": 1
+          },
+          "runtime": {
+            "eventSeq": 0,
+            "pendingRequestIds": [],
+            "goalVerifications": [],
+            "goalVerificationTimeline": [],
+            "stateRevision": 0
+          },
+          "session": {
+            "createdAt": 1787984572186,
+            "mode": "build",
+            "model": {
+              "modelId": "GLM-5.3-Flash",
+              "providerId": "bigmodel"
+            },
+            "traceId": "50c22e17-c489-4cb6-9da0-f6776e4f3390",
+            "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+            "sessionKind": "interactive",
+            "status": "idle",
+            "target": null,
+            "title": "",
+            "updatedAt": 1787984572186,
+            "workspace": {
+              "workspacePath": "/tmp/zcode-wp0-ws-lo4quG",
+              "workspaceKey": "/tmp/zcode-wp0-ws-lo4quG"
+            }
+          },
+          "settings": {
+            "mode": {
+              "current": "build"
+            },
+            "model": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "lastUsed": {
+                "modelId": "…",
+                "providerId": "…"
+              }
+            },
+            "permission": {
+              "mode": "build"
+            },
+            "thoughtLevel": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": "max",
+              "defaultLevel": "max",
+              "enabled": true
+            }
+          },
+          "slashCommands": [
+            {
+              "description": "Show or set the current session goal.",
+              "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+              "name": "goal",
+              "source": "builtin"
+            },
+            {
+              "description": "Compact the current conversation with optional instructions.",
+              "inputHint": "/compact [instructions]",
+              "name": "compact",
+              "source": "builtin"
+            },
+            {
+              "description": "Create or update workspace AGENTS.md instructions.",
+              "inputHint": "/init [notes]",
+              "name": "init",
+              "source": "builtin"
+            },
+            {
+              "description": "Switch to Plan mode and optionally send a task.",
+              "inputHint": "/plan [task]",
+              "name": "plan",
+              "source": "builtin"
+            }
+          ],
+          "todos": [],
+          "todoGroups": []
+        }
+      },
+      {
+        "name": "subscribe",
+        "ok": true,
+        "result": {
+          "eventSeq": 0,
+          "events": [],
+          "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+          "snapshot": {
+            "messages": [],
+            "projection": {
+              "activeToolCalls": [],
+              "backgroundJobs": [],
+              "contextUsed": 0,
+              "contextWindow": 1000000,
+              "mode": "build",
+              "pendingPermissions": [],
+              "sessionId": "unknown",
+              "status": "idle",
+              "target": null,
+              "totalTokenCount": 0,
+              "turnCount": 0
+            },
+            "protocol": {
+              "name": "ZCode Protocol",
+              "version": 1
+            },
+            "runtime": {
+              "deliveryKind": "desktop-continuous",
+              "eventSeq": 0,
+              "pendingRequestIds": [],
+              "goalVerifications": [],
+              "goalVerificationTimeline": [],
+              "stateRevision": 0
+            },
+            "session": {
+              "createdAt": 1787984572186,
+              "mode": "build",
+              "model": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "traceId": "50c22e17-c489-4cb6-9da0-f6776e4f3390",
+              "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+              "sessionKind": "interactive",
+              "status": "idle",
+              "target": null,
+              "title": "",
+              "updatedAt": 1787984572186,
+              "workspace": {
+                "workspacePath": "…",
+                "workspaceKey": "…"
+              }
+            },
+            "settings": {
+              "mode": {
+                "current": "…"
+              },
+              "model": {
+                "available": "…",
+                "current": "…",
+                "lastUsed": "…"
+              },
+              "permission": {
+                "mode": "…"
+              },
+              "thoughtLevel": {
+                "available": "…",
+                "current": "…",
+                "defaultLevel": "…",
+                "enabled": "…"
+              }
+            },
+            "slashCommands": [
+              {
+                "description": "…",
+                "inputHint": "…",
+                "name": "…",
+                "source": "…"
+              },
+              {
+                "description": "…",
+                "inputHint": "…",
+                "name": "…",
+                "source": "…"
+              },
+              {
+                "description": "…",
+                "inputHint": "…",
+                "name": "…",
+                "source": "…"
+              },
+              {
+                "description": "…",
+                "inputHint": "…",
+                "name": "…",
+                "source": "…"
+              }
+            ],
+            "todos": [],
+            "todoGroups": []
+          }
+        }
+      },
+      {
+        "name": "baseline-read",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3-Flash",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max",
+        "permissionMode": "build"
+      },
+      {
+        "name": "setModel(GLM-5.3)",
+        "ok": true,
+        "result": {
+          "messages": [],
+          "projection": {
+            "activeToolCalls": [],
+            "backgroundJobs": [],
+            "contextUsed": 0,
+            "contextWindow": 1000000,
+            "mode": "build",
+            "pendingPermissions": [],
+            "sessionId": "unknown",
+            "status": "idle",
+            "target": null,
+            "totalTokenCount": 0,
+            "turnCount": 0
+          },
+          "protocol": {
+            "name": "ZCode Protocol",
+            "version": 1
+          },
+          "runtime": {
+            "deliveryKind": "desktop-continuous",
+            "eventSeq": 0,
+            "pendingRequestIds": [],
+            "goalVerifications": [],
+            "goalVerificationTimeline": [],
+            "stateRevision": 1
+          },
+          "session": {
+            "createdAt": 1787984572186,
+            "mode": "build",
+            "model": {
+              "modelId": "GLM-5.3",
+              "providerId": "bigmodel"
+            },
+            "traceId": "50c22e17-c489-4cb6-9da0-f6776e4f3390",
+            "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+            "sessionKind": "interactive",
+            "status": "idle",
+            "target": null,
+            "title": "",
+            "updatedAt": 1787984572186,
+            "workspace": {
+              "workspacePath": "/tmp/zcode-wp0-ws-lo4quG",
+              "workspaceKey": "/tmp/zcode-wp0-ws-lo4quG"
+            }
+          },
+          "settings": {
+            "mode": {
+              "current": "build"
+            },
+            "model": {
+              "available": [
+                "…"
+              ],
+              "current": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "lastUsed": {
+                "modelId": "…",
+                "providerId": "…"
+              }
+            },
+            "permission": {
+              "mode": "build"
+            },
+            "thoughtLevel": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": "max",
+              "defaultLevel": "max",
+              "enabled": true
+            }
+          },
+          "slashCommands": [
+            {
+              "description": "Show or set the current session goal.",
+              "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+              "name": "goal",
+              "source": "builtin"
+            },
+            {
+              "description": "Compact the current conversation with optional instructions.",
+              "inputHint": "/compact [instructions]",
+              "name": "compact",
+              "source": "builtin"
+            },
+            {
+              "description": "Create or update workspace AGENTS.md instructions.",
+              "inputHint": "/init [notes]",
+              "name": "init",
+              "source": "builtin"
+            },
+            {
+              "description": "Switch to Plan mode and optionally send a task.",
+              "inputHint": "/plan [task]",
+              "name": "plan",
+              "source": "builtin"
+            }
+          ],
+          "todos": [],
+          "todoGroups": []
+        }
+      },
+      {
+        "name": "after-setModel",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max",
+        "permissionMode": "build"
+      },
+      {
+        "name": "setThoughtLevel(low)",
+        "ok": false,
+        "code": -32602,
+        "message": "Invalid params — (root): Unrecognized key: \"level\""
+      },
+      {
+        "name": "after-setThoughtLevel",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max",
+        "permissionMode": "build"
+      },
+      {
+        "name": "setMode(plan)",
+        "ok": true,
+        "result": {
+          "messages": [],
+          "projection": {
+            "activeToolCalls": [],
+            "backgroundJobs": [],
+            "contextUsed": 0,
+            "contextWindow": 1000000,
+            "mode": "build",
+            "pendingPermissions": [],
+            "sessionId": "unknown",
+            "status": "idle",
+            "target": null,
+            "totalTokenCount": 0,
+            "turnCount": 0
+          },
+          "protocol": {
+            "name": "ZCode Protocol",
+            "version": 1
+          },
+          "runtime": {
+            "deliveryKind": "desktop-continuous",
+            "eventSeq": 0,
+            "pendingRequestIds": [],
+            "goalVerifications": [],
+            "goalVerificationTimeline": [],
+            "stateRevision": 2
+          },
+          "session": {
+            "createdAt": 1787984572186,
+            "mode": "build",
+            "model": {
+              "modelId": "GLM-5.3",
+              "providerId": "bigmodel"
+            },
+            "traceId": "50c22e17-c489-4cb6-9da0-f6776e4f3390",
+            "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+            "sessionKind": "interactive",
+            "status": "idle",
+            "target": null,
+            "title": "",
+            "updatedAt": 1787984572186,
+            "workspace": {
+              "workspacePath": "/tmp/zcode-wp0-ws-lo4quG",
+              "workspaceKey": "/tmp/zcode-wp0-ws-lo4quG"
+            }
+          },
+          "settings": {
+            "mode": {
+              "current": "plan"
+            },
+            "model": {
+              "available": [
+                "…"
+              ],
+              "current": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "lastUsed": {
+                "modelId": "…",
+                "providerId": "…"
+              }
+            },
+            "permission": {
+              "mode": "plan"
+            },
+            "thoughtLevel": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": "max",
+              "defaultLevel": "max",
+              "enabled": true
+            }
+          },
+          "slashCommands": [
+            {
+              "description": "Show or set the current session goal.",
+              "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+              "name": "goal",
+              "source": "builtin"
+            },
+            {
+              "description": "Compact the current conversation with optional instructions.",
+              "inputHint": "/compact [instructions]",
+              "name": "compact",
+              "source": "builtin"
+            },
+            {
+              "description": "Create or update workspace AGENTS.md instructions.",
+              "inputHint": "/init [notes]",
+              "name": "init",
+              "source": "builtin"
+            },
+            {
+              "description": "Switch to Plan mode and optionally send a task.",
+              "inputHint": "/plan [task]",
+              "name": "plan",
+              "source": "builtin"
+            }
+          ],
+          "todos": [],
+          "todoGroups": []
+        }
+      },
+      {
+        "name": "after-setMode",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max",
+        "permissionMode": "plan"
+      },
+      {
+        "name": "setMode(build)",
+        "ok": true,
+        "result": {
+          "messages": [],
+          "projection": {
+            "activeToolCalls": [],
+            "backgroundJobs": [],
+            "contextUsed": 0,
+            "contextWindow": 1000000,
+            "mode": "build",
+            "pendingPermissions": [],
+            "sessionId": "unknown",
+            "status": "idle",
+            "target": null,
+            "totalTokenCount": 0,
+            "turnCount": 0
+          },
+          "protocol": {
+            "name": "ZCode Protocol",
+            "version": 1
+          },
+          "runtime": {
+            "deliveryKind": "desktop-continuous",
+            "eventSeq": 0,
+            "pendingRequestIds": [],
+            "goalVerifications": [],
+            "goalVerificationTimeline": [],
+            "stateRevision": 3
+          },
+          "session": {
+            "createdAt": 1787984572186,
+            "mode": "build",
+            "model": {
+              "modelId": "GLM-5.3",
+              "providerId": "bigmodel"
+            },
+            "traceId": "50c22e17-c489-4cb6-9da0-f6776e4f3390",
+            "sessionId": "sess_567ec400-c038-4f1d-9f81-abef2ef2d5b4",
+            "sessionKind": "interactive",
+            "status": "idle",
+            "target": null,
+            "title": "",
+            "updatedAt": 1787984572186,
+            "workspace": {
+              "workspacePath": "/tmp/zcode-wp0-ws-lo4quG",
+              "workspaceKey": "/tmp/zcode-wp0-ws-lo4quG"
+            }
+          },
+          "settings": {
+            "mode": {
+              "current": "build"
+            },
+            "model": {
+              "available": [
+                "…"
+              ],
+              "current": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "lastUsed": {
+                "modelId": "…",
+                "providerId": "…"
+              }
+            },
+            "permission": {
+              "mode": "build"
+            },
+            "thoughtLevel": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": "max",
+              "defaultLevel": "max",
+              "enabled": true
+            }
+          },
+          "slashCommands": [
+            {
+              "description": "Show or set the current session goal.",
+              "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+              "name": "goal",
+              "source": "builtin"
+            },
+            {
+              "description": "Compact the current conversation with optional instructions.",
+              "inputHint": "/compact [instructions]",
+              "name": "compact",
+              "source": "builtin"
+            },
+            {
+              "description": "Create or update workspace AGENTS.md instructions.",
+              "inputHint": "/init [notes]",
+              "name": "init",
+              "source": "builtin"
+            },
+            {
+              "description": "Switch to Plan mode and optionally send a task.",
+              "inputHint": "/plan [task]",
+              "name": "plan",
+              "source": "builtin"
+            }
+          ],
+          "todos": [],
+          "todoGroups": []
+        }
+      },
+      {
+        "name": "setModel(unknown)",
+        "ok": false,
+        "code": -32603,
+        "message": "Unsupported model: bigmodel/NOT-A-MODEL. Available models: main, bigmodel/GLM-5.3-Flash, lite, bigmodel/GLM-5-Turbo, , bigmodel/GLM-5.3."
+      },
+      {
+        "name": "setMode(unknown)",
+        "ok": false,
+        "code": -32602,
+        "message": "Invalid params — mode: Invalid option: expected one of \"plan\"|\"build\"|\"edit\"|\"yolo\"|\"auto\""
+      },
+      {
+        "name": "setThoughtLevel(unknown)",
+        "ok": false,
+        "code": -32602,
+        "message": "Invalid params — (root): Unrecognized key: \"level\""
+      },
+      {
+        "name": "after-failures",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max",
+        "permissionMode": "build"
+      },
+      {
+        "name": "session/create-2",
+        "ok": true,
+        "result": {
+          "messages": [],
+          "projection": {
+            "activeToolCalls": [],
+            "backgroundJobs": [],
+            "contextUsed": 0,
+            "contextWindow": 1000000,
+            "mode": "build",
+            "pendingPermissions": [],
+            "sessionId": "unknown",
+            "status": "idle",
+            "target": null,
+            "totalTokenCount": 0,
+            "turnCount": 0
+          },
+          "protocol": {
+            "name": "ZCode Protocol",
+            "version": 1
+          },
+          "runtime": {
+            "eventSeq": 0,
+            "pendingRequestIds": [],
+            "goalVerifications": [],
+            "goalVerificationTimeline": [],
+            "stateRevision": 0
+          },
+          "session": {
+            "createdAt": 1787984573874,
+            "mode": "build",
+            "model": {
+              "modelId": "GLM-5.3",
+              "providerId": "bigmodel"
+            },
+            "traceId": "cc14801b-5c9b-4bb4-babb-7b77dd7c56ae",
+            "sessionId": "sess_caa2ec59-5cbb-4715-9c12-42e2c6b49f50",
+            "sessionKind": "interactive",
+            "status": "idle",
+            "target": null,
+            "title": "",
+            "updatedAt": 1787984573874,
+            "workspace": {
+              "workspacePath": "/tmp/zcode-wp0-ws-lo4quG",
+              "workspaceKey": "/tmp/zcode-wp0-ws-lo4quG"
+            }
+          },
+          "settings": {
+            "mode": {
+              "current": "build"
+            },
+            "model": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": {
+                "modelId": "…",
+                "providerId": "…"
+              },
+              "lastUsed": {
+                "modelId": "…",
+                "providerId": "…"
+              }
+            },
+            "permission": {
+              "mode": "build"
+            },
+            "thoughtLevel": {
+              "available": [
+                "…",
+                "…",
+                "…"
+              ],
+              "current": "max",
+              "defaultLevel": "max",
+              "enabled": true
+            }
+          },
+          "slashCommands": [
+            {
+              "description": "Show or set the current session goal.",
+              "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+              "name": "goal",
+              "source": "builtin"
+            },
+            {
+              "description": "Compact the current conversation with optional instructions.",
+              "inputHint": "/compact [instructions]",
+              "name": "compact",
+              "source": "builtin"
+            },
+            {
+              "description": "Create or update workspace AGENTS.md instructions.",
+              "inputHint": "/init [notes]",
+              "name": "init",
+              "source": "builtin"
+            },
+            {
+              "description": "Switch to Plan mode and optionally send a task.",
+              "inputHint": "/plan [task]",
+              "name": "plan",
+              "source": "builtin"
+            }
+          ],
+          "todos": [],
+          "todoGroups": []
+        }
+      },
+      {
+        "name": "second-session-defaults",
+        "ok": true,
+        "model": {
+          "modelId": "GLM-5.3",
+          "providerId": "bigmodel"
+        },
+        "mode": "build",
+        "thoughtLevel": "max"
+      }
+    ]
+  }
+}

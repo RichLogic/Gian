@@ -164,7 +164,13 @@ export function ChatContextPanel({
 
         {detail && <pre className="chat-context-detail">{detail.text}</pre>}
 
-        {feed && feed.length > 0 && <EventFeed items={feed} anchorId={feedAnchor} />}
+        {feed && feed.length > 0 && (
+          <EventFeed
+            items={feed}
+            anchorId={feedAnchor}
+            anchorRequest={target.kind === 'event-feed' ? target : undefined}
+          />
+        )}
 
         {feed && feed.length === 0 && (
           <div className="chat-context-empty">{t('chatPanel.eventFeed.empty')}</div>

@@ -13,6 +13,17 @@ const CC_ADAPTER = resolve('../proxies/cc-proxy/src/protocol/v2-adapter.ts');
 const CODEX_ADAPTER = resolve('../proxies/codex-proxy/src/protocol/v2-adapter.ts');
 const KIMI_ADAPTER = resolve('../proxies/kimi-proxy/src/protocol/v2-adapter.ts');
 const GROK_ADAPTER = resolve('../proxies/grok-proxy/src/protocol/v2-adapter.ts');
+const ZCODE_ADAPTER = resolve('../proxies/zcode-proxy/src/adapter.ts');
+
+/** Registry-keyed v2 adapter table: registering a new executor's adapter in
+ * the shared executor registry adds exactly one entry here. */
+const V2_ADAPTERS: ReadonlyArray<[label: string, path: string]> = [
+  ['cc', CC_ADAPTER],
+  ['codex', CODEX_ADAPTER],
+  ['kimi', KIMI_ADAPTER],
+  ['grok', GROK_ADAPTER],
+  ['zcode', ZCODE_ADAPTER],
+];
 const PROJECTOR = resolve('src/event/project-protocol-v2.ts');
 const PROJECT_NOTIFICATION = resolve('src/event/project-notification.ts');
 
@@ -57,12 +68,7 @@ test('CONTRACT-004: parser locates well-known live notification names', () => {
 });
 
 test('CONTRACT-004: every v2 adapter emission is registered', () => {
-  for (const [label, path] of [
-    ['cc', CC_ADAPTER],
-    ['codex', CODEX_ADAPTER],
-    ['kimi', KIMI_ADAPTER],
-    ['grok', GROK_ADAPTER],
-  ] as const) {
+  for (const [label, path] of V2_ADAPTERS) {
     const missing = [...emittedMethods(path)].filter((method) => !sharedRegistry.has(method));
     assert.deepEqual(missing, [], `${label} emits unregistered notifications: ${missing.join(', ')}`);
   }

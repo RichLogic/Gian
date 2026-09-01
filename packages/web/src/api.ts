@@ -873,6 +873,43 @@ export async function reorderWorkspaces(ids: string[]): Promise<void> {
   });
 }
 
+/** Sidebar drag reorder (2026-08-29): persist the Tasks rail's manual order.
+ *  Returns false on failure so the operation layer can settle the run as
+ *  failed (same contract as `completeSubtask`). */
+export async function reorderTasks(ids: string[]): Promise<boolean> {
+  try {
+    const res = await fetch('/api/tasks/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Sidebar drag reorder (2026-08-29): persist a session scope's manual order —
+ *  `workspace` = a Sessions rail workspace group (parentId null = unfiled),
+ *  `task` = a Tasks rail subtask list. Same return contract as
+ *  `reorderTasks`. */
+export async function reorderSessions(
+  scope: 'workspace' | 'task',
+  parentId: string | null,
+  ids: string[],
+): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sessions/reorder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, parentId, ids }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tasks (PRD-v3) — Subtasks are just sessions filtered by task_id, so there is
 // no subtask endpoint here. Tasks are primarily seeded from `state_sync` and

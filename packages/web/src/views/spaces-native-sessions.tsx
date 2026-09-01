@@ -135,12 +135,12 @@ export function NativeSessionsPane({
     <>
       <div style={{ font: 'var(--fz-12)/1.5 var(--font-sans)', color: 'var(--text-2)', marginTop: -4, marginBottom: 14, display: 'inline-flex', alignItems: 'flex-start', gap: 4, flexWrap: 'wrap' }}>
         <span>
-          Sessions discovered through Claude, Codex, and Kimi Code. <b>Adopt</b> a session to manage it from Gian.
+          Sessions discovered through Claude, Codex, Kimi Code, and ZCode. <b>Adopt</b> a session to manage it from Gian.
         </span>
         <HelpHint>
-          Claude and Codex keep JSONL history; Kimi exposes history through
-          ACP. Gian can <b>adopt</b> either form without changing the
-          executor-owned source.
+          Claude and Codex keep JSONL history; Kimi and ZCode expose history
+          through their Proxies. Gian can <b>adopt</b> any of them without
+          changing the executor-owned source.
         </HelpHint>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
@@ -149,6 +149,7 @@ export function NativeSessionsPane({
           <button className={`segm-item${executor === 'claude' ? ' active' : ''}`} onClick={() => setExecutor('claude')}>Claude</button>
           <button className={`segm-item${executor === 'codex' ? ' active' : ''}`} onClick={() => setExecutor('codex')}>Codex</button>
           <button className={`segm-item${executor === 'kimi' ? ' active' : ''}`} onClick={() => setExecutor('kimi')}>Kimi</button>
+          <button className={`segm-item${executor === 'zcode' ? ' active' : ''}`} onClick={() => setExecutor('zcode')}>ZCode</button>
         </div>
         <div className="segm">
           <button className={`segm-item${status === 'all' ? ' active' : ''}`} onClick={() => setStatus('all')}>All</button>

@@ -270,11 +270,32 @@ export function useWorkbench({
     patchSessionScene({ fileReveal: reveal });
   }, [patchSessionScene]);
   const fileRevealSeqRef = useRef(0);
-  const [chatPanel, setChatPanel] = useState<ChatPanelTarget | null>(null);
+  const [chatPanel, setChatPanelState] = useState<ChatPanelTarget | null>(null);
+  // Only Side Chat is a durable, Session-owned panel intent. Plan/tool/trace
+  // details remain ephemeral and are never restored after navigation.
+  const sideChatOpenSessionsRef = useRef(new Set<string>());
+  const restoreChatPanelForSession = useCallback((sessionId: string | null) => {
+    setChatPanelState(sessionId && sideChatOpenSessionsRef.current.has(sessionId)
+      ? { kind: 'sidechat', sessionId }
+      : null);
+  }, []);
+  const setChatPanel: Dispatch<SetStateAction<ChatPanelTarget | null>> = useCallback((action) => {
+    setChatPanelState(previous => {
+      const next = typeof action === 'function' ? action(previous) : action;
+      if (previous?.kind === 'sidechat'
+        && (next?.kind !== 'sidechat' || next.sessionId !== previous.sessionId)) {
+        sideChatOpenSessionsRef.current.delete(previous.sessionId);
+      }
+      if (next?.kind === 'sidechat') sideChatOpenSessionsRef.current.add(next.sessionId);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
-    setChatPanel(null);
-  }, [mode, activeSessionId, activeSubtaskId]);
+    const sessionSurfaceActive = mode === 'sessions'
+      || (mode === 'tasks' && activeSubtaskId !== null);
+    restoreChatPanelForSession(sessionSurfaceActive ? activeSessionId : null);
+  }, [mode, activeSessionId, activeSubtaskId, restoreChatPanelForSession]);
 
   function defaultWorkingTreeIdFor(sess: Session | null): string | null {
     if (sess) {
@@ -430,7 +451,7 @@ export function useWorkbench({
    *  use-changes-diff store for the viewed working tree. */
   function showChangesDiff(): void {
     if (!activeSessionId) return;
-    setChatPanel(null);
+    setChatPanelState(null);
     setActiveRail('diffs');
     const existing = wbTabs.find(t => t.group === 'diffs' && t.kind === 'changes');
     if (existing) {
@@ -574,7 +595,7 @@ export function useWorkbench({
    *  diffs rail's Changes multi-diff tab. */
   function activateRail(rail: RailId): void {
     if (isSessionRail(rail) && !activeSessionId) return;
-    setChatPanel(null);
+    setChatPanelState(null);
     if (rail === 'files') setFilesInspectorSuppressed(false);
     setActiveRail(rail);
     if (rail === 'terminal' && !wbTabs.some(t => t.group === 'term')) {
@@ -620,7 +641,7 @@ export function useWorkbench({
   function toggleRail(rail: RailId): void {
     if (isSessionRail(rail) && !activeSessionId) return;
     if (chatPanel) {
-      setChatPanel(null);
+      setChatPanelState(null);
       if (activeRail !== rail) activateRail(rail);
       else setViewState(v => v === 'main' ? 'both' : v);
       return;
@@ -793,7 +814,7 @@ export function useWorkbench({
    *  IMMEDIATELY with a loading body, then filled (or failed, with retry) —
    *  no silent wait for loadFile before the destination surface exists. */
   async function openFileInSheet(absPath: string, permanent: boolean = false, line?: number): Promise<void> {
-    setChatPanel(null);
+    setChatPanelState(null);
     const ownerSessionId = activeSessionId;
     if (!ownerSessionId) return;
     // Surface Files at click time, before any index request. A late index
@@ -1005,7 +1026,7 @@ export function useWorkbench({
    *  Query timing (Phase 3b, proposal §4.5): the tab is created and selected
    *  IMMEDIATELY with a loading body, then filled (or failed, with retry). */
   async function openTranscriptDiffInSheet(item: DiffItem): Promise<void> {
-    setChatPanel(null);
+    setChatPanelState(null);
     const ownerSessionId = activeSessionId;
     if (!ownerSessionId) return;
     const sess = sessions.find(s => s.id === ownerSessionId) ?? null;
@@ -1069,7 +1090,7 @@ export function useWorkbench({
   function openCommitInSheet(input: { workingTreeId: string; sha: string; subject?: string }): void {
     if (!activeSessionId) return;
     const ownerSessionId = activeSessionId;
-    setChatPanel(null);
+    setChatPanelState(null);
     setActiveRail('history');
     const name = input.subject ? `${input.sha.slice(0, 7)} · ${input.subject}` : input.sha.slice(0, 7);
     setWbTabs(prev => {
@@ -1127,7 +1148,8 @@ export function useWorkbench({
     sessionId: string,
     request: ChatPanelRequest,
   ): void {
-    setChatPanel({ ...request, sessionId });
+    if (request.kind === 'sidechat') sideChatOpenSessionsRef.current.add(sessionId);
+    setChatPanelState({ ...request, sessionId });
     setViewState(v => v === 'workbench' ? 'both' : v);
   }
 
@@ -1227,6 +1249,7 @@ export function useWorkbench({
     fileReveal,
     chatPanel,
     setChatPanel,
+    restoreChatPanelForSession,
     fileRehype,
     sheetActions,
     GROUP_OF_RAIL,

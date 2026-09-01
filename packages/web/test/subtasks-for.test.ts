@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '@gian/shared';
-import { subtasksFor } from '../src/views/TasksView.js';
+import { reorderableSubtasks, subtasksFor } from '../src/views/TasksView.js';
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -50,5 +50,40 @@ describe('subtasksFor', () => {
       session({ id: 'pin', pinned_at: '2026-08-06T12:00:00.000Z', created_at: '2026-08-06T00:00:00.000Z' }),
     ];
     expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'new-open', 'old-open', 'done']);
+  });
+
+  // Manual drag order (migration 067): task_order wins among open unpinned
+  // rows; NULL (never dragged) keeps created_at DESC ABOVE the manual range,
+  // so a fresh subtask still lands on top.
+  it('applies task_order within open unpinned rows, NULL first by created_at DESC', () => {
+    const rows = [
+      session({ id: 'dragged-2', task_order: 2, created_at: '2026-08-08T00:00:00.000Z' }),
+      session({ id: 'older-auto', created_at: '2026-08-07T00:00:00.000Z' }),
+      session({ id: 'dragged-1', task_order: 1, created_at: '2026-08-06T00:00:00.000Z' }),
+      session({ id: 'fresh-auto', created_at: '2026-08-09T00:00:00.000Z' }),
+    ];
+    expect(subtasksFor(rows, 'task-unit').map(row => row.id))
+      .toEqual(['fresh-auto', 'older-auto', 'dragged-1', 'dragged-2']);
+  });
+
+  it('pinned and completed rows ignore task_order', () => {
+    const rows = [
+      session({ id: 'done', completed_at: '2026-08-09T00:00:00.000Z', task_order: 1 }),
+      session({ id: 'dragged', task_order: 2 }),
+      session({ id: 'pin', pinned_at: '2026-08-08T00:00:00.000Z', task_order: 3 }),
+    ];
+    expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'dragged', 'done']);
+  });
+});
+
+describe('reorderableSubtasks', () => {
+  it('covers exactly the open AND unpinned rows, in display order', () => {
+    const rows = [
+      session({ id: 'done', completed_at: '2026-08-09T00:00:00.000Z' }),
+      session({ id: 'open-2', created_at: '2026-08-07T00:00:00.000Z' }),
+      session({ id: 'pin', pinned_at: '2026-08-08T00:00:00.000Z' }),
+      session({ id: 'open-1', created_at: '2026-08-08T00:00:00.000Z' }),
+    ];
+    expect(reorderableSubtasks(rows, 'task-unit').map(row => row.id)).toEqual(['open-1', 'open-2']);
   });
 });

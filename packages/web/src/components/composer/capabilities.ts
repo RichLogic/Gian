@@ -164,9 +164,13 @@ export function mergeTurnCatalog(
   sessionTurnOptions: ConfigOption[] | undefined,
 ): ConfigOption[] {
   if (sessionTurnOptions === undefined) return processOptions;
+  const processById = new Map(processOptions.map(option => [option.id, option]));
   return [
     ...processOptions.filter((option) => option.binding === 'session'),
-    ...sessionTurnOptions,
+    ...sessionTurnOptions.map((option) => {
+      const role = processById.get(option.id)?.role;
+      return role && option.role === undefined ? { ...option, role } : option;
+    }),
   ];
 }
 

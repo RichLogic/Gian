@@ -321,6 +321,43 @@
         "usage.updated",
         "catalog.changed"
       ]
+    },
+    "zcode": {
+      "displayName": "ZCode",
+      "pluginId": "com.zhipu.zcode",
+      "pluginVersion": "0.1.0",
+      "processScope": "shared",
+      "binary": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      "interactionDelayMs": 25000,
+      "cheapestConfig": {
+        "model": "$catalog-default",
+        "thinking": "$catalog-default",
+        "approval_mode": "$catalog-default"
+      },
+      "capabilities": [
+        "catalog.resolve",
+        "session.native.list",
+        "session.replay",
+        "interaction",
+        "event.reasoning",
+        "event.usage"
+      ],
+      "implementedNotifications": [
+        "turn.started",
+        "input.recorded",
+        "content.delta",
+        "content.completed",
+        "session.updated",
+        "turn.completed",
+        "turn.failed",
+        "runtime.error",
+        "activity.updated",
+        "interaction.requested",
+        "interaction.resolved",
+        "usage.updated",
+        "catalog.changed",
+        "history.changed"
+      ]
     }
   },
   "scenarios": [
@@ -332,7 +369,7 @@
       "methods": ["initialize", "catalog.list"],
       "notifications": [],
       "steps": ["start proxy", "initialize", "catalog.list", "record runtime and catalog snapshot"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "transport.invalid_frames",
@@ -342,7 +379,7 @@
       "methods": ["initialize"],
       "notifications": [],
       "steps": ["send malformed JSON", "send a batch", "send an unknown method", "send invalid params", "assert numeric JSON-RPC codes and stable domainCode"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "catalog.resolve",
@@ -352,7 +389,7 @@
       "methods": ["catalog.resolve"],
       "notifications": [],
       "steps": ["send current catalog revision", "resolve cheapest valid config", "send stale revision", "send invalid config"],
-      "providers": {"claude": "required", "codex": "unsupported", "kimi": "unsupported", "grok": "unsupported", "dsh": "required"}
+      "providers": {"claude":"required","codex":"unsupported","kimi":"unsupported","grok":"unsupported","dsh":"required","zcode":"required"}
     },
     {
       "id": "config.validation",
@@ -362,7 +399,7 @@
       "methods": ["session.create", "turn.start"],
       "notifications": [],
       "steps": ["send unknown session config", "send turn option during session.create", "send session option during turn.start", "send invalid choice"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "session.lifecycle",
@@ -372,7 +409,7 @@
       "methods": ["session.create", "session.get", "session.rename", "session.close"],
       "notifications": ["session.updated"],
       "steps": ["session.create", "session.get", "repeat identical create", "reuse id with conflicting params", "rename", "close twice"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "partial"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"partial","zcode":"partial"}
     },
     {
       "id": "input.local_file",
@@ -383,7 +420,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Read the attached file. Reply with exactly the unique marker found inside it and nothing else.",
       "steps": ["create marker.txt fixture", "attach localFile", "start turn", "wait for terminal"],
-      "providers": {"claude": "required", "codex": "unsupported", "kimi": "required", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"unsupported","kimi":"required","grok":"required","dsh":"contract_only","zcode":"spec_gap"}
     },
     {
       "id": "input.local_image",
@@ -394,7 +431,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Inspect the attached image. Reply with exactly the large uppercase word shown in it and nothing else.",
       "steps": ["create a local PNG with one marker word", "attach localImage", "start turn", "wait for terminal"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"spec_gap"}
     },
     {
       "id": "input.skill",
@@ -405,7 +442,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Use the attached acceptance skill. Reply with exactly PROXY_SKILL_OK.",
       "steps": ["create a minimal SKILL.md fixture", "attach skill input", "start turn", "wait for terminal"],
-      "providers": {"claude": "unsupported", "codex": "required", "kimi": "unsupported", "grok": "unsupported", "dsh": "unsupported"}
+      "providers": {"claude":"unsupported","codex":"required","kimi":"unsupported","grok":"unsupported","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "turn.basic_content_reasoning_usage",
@@ -416,7 +453,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "usage.updated", "turn.completed"],
       "prompt": "Think briefly about whether 17 is prime, then reply with exactly PRIME_17_OK. Do not use tools.",
       "steps": ["create session with cheapest config", "start turn", "wait for exactly one terminal", "record optional reasoning stream"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {
       "id": "activity.workspace_tools",
@@ -427,7 +464,7 @@
       "notifications": ["activity.updated", "content.completed", "turn.completed"],
       "prompt": "Perform every step using tools: (1) read source.txt, (2) search the workspace for ACCEPTANCE_NEEDLE, (3) create draft.txt containing TOOL_FLOW_OK, (4) rename it to final.txt, (5) create then delete obsolete.txt, and (6) run `node verify.mjs`. Finish only after the command succeeds, then reply exactly TOOL_FLOW_OK.",
       "steps": ["prepare isolated workspace fixtures", "start turn in ask mode", "respond to every safe workspace approval", "verify filesystem outcome", "wait for terminal"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "not_run"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"not_run","zcode":"required"}
     },
     {
       "id": "activity.plan",
@@ -438,7 +475,7 @@
       "notifications": ["plan.updated", "turn.completed"],
       "prompt": "Use your native plan or todo update tool to create exactly two steps. Mark the first step complete and the second in progress, read source.txt, then mark both complete. Do not merely describe a plan in prose. Finally reply exactly PLAN_FLOW_OK.",
       "steps": ["select the Provider plan-capable mode when required", "start turn", "wait for plan.updated", "wait for terminal"],
-      "providers": {"claude": "unsupported", "codex": "required", "kimi": "required", "grok": "required", "dsh": "unsupported"}
+      "providers": {"claude":"unsupported","codex":"required","kimi":"required","grok":"required","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "activity.diff",
@@ -449,7 +486,7 @@
       "notifications": ["activity.updated", "diff.updated", "turn.completed"],
       "prompt": "Edit change-me.txt, replacing BEFORE_ACCEPTANCE with AFTER_ACCEPTANCE. Use the normal file-edit tool and then reply exactly DIFF_FLOW_OK.",
       "steps": ["prepare change-me.txt", "start turn", "approve workspace edit", "verify diff and file", "wait for terminal"],
-      "providers": {"claude": "unsupported", "codex": "required", "kimi": "unsupported", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"unsupported","codex":"required","kimi":"unsupported","grok":"required","dsh":"contract_only","zcode":"unsupported"}
     },
     {
       "id": "activity.subagent",
@@ -460,7 +497,7 @@
       "notifications": ["activity.updated", "turn.completed"],
       "prompt": "Delegate to exactly one subagent. Ask it to read subagent.txt and return its unique marker. Wait for it, then reply exactly SUBAGENT_FLOW_OK.",
       "steps": ["prepare subagent fixture", "enable native collaboration when required", "start turn", "wait for running and terminal agent activity", "wait for turn terminal"],
-      "providers": {"claude": "required", "codex": "conditional", "kimi": "unsupported", "grok": "policy_blocked", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"conditional","kimi":"unsupported","grok":"policy_blocked","dsh":"contract_only","zcode":"unsupported"}
     },
     {
       "id": "activity.notice_unknown",
@@ -470,7 +507,7 @@
       "methods": ["turn.start"],
       "notifications": ["activity.updated", "turn.completed"],
       "steps": ["inject one known-hidden event", "inject one unknown visible event", "assert only the visible event degrades to generic activity"],
-      "providers": {"claude": "fake_only", "codex": "fake_only", "kimi": "fake_only", "grok": "fake_only", "dsh": "fake_only"}
+      "providers": {"claude":"fake_only","codex":"fake_only","kimi":"fake_only","grok":"fake_only","dsh":"fake_only","zcode":"fake_only"}
     },
     {
       "id": "interaction.permission",
@@ -481,7 +518,7 @@
       "notifications": ["interaction.requested", "interaction.resolved", "turn.completed"],
       "prompt": "Use a tool that requires approval to write permission.txt with PERMISSION_FLOW_OK. Do not avoid the requested write.",
       "steps": ["start turn in ask mode", "capture native actions", "choose one safe allow action", "respond with a unique responseId", "repeat identical response", "wait for resolved and terminal"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"required"}
     },
     {
       "id": "interaction.question",
@@ -492,7 +529,7 @@
       "notifications": ["interaction.requested", "interaction.resolved", "turn.completed"],
       "prompt": "Before doing any work, use your native user-question tool to ask which marker to write. Offer ALPHA and BETA when the runtime supports choices. After the answer, write the selected marker and finish.",
       "steps": ["start turn", "wait for question interaction", "supply ALPHA", "assert response before resolved", "wait for terminal"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "conditional", "grok": "unsupported", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"conditional","grok":"unsupported","dsh":"contract_only","zcode":"unsupported"}
     },
     {
       "id": "interaction.exit_plan_confirmation",
@@ -503,7 +540,7 @@
       "notifications": ["interaction.requested", "interaction.resolved", "turn.completed"],
       "prompt": "Enter native planning mode, produce a short plan, then invoke the native exit-plan operation and wait for the user's decision.",
       "steps": ["start in plan mode", "wait for exit-plan interaction", "record every action", "choose the continue action", "wait for resolved and terminal"],
-      "providers": {"claude": "spec_gap", "codex": "unsupported", "kimi": "conditional", "grok": "unsupported", "dsh": "unsupported"}
+      "providers": {"claude":"spec_gap","codex":"unsupported","kimi":"conditional","grok":"unsupported","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "control.steer",
@@ -514,7 +551,7 @@
       "notifications": ["turn.started", "content.delta", "content.completed", "turn.completed"],
       "prompt": "Draft a long explanation in at least eight paragraphs. Do not use tools and do not finish early.",
       "steps": ["start long turn", "wait for turn.started", "steer with a unique marker instruction", "assert accepted turnId", "verify one terminal and steered marker"],
-      "providers": {"claude": "unsupported", "codex": "required", "kimi": "unsupported", "grok": "required", "dsh": "unsupported"}
+      "providers": {"claude":"unsupported","codex":"required","kimi":"unsupported","grok":"required","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "control.interrupt_busy",
@@ -525,7 +562,7 @@
       "notifications": ["turn.started", "turn.completed"],
       "prompt": "Run `node long-running.mjs` and wait for it to finish before replying.",
       "steps": ["start long command turn", "attempt a second turn and expect SESSION_BUSY", "interrupt active turn", "assert response before terminal", "assert stopReason interrupted"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"required"}
     },
     {
       "id": "concurrency.process_scope",
@@ -535,7 +572,7 @@
       "methods": ["session.create", "turn.start", "turn.interrupt", "session.close"],
       "notifications": ["turn.started", "content.completed", "turn.completed"],
       "steps": ["create two sessions", "start two marked turns", "interrupt one", "assert the other completes unaffected"],
-      "providers": {"claude": "session_scope", "codex": "required", "kimi": "required", "grok": "session_scope", "dsh": "required"}
+      "providers": {"claude":"session_scope","codex":"required","kimi":"required","grok":"session_scope","dsh":"required","zcode":"required"}
     },
     {
       "id": "native.discovery_replay_identity",
@@ -545,7 +582,7 @@
       "methods": ["session.native.list", "session.replay"],
       "notifications": ["input.recorded", "history.changed"],
       "steps": ["complete a marked real turn", "list native sessions", "adopt or replay the exact native id", "validate Replay Event schemas", "compare fact-derived identities"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "contract_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"contract_only","zcode":"required"}
     },
     {
       "id": "native.delete",
@@ -555,7 +592,7 @@
       "methods": ["session.native.delete"],
       "notifications": [],
       "steps": ["create an isolated native session", "close Gian attachment", "delete exact native id", "verify it is absent from native list"],
-      "providers": {"claude": "unsupported", "codex": "unsupported", "kimi": "unsupported", "grok": "required", "dsh": "unsupported"}
+      "providers": {"claude":"unsupported","codex":"unsupported","kimi":"unsupported","grok":"required","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "lifecycle.compact_reset",
@@ -566,7 +603,7 @@
       "notifications": ["usage.updated", "turn.completed"],
       "prompt": "/compact",
       "steps": ["create enough short context", "invoke native compact command", "wait for one terminal", "assert context reset/replacement", "send a post-compact marker turn"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "conditional", "grok": "unsupported", "dsh": "unsupported"}
+      "providers": {"claude":"required","codex":"required","kimi":"conditional","grok":"unsupported","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "invalidation.catalog_history",
@@ -576,7 +613,7 @@
       "methods": ["catalog.list", "session.replay"],
       "notifications": ["catalog.changed", "history.changed"],
       "steps": ["change an isolated command/skill source", "wait for catalog.changed and refetch", "append or complete native history", "wait for history.changed and replay"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "catalog_only", "grok": "catalog_only", "dsh": "catalog_only"}
+      "providers": {"claude":"required","codex":"required","kimi":"catalog_only","grok":"catalog_only","dsh":"catalog_only","zcode":"catalog_only"}
     },
     {
       "id": "fault.runtime_auth_recovery",
@@ -586,7 +623,7 @@
       "methods": ["turn.start", "session.close"],
       "notifications": ["runtime.error", "turn.failed", "interaction.resolved", "activity.updated", "session.updated"],
       "steps": ["run with an isolated invalid credential/profile", "assert RUNTIME_AUTH_REQUIRED", "run a fake runtime crash during a turn", "assert one failure terminal", "start a fresh or surviving session"],
-      "providers": {"claude": "mixed_real_fake", "codex": "mixed_real_fake", "kimi": "mixed_real_fake", "grok": "mixed_real_fake", "dsh": "mixed_real_fake"}
+      "providers": {"claude":"mixed_real_fake","codex":"mixed_real_fake","kimi":"mixed_real_fake","grok":"mixed_real_fake","dsh":"mixed_real_fake","zcode":"mixed_real_fake"}
     },
     {
       "id": "terminal.stop_reason_matrix",
@@ -596,7 +633,7 @@
       "methods": ["turn.start", "turn.interrupt"],
       "notifications": ["turn.completed", "turn.failed"],
       "steps": ["observe completed real turn", "observe Host interrupt", "inject native cancelled without Host interrupt", "inject limit/refused/other", "inject runtime failure"],
-      "providers": {"claude": "real_plus_fake", "codex": "real_plus_fake", "kimi": "real_plus_fake", "grok": "real_plus_fake", "dsh": "fake_only"}
+      "providers": {"claude":"real_plus_fake","codex":"real_plus_fake","kimi":"real_plus_fake","grok":"real_plus_fake","dsh":"fake_only","zcode":"real_plus_fake"}
     },
     {
       "id": "trace.step_request",
@@ -607,7 +644,7 @@
       "notifications": ["step.updated", "request.updated", "content.completed", "activity.updated", "usage.updated", "turn.completed"],
       "prompt": "Complete a simple two-step task and report the effective model request for each step.",
       "steps": ["start turn", "observe running and terminal Step snapshots", "observe Request identity", "validate child stepId links", "wait for terminal"],
-      "providers": {"claude": "unsupported", "codex": "unsupported", "kimi": "unsupported", "grok": "unsupported", "dsh": "contract_only"}
+      "providers": {"claude":"unsupported","codex":"unsupported","kimi":"unsupported","grok":"unsupported","dsh":"contract_only","zcode":"unsupported"}
     },
     {
       "id": "sidechat_fork.native_contract",
@@ -617,7 +654,7 @@
       "methods": ["sidechat.create", "sidechat.resume", "sidechat.close", "session.fork"],
       "notifications": [],
       "steps": ["create a parent terminal turn", "create, resume, run, and close a Side Chat", "assert parent and child streams remain isolated", "fork head and replay inherited history", "for Claude/Codex also fork the exact terminal turn", "restart and reattach by durable nativeSession.id"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "partial", "grok": "partial", "dsh": "unsupported"}
+      "providers": {"claude":"required","codex":"required","kimi":"partial","grok":"partial","dsh":"unsupported","zcode":"unsupported"}
     },
     {
       "id": "shutdown.cleanup",
@@ -627,7 +664,7 @@
       "methods": ["session.close", "shutdown"],
       "notifications": ["interaction.resolved", "activity.updated", "session.updated"],
       "steps": ["close active and idle sessions", "shutdown", "repeat shutdown", "sample process group until empty"],
-      "providers": {"claude": "required", "codex": "required", "kimi": "required", "grok": "required", "dsh": "required"}
+      "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     }
   ]
 }

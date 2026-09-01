@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadValidatedCatalog, matchesPattern } from './test-catalog.mjs';
@@ -50,9 +50,21 @@ export function buildFunctionalEvidenceReport(config, inventory, availableEviden
   return { version: 1, total: cases.length, cases };
 }
 
-export function main(argv = process.argv.slice(2)) {
-  const config = JSON.parse(readFileSync(join(rootDir, 'test', 'functional-evidence.json'), 'utf8'));
-  const markdown = readFileSync(join(rootDir, config.inventory), 'utf8');
+export function resolveFunctionalInventoryPath(projectRoot, inventoryPath) {
+  const absolute = join(projectRoot, inventoryPath);
+  if (existsSync(absolute)) return absolute;
+  if (!existsSync(join(projectRoot, 'AGENTS.md'))) return null;
+  throw new Error(`functional evidence inventory is missing: ${inventoryPath}`);
+}
+
+export function main(argv = process.argv.slice(2), projectRoot = rootDir) {
+  const config = JSON.parse(readFileSync(join(projectRoot, 'test', 'functional-evidence.json'), 'utf8'));
+  const inventoryPath = resolveFunctionalInventoryPath(projectRoot, config.inventory);
+  if (inventoryPath === null) {
+    console.log('functional-evidence: curated public source omits internal docs; gate skipped');
+    return;
+  }
+  const markdown = readFileSync(inventoryPath, 'utf8');
   const inventory = parseFunctionalInventory(markdown);
   const { catalog, entries } = loadValidatedCatalog();
   const availableEvidence = [
@@ -62,7 +74,7 @@ export function main(argv = process.argv.slice(2)) {
   const report = buildFunctionalEvidenceReport(config, inventory, availableEvidence);
   const outputIndex = argv.indexOf('--write-report');
   if (outputIndex >= 0) {
-    const outputPath = resolve(rootDir, argv[outputIndex + 1] ?? 'output/quality/functional-evidence.json');
+    const outputPath = resolve(projectRoot, argv[outputIndex + 1] ?? 'output/quality/functional-evidence.json');
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
     console.log(`functional-evidence: report ${outputPath}`);

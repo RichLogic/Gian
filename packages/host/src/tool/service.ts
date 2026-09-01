@@ -486,11 +486,11 @@ export class GianToolService {
     }
     if (config?.turn) {
       for (const [id, value] of Object.entries(config.turn)) {
-        this.deps.sessions.setTurnConfigValue(params.session_id, id, value);
+        await this.deps.sessions.setTurnConfigValue(params.session_id, id, value);
       }
     }
     if (config?.model !== undefined) {
-      this.deps.sessions.setModel(params.session_id, config.model ?? agent?.defaults.model ?? '');
+      await this.deps.sessions.setModel(params.session_id, config.model ?? agent?.defaults.model ?? '');
     }
     if (config?.thinking_effort !== undefined) {
       this.deps.sessions.setEffort(

@@ -9,11 +9,10 @@
  * changes to the boot load set — create, delete, CLI path, Proxy kind —
  * write agents.json and then restart Gian. The VIEW keeps the restart
  * confirm dialog and dispatches with `restart: true`; the executor writes,
- * asks the bridge to restart, and — when the restart can't happen — rolls
- * the write back (delete a created Agent, restore the previous path/kind,
- * re-create a deleted Agent from its snapshot) and fails the run with the
- * view-supplied localized message. Name/defaults are write-through
- * and never restart.
+ * asks the bridge to restart. A newly created Agent remains saved when the
+ * native restart cannot start so the view can offer an explicit retry;
+ * destructive or retargeting changes still roll back to their previous
+ * state. Name/defaults are write-through and never restart.
  */
 import type {
   AgentInstallResult,
@@ -100,14 +99,20 @@ interface AgentIdInput {
   agentId: string;
 }
 
-/** Save a draft into agents.json (load-set change → restart on desktop).
- *  Rollback on restart failure deletes the just-created Agent. */
+/** Save a draft into agents.json (load-set change → restart on desktop). */
 export interface CreateAgentOperationInput extends CreateAgentInput {
   restart: boolean;
-  restartFailedMessage?: string;
 }
 
-const agentCreate: OperationDefinition<CreateAgentOperationInput, UserAgentStatus> = {
+export interface CreateAgentOperationResult {
+  agent: UserAgentStatus;
+  /** True means the desired Agent was saved, but the current Host still has
+   *  its old boot load set. The view must keep an explicit restart affordance
+   *  instead of silently deleting the user's completed draft. */
+  restartRequired: boolean;
+}
+
+const agentCreate: OperationDefinition<CreateAgentOperationInput, CreateAgentOperationResult> = {
   policy: 'pending',
   entityKey: () => `pending:agent.create:${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
   execute: async input => {
@@ -117,11 +122,9 @@ const agentCreate: OperationDefinition<CreateAgentOperationInput, UserAgentStatu
       ...(input.cliPath !== undefined ? { cliPath: input.cliPath } : {}),
       ...(input.defaults !== undefined ? { defaults: input.defaults } : {}),
     });
-    if (!input.restart) return created;
+    if (!input.restart) return { agent: created, restartRequired: false };
     const restarting = await desktopBridge()?.restartApp?.() ?? false;
-    if (restarting) return created;
-    await deleteAgent(created.id).catch(() => undefined);
-    throw new Error(input.restartFailedMessage ?? 'Restart failed');
+    return { agent: created, restartRequired: !restarting };
   },
   timeoutMs: REST_TIMEOUT_MS,
 };

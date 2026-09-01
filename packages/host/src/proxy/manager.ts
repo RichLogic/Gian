@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { EXECUTOR_DEFS, EXECUTOR_IDS } from '@gian/shared';
 import type { Executor } from '@gian/shared';
 import {
   ProtocolV2Host,
@@ -14,15 +15,15 @@ import type {
   RuntimeProcessGroupReservation,
 } from '../runtime/types.js';
 
-type ProxyExecutor = 'codex' | 'claude' | 'kimi' | 'grok' | 'dsh';
+type ProxyExecutor = Executor;
 type SharedRuntimeHost = ProtocolV2Host;
 function isKimiRuntimeClient(client: ProxyClient): client is ProtocolV2SessionClient {
   return client instanceof ProtocolV2SessionClient && client.executor === 'kimi';
 }
 
-/** Product executor alias → gian.proxy plugin id (plan §2 Manifest v2). */
+/** Product executor alias → gian.proxy plugin id (registry-owned identity). */
 function pluginIdFor(executor: ProxyExecutor): string {
-  return executor === 'dsh' ? 'ai.deepseek.harness' : executor;
+  return EXECUTOR_DEFS[executor].pluginId;
 }
 
 export interface ProxyProtocolDescriptor {
@@ -72,6 +73,9 @@ export interface ProxyManagerConfig {
   /** Path to dsh-proxy spawn.js entry (plugin id ai.deepseek.harness). */
   dshProxyEntry?: string;
   dshProxy?: ProxyProtocolDescriptor;
+  /** Path to zcode-proxy spawn.js entry (plugin id com.zhipu.zcode). */
+  zcodeProxyEntry?: string;
+  zcodeProxy?: ProxyProtocolDescriptor;
   /** Optional codex CLI binary path (forwarded as --codex-bin). */
   codexBin?: string;
   /** Kimi always resolves through this manager; no PATH fallback in proxy. */
@@ -117,6 +121,8 @@ export class ProxyManager {
   private codexHostInits = new Map<string, Promise<SharedRuntimeHost>>();
   private kimiHosts = new Map<string, SharedRuntimeHost>();
   private kimiHostInits = new Map<string, Promise<SharedRuntimeHost>>();
+  private zcodeHosts = new Map<string, SharedRuntimeHost>();
+  private zcodeHostInits = new Map<string, Promise<SharedRuntimeHost>>();
   private dshHosts = new Map<string, SharedRuntimeHost>();
   private dshHostInits = new Map<string, Promise<SharedRuntimeHost>>();
   /** A failed-attach Kimi host is never replaced until this exact host has
@@ -269,7 +275,9 @@ export class ProxyManager {
           ? await this.createGrokClient(sessionId, cliPath)
           : executor === 'dsh'
             ? await this.createDshClient(sessionId, cliPath)
-            : await this.createClaudeClient(sessionId, cliPath);
+            : executor === 'zcode'
+              ? await this.createZcodeClient(sessionId, cliPath)
+              : await this.createClaudeClient(sessionId, cliPath);
 
     if (!client) return null;
 
@@ -567,7 +575,7 @@ export class ProxyManager {
   async closeAll(): Promise<void> {
     await Promise.allSettled(this.closingByExecutor.values());
     const results = await Promise.allSettled(
-      (['claude', 'codex', 'kimi', 'grok', 'dsh'] as const).map(executor => this.closeByExecutor(executor)),
+      (EXECUTOR_IDS as readonly ProxyExecutor[]).map(executor => this.closeByExecutor(executor)),
     );
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -667,6 +675,21 @@ export class ProxyManager {
       const hosts = [...this.dshHosts.values()];
       this.dshHosts.clear();
       if (hosts.length > 0) this.dropExecutorClients('dsh');
+      for (const host of hosts) {
+        cleanupAttempts.push({
+          owner: host,
+          promise: this.runtimeByOwner.has(host)
+            ? this.releaseRuntimeBinding(host)
+            : host.shutdown(),
+        });
+      }
+    } else if (executor === 'zcode') {
+      const pendings = [...this.zcodeHostInits.values()];
+      if (pendings.length > 0) await Promise.allSettled(pendings);
+      this.zcodeHostInits.clear();
+      const hosts = [...this.zcodeHosts.values()];
+      this.zcodeHosts.clear();
+      if (hosts.length > 0) this.dropExecutorClients('zcode');
       for (const host of hosts) {
         cleanupAttempts.push({
           owner: host,
@@ -1037,6 +1060,104 @@ export class ProxyManager {
         runtimeOwner,
         error,
         'DSH runtime startup cleanup failed.',
+      );
+      throw error;
+    }
+  }
+
+  private async createZcodeClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
+    const host = await this.getOrCreateZcodeHost(cliPath);
+    if (!host) return null;
+    return host.createSessionClient(sessionId);
+  }
+
+  private async getOrCreateZcodeHost(cliPath: string | null): Promise<SharedRuntimeHost | null> {
+    if (!this.cfg.zcodeProxyEntry) {
+      throw new Error(
+        'zcode executor requested but zcodeProxyEntry is not configured',
+      );
+    }
+    if (!this.cfg.runtimeManager) {
+      throw new Error(
+        'zcode executor requested but CliRuntimeManager is not configured',
+      );
+    }
+    const key = ProxyManager.hostKey(cliPath);
+    const current = this.zcodeHosts.get(key);
+    if (current) return current;
+    let pending = this.zcodeHostInits.get(key);
+    if (!pending) {
+      pending = this.startZcodeHost(key, cliPath);
+      this.zcodeHostInits.set(key, pending);
+    }
+    try {
+      return await pending;
+    } finally {
+      if (this.zcodeHostInits.get(key) === pending) this.zcodeHostInits.delete(key);
+    }
+  }
+
+  private async startZcodeHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
+    const lease = await this.cfg.runtimeManager!.acquire('zcode', cliPath);
+    let runtimeOwner: object | undefined = this.trackStartupRuntime('zcode', lease);
+    let reservation: RuntimeProcessGroupReservation | undefined;
+    let host: SharedRuntimeHost | undefined;
+    try {
+      reservation = await lease.reserveProcessGroup?.();
+      if (reservation) {
+        this.setRuntimeProtection(
+          runtimeOwner,
+          () => reservation!.cancelBeforeSpawn(),
+        );
+      }
+      const protocol = this.requireProtocol('zcode', this.cfg.zcodeProxy, 'shared');
+      host = this.createProtocolHost('zcode', {
+        protocol,
+        entry: this.cfg.zcodeProxyEntry!,
+        dataDir: this.hostDataDir('zcode', key),
+        // GIAN_RUNTIME_BIN for zcode-proxy is the ZCode CLI entry (zcode.cjs).
+        runtimeBin: lease.binaryPath,
+        env: lease.env,
+      });
+      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
+      runtimeOwner = host;
+      if (reservation) {
+        this.setRuntimeProtection(runtimeOwner, async () => {
+          throw new Error(
+            'ZCode Proxy spawned without a verifiable process group; retaining its pending reservation.',
+          );
+        });
+        const groupId = host.processGroupId();
+        this.setRuntimeProtection(
+          runtimeOwner,
+          () => reservation!.releaseUnregistered(groupId),
+        );
+        const registration = await reservation.register(groupId);
+        if (registration === 'already-empty') {
+          host.observeProcessGroupAbsence();
+          this.markRuntimeBindingReleaseEligible(runtimeOwner);
+          throw new Error('ZCode Proxy exited before its process group could be registered.');
+        }
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
+      }
+      const startedHost = host;
+      this.zcodeHosts.set(key, startedHost);
+      startedHost.onHostExit(() => {
+        if (this.zcodeHosts.get(key) === startedHost) {
+          this.zcodeHosts.delete(key);
+          this.dropSharedClientsForHost('zcode', startedHost);
+        }
+        this.markRuntimeBindingReleaseEligible(startedHost);
+        void this.releaseRuntimeBinding(startedHost).catch(error => {
+          console.error('[proxy] failed to release ZCode runtime:', error);
+        });
+      });
+      return startedHost;
+    } catch (error) {
+      await this.cleanupFailedRuntimeStartup(
+        runtimeOwner,
+        error,
+        'ZCode runtime startup cleanup failed.',
       );
       throw error;
     }

@@ -7,7 +7,7 @@
 // The path is the FIRST positional argument after option-stripping.
 
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, isAbsolute, resolve } from 'node:path';
 
 /** Minimal shell tokenizer: splits on unquoted whitespace, understands
  *  single/double quotes and backslash escapes, and yields the shell command
@@ -71,6 +71,13 @@ const GIT_GLOBAL_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', 
 // `worktree add` options that consume the following token as their value.
 const ADD_VALUE_FLAGS = new Set(['-b', '-B', '--orphan', '--reason']);
 
+// Agent command events commonly preserve the launcher used by the runtime,
+// for example `/bin/zsh -lc 'git worktree add …'`. Only unwrap known shells;
+// arbitrary `program -c <text>` values must not be interpreted as commands.
+const SHELL_EXECUTABLES = new Set(['sh', 'bash', 'zsh']);
+const SHELL_VALUE_FLAGS = new Set(['-o', '+o', '-O', '+O', '--init-file', '--rcfile']);
+const MAX_SHELL_WRAPPER_DEPTH = 4;
+
 /** Expand a leading `~` / `~/...` against the user's home directory. */
 function expandTilde(p: string): string {
   if (p === '~') return homedir();
@@ -86,9 +93,14 @@ function expandTilde(p: string): string {
  *
  * Handles: quoted paths, `~` expansion, `-b/-B/--orphan/--reason` value
  * flags, boolean flags (`--detach`, `--track`, `--force`, …), `--` separator,
- * and compound commands (`cd repo && git worktree add …`).
+ * compound commands (`cd repo && git worktree add …`), and the command
+ * strings of nested `sh`/`bash`/`zsh -c` wrappers used by agent runtimes.
  */
 export function detectWorktreeAddPath(command: string): string | null {
+  return detectWorktreeAddPathAtDepth(command, 0);
+}
+
+function detectWorktreeAddPathAtDepth(command: string, depth: number): string | null {
   const tokens = tokenize(command);
   // Split into segments at shell separators; each segment may be its own
   // command, and any one of them may be the git invocation.
@@ -101,6 +113,36 @@ export function detectWorktreeAddPath(command: string): string | null {
   for (const seg of segments) {
     const found = parseSegment(seg);
     if (found) return found;
+    if (depth < MAX_SHELL_WRAPPER_DEPTH) {
+      const innerCommand = shellCommandString(seg);
+      if (innerCommand) {
+        const nested = detectWorktreeAddPathAtDepth(innerCommand, depth + 1);
+        if (nested) return nested;
+      }
+    }
+  }
+  return null;
+}
+
+function shellCommandString(seg: string[]): string | null {
+  const executable = seg[0];
+  if (!executable || !SHELL_EXECUTABLES.has(basename(executable))) return null;
+
+  for (let i = 1; i < seg.length; i++) {
+    const option = seg[i]!;
+    // POSIX shells accept combined invocation flags, so both `-c` and `-lc`
+    // select the following argv entry as the command string.
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option)) return seg[i + 1] ?? null;
+    if (SHELL_VALUE_FLAGS.has(option)) {
+      if (seg[i + 1] === undefined) return null;
+      i++;
+      continue;
+    }
+    if (option === '--') return null;
+    if (option.startsWith('-') || option.startsWith('+')) continue;
+    // Once a script or another positional is selected, later argv entries
+    // belong to that script and must not be reinterpreted as shell options.
+    return null;
   }
   return null;
 }

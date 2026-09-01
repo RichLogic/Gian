@@ -7,6 +7,7 @@ on:
       - 'proxy-codex-v*'
       - 'proxy-kimi-v*'
       - 'proxy-dsh-v*'
+      - 'proxy-zcode-v*'
 
 permissions:
   contents: write
@@ -52,6 +53,11 @@ jobs:
               ID=dsh
               PACKAGE=@gian/dsh-proxy
               MANIFEST=packages/proxies/dsh-proxy/package.json
+              ;;
+            proxy-zcode-v*)
+              ID=zcode
+              PACKAGE=@gian/zcode-proxy
+              MANIFEST=packages/proxies/zcode-proxy/package.json
               ;;
             *) exit 1 ;;
           esac

@@ -72,8 +72,13 @@ export function applySessionUpdate(
 }
 
 /** Sidebar rail ordering inside one workspace group: pinned first
- *  (most-recently-pinned first), then by last activity. */
-export function sortSessionsForRail<T extends Pick<Session, 'pinned_at' | 'updated_at'>>(
+ *  (most-recently-pinned first), then manual drag order (migration 067
+ *  `workspace_order`; NULL = never dragged — those keep the activity order
+ *  ABOVE the manual range so a fresh session still lands on top), then by
+ *  last activity. */
+export function sortSessionsForRail<
+  T extends Pick<Session, 'pinned_at' | 'updated_at'> & { workspace_order?: number | null },
+>(
   sessions: T[],
 ): T[] {
   return sessions.slice().sort((a, b) => {
@@ -81,8 +86,27 @@ export function sortSessionsForRail<T extends Pick<Session, 'pinned_at' | 'updat
     const bp = b.pinned_at ? 1 : 0;
     if (ap !== bp) return bp - ap;
     if (a.pinned_at && b.pinned_at) return Date.parse(b.pinned_at) - Date.parse(a.pinned_at);
+    const am = a.workspace_order != null ? 1 : 0;
+    const bm = b.workspace_order != null ? 1 : 0;
+    if (am !== bm) return am - bm;
+    if (am && bm) return a.workspace_order! - b.workspace_order!;
     return Date.parse(b.updated_at) - Date.parse(a.updated_at);
   });
+}
+
+/**
+ * Apply a whole-list order overlay (the drag-reorder operations' id arrays)
+ * over an already-sorted list: listed ids take the overlay's order, unlisted
+ * rows keep their relative order at the end (a row created mid-flight lands
+ * at the bottom until the run confirms and the canonical order columns take
+ * over). Stable for unlisted rows.
+ */
+export function orderByIds<T extends { id: string }>(
+  list: readonly T[],
+  ids: readonly string[],
+): T[] {
+  const rank = new Map(ids.map((id, index) => [id, index]));
+  return [...list].sort((a, b) => (rank.get(a.id) ?? ids.length) - (rank.get(b.id) ?? ids.length));
 }
 
 /** Sidebar rail ordering for workspace groups: pinned first, stable within

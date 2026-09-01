@@ -29,7 +29,7 @@ import type {
 } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
 
-import { dropSession, mergeSession } from '../api.js';
+import { dropSession, mergeSession, reorderSessions } from '../api.js';
 import { toast } from '../feedback.js';
 import { registry } from './registry.js';
 import type { OperationDefinition, OptimisticOverlay } from './types.js';
@@ -37,6 +37,35 @@ import type { OperationDefinition, OptimisticOverlay } from './types.js';
 /** Entity key for an existing session. */
 export function sessionEntityKey(sessionId: string): string {
   return `session:${sessionId}`;
+}
+
+/** Entity key of one scope's manual session order overlay
+ *  (`session-order:<scope>:<parentId>`, field `order`) — the sidebar drag
+ *  reorder (migration 067). `parentId` is the owning workspace/task id; `$`
+ *  stands in for the NULL-parent unfiled group. The value is the scope's FULL
+ *  ordered id array, applied over the canonical list by the view while the
+ *  run is in flight (same whole-list pattern as operations/workspace.ts). */
+export function sessionOrderEntityKey(
+  scope: 'workspace' | 'task',
+  parentId: string | null,
+): string {
+  return `session-order:${scope}:${parentId ?? '$'}`;
+}
+export const SESSION_ORDER_FIELD = 'order';
+
+/**
+ * Canonical session patch applied on `session.reorder` success — the reorder
+ * REST endpoint does NOT broadcast (same no-broadcast rule as workspace
+ * reorder), so the confirmed order values are patched into canonical session
+ * state directly. Wired by App with the canonical `setSessions`; tests
+ * substitute a fake.
+ */
+let sessionCanonicalPatch: ((sessionId: string, partial: Partial<Session>) => void) | null = null;
+
+export function wireSessionCanonicalPatch(
+  sink: ((sessionId: string, partial: Partial<Session>) => void) | null,
+): void {
+  sessionCanonicalPatch = sink;
 }
 
 /** WS round-trips are normally well under this; expiry marks the outcome
@@ -287,6 +316,39 @@ const sessionDrop: OperationDefinition<SessionIdInput> = {
   timeoutMs: GIT_TIMEOUT_MS,
 };
 
+export interface SessionReorderInput {
+  scope: 'workspace' | 'task';
+  /** Owning workspace/task id; null = the unfiled group (workspace scope). */
+  parentId: string | null;
+  /** The scope's full ordered id list after the drag. */
+  ids: string[];
+}
+
+/** Sidebar drag reorder within one scope (migration 067): whole-list overlay
+ *  on the scope's virtual entity, REST executor, canonical patch convergence
+ *  (the endpoint does not broadcast — see `wireSessionCanonicalPatch`). */
+const sessionReorder: OperationDefinition<SessionReorderInput, SessionReorderInput> = {
+  policy: 'optimistic',
+  entityKey: input => sessionOrderEntityKey(input.scope, input.parentId),
+  optimisticWrites: input => [{ field: SESSION_ORDER_FIELD, value: input.ids }],
+  execute: async input => {
+    if (!(await reorderSessions(input.scope, input.parentId, input.ids))) {
+      throw new Error('reorder sessions failed');
+    }
+    return input;
+  },
+  reconcile: result => {
+    const field = result.scope === 'workspace' ? 'workspace_order' : 'task_order';
+    result.ids.forEach((id, index) => {
+      sessionCanonicalPatch?.(id, { [field]: index + 1 });
+    });
+  },
+  // REST failures have no error envelope — surface them here (the overlay
+  // rollback is the store's job).
+  rollback: error => toast({ kind: 'error', message: error.message }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
 registry.register('session.rename', sessionRename);
 registry.register('session.archive', sessionArchive);
 registry.register('session.pin', sessionPin);
@@ -305,6 +367,7 @@ registry.register('session.stop', sessionStop);
 registry.register('session.recover', sessionRecover);
 registry.register('session.merge', sessionMerge);
 registry.register('session.drop', sessionDrop);
+registry.register('session.reorder', sessionReorder);
 
 /** Session fields an overlay may write (Phase 2a set). */
 const SESSION_OVERLAY_FIELDS = new Set([

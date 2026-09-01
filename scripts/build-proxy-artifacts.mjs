@@ -51,7 +51,7 @@ const definitions = [
     runtime: {
       id: 'kimi',
       displayName: 'Kimi Code CLI',
-      verifiedCliVersions: ['0.31.1'],
+      verifiedCliVersions: ['0.38.0'],
     },
   },
   {
@@ -72,16 +72,30 @@ const definitions = [
     directory: 'grok-proxy',
     displayName: 'Grok Build',
     processScope: 'session',
+    staged: true,
     runtime: {
       id: 'grok',
       displayName: 'Grok Build CLI',
       verifiedCliVersions: ['1.0.4'],
     },
   },
+  {
+    id: 'zcode',
+    pluginId: 'com.zhipu.zcode',
+    directory: 'zcode-proxy',
+    displayName: 'ZCode',
+    processScope: 'shared',
+    branding: true,
+    runtime: {
+      id: 'zcode',
+      displayName: 'ZCode CLI',
+      verifiedCliVersions: ['0.16.5'],
+    },
+  },
 ];
 
 export const shippingProxyIds = definitions
-  .filter(definition => definition.id !== 'grok')
+  .filter(definition => definition.staged !== true)
   .map(definition => definition.id);
 
 const BUILTIN_PROXY_IDS = new Set(definitions.map(definition => definition.pluginId ?? definition.id));

@@ -1,0 +1,81 @@
+{
+  "gate": "G1",
+  "results": {
+    "noConfig": {
+      "outcome": "failed",
+      "code": -32603,
+      "message": "Model config is missing. Create /tmp/zcode-wp0-g1-home-Fl0WaH/.zcode/cli/config.json with an explicit model provider before running ZCode."
+    },
+    "settingsPlacements": [
+      {
+        "args": [
+          "--settings",
+          "/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json",
+          "version"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      },
+      {
+        "args": [
+          "version",
+          "--settings",
+          "/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      },
+      {
+        "args": [
+          "--settings=/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json",
+          "version"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      },
+      {
+        "args": [
+          "version",
+          "--settings=/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      },
+      {
+        "args": [
+          "--settings",
+          "/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json",
+          "app-server",
+          "--cwd",
+          "/tmp/zcode-wp0-g1-ws-purRlp"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      },
+      {
+        "args": [
+          "app-server",
+          "--cwd",
+          "/tmp/zcode-wp0-g1-ws-purRlp",
+          "--settings",
+          "/tmp/zcode-wp0-g1-JOLOq9/zcode-config.json"
+        ],
+        "exitCode": 1,
+        "rejected": true,
+        "output": "Unknown option '--settings'. To specify a positional argument starting with a '-', place it at the end of the command af"
+      }
+    ],
+    "doctor": {
+      "args": [
+        "doctor"
+      ],
+      "code": 0,
+      "output": "zcode doctor\nversion: 0.16.5\nprocess: zcode-cli\nnode: v24.19.0\nplatform: darwin/arm64\nsea: no (optional)\ndefault artifact: node-bundle\n"
+    }
+  }
+}

@@ -6,13 +6,13 @@ import type {
   ProductExecutor,
   ProxyCatalog,
 } from '@gian/shared';
-import { isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
+import { EXECUTOR_IDS, isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import { AgentNameTakenError } from '../../agents/manager.js';
 import type { CliRuntimeManager } from '../../runtime/manager.js';
 import { pickPath } from '../pick-path.js';
 
-const EXECUTORS = new Set<Executor>(['claude', 'codex', 'kimi', 'grok', 'dsh']);
+const EXECUTORS = new Set<Executor>(EXECUTOR_IDS);
 
 function executor(raw: string): Executor | null {
   return EXECUTORS.has(raw as Executor) ? raw as Executor : null;

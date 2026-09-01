@@ -84,6 +84,35 @@ test('detect: compound commands — any segment may carry the git invocation', (
   assert.equal(detectWorktreeAddPath('git worktree add /tmp/wt && echo done'), '/tmp/wt');
 });
 
+test('detect: unwraps sh, bash, and zsh command strings used by agent runtimes', () => {
+  assert.equal(
+    detectWorktreeAddPath(
+      "/bin/zsh -lc 'git worktree add -b fix/trace-pinned-header /tmp/trace-wt main'",
+    ),
+    '/tmp/trace-wt',
+  );
+  assert.equal(
+    detectWorktreeAddPath('bash -lc "cd /repo && git worktree add /tmp/bash-wt"'),
+    '/tmp/bash-wt',
+  );
+  assert.equal(
+    detectWorktreeAddPath("sh -c 'git worktree add /tmp/sh-wt'"),
+    '/tmp/sh-wt',
+  );
+  assert.equal(
+    detectWorktreeAddPath("zsh -l -c 'git worktree add /tmp/zsh-wt'"),
+    '/tmp/zsh-wt',
+  );
+  assert.equal(
+    detectWorktreeAddPath("bash -o posix -lc 'git worktree add /tmp/bash-option-wt'"),
+    '/tmp/bash-option-wt',
+  );
+  assert.equal(
+    detectWorktreeAddPath("bash -lc \"/bin/sh -c 'git worktree add /tmp/nested-wt'\""),
+    '/tmp/nested-wt',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // detectWorktreeAddPath — negative shapes
 // ---------------------------------------------------------------------------
@@ -105,6 +134,10 @@ test('detect: non-matching commands return null', () => {
     'git worktree add -b x',      // flag value consumed, no path left
     'git worktree add ../wt',     // relative path without -C anchor
     'git -C worktree add /tmp/x', // malformed: -C value is "worktree" → subcommand mismatch
+    "zsh -lc 'echo git worktree add /tmp/x'",
+    'bash -lc',
+    "bash ./script.sh -c 'git worktree add /tmp/x'",
+    "python -c 'git worktree add /tmp/x'",
   ]) {
     assert.equal(detectWorktreeAddPath(cmd), null, `expected null for: ${cmd}`);
   }

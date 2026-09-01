@@ -37,6 +37,7 @@ import {
   __resetSideChatResumeMarksForTests,
   SideChatDock,
 } from '../src/components/SideChatDock.js';
+import { injectComposerContextItems } from '../src/components/Composer.js';
 import { ChatContextPanel } from '../src/components/ChatContextPanel.js';
 import { Dock } from '../src/components/Dock.js';
 import { actionControlState } from '../src/components/action-gating.js';
@@ -54,6 +55,7 @@ import {
   OperationDispatcherProvider,
   OperationStoreProvider,
 } from '../src/operations/use-operations.js';
+import { ChatPanelOpenContext } from '../src/presentation/chat-panel.js';
 // Side effects: register the product operation definitions under test.
 import '../src/operations/session.js';
 import '../src/operations/message.js';
@@ -505,6 +507,55 @@ describe('SideChatDock', () => {
     expect(screen.getByText('thinking it over')).toBeInTheDocument();
   });
 
+  it('keeps Working tool details inside Side Chat instead of replacing its owning panel', () => {
+    const harness = makeHarness();
+    const openParentPanel = vi.fn();
+    const record = sideChat('sc-tool', 'open', 'running');
+    const command = {
+      kind: 'command' as const,
+      id: 'cmd-sidechat',
+      command: 'rg -n "Manifest" packages',
+      cwd: '/workspace',
+      status: 'running' as const,
+      stdout: 'packages/host/src/manifest.ts:1\n',
+      ts: 1_700_000_000_000,
+      turn: 1,
+    } satisfies TranscriptItem;
+    const tool = {
+      kind: 'tool' as const,
+      id: 'tool-sidechat',
+      name: 'Read',
+      summary: '{"file_path":"packages/host/src/manifest.ts"}',
+      output: 'export const manifest = {};',
+      status: 'success' as const,
+      ts: 1_700_000_000_001,
+      turn: 1,
+    } satisfies TranscriptItem;
+
+    render(
+      <Providers harness={harness}>
+        <ChatPanelOpenContext.Provider value={openParentPanel}>
+          <SideChatDock
+            parent={PARENT}
+            sideChats={[record]}
+            items={{ [record.id]: [command, tool] }}
+            control={ENABLED_CONTROL}
+            onClosed={() => {}}
+          />
+        </ChatPanelOpenContext.Provider>
+      </Providers>,
+    );
+
+    const panel = screen.getByTestId(`sidechat-panel-${record.id}`);
+    fireEvent.click(within(panel).getByText(command.command));
+    fireEvent.click(within(panel).getByText(tool.name));
+
+    expect(openParentPanel).not.toHaveBeenCalled();
+    expect(panel.querySelector('.trow-detail')).toHaveTextContent('packages/host/src/manifest.ts:1');
+    expect(panel.querySelectorAll('.trow-detail')).toHaveLength(2);
+    expect(panel.querySelectorAll('.trow-detail')[1]).toHaveTextContent('export const manifest = {};');
+  });
+
   it('a running snapshot state blocks the composer with the honest busy copy (no queue)', () => {
     const harness = makeHarness();
     renderDock(harness, { sideChats: [sideChat('sc-1', 'open', 'running')] });
@@ -657,6 +708,41 @@ describe('SideChatDock', () => {
       },
     });
     expect(PARENT.model).toBe('gpt-5.6-sol');
+  });
+
+  it('sends the ordered composer document so quoted context stays inline like main Chat', () => {
+    const harness = makeHarness();
+    const record = sideChat('sc-quote');
+    const quote = {
+      type: 'pastedText' as const,
+      id: 'quote-1',
+      text: 'selected answer',
+      lineCount: 1,
+      byteSize: 15,
+      origin: 'selection' as const,
+    };
+    expect(injectComposerContextItems(record.id, [quote])).toBe(true);
+    renderDock(harness, { sideChats: [record] });
+    act(() => harness.transport.settle(true));
+
+    const textarea = screen.getByRole('textbox');
+    typeInlineComposer(textarea, 'follow up');
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+
+    expect(harness.transport.sentOfType('message:send').at(-1)).toMatchObject({
+      session_id: record.id,
+      context_items: [quote],
+      composer_document: {
+        version: 1,
+        segments: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'reference',
+            id: quote.id,
+            referenceType: 'context',
+          }),
+        ]),
+      },
+    });
   });
 
   it('resume failure keeps the content and shows cannot-continue + a close entry (never a fake fresh Side Chat)', () => {

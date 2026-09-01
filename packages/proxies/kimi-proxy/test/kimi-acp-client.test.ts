@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -24,6 +27,21 @@ import {
   type KimiAcpExit,
   type KimiAcpTransportFactory,
 } from '../src/runtime/kimi-acp-client.js';
+
+function initializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: 1,
+    agentInfo: { name: 'fake-kimi', version: '0.0.0-test' },
+    agentCapabilities: {
+      loadSession: true,
+      sessionCapabilities: {
+        list: {},
+        resume: {},
+      },
+    },
+    authMethods: [{ id: 'login', name: 'Login', type: 'terminal', args: ['login'] }],
+  };
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -182,7 +200,7 @@ test('fails startup promptly when the managed binary does not exist', async () =
   );
 });
 
-test('negotiates ACP v1 without filesystem or terminal reverse capabilities', async () => {
+test('negotiates ACP v1 with the terminal capability and without fs reverse capabilities', async () => {
   let agent!: RecordingAgent;
   const client = new KimiAcpClient({
     binaryPath: '/managed/kimi',
@@ -209,7 +227,7 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
         readTextFile: false,
         writeTextFile: false,
       },
-      terminal: false,
+      terminal: true,
     },
   });
 
@@ -379,4 +397,99 @@ test('forwards list, config, cancel, and marks an explicit stop as expected', as
   });
   assert.equal(agent.cancelSessionId, 'native-new');
   assert.equal(await stopped.promise, true);
+});
+
+test('ACP failure logs attribute the operation without leaking command paths', async () => {
+  const { logAcpFailure } = await import('../src/runtime/kimi-acp-client.js');
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (line: string) => {
+    lines.push(line);
+  };
+  try {
+    const spawnError = new Error('spawn /secret/tools/hidden-command ENOENT') as NodeJS.ErrnoException;
+    spawnError.code = 'ENOENT';
+    logAcpFailure('terminal/create', spawnError);
+    logAcpFailure('session/prompt', new Error('line1\nline2\u0007bell'));
+    logAcpFailure('session/prompt', new Error('x'.repeat(500)));
+  } finally {
+    console.error = original;
+  }
+
+  assert.equal(lines.length, 3);
+  assert.match(lines[0]!, /^\[kimi-acp\] terminal\/create failed code=ENOENT \(Error\): spawn <redacted> ENOENT$/);
+  assert.ok(!lines[0]!.includes('/secret'));
+  assert.match(lines[1]!, /^\[kimi-acp\] session\/prompt failed \(Error\): line1 line2 bell$/);
+  const prefix = '[kimi-acp] session/prompt failed (Error): ';
+  assert.ok(lines[2]!.startsWith(prefix));
+  assert.ok(lines[2]!.length <= prefix.length + 200, 'sanitized message must stay bounded');
+  assert.ok(!lines[2]!.includes('x'.repeat(300)));
+});
+
+test('a failing reverse terminal/create never dumps raw request params (Finding 4)', async () => {
+  const CWD_SENTINEL = 'gian-cwd-nonexistent-9f2';
+  const COMMAND_SENTINEL = 'GIAN_SENTINEL_COMMAND';
+  const ARG_SENTINEL = 'GIAN_SENTINEL_ARG_VALUE';
+  const ENV_SENTINEL = 'GIAN_SENTINEL_ENV_VALUE';
+  const secretCwd = mkdtempSync(join(tmpdir(), 'gian-sentinel-'));
+  const terminalFailure = deferred<void>();
+  let agentSawError: unknown = null;
+
+  const client = new KimiAcpClient({
+    binaryPath: '/managed/kimi',
+    transportFactory: inMemoryTransport((remoteClient) => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-sentinel' }),
+      prompt: async (params: { sessionId: string }) => {
+        try {
+          await remoteClient.createTerminal({
+            sessionId: params.sessionId,
+            command: `/${COMMAND_SENTINEL}/no-such-binary`,
+            args: [`--value=${ARG_SENTINEL}`],
+            cwd: secretCwd,
+            env: [{ name: 'GIAN_SENTINEL_ENV', value: ENV_SENTINEL }],
+            outputByteLimit: 4096,
+          });
+        } catch (error) {
+          agentSawError = error;
+        } finally {
+          terminalFailure.resolve();
+        }
+        return { stopReason: 'end_turn' as const };
+      },
+      cancel: async () => undefined,
+    }) as unknown as Agent),
+  });
+
+  // Bind the native session so the failing request travels past ownership
+  // into the spawn attempt, where the ENOENT message would embed the command.
+  await client.newSession({ cwd: secretCwd, mcpServers: [] });
+
+  const originalConsoleError = console.error;
+  const captured: string[] = [];
+  console.error = (...parts: unknown[]) => {
+    captured.push(parts.map(String).join(' '));
+  };
+  try {
+    await client.prompt({
+      sessionId: 'native-sentinel',
+      prompt: [{ type: 'text', text: 'run it' }],
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  await terminalFailure.promise;
+
+  // The agent observed the actual failure, so the handler really ran.
+  assert.ok(agentSawError instanceof Error, 'terminal/create must fail the agent request');
+  assert.ok(captured.length > 0, 'the failure must be logged for attribution');
+  const allOutput = captured.join('\n');
+  for (const sentinel of [COMMAND_SENTINEL, ARG_SENTINEL, ENV_SENTINEL, secretCwd, CWD_SENTINEL]) {
+    assert.ok(!allOutput.includes(sentinel), `stderr leaked sentinel ${sentinel}: ${allOutput}`);
+  }
+  assert.ok(!allOutput.includes('params'), 'raw request params must not reach stderr');
+  // Attribution survives: method label plus the redacted failure identity.
+  assert.match(allOutput, /terminal\/create/);
+  assert.match(allOutput, /spawn <redacted> ENOENT/);
+  await client.stop();
 });

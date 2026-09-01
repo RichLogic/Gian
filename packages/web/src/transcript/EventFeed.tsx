@@ -14,12 +14,21 @@ import { transcriptItemIdentity } from './identity.js';
  * when one exists, otherwise the raw-item JSON dump. Resolved approval
  * lines stay static (they already are the full record).
  *
- * `anchorId` (2026-08-27): a transcript item identity the feed locates
- * after render — the row scrolls into view and flashes once
+ * `anchorId` (2026-08-29): a transcript item identity the feed locates
+ * after render — the row opens in place, scrolls into view, and flashes once
  * (`.trow.is-anchor-flash`, ~1.6s × 2). The turn work block sets it when a
  * preview row is clicked.
  */
-export function EventFeed({ items, anchorId }: { items: TranscriptItem[]; anchorId?: string }) {
+export function EventFeed({
+  items,
+  anchorId,
+  anchorRequest,
+}: {
+  items: TranscriptItem[];
+  anchorId?: string;
+  /** Stable for live feed updates, new for each Panel-2 navigation request. */
+  anchorRequest?: object;
+}) {
   const rowsRef = useRef(new Map<string, HTMLElement>());
   useLayoutEffect(() => {
     if (!anchorId) return;
@@ -32,7 +41,7 @@ export function EventFeed({ items, anchorId }: { items: TranscriptItem[]; anchor
       window.clearTimeout(timer);
       el.classList.remove('is-anchor-flash');
     };
-  }, [anchorId]);
+  }, [anchorId, anchorRequest]);
   return (
     <section className="chat-context-feed" data-testid="chat-event-feed">
       {items.map(item => {
@@ -41,6 +50,8 @@ export function EventFeed({ items, anchorId }: { items: TranscriptItem[]; anchor
           <EventFeedRow
             key={id}
             item={item}
+            autoOpen={id === anchorId}
+            autoOpenRequest={id === anchorId ? (anchorRequest ?? anchorId) : undefined}
             rowRef={(el) => {
               if (el) rowsRef.current.set(id, el);
               else rowsRef.current.delete(id);
@@ -55,14 +66,24 @@ export function EventFeed({ items, anchorId }: { items: TranscriptItem[]; anchor
 /** Long details keep the transcript's capped, scrolling detail form. */
 const FEED_DETAIL_SCROLL_LINES = 16;
 
-function EventFeedRow({
+export function EventFeedRow({
   item,
+  autoOpen = false,
+  autoOpenRequest,
   rowRef,
 }: {
   item: TranscriptItem;
+  autoOpen?: boolean;
+  autoOpenRequest?: object | string;
   rowRef?: (el: HTMLElement | null) => void;
 }) {
-  const { open, toggle } = useStableExpand();
+  const { open, setOpen, toggle } = useStableExpand(autoOpen);
+  const wasAutoOpenRef = useRef(autoOpen);
+  useLayoutEffect(() => {
+    if (autoOpen) setOpen(true);
+    else if (wasAutoOpenRef.current) setOpen(false);
+    wasAutoOpenRef.current = autoOpen;
+  }, [autoOpen, autoOpenRequest, setOpen]);
   if (item.kind === 'approval') return <ApprovalLine item={item} />;
   const text = eventDetailText(item);
   if (!text) return <EventLine item={item} rowRef={rowRef} />;

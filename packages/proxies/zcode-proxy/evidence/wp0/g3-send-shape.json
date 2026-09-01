@@ -1,0 +1,42 @@
+{
+  "gate": "G3",
+  "scope": "zod shape only, zero quota",
+  "results": {
+    "empty": {
+      "outcome": "rejected",
+      "code": -32602,
+      "message": "Invalid params — sessionId: Invalid input: expected string, received undefined; content: Invalid input: expected string, received undefined"
+    },
+    "ghost-content-string": {
+      "outcome": "rejected",
+      "code": -32004,
+      "message": "Session is not active: sess_00000000-0000-4000-8000-000000000000"
+    },
+    "ghost-content-parts": {
+      "outcome": "rejected",
+      "code": -32602,
+      "message": "Invalid params — content: Invalid input: expected string, received array"
+    },
+    "ghost-content-object": {
+      "outcome": "rejected",
+      "code": -32602,
+      "message": "Invalid params — content: Invalid input: expected string, received object"
+    },
+    "ghost-attachments-array": {
+      "outcome": "rejected",
+      "code": -32004,
+      "message": "Session is not active: sess_00000000-0000-4000-8000-000000000000"
+    },
+    "ghost-attachments-alt": {
+      "outcome": "rejected",
+      "code": -32004,
+      "message": "Session is not active: sess_00000000-0000-4000-8000-000000000000"
+    },
+    "ghost-input-array": {
+      "outcome": "rejected",
+      "code": -32602,
+      "message": "Invalid params — (root): Unrecognized key: \"input\""
+    },
+    "realSessionNotSent": true
+  }
+}

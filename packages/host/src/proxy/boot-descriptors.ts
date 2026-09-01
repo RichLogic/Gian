@@ -8,6 +8,7 @@ export interface BootProxyDescriptors {
   kimi?: ProxyLaunchDescriptor;
   grok?: ProxyLaunchDescriptor;
   dsh?: ProxyLaunchDescriptor;
+  zcode?: ProxyLaunchDescriptor;
 }
 
 /**
@@ -39,12 +40,13 @@ export async function resolveBootProxyDescriptors(
       return { entryPath: '' };
     }
   };
-  const [claude, codex, kimi, grok, dsh] = await Promise.all([
+  const [claude, codex, kimi, grok, dsh, zcode] = await Promise.all([
     resolve('claude'),
     resolve('codex'),
     resolve('kimi'),
     resolve('grok'),
     resolve('dsh'),
+    resolve('zcode'),
   ]);
-  return { claude, codex, kimi, grok, dsh };
+  return { claude, codex, kimi, grok, dsh, zcode };
 }

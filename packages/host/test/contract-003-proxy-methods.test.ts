@@ -14,6 +14,17 @@ const CC_ADAPTER = resolve('../proxies/cc-proxy/src/protocol/v2-adapter.ts');
 const CODEX_ADAPTER = resolve('../proxies/codex-proxy/src/protocol/v2-adapter.ts');
 const KIMI_ADAPTER = resolve('../proxies/kimi-proxy/src/protocol/v2-adapter.ts');
 const GROK_ADAPTER = resolve('../proxies/grok-proxy/src/protocol/v2-adapter.ts');
+const ZCODE_ADAPTER = resolve('../proxies/zcode-proxy/src/adapter.ts');
+
+/** Registry-keyed v2 adapter table: registering a new executor's adapter in
+ * the shared executor registry adds exactly one entry here. */
+const V2_ADAPTERS: ReadonlyArray<[label: string, path: string]> = [
+  ['cc', CC_ADAPTER],
+  ['codex', CODEX_ADAPTER],
+  ['kimi', KIMI_ADAPTER],
+  ['grok', GROK_ADAPTER],
+  ['zcode', ZCODE_ADAPTER],
+];
 const HOST_CLIENT = resolve('src/proxy/protocol-v2-client.ts');
 const HOST_SESSION = resolve('src/proxy/protocol-v2-session-client.ts');
 
@@ -73,12 +84,7 @@ test('CONTRACT-003: shared PROXY_METHODS matches the gian.proxy/2 method set', (
 });
 
 test('CONTRACT-003: parser locates the canonical methods in every v2 adapter', () => {
-  for (const [label, path] of [
-    ['cc', CC_ADAPTER],
-    ['codex', CODEX_ADAPTER],
-    ['kimi', KIMI_ADAPTER],
-    ['grok', GROK_ADAPTER],
-  ] as const) {
+  for (const [label, path] of V2_ADAPTERS) {
     const methods = methodsFromAdapter(path);
     for (const must of CORE_METHODS) {
       assert.ok(methods.has(must), `${label} v2 adapter handle() missing ${must}`);
@@ -87,12 +93,7 @@ test('CONTRACT-003: parser locates the canonical methods in every v2 adapter', (
 });
 
 test('CONTRACT-003: every adapter-handled method is in shared PROXY_METHODS', () => {
-  for (const [label, path] of [
-    ['cc', CC_ADAPTER],
-    ['codex', CODEX_ADAPTER],
-    ['kimi', KIMI_ADAPTER],
-    ['grok', GROK_ADAPTER],
-  ] as const) {
+  for (const [label, path] of V2_ADAPTERS) {
     const orphans: string[] = [];
     for (const method of methodsFromAdapter(path)) {
       if (!sharedRegistry.has(method)) orphans.push(method);
@@ -102,12 +103,9 @@ test('CONTRACT-003: every adapter-handled method is in shared PROXY_METHODS', ()
 });
 
 test('CONTRACT-003: every shared method is handled by at least one adapter', () => {
-  const union = new Set<string>([
-    ...methodsFromAdapter(CC_ADAPTER),
-    ...methodsFromAdapter(CODEX_ADAPTER),
-    ...methodsFromAdapter(KIMI_ADAPTER),
-    ...methodsFromAdapter(GROK_ADAPTER),
-  ]);
+  const union = new Set<string>(
+    V2_ADAPTERS.flatMap(([, path]) => [...methodsFromAdapter(path)]),
+  );
   const orphans = [...sharedRegistry].filter((method) => (
     !union.has(method) && !PROVIDER_DEFERRED_METHODS.has(method)
   ));

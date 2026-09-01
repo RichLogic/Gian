@@ -38,8 +38,18 @@ import type { OperationDispatcher } from './dispatcher.js';
 import { QUEUE_OVERLAY_FIELD } from './queue.js';
 import { applySettingsOverlays, SETTINGS_ENTITY_KEY } from './settings.js';
 import { entityFieldKey, type OperationStore } from './store.js';
-import { applySessionOverlays, sessionEntityKey } from './session.js';
-import { applyTaskOverlays, taskEntityKey } from './task.js';
+import {
+  applySessionOverlays,
+  SESSION_ORDER_FIELD,
+  sessionEntityKey,
+  sessionOrderEntityKey,
+} from './session.js';
+import {
+  applyTaskOverlays,
+  TASK_LIST_ENTITY_KEY,
+  TASK_ORDER_FIELD,
+  taskEntityKey,
+} from './task.js';
 import {
   applyWorkspaceOrderOverlay,
   applyWorkspaceOverlays,
@@ -260,6 +270,37 @@ let taskSnapshotCache: {
 /** Context-based variant for components under the provider. */
 export function useTasksWithOverlays(tasks: readonly Task[]): Task[] {
   return useStoreTasksWithOverlays(useOperationStore(), tasks);
+}
+
+// ─── Drag-reorder order overlays (2026-08-29, migration 067) ───────────────
+// The reorder operations carry whole-list id arrays on virtual entities
+// (`task:list`, `session-order:<scope>:<parentId>`) instead of per-entity
+// writes. Views read the in-flight order here and apply it over the sorted
+// canonical list; on confirm the reconcile patches the canonical order
+// columns so the overlay absorbs seamlessly.
+
+/** The in-flight open-task order overlay (`task.reorder`), if any. */
+export function useTaskOrderOverlay(): string[] | undefined {
+  const store = useOperationStoreOptional();
+  const getSnapshot = useCallback(
+    () => store?.getOverlay(entityFieldKey(TASK_LIST_ENTITY_KEY, TASK_ORDER_FIELD)),
+    [store],
+  );
+  const overlay = useSyncExternalStore(store?.subscribe ?? NOOP_SUBSCRIBE, getSnapshot);
+  return overlay?.value as string[] | undefined;
+}
+
+/** The in-flight session order overlay (`session.reorder`) for one scope —
+ *  a workspace group (parentId null = unfiled) or a task's subtask list. */
+export function useSessionOrderOverlay(
+  scope: 'workspace' | 'task',
+  parentId: string | null,
+): string[] | undefined {
+  const store = useOperationStoreOptional();
+  const key = entityFieldKey(sessionOrderEntityKey(scope, parentId), SESSION_ORDER_FIELD);
+  const getSnapshot = useCallback(() => store?.getOverlay(key), [store, key]);
+  const overlay = useSyncExternalStore(store?.subscribe ?? NOOP_SUBSCRIBE, getSnapshot);
+  return overlay?.value as string[] | undefined;
 }
 
 // ─── Workspace rendering merge (canonical + overlays, Phase 3a) ────────────

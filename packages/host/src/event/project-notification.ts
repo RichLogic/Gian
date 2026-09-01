@@ -5,7 +5,7 @@ import { projectCcNotification } from './normalize-cc.js';
 import { projectCodexNotification } from './normalize-codex.js';
 import { projectKimiNotification } from './normalize-kimi.js';
 import { projectProtocolV1Notification } from './normalize-protocol-v1.js';
-import { projectProtocolV2Notification } from './project-protocol-v2.js';
+import { projectProtocolV2Notification, type InteractionKindLookup } from './project-protocol-v2.js';
 
 function isHistoricalProtocolV1(notification: ProxyNotification): boolean {
   const params = notification.params as Record<string, unknown> | undefined;
@@ -30,12 +30,17 @@ function projectLegacyNotification(
 
 /**
  * Keep a provider notification intact and attach zero or more UI projections.
+ * `interactionKinds` supplies the pending interaction's native
+ * optionId -> ACP permission kind map so resolved events can derive their
+ * Gian decision before persistence; both live and replay callers pass the
+ * same sequential registry.
  */
 export function projectNotification(
   provider: Executor,
   notification: ProxyNotification,
   sessionId: string,
   turn: number,
+  interactionKinds?: InteractionKindLookup,
 ): ChatEvent[] {
   const standard = proxyNotificationSchema.safeParse(notification);
   if (standard.success && standard.data.method === 'input.recorded') {
@@ -73,7 +78,7 @@ export function projectNotification(
   }
 
   const projected: DisplayEvent[] = standard.success
-    ? projectProtocolV2Notification(standard.data, sessionId, turn)
+    ? projectProtocolV2Notification(standard.data, sessionId, turn, interactionKinds)
     : (() => {
       const historical = isHistoricalProtocolV1(notification)
         ? (() => {

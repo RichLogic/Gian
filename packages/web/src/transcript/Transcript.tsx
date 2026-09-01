@@ -7,6 +7,7 @@ import { formatTime } from '../utils/format.js';
 import { AgentSpawnRow, ApprovalCard, AssistantMessage, AutoNoticeCard, Caret, CommandCard, CompactionRow, DiffCard, FileReadCard, FileSearchCard, formatElapsed, MinimalErrorCard, ReasoningCard, ToolEvent, UserMessage, useStableExpand, WebSearchRow } from './items.js';
 import { TURN_WORK_KINDS, isTurnWorkItem } from './event-feed.js';
 import { EventLine } from './event-lines.js';
+import { EventFeedRow } from './EventFeed.js';
 import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import { GianMascot } from '../components/GianMascot.js';
 import { ForkFromTurnControl } from '../components/ForkControls.js';
@@ -21,8 +22,10 @@ import {
  * One stable Turn work boundary (Issue #116; interaction redesign
  * 2026-08-27): process events fold into one `Working <elapsed>` block while
  * live; when `turn-end` arrives the same key/component becomes
- * Worked/Failed/Stopped at that boundary, so the final assistant summary
- * remains below it. A dangling idle turn stays flat history.
+ * Worked/Failed/Stopped between the Turn's process prose and its final
+ * assistant result. Providers normally emit that result before `turn-end`,
+ * so terminal grouping deliberately reorders the boundary ahead of the last
+ * non-empty assistant message. A dangling idle turn stays flat history.
  *
  * Interaction model (Working / terminal aligned):
  * - collapsed = head only (state + elapsed [+ end time]); expanded = the
@@ -33,9 +36,9 @@ import {
  *   the user manually expanded during the turn; terminal defaults
  *   collapsed, the user's choice persisting across re-renders;
  * - clicking a row jumps to the panel-2 event feed anchored at that row
- *   (`{kind:'event-feed', anchorId}`). Without a chat panel the rows are
- *   inert and terminal blocks fall back to the original in-place card
- *   expansion;
+ *   (`{kind:'event-feed', anchorId}`), where the target row opens in place.
+ *   Without a chat panel the rows are inert and terminal blocks fall back to
+ *   the original in-place card expansion;
  * - exception: the RUNNING command row keeps its streaming output block
  *   (`.turn-work-live-stream`) until the command ends.
  *
@@ -70,12 +73,34 @@ function terminalState(items: TranscriptItem[], turn: number, end: StatusItem): 
   return /interrupt|cancel|stopp/i.test(error.text) ? 'stopped' : 'failed';
 }
 
+/** Successful terminal Turns treat their last non-empty assistant message as
+ * the result. Besides owning Copy/Fork, that result is the render anchor that
+ * keeps Worked between process prose and result prose even when the Provider
+ * emits `turn-end` afterwards (the normal Codex ordering). */
+function terminalResultByTurn(
+  items: TranscriptItem[],
+  endByTurn: ReadonlyMap<number, StatusItem>,
+): Map<number, string> {
+  const result = new Map<number, string>();
+  const workedTurns = new Set<number>();
+  for (const [turn, end] of endByTurn) {
+    if (terminalState(items, turn, end) === 'worked') workedTurns.add(turn);
+  }
+  for (const item of items) {
+    if (item.kind === 'assistant' && item.text.trim().length > 0 && workedTurns.has(item.turn)) {
+      result.set(item.turn, transcriptItemIdentity(item));
+    }
+  }
+  return result;
+}
+
 export function groupIntoBlocks(items: TranscriptItem[], live: boolean): RenderableItem[] {
   const endByTurn = new Map<number, StatusItem>();
   const lastIndexByTurn = new Map<number, number>();
   for (const it of items) {
     if (it.kind === 'turn-end' && !endByTurn.has(it.turn)) endByTurn.set(it.turn, it);
   }
+  const resultByTurn = terminalResultByTurn(items, endByTurn);
   items.forEach((item, index) => lastIndexByTurn.set(item.turn, index));
 
   const foldablesByTurn = new Map<number, TranscriptItem[]>();
@@ -108,7 +133,12 @@ export function groupIntoBlocks(items: TranscriptItem[], live: boolean): Rendera
   });
 
   const out: RenderableItem[] = [];
-  const makeBlock = (turn: number, state: TurnWorkState, end?: StatusItem) => {
+  const makeBlock = (
+    turn: number,
+    state: TurnWorkState,
+    end?: StatusItem,
+    renderAnchor?: TranscriptItem,
+  ) => {
     const foldables = foldablesByTurn.get(turn) ?? [];
     const pendings = pendingByTurn.get(turn) ?? [];
     if (foldables.length === 0) return null;
@@ -116,7 +146,9 @@ export function groupIntoBlocks(items: TranscriptItem[], live: boolean): Rendera
       ...foldables.map(item => item.ts),
       ...pendings.map(item => item.ts),
     );
-    const ts = end?.ts ?? Math.max(...items.filter(item => item.turn === turn).map(item => item.ts));
+    const ts = renderAnchor?.ts
+      ?? end?.ts
+      ?? Math.max(...items.filter(item => item.turn === turn).map(item => item.ts));
     return {
       kind: 'turn-work' as const,
       id: `turnwork_${turn}_${foldables[0]!.id}`,
@@ -131,11 +163,15 @@ export function groupIntoBlocks(items: TranscriptItem[], live: boolean): Rendera
   };
   items.forEach((it, index) => {
     const end = endByTurn.get(it.turn);
-    if (end && it === end) {
-      const block = makeBlock(it.turn, terminalState(items, it.turn, end), end);
+    const resultId = resultByTurn.get(it.turn);
+    const terminalAnchor = resultId
+      ? transcriptItemIdentity(it) === resultId
+      : end !== undefined && it === end;
+    if (end && terminalAnchor) {
+      const block = makeBlock(it.turn, terminalState(items, it.turn, end), end, it);
       if (block) out.push(block);
       out.push(...(pendingByTurn.get(it.turn) ?? []));
-      out.push(it);
+      if (!skip.has(it)) out.push(it);
       return;
     }
 
@@ -260,6 +296,7 @@ function useTurnWorkNow(active: boolean): number {
 function TurnWorkBlock({
   block,
   onApprove,
+  inlineEventDetails,
 }: {
   block: Extract<RenderableItem, { kind: 'turn-work' }>;
   onApprove: (
@@ -268,6 +305,7 @@ function TurnWorkBlock({
     answers?: Record<string, string | boolean | string[]>,
     context?: ApprovalActionContext,
   ) => void;
+  inlineEventDetails: boolean;
 }) {
   const t = useT();
   // Working mounts expanded, terminal mounts collapsed; the stable component
@@ -340,7 +378,7 @@ function TurnWorkBlock({
             <span className="turnsum-time">{formatTime(block.endTs)}</span>
           )}
         </div>
-        {open && (live || hasPanel) && (
+        {open && (live || hasPanel || inlineEventDetails) && (
           <div
             className="turnsum-body turn-work-preview turn-work-scroll"
             data-testid="turn-work-preview"
@@ -349,16 +387,24 @@ function TurnWorkBlock({
           >
             {block.items.map(child => {
               const rowId = transcriptItemIdentity(child);
+              const liveCommand = live
+                && child.kind === 'command'
+                && child.status === 'running'
+                && child.stdout.length > 0;
               return (
                 <Fragment key={rowId}>
-                  <EventLine
-                    item={child}
-                    turnCompleted={!live}
-                    onRowClick={hasPanel
-                      ? () => openChatPanel({ kind: 'event-feed', turn: block.turn, anchorId: rowId })
-                      : undefined}
-                  />
-                  {live && child.kind === 'command' && child.status === 'running' && child.stdout.length > 0 && (
+                  {inlineEventDetails && !liveCommand ? (
+                    <EventFeedRow item={child} />
+                  ) : (
+                    <EventLine
+                      item={child}
+                      turnCompleted={!live}
+                      onRowClick={!inlineEventDetails && hasPanel
+                        ? () => openChatPanel({ kind: 'event-feed', turn: block.turn, anchorId: rowId })
+                        : undefined}
+                    />
+                  )}
+                  {liveCommand && (
                     <div className="trow-detail cmd turn-work-live-stream">
                       <div className="cmd-stream">
                         <span>{child.stdout}</span>
@@ -372,7 +418,7 @@ function TurnWorkBlock({
           </div>
         )}
       </div>
-      {!live && !hasPanel && open && (
+      {!live && !hasPanel && !inlineEventDetails && open && (
         <div className="turnsum-body">
           {block.items.map(child => renderItem(
             child,
@@ -402,7 +448,7 @@ export interface TranscriptExtra {
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
   hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
-  forkAtTurn, selectionActions,
+  forkAtTurn, selectionActions, inlineEventDetails = false,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -438,6 +484,9 @@ export function Transcript({
   /** Context actions exposed only for selections contained in one visible
    *  user/assistant message. Side Chat transcripts omit this prop. */
   selectionActions?: TranscriptSelectionActionsConfig;
+  /** Side Chat already owns Panel 2, so its process rows expand in place
+   *  instead of trying to replace their own owner with a parent event feed. */
+  inlineEventDetails?: boolean;
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -617,22 +666,10 @@ export function Transcript({
           for (const item of visibleItems) {
             if (item.kind === 'turn-end') terminalByTurn.set(item.turn, item);
           }
-          const terminalStateByTurn = new Map(
-            Array.from(terminalByTurn, ([turn, end]) => [turn, terminalState(visibleItems, turn, end)]),
-          );
           // `assistant` has no guessed process/result flag. The authoritative
           // Terminal Turn boundary supplies it: only the last non-empty
           // assistant message of a successfully worked turn is copyable.
-          const resultByTurn = new Map<number, string>();
-          for (const item of visibleItems) {
-            if (
-              item.kind === 'assistant'
-              && item.text.trim().length > 0
-              && terminalStateByTurn.get(item.turn) === 'worked'
-            ) {
-              resultByTurn.set(item.turn, transcriptItemIdentity(item));
-            }
-          }
+          const resultByTurn = terminalResultByTurn(visibleItems, terminalByTurn);
           const blocks = groupIntoBlocks(visibleItems, pending);
           // Interleave `extras` (Manager subtask cards) by timestamp: each one
           // renders after the last block whose ts ≤ its afterTs. A card is a
@@ -654,7 +691,14 @@ export function Transcript({
           blocks.forEach((item, bi) => {
             if (item.kind === 'turn-work') {
               prevSender = null;
-              out.push(<TurnWorkBlock key={item.id} block={item} onApprove={onApprove} />);
+              out.push(
+                <TurnWorkBlock
+                  key={item.id}
+                  block={item}
+                  onApprove={onApprove}
+                  inlineEventDetails={inlineEventDetails}
+                />,
+              );
             } else if (item.kind === 'turn-end' && forkAtTurn && !resultByTurn.has(item.turn)) {
               // A failed/stopped or text-free Terminal Turn has no result
               // footer to own the action. Keep the exact-boundary Fork in a

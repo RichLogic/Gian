@@ -37,6 +37,7 @@ import { useT } from '../i18n/index.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
 import { dispatchMessageSend } from '../operations/message.js';
 import { sidechatEntityKey } from '../operations/sidechat.js';
+import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import {
   useOperationDispatch,
   useOperationPending,
@@ -419,24 +420,27 @@ function SideChatPanel({
   return (
     <section className="sidechat-panel" data-testid={`sidechat-panel-${sideChat.id}`}>
       <div className="sidechat-scroll">
-        <Transcript
-          items={items}
-          pending={turnRunning}
-          onApprove={(
-            approvalId: string,
-            decision: ApprovalDecision,
-            answers?: Record<string, string | boolean | string[]>,
-            context?: ApprovalActionContext,
-          ) => dispatch('approval.resolve', {
-            // interaction.respond on the Side Chat route (§10.5.1) — the Host
-            // routes approval:resolve by session_id = sidechat id.
-            sessionId: sideChat.id,
-            approvalId,
-            decision,
-            ...(answers ? { answers } : {}),
-            ...(context?.nativeOptionId ? { nativeOptionId: context.nativeOptionId } : {}),
-          })}
-        />
+        <ChatPanelOpenContext.Provider value={null}>
+          <Transcript
+            items={items}
+            pending={turnRunning}
+            inlineEventDetails
+            onApprove={(
+              approvalId: string,
+              decision: ApprovalDecision,
+              answers?: Record<string, string | boolean | string[]>,
+              context?: ApprovalActionContext,
+            ) => dispatch('approval.resolve', {
+              // interaction.respond on the Side Chat route (§10.5.1) — the Host
+              // routes approval:resolve by session_id = sidechat id.
+              sessionId: sideChat.id,
+              approvalId,
+              decision,
+              ...(answers ? { answers } : {}),
+              ...(context?.nativeOptionId ? { nativeOptionId: context.nativeOptionId } : {}),
+            })}
+          />
+        </ChatPanelOpenContext.Provider>
       </div>
 
       {recovering ? (
@@ -485,6 +489,9 @@ function SideChatPanel({
               turnConfig,
               ...(options?.contextItems && options.contextItems.length > 0
                 ? { contextItems: options.contextItems }
+                : {}),
+              ...(options?.composerDocument
+                ? { composerDocument: options.composerDocument }
                 : {}),
             });
           }}

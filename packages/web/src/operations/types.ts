@@ -38,6 +38,7 @@ export type OperationName =
   | 'session.setEffort'
   | 'session.setServiceTier'
   | 'session.assignTask'
+  | 'session.reorder'
   | 'session.setNativeConfig'
   | 'session.setTurnConfig'
   | 'session.merge'
@@ -67,6 +68,7 @@ export type OperationName =
   | 'task.createSubtask'
   | 'task.completeSubtask'
   | 'task.reopenSubtask'
+  | 'task.reorder'
   // Workspace
   | 'workspace.create'
   | 'workspace.rename'
@@ -138,6 +140,7 @@ export const OPERATION_POLICIES = {
   'session.setEffort': 'optimistic',
   'session.setServiceTier': 'optimistic',
   'session.assignTask': 'optimistic',
+  'session.reorder': 'optimistic',
   // Pending, not optimistic (Phase 2a decision, inventory §4 note 6): the
   // rendered value lives in `native_config_options[].currentValue` — a nested
   // array element, not a flat Session field — so it does not fit the
@@ -167,6 +170,7 @@ export const OPERATION_POLICIES = {
   'task.createSubtask': 'pending',
   'task.completeSubtask': 'pending',
   'task.reopenSubtask': 'pending',
+  'task.reorder': 'optimistic',
   'workspace.create': 'pending',
   'workspace.rename': 'optimistic',
   'workspace.setHidden': 'optimistic',

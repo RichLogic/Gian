@@ -17,6 +17,7 @@ import {
   makeWsUrl,
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
+import { sortSessionsForRail } from './session-routing.js';
 import type { ChangeScope } from './api.js';
 import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
 import { useHistoryMovementRevision } from './controllers/use-history.js';
@@ -41,7 +42,7 @@ import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
 import { NewWorkspacePanel } from './views/workspace-create.js';
-import { TasksView } from './views/TasksView.js';
+import { TasksView, reorderableSubtasks } from './views/TasksView.js';
 // The primary view is imported statically: lazy-loading it served no purpose
 // (it renders on every launch) and its suspension used to tear down the whole
 // shell via the root Suspense boundary (the "full-screen flash" bug).
@@ -93,14 +94,19 @@ import './operations/files.js';
 import './operations/browser.js';
 import './operations/onboarding.js';
 import './operations/sidechat.js';
-import { sessionEntityKey } from './operations/session.js';
+import { sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
 import {
   createMessageEchoSink,
   dispatchAttachmentUpload,
   wireMessageEchoSink,
 } from './operations/message.js';
 import { QUEUE_OVERLAY_FIELD, wireCanonicalQueueReader } from './operations/queue.js';
-import { wireSubtaskCanonicalSink } from './operations/task.js';
+import {
+  TASK_LIST_ENTITY_KEY,
+  TASK_ORDER_FIELD,
+  wireSubtaskCanonicalSink,
+  wireTaskCanonicalSink,
+} from './operations/task.js';
 import { SETTINGS_ENTITY_KEY, wireSettingsSink } from './operations/settings.js';
 import {
   applyWorkspaceOrderOverlay,
@@ -367,6 +373,14 @@ export function App() {
           const session = sessionsRef.current.find(s => s.id === sessionId);
           return session?.[field as keyof Session];
         }
+        if (entityKey === TASK_LIST_ENTITY_KEY) {
+          // The reorder overlay is the open group's ordered id array
+          // (`task:list:order`, see operations/task.ts).
+          if (field === TASK_ORDER_FIELD) {
+            return tasksRef.current.filter(task => task.status === 'open').map(task => task.id);
+          }
+          return undefined;
+        }
         if (entityKey.startsWith('task:')) {
           const task = tasksRef.current.find(t => t.id === entityKey.slice('task:'.length));
           return task?.[field as keyof Task];
@@ -451,6 +465,22 @@ export function App() {
     wireSubtaskCanonicalSink((sessionId, partial) => {
       setSessions(previous => previous.map(s => (s.id === sessionId ? { ...s, ...partial } : s)));
     });
+    // Drag reorder (2026-08-29, migration 067): the tasks/sessions reorder
+    // REST endpoints do NOT broadcast either — stamp the confirmed order
+    // values onto the canonical lists so the absorbed whole-list overlays
+    // leave Host truth behind (task.ts/session.ts reconcile).
+    wireTaskCanonicalSink({
+      applyOrder: ids => setTasks(previous => previous.map(task => {
+        const index = ids.indexOf(task.id);
+        return index >= 0 && task.sort_order !== index + 1
+          ? { ...task, sort_order: index + 1 }
+          : task;
+      })),
+      refetch: () => { void loadTasks().then(setTasks); },
+    });
+    wireSessionCanonicalPatch((sessionId, partial) => {
+      setSessions(previous => previous.map(s => (s.id === sessionId ? { ...s, ...partial } : s)));
+    });
     // Settings convergence (Phase 3b, same no-broadcast rule): the settings
     // PATCH response IS the canonical successor — patch it in so the
     // absorbed overlay leaves Host truth behind.
@@ -458,6 +488,8 @@ export function App() {
     return () => {
       wireWorkspaceCanonicalSink(null);
       wireSubtaskCanonicalSink(null);
+      wireTaskCanonicalSink(null);
+      wireSessionCanonicalPatch(null);
       wireSettingsSink(null);
     };
   }, []);
@@ -696,9 +728,34 @@ export function App() {
   // after the command, then reconciles the run's unresolved overlays against
   // the fresh values: matches absorb silently, mismatches drop with a
   // "change may not have been applied" warning. Covers the session (incl.
-  // queue), task, and workspace entity prefixes; `pending:` create keys and
-  // `approval:` runs have no overlays to reconcile.
+  // queue), task, and workspace entity prefixes plus the drag-reorder
+  // whole-list keys (`task:list`, `session-order:*`); `pending:` create keys
+  // and `approval:` runs have no overlays to reconcile.
   const reloadUnresolvedEntity = useCallback(async (entityKey: string) => {
+    // Drag-reorder overlays (2026-08-29): the overlay value is the scope's
+    // ordered id array; the fresh canonical order columns reproduce it when
+    // the command landed (the deep-compare in reconcileUnresolvedEntity
+    // absorbs a matching array silently).
+    if (entityKey === TASK_LIST_ENTITY_KEY) {
+      const fresh = await loadTasks();
+      reconcileUnresolvedEntity(operationStore, entityKey,
+        () => fresh.filter(task => task.status === 'open').map(task => task.id), appT);
+      setTasks(fresh);
+      return;
+    }
+    if (entityKey.startsWith('session-order:')) {
+      const [, scope, rawParent] = entityKey.split(':');
+      const parentId = !rawParent || rawParent === '$' ? null : rawParent;
+      const fresh = await loadSessions();
+      const ids = scope === 'task'
+        ? reorderableSubtasks(fresh, parentId ?? '').map(s => s.id)
+        : sortSessionsForRail(fresh.filter(s => s.pinned_at == null
+            && (parentId === null ? s.workspace_id == null : s.workspace_id === parentId)))
+          .map(s => s.id);
+      reconcileUnresolvedEntity(operationStore, entityKey, () => ids, appT);
+      setSessions(fresh);
+      return;
+    }
     if (entityKey.startsWith('session:')) {
       const sessionId = entityKey.slice('session:'.length).split(':')[0]!;
       const fresh = await loadSessions();
@@ -755,6 +812,7 @@ export function App() {
     fileReveal,
     chatPanel,
     setChatPanel,
+    restoreChatPanelForSession,
     fileRehype,
     sheetActions,
     GROUP_OF_RAIL,
@@ -894,7 +952,7 @@ export function App() {
     sessionsRef,
     activeSessionIdRef,
     setActiveSessionId,
-    setChatPanel,
+    restoreChatPanelForSession,
     ops,
   });
 

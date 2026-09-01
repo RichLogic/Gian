@@ -8,8 +8,9 @@ import type { SessionRepository } from './repository.js';
 import { nativeSessionsCacheKey } from './native-session-service.js';
 
 /**
- * Issue #57: derive a session name automatically once an unnamed session has
- * produced completed turns.
+ * Issue #57: derive a session name automatically from an accepted/completed
+ * first user turn. Non-Claude discovery can start while work is still running;
+ * Claude waits for completion because that is when its ai-title is written.
  *
  *   - claude: Claude Code writes `{"type":"ai-title","aiTitle":...}` lines into
  *     the session JSONL, asynchronously after the first turn.
@@ -89,8 +90,9 @@ export class AutoTitleService {
   constructor(private deps: AutoTitleDeps) {}
 
   /**
-   * Fire-and-forget entry point called from turn completion. Errors are
-   * logged, never propagated — auto-title must not break turn completion.
+   * Fire-and-forget entry point called after turn acceptance and again at turn
+   * completion. Errors are logged, never propagated — auto-title must not
+   * break either lifecycle boundary.
    * Returns the internal promise purely so tests can await settlement.
    */
   maybeAutoTitle(sessionId: string): Promise<void> | null {
@@ -166,10 +168,21 @@ export class AutoTitleService {
     if (!session.native_session_id) return null;
     const cwd = this.cwdFor(session);
     if (!cwd) return null;
-    const cliPath = this.deps.cliPathForSession?.(session) ?? null;
-    const cacheKey = nativeSessionsCacheKey(session.executor, cliPath);
+    const cliPath = session.runtime_profile?.cliPath
+      ?? this.deps.cliPathForSession?.(session)
+      ?? null;
+    const proxyVersion = session.runtime_profile?.proxyVersion ?? null;
+    const cacheKey = nativeSessionsCacheKey(session.executor, cliPath, proxyVersion);
+    const attached = typeof this.deps.proxy.get === 'function'
+      ? this.deps.proxy.get(session.id)
+      : undefined;
+    const ownsLookupClient = attached === undefined;
     try {
-      const client = await this.deps.proxy.getOrCreate(cacheKey, session.executor, { cliPath });
+      const client = attached ?? await this.deps.proxy.getOrCreate(
+        cacheKey,
+        session.executor,
+        { cliPath, proxyVersion },
+      );
       await client.initialize();
       if (!client.listNativeSessions) return null;
       // Same pagination pattern as NativeSessionService.listFromProxy.
@@ -219,9 +232,11 @@ export class AutoTitleService {
       }
       return null;
     } catch (error) {
-      // The shared lookup client may be wedged; drop it so the next attempt
-      // respawns, and leave the title unset for this poll.
-      await this.deps.proxy.dispose(cacheKey).catch(() => undefined);
+      // A dedicated lookup client may be wedged; drop only that isolated
+      // facade. Never dispose the active Session client while its turn runs.
+      if (ownsLookupClient) {
+        await this.deps.proxy.dispose(cacheKey).catch(() => undefined);
+      }
       console.warn(
         `[auto-title] ${session.executor} native session lookup failed session=${session.id}: ${String(error)}`,
       );

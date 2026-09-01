@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../src/api.js';
 import type { WorkingTree } from '../src/api.js';
 import { Inspector } from '../src/components/Inspector.js';
+import type { Mode } from '../src/components/Topbar.js';
 import { useWorkbench } from '../src/controllers/use-workbench.js';
 import type { DiffItem } from '../src/types.js';
 
@@ -114,7 +115,7 @@ const session4: Session = { ...session, id: 's4', name: 'demo four' };
 const sessionSet = [session, session2, session3, session4];
 
 function renderSwitchableWorkbench(initialSessionId = 's1') {
-  return renderHook(({ sessionId }: { sessionId: string }) => {
+  return renderHook(({ sessionId, mode = 'sessions' }: { sessionId: string; mode?: Mode }) => {
     const active = sessionSet.find(candidate => candidate.id === sessionId) ?? null;
     return useWorkbench({
       authStatus: 'authenticated',
@@ -125,7 +126,7 @@ function renderSwitchableWorkbench(initialSessionId = 's1') {
       activeWorkspace: workspace,
       workspaces: [workspace],
       workingTrees: [tree],
-      mode: 'sessions',
+      mode,
       activeSubtaskId: null,
       t: key => key,
     });
@@ -571,6 +572,33 @@ describe('Issue #46 Session-owned workbench state', () => {
     expect(result.current.activeRail).toBe('files');
     rerender({ sessionId: 's2' });
     expect(result.current.activeRail).toBeNull();
+  });
+
+  it('restores Side Chat only for its owning Session after page and Session navigation', () => {
+    const { result, rerender } = renderSwitchableWorkbench();
+
+    act(() => result.current.openChatPanel('s1', { kind: 'sidechat' }));
+    expect(result.current.chatPanel).toEqual({ kind: 'sidechat', sessionId: 's1' });
+
+    act(() => rerender({ sessionId: 's1', mode: 'spaces' }));
+    expect(result.current.chatPanel).toBeNull();
+    act(() => rerender({ sessionId: 's1', mode: 'sessions' }));
+    expect(result.current.chatPanel).toEqual({ kind: 'sidechat', sessionId: 's1' });
+
+    act(() => rerender({ sessionId: 's2', mode: 'sessions' }));
+    expect(result.current.chatPanel).toBeNull();
+    act(() => rerender({ sessionId: 's1', mode: 'sessions' }));
+    expect(result.current.chatPanel).toEqual({ kind: 'sidechat', sessionId: 's1' });
+
+    act(() => result.current.activateRail('files'));
+    expect(result.current.chatPanel).toBeNull();
+    act(() => result.current.restoreChatPanelForSession('s1'));
+    expect(result.current.chatPanel).toEqual({ kind: 'sidechat', sessionId: 's1' });
+
+    act(() => result.current.setChatPanel(null));
+    act(() => rerender({ sessionId: 's1', mode: 'spaces' }));
+    act(() => rerender({ sessionId: 's1', mode: 'sessions' }));
+    expect(result.current.chatPanel).toBeNull();
   });
 
   it('isolates Session-owned tabs and active content even when Sessions share one working tree', async () => {

@@ -119,7 +119,7 @@ function TraceToolbar({
 }) {
   const t = useT();
   return (
-    <div className="trace-toolbar trace-pinned-head" data-testid="trace-toolbar">
+    <div className="trace-toolbar" data-testid="trace-toolbar">
       <div className="trace-toolbar-controls">
         <button type="button" className="trace-toolbar-btn" aria-pressed={mode === 'duration'}
                 onClick={onToggleMode} data-testid="trace-control-duration">
@@ -508,36 +508,47 @@ export function TraceView({ snapshot }: { snapshot: TraceSnapshot }) {
     <div className={`trace-view${snapshot.items.length > 100 ? ' large' : ''}`}
          data-testid="trace-view" data-partial={snapshot.partial || undefined}
          data-virtualized={snapshot.items.length > 100 || undefined}>
-      {snapshot.partial && (
-        <div className="trace-partial" role="status" data-testid="trace-partial">
-          {t('trace.partial')}
-        </div>
-      )}
       {isEmpty ? (
-        <div className="trace-empty" data-testid="trace-empty">{t('trace.empty')}</div>
+        <>
+          {snapshot.partial && (
+            <header className="trace-pinned-head" data-testid="trace-pinned-header">
+              <div className="trace-partial" role="status" data-testid="trace-partial">
+                {t('trace.partial')}
+              </div>
+            </header>
+          )}
+          <div className="trace-empty" data-testid="trace-empty">{t('trace.empty')}</div>
+        </>
       ) : (
         <>
-          <TraceToolbar
-            mode={timelineMode}
-            allTurnsCollapsed={allTurnsCollapsed}
-            callsCollapsed={callsCollapsed}
-            query={query}
-            stats={stats}
-            onToggleMode={() => setTimelineMode(current => current === 'duration' ? 'sequence' : 'duration')}
-            onToggleTurns={() => setCollapsedTurnIds(allTurnsCollapsed
-              ? new Set()
-              : new Set(groups.map(group => group.turnId)))}
-            onToggleCalls={() => setCallsCollapsed(current => !current)}
-            onQuery={setQuery}
-            onDownload={() => downloadTraceSnapshot(snapshot)}
-          />
-          <TraceTimeline
-            items={visibleItems}
-            selectedId={selectedId}
-            mode={timelineMode}
-            onSelect={selectFromTimeline}
-          />
-          <TraceStatsLine items={visibleItems} />
+          <header className="trace-pinned-head" data-testid="trace-pinned-header">
+            {snapshot.partial && (
+              <div className="trace-partial" role="status" data-testid="trace-partial">
+                {t('trace.partial')}
+              </div>
+            )}
+            <TraceToolbar
+              mode={timelineMode}
+              allTurnsCollapsed={allTurnsCollapsed}
+              callsCollapsed={callsCollapsed}
+              query={query}
+              stats={stats}
+              onToggleMode={() => setTimelineMode(current => current === 'duration' ? 'sequence' : 'duration')}
+              onToggleTurns={() => setCollapsedTurnIds(allTurnsCollapsed
+                ? new Set()
+                : new Set(groups.map(group => group.turnId)))}
+              onToggleCalls={() => setCallsCollapsed(current => !current)}
+              onQuery={setQuery}
+              onDownload={() => downloadTraceSnapshot(snapshot)}
+            />
+            <TraceTimeline
+              items={visibleItems}
+              selectedId={selectedId}
+              mode={timelineMode}
+              onSelect={selectFromTimeline}
+            />
+            <TraceStatsLine items={visibleItems} />
+          </header>
           {noResults && (
             <div className="trace-empty" data-testid="trace-no-results">{t('trace.search.empty')}</div>
           )}

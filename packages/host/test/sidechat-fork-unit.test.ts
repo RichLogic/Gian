@@ -16,7 +16,7 @@ import {
   toPublicSidechat,
   type SidechatRecord,
 } from '../src/session/sidechat-store.js';
-import { SidechatCoordinator } from '../src/session/sidechat-coordinator.js';
+import { reconcileTurnConfig, SidechatCoordinator } from '../src/session/sidechat-coordinator.js';
 import { deriveSidechatAgentTitle } from '../src/session/sidechat-title.js';
 import { ProtocolV2SessionClient } from '../src/proxy/protocol-v2-session-client.js';
 
@@ -634,4 +634,54 @@ test('Side Chat user inputs append across turns and appear on the public snapsho
   } finally {
     ctx.close();
   }
+});
+
+test('sidechat turn config rejects a stale effort after the model catalog changes', () => {
+  // Kimi-for-coding advertises on/off thinking only; a k3-era `low` must fail
+  // loudly instead of reaching the Provider.
+  const kimiForCodingOptions: ConfigOption[] = [
+    {
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: false,
+      defaultValue: 'kimi-for-coding',
+      choices: [
+        { value: 'kimi-for-coding', displayName: 'K2.7 Coding' },
+        { value: 'k3', displayName: 'K3' },
+      ],
+    },
+    {
+      id: 'thinking',
+      displayName: 'Thinking',
+      binding: 'turn',
+      role: 'effort',
+      control: 'select',
+      required: false,
+      defaultValue: 'on',
+      choices: [
+        { value: 'on', displayName: 'On' },
+        { value: 'off', displayName: 'Off' },
+      ],
+    },
+  ];
+  assert.throws(
+    () => reconcileTurnConfig(kimiForCodingOptions, {
+      model: 'kimi-for-coding',
+      thinking: 'low',
+    }),
+    (error: unknown) => error instanceof ProxyProtocolError
+      && error.code === 'CONFIG_VALUE_INVALID',
+  );
+  assert.deepEqual(
+    reconcileTurnConfig(kimiForCodingOptions, { model: 'kimi-for-coding', thinking: 'on' }),
+    { model: 'kimi-for-coding', thinking: 'on' },
+  );
+  // An unrequested option converges to the catalog default (no silent carry-over).
+  assert.deepEqual(
+    reconcileTurnConfig(kimiForCodingOptions, { model: 'kimi-for-coding' }),
+    { model: 'kimi-for-coding', thinking: 'on' },
+  );
 });

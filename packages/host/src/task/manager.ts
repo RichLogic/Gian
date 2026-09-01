@@ -50,17 +50,32 @@ export class TaskManager {
   }
 
   listTasks(): Task[] {
-    // Pinned tasks first (most-recently-pinned on top), then the rest by
-    // creation time (newest first). `(pinned_at IS NOT NULL) DESC` puts the
-    // pinned group ahead; within each group the trailing keys order it. The web
-    // client re-sorts by the same keys (single source of truth for live pin
-    // moves), so this only needs to make the initial snapshot consistent.
+    // Manual drag order (migration 067) wins; tasks never dragged
+    // (sort_order IS NULL) keep the automatic creation-time order ABOVE the
+    // manual range, so a fresh task still lands on top. The web client
+    // re-sorts by the same keys (single source of truth for live reorder),
+    // so this only needs to make the initial snapshot consistent.
     return this.db
       .prepare(
         `SELECT * FROM tasks
-         ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, created_at DESC`,
+         ORDER BY (sort_order IS NOT NULL), sort_order, created_at DESC`,
       )
       .all() as Task[];
+  }
+
+  /**
+   * Persist a manual order for the given tasks (sidebar drag reorder). The
+   * caller passes the scope's full ordered id list (e.g. the open group);
+   * values are rewritten to a dense 1..n sequence. Tasks absent from `ids`
+   * keep their current sort_order (NULL = automatic order). Deliberately does
+   * NOT bump `updated_at` — a reorder is view metadata, not a content edit.
+   */
+  reorderTasks(ids: string[]): void {
+    const update = this.db
+      .prepare('UPDATE tasks SET sort_order = @order WHERE id = @id');
+    this.db.transaction(() => {
+      ids.forEach((id, index) => update.run({ id, order: index + 1 }));
+    })();
   }
 
   /**

@@ -1,0 +1,17 @@
+diff --git a/dist/acp.js b/dist/acp.js
+index 8185ba61497d05fcf643df1d1e6ed8c6730fd1b5..353fbcdbb693def50f7ee7bc019ae6c5adb99aa9 100644
+--- a/dist/acp.js
++++ b/dist/acp.js
+@@ -1109,7 +1109,11 @@ class Connection {
+             // It's a request
+             const response = await this.tryCallRequestHandler(message.method, message.params);
+             if ("error" in response) {
+-                console.error("Error handling request", message, response.error);
++                // Gian patch: the original dumped the FULL request message
++                // (params include prompt/command/cwd/env) to stderr. Log only
++                // the method name and the error identity; attribution stays
++                // with the caller's sanitized operation label.
++                console.error("[acp] request handler failed:", message.method ?? "<unknown>", response.error?.name ?? "Error");
+             }
+             await this.sendMessage({
+                 jsonrpc: "2.0",

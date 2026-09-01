@@ -2,6 +2,7 @@
 // Panel-2 event-feed projection and in-place row drill-down.
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type {
@@ -114,6 +115,15 @@ describe('turn work boundary: live grouping and terminal handoff', () => {
     expect(within(body).getByText('checking the reducer')).toBeInTheDocument();
   });
 
+  it('aligns preview rows with the Working label without a nested guide-rail indent', () => {
+    const css = readFileSync('src/styles/events.css', 'utf8');
+    const rule = css.match(/\.turn-work-preview\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toContain('margin-left: 0');
+    expect(rule![1]).toContain('padding-left: 0');
+    expect(rule![1]).toContain('border-left: 0');
+  });
+
   it('keeps a pending approval inline after Working', () => {
     const view = renderTranscript([userMsg(), tool(), approval({ status: 'pending' })]);
     const work = workOf(view.container);
@@ -197,14 +207,16 @@ describe('turn work boundary: live grouping and terminal handoff', () => {
     }
   });
 
-  it('morphs in place at turn-end, with process text above and final summary below', () => {
+  it('morphs in place before the final result when the Provider emits turn-end afterwards', () => {
     const liveItems = [
       userMsg(), tool({ ts: 1_000 }), assistantMsg({ id: 'a-mid', text: 'process note', ts: 2_000 }),
     ];
     const view = renderTranscript(liveItems);
     const before = workOf(view.container);
     view.rerender(<Transcript items={[
-      ...liveItems, turnEnd({ ts: 3_000 }), assistantMsg({ id: 'a-final', text: 'final summary', ts: 4_000 }),
+      ...liveItems,
+      assistantMsg({ id: 'a-final', text: 'final summary', ts: 3_000 }),
+      turnEnd({ ts: 4_000 }),
     ]} pending={false} onApprove={vi.fn()} />);
     const after = workOf(view.container);
     expect(after).toBe(before);
@@ -534,10 +546,11 @@ describe('panel-2 event feed', () => {
     expect(screen.getByText('No process events in this turn yet.')).toBeInTheDocument();
   });
 
-  it('anchors the requested row: scrolls it into view and flashes it', () => {
+  it('anchors the requested row: scrolls it into view, flashes it, and expands only that row', async () => {
+    const user = userEvent.setup();
     const scrollIntoView = vi.fn();
     window.HTMLElement.prototype.scrollIntoView = scrollIntoView;
-    render(
+    const view = render(
       <ChatContextPanel
         target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1', anchorId: '1:command:cmd-1' }}
         items={[userMsg(), tool(), command()]}
@@ -548,9 +561,40 @@ describe('panel-2 event feed', () => {
     const row = within(feed).getByText('pnpm test').closest('.trow');
     expect(row).not.toBeNull();
     expect(row!).toHaveClass('is-anchor-flash');
+    expect(row!).toHaveClass('open');
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
     // Other rows stay unflashed.
     expect(feed.querySelectorAll('.is-anchor-flash')).toHaveLength(1);
+    expect(feed.querySelectorAll('.trow.open')).toHaveLength(1);
+    const detail = row!.nextElementSibling;
+    expect(detail).toHaveClass('trow-detail');
+    expect(detail).toHaveTextContent('$ pnpm test');
+    expect(detail).toHaveTextContent('ok');
+
+    // A second click on the same transcript row is a fresh anchor request:
+    // reopen it even when the user collapsed the first expansion in Panel 2.
+    await user.click(row!);
+    expect(feed.querySelectorAll('.trow.open')).toHaveLength(0);
+    view.rerender(
+      <ChatContextPanel
+        target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1', anchorId: '1:command:cmd-1' }}
+        items={[userMsg(), tool(), command()]}
+        onClose={() => {}}
+      />,
+    );
+    expect(feed.querySelectorAll('.trow.open')).toHaveLength(1);
+
+    // Moving the anchor closes the prior auto-open row and opens the new one.
+    view.rerender(
+      <ChatContextPanel
+        target={{ kind: 'event-feed', turn: 1, sessionId: 'session-1', anchorId: '1:tool:tool-1' }}
+        items={[userMsg(), tool(), command()]}
+        onClose={() => {}}
+      />,
+    );
+    expect(within(feed).getByText('Read').closest('.trow')).toHaveClass('open');
+    expect(within(feed).getByText('pnpm test').closest('.trow')).not.toHaveClass('open');
+    expect(feed.querySelectorAll('.trow.open')).toHaveLength(1);
   });
 
   it('flashes nothing without an anchor request', () => {

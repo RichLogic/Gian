@@ -27,7 +27,7 @@ import type { ApprovalManager } from '../approval/index.js';
 import type { QueueManager } from '../queue/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
 import { SessionRepository } from './repository.js';
 import { SessionHistoryStore, type EventHistoryPage } from './history-store.js';
@@ -1104,6 +1104,12 @@ export class SessionManager {
         this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
       }
       this.persistTurnConfig(sessionId, draft);
+      // Non-Claude native titles can appear while the first turn is running,
+      // so start discovery as soon as the Provider accepts it. Claude writes
+      // ai-title after completion; starting its fallback clock here would beat
+      // the real summary on long turns, so Claude keeps the completion trigger.
+      // AutoTitle's in-flight/name guards keep accepted + completed idempotent.
+      if (session.executor !== 'claude') void this.autoTitle.maybeAutoTitle(sessionId);
       if (toolRequestId) {
         this.db.prepare(
           `UPDATE tool_deliveries
@@ -1154,10 +1160,118 @@ export class SessionManager {
     });
   }
 
-  setModel(sessionId: string, model: string): void {
+  /**
+   * Canonical model change. When the session's Proxy advertises
+   * `catalog.resolve` and the Catalog carries both model and effort roles,
+   * the stale effort is dropped, the proxy resolves the target model's
+   * catalog, and the resolved default effort is validated against the new
+   * choices before one transaction writes model, thinking_effort, turn
+   * config, options, and revision — followed by exactly one canonical
+   * session:updated broadcast. Proxies without catalog.resolve keep the
+   * legacy synchronous write (capability-driven; no executor branching).
+   */
+  async setModel(sessionId: string, model: string): Promise<void> {
     const session = this.getSession(sessionId);
     const trimmed = model.trim();
     const stored = trimmed.length > 0 ? trimmed : null;
+    if (stored === null) {
+      this.setModelWithoutCatalogResolution(session, stored);
+      return;
+    }
+    const cliPath = this.agentResolver?.cliPathForSession(session);
+    // Cold-start safe: bring the session's proxy up before reading its
+    // advertised capabilities, otherwise the first model change on a fresh
+    // Host process would silently miss the resolving path.
+    await this.proxySessions.ensure(session);
+    const protocolCapabilities = this.proxySessions.getProtocolCapabilities(session.executor, cliPath);
+    const catalog = this.proxySessions.getCapabilities(session.executor, cliPath);
+    const options = session.turn_config_options ?? catalog?.configOptions;
+    const modelOption = options?.find((option) => option.role === 'model');
+    const effortOption = options?.find((option) => option.role === 'effort');
+    if (
+      !catalog
+      || protocolCapabilities?.['catalog.resolve'] === undefined
+      || !modelOption
+      || !effortOption
+    ) {
+      this.setModelWithoutCatalogResolution(session, stored);
+      return;
+    }
+
+    // 1. Drop the stale effort and select the target model.
+    const turnConfig: Record<string, ConfigValue> = { ...(session.turn_config ?? {}) };
+    delete turnConfig[effortOption.id];
+    turnConfig[modelOption.id] = stored;
+
+    // 2. Resolve the target model's config options and defaults from the
+    //    proxy. An invalid combination fails here, before anything persists.
+    const resolved = await this.resolveCatalog(session.executor, {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig: {},
+      turnConfig,
+    }, sessionId, cliPath);
+    const resolvedEffort = resolved.configOptions.find((option) => option.role === 'effort');
+    let effort: string | null = null;
+    if (resolvedEffort) {
+      const candidate = turnConfig[resolvedEffort.id]
+        ?? resolved.resolvedDefaults.turnConfig[resolvedEffort.id]
+        ?? resolvedEffort.defaultValue
+        ?? null;
+      const choiceValues = (resolvedEffort.choices ?? []).map((choice) => choice.value);
+      if (candidate !== null && candidate !== undefined
+        && choiceValues.some((value) => Object.is(value, candidate))) {
+        effort = String(candidate);
+      } else {
+        throw new Error(
+          `Resolved thinking default for model "${stored}" is not one of its advertised choices.`,
+        );
+      }
+    }
+
+    // 3. One transaction for the whole canonical update.
+    const nextTurnConfig: Record<string, ConfigValue> = { ...turnConfig };
+    if (effort !== null && resolvedEffort) nextTurnConfig[resolvedEffort.id] = effort;
+    const now = new Date().toISOString();
+    const revision = `turn-config-${createHash('sha256')
+      .update(JSON.stringify(resolved.configOptions))
+      .digest('hex')
+      .slice(0, 24)}`;
+    this.db.transaction(() => {
+      this.db.prepare(
+        `UPDATE sessions
+            SET model = ?,
+                thinking_effort = ?,
+                turn_config_json = ?,
+                turn_config_options_json = ?,
+                turn_config_revision = ?,
+                updated_at = ?
+          WHERE id = ?`,
+      ).run(
+        stored,
+        effort,
+        JSON.stringify(nextTurnConfig),
+        JSON.stringify(resolved.configOptions),
+        revision,
+        now,
+        sessionId,
+      );
+    })();
+
+    // 4. Exactly one canonical broadcast with every updated field.
+    this.broadcastSessionUpdated(sessionId, {
+      model: stored,
+      thinking_effort: effort,
+      turn_config: nextTurnConfig,
+      turn_config_options: resolved.configOptions,
+      turn_config_revision: revision,
+      updated_at: now,
+    });
+  }
+
+  /** Legacy non-resolving write used by proxies without catalog.resolve or
+   *  when the Catalog has no model/effort role pair. */
+  private setModelWithoutCatalogResolution(session: Session, stored: string | null): void {
+    const sessionId = session.id;
     const now = new Date().toISOString();
     const optionId = this.optionIdForRole(session.executor, 'model', session);
     const turn_config = { ...(session.turn_config ?? {}), [optionId]: stored };
@@ -1167,7 +1281,7 @@ export class SessionManager {
     this.broadcastSessionUpdated(sessionId, { model: stored, turn_config, updated_at: now });
   }
 
-  setTurnConfigValue(sessionId: string, optionId: string, value: ConfigValue): void {
+  async setTurnConfigValue(sessionId: string, optionId: string, value: ConfigValue): Promise<void> {
     const session = this.getSession(sessionId);
     const option = (session.turn_config_options
       ?? this.proxySessions.getCapabilities(
@@ -1176,7 +1290,7 @@ export class SessionManager {
       )?.configOptions)
       ?.find((entry) => entry.id === optionId);
     if (option?.role === 'model') {
-      this.setModel(sessionId, value == null ? '' : String(value));
+      await this.setModel(sessionId, value == null ? '' : String(value));
       return;
     }
     if (option?.role === 'effort') {

@@ -39,7 +39,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.3';
+  return '0.2.6';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -121,7 +121,17 @@ async function main(): Promise<void> {
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await service.close();
+    try {
+      await service.close();
+    } catch (error) {
+      // Fail closed: an unverified terminal process group must turn the
+      // shutdown into a failed exit, not a silent clean one.
+      console.error(
+        '[kimi-proxy:shutdown] terminal cleanup failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+      process.exit(1);
+    }
     process.exit(code);
   };
   process.on('SIGINT', () => {

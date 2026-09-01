@@ -214,6 +214,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
   private nativeSessionId: string | null = null;
   private cwd: string | null = null;
   private catalogCache: ProxyCatalog | null = null;
+  private catalogStale = false;
   private activeTurnId: string | null = null;
   private closed = false;
   private exitNotified = false;
@@ -259,7 +260,11 @@ export class ProtocolV2SessionClient implements ProxyClient {
   }
 
   async catalog(): Promise<ProxyCatalog> {
-    this.catalogCache ??= await this.host.catalog();
+    if (this.catalogCache === null || this.catalogStale) {
+      this.catalogCache = await this.host.catalog();
+      this.catalogStale = false;
+      this.turnConfigOptions = this.normalizeTurnConfigOptions(this.turnConfigOptions);
+    }
     return this.catalogCache;
   }
 
@@ -595,7 +600,11 @@ export class ProtocolV2SessionClient implements ProxyClient {
     } else if (notification.method === 'interaction.resolved') {
       if (this.state === 'waiting_interaction') this.state = this.activeTurnId ? 'running' : 'idle';
     } else if (notification.method === 'catalog.changed') {
-      this.catalogCache = null;
+      // Keep the last normalized catalog available while the Host refetches.
+      // A Provider may immediately follow catalog.changed with a role-free
+      // 2.1 session.updated snapshot; dropping the old catalog here loses the
+      // Special Catalog projection and hides the Composer controls.
+      this.catalogStale = true;
     }
     for (const handler of this.notificationHandlers) handler(notification);
   }

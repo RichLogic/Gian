@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   formatPrepackageSummary,
+  prepackageSkipReason,
   PREPACKAGE_STEPS,
 } from './run-quality-prepackage.mjs';
 
@@ -40,4 +41,27 @@ test('prepackage summary links the detailed log when one is available', () => {
     '/tmp/prepackage.log',
   );
   assert.match(summary, /Detailed log: \/tmp\/prepackage\.log/);
+});
+
+test('curated source skips only absent internal E2E and remains package-ready', () => {
+  assert.equal(prepackageSkipReason('e2e', {
+    curatedSource: true,
+    e2eAvailable: false,
+  }), 'curated public source omits internal e2e specs');
+  assert.equal(prepackageSkipReason('e2e', {
+    curatedSource: false,
+    e2eAvailable: false,
+  }), null, 'private source must run and fail if its E2E specs disappear');
+  assert.equal(prepackageSkipReason('desktop', {
+    curatedSource: true,
+    e2eAvailable: false,
+  }), null, 'Electron smoke remains mandatory in curated source');
+
+  const summary = formatPrepackageSummary([
+    { label: 'Tests', status: 'PASS' },
+    { label: 'Browser journeys', status: 'SKIP', reason: 'curated public source omits internal e2e specs' },
+    { label: 'Electron smoke', status: 'PASS' },
+  ]);
+  assert.match(summary, /\[SKIP\] Browser journeys: curated public source/);
+  assert.match(summary, /RESULT: PASS/);
 });

@@ -43,11 +43,14 @@ import type {
   UserAgentStatus,
 } from '@gian/shared';
 import {
+  EXECUTOR_DEFS,
+  EXECUTOR_IDS,
   isProductExecutor,
   migrateLegacyGrokProxyDefaults,
   PRODUCT_EXECUTORS,
 } from '@gian/shared';
 import { CommandRuntimeProvider } from '../runtime/command-provider.js';
+import { ZCODE_CLI_CONFIG_READINESS_ISSUE, ZcodeRuntimeProvider } from '../runtime/zcode-provider.js';
 import { DshRuntimeProvider } from '../runtime/dsh-provider.js';
 import { DshRuntimeInstaller } from '../runtime/dsh-installer.js';
 import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.js';
@@ -82,20 +85,21 @@ const STATUS_CACHE_TTL_MS = 30_000;
 const VERIFIED_CLI_VERSIONS: Record<Executor, string[]> = {
   claude: ['2.1.159'],
   codex: ['0.146.0'],
-  kimi: ['0.31.1'],
+  // Only the CLI version with a completed real regression of the ACP
+  // terminal capability; 0.31.1 never ran that regression (plan §0.8).
+  kimi: ['0.38.0'],
   grok: ['1.0.4'],
   // Resolved from the official npm latest dist-tag at install/probe time;
   // this value is only a diagnostic fallback (plan §0).
   dsh: ['0.1.0-rc.7'],
+  // WP0-verified exact version (Revision 2 §1.3: precise SemVer only).
+  zcode: ['0.16.5'],
 };
 
-const DEVELOPMENT_PROCESS_SCOPE: Record<Executor, 'shared' | 'session'> = {
-  claude: 'session',
-  grok: 'session',
-  codex: 'shared',
-  kimi: 'shared',
-  dsh: 'shared',
-};
+const DEVELOPMENT_PROCESS_SCOPE: Record<Executor, 'shared' | 'session'> =
+  Object.fromEntries(
+    EXECUTOR_IDS.map((id) => [id, EXECUTOR_DEFS[id].processScope]),
+  ) as Record<Executor, 'shared' | 'session'>;
 
 interface AgentDefinition {
   id: Executor;
@@ -262,6 +266,20 @@ const AGENTS: Record<Executor, AgentDefinition> = {
       '/usr/local/bin/dsh',
     ],
   },
+  zcode: {
+    id: 'zcode',
+    name: 'ZCode',
+    command: 'zcode',
+    // ZCode ships only inside the ZCode.app bundle (Revision 2 §4.1); the
+    // URL documents the official download page for the settings surface.
+    // Gian never downloads, installs, mirrors, or upgrades ZCode.
+    installerUrl: 'https://zcode.z.ai',
+    installerSha256: '',
+    officialPaths: home => [
+      join('/Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs'),
+      join(home, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs'),
+    ],
+  },
 };
 
 function emptyConfig(): AgentConfigFile {
@@ -328,6 +346,7 @@ const PROXY_TAGLINES: Record<ProductExecutor, string> = {
   codex: 'OpenAI Codex agent',
   kimi: 'Moonshot Kimi Code agent',
   dsh: 'DeepSeek Harness agent',
+  zcode: 'Z.ai ZCode coding agent',
 };
 
 /** Lenient read-side normalization of one persisted Agent. Returns null for
@@ -684,7 +703,7 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
  * keeps its short id. Managed Manifest identity must match initialize.
  */
 export function pluginIdFor(id: Executor): string {
-  return id === 'dsh' ? 'ai.deepseek.harness' : id;
+  return EXECUTOR_DEFS[id].pluginId;
 }
 
 function validateProxyInitialize(id: Executor, value: unknown): void {
@@ -784,7 +803,15 @@ export class AgentManager {
                 overridePath: options.environmentCliPaths?.dsh,
                 pathEnv: options.pathEnv,
               })
-            : commandProvider,
+            : definition.id === 'zcode'
+              ? new ZcodeRuntimeProvider({
+                  overridePath: options.environmentCliPaths?.zcode,
+                  ...(options.pathEnv !== undefined ? { pathEnv: options.pathEnv } : {}),
+                  // Keep the config-readiness check inside the manager's HOME
+                  // boundary so tests (and packaged runs) stay hermetic.
+                  ...(options.homeDir !== undefined ? { home: options.homeDir } : {}),
+                })
+              : commandProvider,
       );
     }
   }
@@ -1457,6 +1484,13 @@ export class AgentManager {
       if (id === 'dsh') {
         return this.installDshRuntime(id, updateOwner);
       }
+      if (id === 'zcode') {
+        // Unmanaged runtime: direct the user to the official channel instead
+        // of downloading anything (Revision 2 §4.1 / frozen D3).
+        throw new Error(
+          'ZCode is not installed through Gian. Download ZCode.app from https://zcode.z.ai, then configure an explicit model provider for the ZCode CLI (Gian will not create or modify ~/.zcode) and retry.',
+        );
+      }
       const script = await this.download(definition.installerUrl, MAX_INSTALLER_BYTES);
       assertOfficialInstallerIntegrity(
         script,
@@ -1716,12 +1750,28 @@ export class AgentManager {
         const contentFingerprint = provider.snapshot
           ? await provider.snapshot(probe)
           : null;
+        // WP0 G1 (frozen O2): the ZCode CLI needs its own model-provider
+        // config; Gian reports generic repair guidance, never writes ~/.zcode.
+        if (
+          id === 'zcode'
+          && provider instanceof ZcodeRuntimeProvider
+          && (await provider.configReady()) === false
+        ) {
+          return {
+            state: 'invalid',
+            path: probe.binaryPath,
+            version: probe.version,
+            contentFingerprint,
+            source: probe.source,
+            readinessIssue: { ...ZCODE_CLI_CONFIG_READINESS_ISSUE },
+          };
+        }
         return {
           state: 'ready',
           path: probe.binaryPath,
           version: probe.version,
           contentFingerprint,
-          source: probe.source === 'managed' ? 'official-user' : probe.source,
+          source: probe.source,
         };
       } catch (error) {
         failures.push(error instanceof Error ? error.message : String(error));

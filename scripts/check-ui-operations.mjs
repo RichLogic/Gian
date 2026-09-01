@@ -76,6 +76,8 @@ export const REST_MUTATION_TO_OPERATION = {
   createWorkspace: ['workspace.create'],
   updateWorkspace: ['workspace.rename', 'workspace.setHidden', 'workspace.pin'],
   reorderWorkspaces: ['workspace.reorder'],
+  reorderTasks: ['task.reorder'],
+  reorderSessions: ['session.reorder'],
   deleteWorkspace: ['workspace.delete'],
   saveClaudeMd: ['workspace.saveClaudeMd'],
   pickWorkspaceFolder: ['workspace.pickFolder'],

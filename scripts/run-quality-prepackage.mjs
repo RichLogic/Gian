@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireQualityLock } from './quality-lock.mjs';
@@ -52,9 +52,10 @@ export function formatPrepackageSummary(results, logPath) {
   for (const result of results) {
     const resource = result.resources ? `; ${formatResourceMetrics(result.resources)}` : '';
     const suffix = result.duration ? ` (${result.duration}${resource})` : '';
-    lines.push(`[${result.status}] ${result.label}${suffix}`);
+    const reason = result.reason ? `: ${result.reason}` : '';
+    lines.push(`[${result.status}] ${result.label}${reason}${suffix}`);
   }
-  const passed = results.every(result => result.status === 'PASS');
+  const passed = results.every(result => result.status !== 'FAIL');
   lines.push('');
   lines.push(passed
     ? 'RESULT: PASS - the source tree is ready to package.'
@@ -62,6 +63,13 @@ export function formatPrepackageSummary(results, logPath) {
   lines.push('NOTE: the final packaged .app is a separate artifact check.');
   if (logPath) lines.push(`Detailed log: ${logPath}`);
   return lines.join('\n');
+}
+
+export function prepackageSkipReason(stepId, options) {
+  if (stepId === 'e2e' && options.curatedSource && !options.e2eAvailable) {
+    return 'curated public source omits internal e2e specs';
+  }
+  return null;
 }
 
 export async function main() {
@@ -84,10 +92,20 @@ export async function main() {
 
     console.log('Gian prepackage quality gate');
     console.log(`Revision: ${revision}${dirty ? ' (working tree has changes)' : ''}`);
+    const curatedSource = !existsSync(join(rootDir, 'AGENTS.md'));
+    const e2eAvailable = existsSync(join(rootDir, 'e2e', 'specs'));
 
     for (const step of PREPACKAGE_STEPS) {
       if (failed) {
         results.push({ ...step, status: 'SKIP' });
+        continue;
+      }
+      const reason = prepackageSkipReason(step.id, { curatedSource, e2eAvailable });
+      if (reason) {
+        const skipped = { ...step, status: 'SKIP', reason };
+        results.push(skipped);
+        console.log(`\n[SKIP] ${step.label}: ${reason}`);
+        appendFileSync(logPath, `\n[SKIP] ${step.label}: ${reason}\n`);
         continue;
       }
 

@@ -1,4 +1,5 @@
 import {
+  isExecutorId,
   usesNativeExecutorConfig,
   type ApprovalMode,
   type Executor,
@@ -72,6 +73,17 @@ export function registerTaskRoutes(
     }
   });
 
+  // Sidebar drag reorder (2026-08-29): the caller passes the scope's full
+  // ordered id list; values are rewritten to a dense 1..n sequence. Like
+  // /api/workspaces/reorder this does NOT broadcast — the web operation layer
+  // converges canonical state itself (see operations/task.ts).
+  app.post('/api/tasks/reorder', async c => {
+    const body = await c.req.json<{ ids: string[] }>();
+    if (!Array.isArray(body.ids)) return c.json({ error: 'ids required' }, 400);
+    tasks.reorderTasks(body.ids);
+    return c.json({ ok: true });
+  });
+
   app.delete('/api/tasks/:id', async c => {
     const id = c.req.param('id');
     if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
@@ -100,13 +112,7 @@ export function registerTaskRoutes(
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (body.agent_id === undefined &&
-      body.executor !== 'claude'
-      && body.executor !== 'codex'
-      && body.executor !== 'kimi'
-      && body.executor !== 'grok'
-      && body.executor !== 'dsh'
-    ) {
+    if (body.agent_id === undefined && !isExecutorId(body.executor)) {
       return c.json({ error: 'executor must be claude, codex, kimi, grok, or dsh' }, 400);
     }
     try {

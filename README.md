@@ -4,7 +4,7 @@
 
 <h1 align="center">Gian</h1>
 
-<p align="center"><strong>One local desktop workspace for Codex, Claude Code, Kimi Code, and DeepSeek Harness.</strong></p>
+<p align="center"><strong>One local desktop workspace for Codex, Claude Code, Kimi Code, DeepSeek Harness, and ZCode.</strong></p>
 
 <p align="center">
   Keep agent sessions, approvals, tasks, worktrees, files, diffs, and terminals in one focused macOS app.
@@ -15,11 +15,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/download/v0.5.3/Gian-0.5.3-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.5.3-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/download/v0.5.4/Gian-0.5.4-arm64.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-Gian_0.5.4-E4572E?style=for-the-badge&logo=apple&logoColor=white" alt="Download Gian for macOS Apple Silicon"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.5.3"><img src="https://img.shields.io/badge/release-v0.5.3_beta-C65D3A" alt="Current Gian beta release v0.5.3"></a>
+  <a href="https://github.com/RichLogic/Gian/releases/tag/v0.5.4"><img src="https://img.shields.io/badge/release-v0.5.4_beta-C65D3A" alt="Current Gian beta release v0.5.4"></a>
   <img src="https://img.shields.io/badge/platform-macOS_Apple_Silicon-1F2328?logo=apple" alt="Platform macOS Apple Silicon">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2F7D6D" alt="MIT License"></a>
 </p>
@@ -30,7 +30,7 @@
 
 ## Why Gian
 
-- Run Codex, Claude Code, Kimi Code, and DeepSeek Harness from one consistent desktop interface.
+- Run Codex, Claude Code, Kimi Code, DeepSeek Harness, and ZCode from one consistent desktop interface.
 - Keep several sessions visible and switch between them without juggling terminals.
 - Review assistant messages, plans, tool calls, commands, approvals, and errors as structured events.
 - Group related sessions into Tasks without adding an autonomous manager between you and your agents.
@@ -68,7 +68,7 @@ Beta intentionally does not include an autonomous Task Manager or Discord/Slack 
 
 Gian is currently an **unsigned macOS beta for Apple Silicon**. It is not yet notarized, so macOS Gatekeeper will warn the first time you open it.
 
-1. Download [`Gian-0.5.3-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.5.3/Gian-0.5.3-arm64.dmg) from the [current beta release](https://github.com/RichLogic/Gian/releases/tag/v0.5.3).
+1. Download [`Gian-0.5.4-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.5.4/Gian-0.5.4-arm64.dmg) from the [current beta release](https://github.com/RichLogic/Gian/releases/tag/v0.5.4).
 2. Open the DMG and drag Gian into **Applications**.
 3. In Finder, Control-click Gian and choose **Open**, then choose **Open** again in the Gatekeeper dialog.
 4. If macOS does not offer that option, open **System Settings > Privacy & Security** and choose **Open Anyway** for Gian.
@@ -85,6 +85,7 @@ On first run, Gian guides you through GitHub sign-in, agent setup, and choosing 
 | Claude Code | Anthropic Claude Code CLI | Structured print-mode proxy |
 | Kimi Code | Moonshot AI Kimi CLI | Shared ACP proxy |
 | DeepSeek Harness | DeepSeek DSH CLI | Managed profile, Bridge, and shared proxy |
+| ZCode | Z.ai ZCode.app Agent runtime | Per-workspace app-server proxy |
 
 Gian can detect an existing CLI or use a custom executable path. If a CLI is missing, setup can launch the vendor's official installer. Gian downloads its matching integration proxy from the same GitHub Release and verifies it before activation.
 

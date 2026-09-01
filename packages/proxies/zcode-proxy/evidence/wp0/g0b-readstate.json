@@ -1,0 +1,67 @@
+{
+  "gate": "G0",
+  "sub": "workspace/readState",
+  "results": {
+    "sessionCountBefore": 0,
+    "readState": "ok",
+    "shape": {
+      "modelCatalog": {
+        "available": {
+          "array": 0
+        },
+        "providers": {
+          "array": 0
+        },
+        "revision": 0
+      },
+      "settings": {
+        "mode": {
+          "current": "build"
+        },
+        "model": {
+          "available": {
+            "array": 0
+          },
+          "current": {
+            "modelId": "missing-model",
+            "providerId": "zcode-unconfigured"
+          },
+          "lastUsed": {
+            "modelId": "missing-model",
+            "providerId": "zcode-unconfigured"
+          }
+        },
+        "permission": {
+          "mode": "build"
+        },
+        "thoughtLevel": {
+          "available": {
+            "array": 0
+          },
+          "enabled": false
+        }
+      },
+      "slashCommands": {
+        "array": 4,
+        "sample": {
+          "description": "Show or set the current session goal.",
+          "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+          "name": "goal",
+          "source": "builtin"
+        }
+      },
+      "workspace": {
+        "workspacePath": "/tmp/zcode-wp0-g0b-ws-a3gx6p",
+        "workspaceKey": "/tmp/zcode-wp0-g0b-ws-a3gx6p"
+      }
+    },
+    "topKeys": [
+      "modelCatalog",
+      "settings",
+      "slashCommands",
+      "workspace"
+    ],
+    "sessionCountAfter": 0,
+    "sideEffectFree": true
+  }
+}

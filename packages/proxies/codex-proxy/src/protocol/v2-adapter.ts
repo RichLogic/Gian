@@ -2238,9 +2238,7 @@ export class CodexProtocolV2Adapter {
       }
       case 'runtime.error':
         if (turnId) {
-          this.completeTurn(session, turnId, true, {
-            message: String(data.message ?? 'Codex runtime error.'),
-          });
+          this.completeTurn(session, turnId, true, data);
         } else {
           this.updateSession(session, {
             state: 'error',
@@ -2311,13 +2309,18 @@ export class CodexProtocolV2Adapter {
     this.closeOpenWork(session, turnId, failed ? 'failed' : 'succeeded');
     if (failed) {
       const message = String(data.message ?? 'Codex turn failed.');
-      this.updateSession(session, { state: 'error', lastError: message });
+      const retryable = data.retryable === true;
+      const providerCode = nonEmptyString(data.code);
+      this.updateSession(session, {
+        state: retryable ? 'idle' : 'error',
+        lastError: retryable ? null : message,
+      });
       this.emitTurnEvent('turn.failed', session, turnId, {
         error: {
-          domainCode: 'RUNTIME_ERROR',
+          domainCode: retryable ? 'RUNTIME_UNAVAILABLE' : 'RUNTIME_ERROR',
           message,
-          retryable: false,
-          details: {},
+          retryable,
+          details: providerCode ? { providerCode } : {},
         },
       });
     } else {

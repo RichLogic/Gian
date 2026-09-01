@@ -11,6 +11,7 @@ import type {
   Task,
   Workspace,
 } from './model.js';
+import { EXECUTOR_IDS, PRODUCT_EXECUTOR_IDS } from './executors.js';
 import { normalizeBrowserElementCapture } from './browser-context.js';
 import { normalizeComposerDocument } from './context.js';
 import type { ListNativeSessionsResponse, NativeSession } from './native.js';
@@ -95,7 +96,7 @@ function isAgentRuntimeProfile(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.skill)) return false;
   return isString(value.id)
     && isString(value.agentId)
-    && isOneOf(value.proxy, ['codex', 'claude', 'kimi', 'dsh'])
+    && isOneOf(value.proxy, PRODUCT_EXECUTOR_IDS as readonly string[])
     && isString(value.cliPath)
     && isString(value.cliVersion)
     && isNullableString(value.configHome)
@@ -121,7 +122,7 @@ export function isSession(value: unknown): value is Session {
     ))
     && isOptional(value, 'created_by_actor_id', isNullableString)
     && isOptional(value, 'created_by_session_id', isNullableString)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok', 'dsh'])
+    && isOneOf(value.executor, EXECUTOR_IDS as readonly string[])
     && isOptional(value, 'runtime_profile', entry => entry === null || isAgentRuntimeProfile(entry))
     && isNullableString(value.model)
     && (value.approval_mode === null
@@ -134,6 +135,8 @@ export function isSession(value: unknown): value is Session {
     && isOneOf(value.status, ['new', 'running', 'pending', 'error', 'done'])
     && isZeroOrOne(value.archived)
     && isNullableString(value.pinned_at)
+    && isOptional(value, 'workspace_order', isNullableNumber)
+    && isOptional(value, 'task_order', isNullableNumber)
     && isZeroOrOne(value.unread)
     && isNullableString(value.worktree_path)
     && isOptional(value, 'detected_worktree_path', isNullableString)
@@ -274,7 +277,8 @@ function isTask(value: unknown): value is Task {
     && isOneOf(value.status, ['open', 'done', 'archived'])
     && isString(value.created_at)
     && isString(value.updated_at)
-    && isNullableString(value.pinned_at);
+    && isNullableString(value.pinned_at)
+    && isOptional(value, 'sort_order', isNullableNumber);
 }
 
 function isApproval(value: unknown): value is Approval {
@@ -378,7 +382,7 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
 export function isNativeSession(value: unknown): value is NativeSession {
   if (!isRecord(value)) return false;
   return isString(value.id)
-    && isOneOf(value.executor, ['codex', 'claude', 'kimi', 'grok', 'dsh'])
+    && isOneOf(value.executor, EXECUTOR_IDS as readonly string[])
     && isString(value.filePath)
     && isString(value.cwd)
     && isString(value.updatedAt)

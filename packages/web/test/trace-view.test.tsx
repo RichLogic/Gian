@@ -172,6 +172,19 @@ describe('TraceView event list', () => {
     expect(screen.queryByTestId('trace-timeline')).not.toBeInTheDocument();
   });
 
+  it('keeps the partial hint pinned before the first trace item arrives', () => {
+    renderTrace({
+      sessionId: 'sess-empty-streaming',
+      generatedAt: '2026-08-15T10:00:00.000Z',
+      partial: true,
+      items: [],
+    });
+    expect(screen.getByTestId('trace-pinned-header'))
+      .toContainElement(screen.getByTestId('trace-partial'));
+    expect(screen.getByTestId('trace-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('trace-timeline')).not.toBeInTheDocument();
+  });
+
   it('renders no reasoning/plan rows or spans for a partial-capability session', () => {
     renderTrace(traceFixturePartialCapability);
     expect(document.querySelectorAll('[data-kind="reasoning"]')).toHaveLength(0);

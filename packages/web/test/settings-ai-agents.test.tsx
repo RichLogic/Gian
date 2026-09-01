@@ -249,6 +249,38 @@ describe('SettingsBody AI Agents', () => {
     }, { timeout: 5_000 });
   }, ASYNC_DIALOG_TEST_TIMEOUT_MS);
 
+  it('keeps a DSH Agent saved and offers restart retry when native relaunch does not start', async () => {
+    const restartApp = vi.fn().mockResolvedValue(false);
+    (window as { gianDesktop?: unknown }).gianDesktop = { appVariant: 'production', restartApp };
+    renderSettings();
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Add Agent' }))[0]!);
+    const catalog = await screen.findByRole('dialog');
+    fireEvent.click(within(catalog).getByText('DeepSeek Harness'));
+    fireEvent.click(within(catalog).getByRole('button', { name: 'Continue' }));
+
+    const draftCard = await screen.findByTestId('agent-draft-card');
+    fireEvent.click(within(draftCard).getByRole('button', { name: 'Save & Restart' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Restart' }, { timeout: 5_000 }));
+
+    expect(await screen.findByTestId('agent-restart-required')).toHaveTextContent(
+      'The Agent was saved, but Gian could not restart automatically.',
+    );
+    expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'DeepSeek Harness',
+      proxy: 'dsh',
+      cliPath: null,
+    });
+    expect(api.deleteAgent).not.toHaveBeenCalled();
+    expect(restartApp).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart now' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The Agent remains saved; quit and reopen Gian manually, or try again.',
+    );
+    expect(restartApp).toHaveBeenCalledTimes(2);
+  }, ASYNC_DIALOG_TEST_TIMEOUT_MS);
+
   it('renders a saved ready Agent: inline name, Proxy kind, versions, and Defaults', async () => {
     const saved = agent({
       proxy: 'claude',

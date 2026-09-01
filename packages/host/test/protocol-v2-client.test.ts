@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { ProxyNotification } from '@gian/proxy-protocol';
 import { ProtocolV2Client } from '../src/proxy/protocol-v2-client.js';
-import { normalizeProtocolCatalog } from '../src/proxy/protocol-v2-session-client.js';
+import {
+  normalizeProtocolCatalog,
+  ProtocolV2SessionClient,
+} from '../src/proxy/protocol-v2-session-client.js';
 
 test('Host normalizes 2.1 Special Catalog ids for existing internal config projections', () => {
   const catalog = normalizeProtocolCatalog({
@@ -31,6 +34,62 @@ test('Host normalizes 2.1 Special Catalog ids for existing internal config proje
     ['native-fast', 'fast'],
     ['native-approval', 'approval_mode'],
   ]);
+});
+
+test('catalog invalidation keeps Special Catalog roles for an immediate session snapshot', async () => {
+  const catalog = normalizeProtocolCatalog({
+    catalogRevision: 'rev-21',
+    input: [{ type: 'text' }],
+    configOptions: [
+      { id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false, defaultValue: 'k3', choices: [{ value: 'k3', displayName: 'K3' }] },
+      { id: 'thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false, defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }] },
+      { id: 'mode', displayName: 'Mode', binding: 'turn', control: 'select', required: false, defaultValue: 'yolo', choices: [{ value: 'yolo', displayName: 'YOLO' }] },
+    ],
+    specialCatalogs: { model: 'model', thinking: 'thinking', approvalMode: 'mode' },
+    slashCommands: [],
+  });
+  let catalogCalls = 0;
+  const client = new ProtocolV2SessionClient({
+    executor: 'kimi',
+    catalog: async () => {
+      catalogCalls += 1;
+      return catalog;
+    },
+  } as never, 'session-1');
+  await client.catalog();
+
+  client.deliverNotification({
+    method: 'catalog.changed',
+    params: {
+      eventId: 'catalog-event',
+      emittedAt: '2026-08-31T09:00:00.000Z',
+      data: { reason: 'available-commands', revision: 'rev-22' },
+    },
+  } as ProxyNotification);
+  client.deliverNotification({
+    method: 'session.updated',
+    params: {
+      eventId: 'session-event',
+      emittedAt: '2026-08-31T09:00:00.001Z',
+      sessionId: 'session-1',
+      streamId: 'stream-1',
+      data: {
+        turnConfigOptions: catalog.configOptions.map(({ role: _role, ...option }) => option),
+        turnConfigRevision: 'turn-rev-2',
+      },
+    },
+  } as ProxyNotification);
+
+  const snapshot = client as unknown as {
+    turnConfigOptions?: Array<{ id: string; role?: string }>;
+  };
+  assert.deepEqual(snapshot.turnConfigOptions?.map(option => [option.id, option.role]), [
+    ['model', 'model'],
+    ['thinking', 'effort'],
+    ['mode', 'approval_mode'],
+  ]);
+  await client.catalog();
+  assert.equal(catalogCalls, 2, 'the invalidated catalog still refetches on demand');
 });
 
 function fixtureSource(options: { malformedCatalog?: boolean; invalidUtf8Catalog?: boolean } = {}): string {

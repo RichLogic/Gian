@@ -2,7 +2,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { serve } from '@hono/node-server';
-import type { Executor } from '@gian/shared';
+import { EXECUTOR_DEFS, EXECUTOR_IDS, type Executor } from '@gian/shared';
 import { createApp } from './web/app.js';
 import { startGianToolRpc } from './tool/rpc-server.js';
 import { openDatabase } from './storage/db.js';
@@ -91,33 +91,19 @@ async function main(): Promise<void> {
     console.warn('[gian] agent instruction cleanup failed:', err);
   }
 
-  const developmentProxyEntries = {
-    claude: resolveProxyEntry(
-      process.env.GIAN_CC_PROXY_ENTRY,
-      '@gian/cc-proxy',
-      'cc-proxy',
-    ),
-    codex: resolveProxyEntry(
-      process.env.GIAN_CODEX_PROXY_ENTRY,
-      '@gian/codex-proxy',
-      'codex-proxy',
-    ),
-    kimi: resolveProxyEntry(
-      process.env.GIAN_KIMI_PROXY_ENTRY,
-      '@gian/kimi-proxy',
-      'kimi-proxy',
-    ),
-    grok: resolveProxyEntry(
-      process.env.GIAN_GROK_PROXY_ENTRY,
-      '@gian/grok-proxy',
-      'grok-proxy',
-    ),
-    dsh: resolveProxyEntry(
-      process.env.GIAN_DSH_PROXY_ENTRY,
-      '@gian/dsh-proxy',
-      'dsh-proxy',
-    ),
-  } as const;
+  const developmentProxyEntries = Object.fromEntries(
+    EXECUTOR_IDS.map((id) => {
+      const def = EXECUTOR_DEFS[id];
+      return [
+        id,
+        resolveProxyEntry(
+          process.env[def.entryEnvVar],
+          def.proxyPackageName,
+          def.proxyPackageDir,
+        ),
+      ];
+    }),
+  ) as Record<Executor, string>;
   const agentManager = await AgentManager.create({
     dataDir,
     releaseVersion,
@@ -146,14 +132,13 @@ async function main(): Promise<void> {
       kimi: { model: '', thinking: '', mode: '' },
       grok: { model: '', thinking: '', mode: '' },
       dsh: { model: '', thinking: '', mode: '' },
+      zcode: { model: '', thinking: '', mode: '' },
     },
-    environmentCliPaths: {
-      ...(process.env.CLAUDE_BIN ? { claude: process.env.CLAUDE_BIN } : {}),
-      ...(process.env.CODEX_BIN ? { codex: process.env.CODEX_BIN } : {}),
-      ...(process.env.KIMI_BIN ? { kimi: process.env.KIMI_BIN } : {}),
-      ...(process.env.GROK_BIN ? { grok: process.env.GROK_BIN } : {}),
-      ...(process.env.DSH_BIN ? { dsh: process.env.DSH_BIN } : {}),
-    },
+    environmentCliPaths: Object.fromEntries(
+      EXECUTOR_IDS
+        .map((id) => [id, process.env[EXECUTOR_DEFS[id].binEnvVar]] as const)
+        .filter((entry): entry is [Executor, string] => Boolean(entry[1])),
+    ),
     // v2 migration source: kinds that appear in existing sessions get one
     // default Agent even without a configured path or installed Proxy.
     sessionExecutors: () => (
@@ -185,10 +170,12 @@ async function main(): Promise<void> {
     kimiProxyEntry: bootDescriptors.kimi?.entryPath,
     grokProxyEntry: bootDescriptors.grok?.entryPath,
     dshProxyEntry: bootDescriptors.dsh?.entryPath,
+    zcodeProxyEntry: bootDescriptors.zcode?.entryPath,
     codexProxy: bootDescriptors.codex?.protocol,
     kimiProxy: bootDescriptors.kimi?.protocol,
     grokProxy: bootDescriptors.grok?.protocol,
     dshProxy: bootDescriptors.dsh?.protocol,
+    zcodeProxy: bootDescriptors.zcode?.protocol,
     runtimeManager,
     agentManager,
   });

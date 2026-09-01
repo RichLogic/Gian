@@ -4,6 +4,7 @@ import type {
   ChatEvent,
   ConfigOption,
   EventEnvelope,
+  Executor,
   ExecutorConfigState,
   InputItem,
   MessageContextItem,
@@ -23,7 +24,7 @@ import {
   type ReplayEvent,
 } from '@gian/proxy-protocol';
 import type { ApprovalManager } from '../approval/index.js';
-import { projectNotification } from '../event/index.js';
+import { projectNotification, InteractionKindRegistry } from '../event/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { QueueManager } from '../queue/index.js';
 import type { Db } from '../storage/db.js';
@@ -129,6 +130,9 @@ export class SessionEventCoordinator {
   private replayRefreshCancelled = new Set<string>();
   private attention: AttentionDispatcher;
   private traceEvidence: TraceEvidenceStore;
+  /** Pending interaction optionId -> ACP kind, recorded from requested
+   *  projections and consumed by resolved projections (live and replay). */
+  private readonly interactionKinds = new InteractionKindRegistry();
 
   constructor(
     private db: Db,
@@ -517,6 +521,10 @@ export class SessionEventCoordinator {
             `Proxy replay event ${notification.params.eventId} changed after persistence.`,
           );
         }
+        // Already persisted: no new projection, but interaction kind tracking
+        // must still observe the stream so a later resolved event maps to the
+        // same decision live and replay derive.
+        this.observeRawInteractionEvent(sessionId, notification as unknown as ProxyNotification);
         continue;
       }
       const turn = ensureTurn(notification.params.turnId, createdAt);
@@ -524,7 +532,7 @@ export class SessionEventCoordinator {
       // later confirms that input, but must not render it a second time.
       const projected = notification.method === 'input.recorded' && !turn.replayOwned
         ? []
-        : projectNotification(
+        : this.projectEventsWithKindTracking(
             provider,
             notification as unknown as ProxyNotification,
             sessionId,
@@ -805,7 +813,10 @@ export class SessionEventCoordinator {
       } catch (error) {
         if (!(error instanceof ProxyProtocolError)) throw error;
         console.error(`[proxy-live] ${sessionId} protocol fault`, error);
-        if (error.faultClass === 'session') this.proxySessions.quarantine(sessionId, error);
+        if (error.faultClass === 'session') {
+          this.interactionKinds.forgetSession(sessionId);
+          this.proxySessions.quarantine(sessionId, error);
+        }
         else if (error.fatal) this.proxySessions.abort(sessionId);
         else throw error;
         return;
@@ -1008,6 +1019,7 @@ export class SessionEventCoordinator {
     standardNativeSessionId?: string,
     manageWatcher = true,
   ): void {
+    this.interactionKinds.forgetSession(gianSessionId);
     const data = notification.params?.data as
       | { oldNativeSessionId?: string; newNativeSessionId?: string }
       | undefined;
@@ -1082,7 +1094,66 @@ export class SessionEventCoordinator {
     turn: number,
   ): ChatEvent[] {
     const session = this.sessions.get(sessionId);
-    return projectNotification(session.executor, notification, sessionId, turn);
+    return this.projectEventsWithKindTracking(session.executor, notification, sessionId, turn);
+  }
+
+  /**
+   * Project one notification while maintaining the pending-interaction
+   * option-kind registry: requested events record their native
+   * optionId -> ACP kind mapping, resolved events consume it to derive the
+   * Gian decision before persistence, in both live and replay order.
+   */
+  private projectEventsWithKindTracking(
+    provider: Executor,
+    notification: ProxyNotification,
+    sessionId: string,
+    turn: number,
+  ): ChatEvent[] {
+    const events = projectNotification(
+      provider,
+      notification,
+      sessionId,
+      turn,
+      (notificationSessionId, approvalId) => this.interactionKinds.lookup(notificationSessionId, approvalId),
+    );
+    for (const event of events) {
+      const type = event.display?.type;
+      const data = event.display?.data as Record<string, unknown> | undefined;
+      if ((type === 'interaction.approval' || type === 'interaction.question') && data) {
+        this.interactionKinds.record(sessionId, String(data.approvalId ?? ''), data.nativeOptions);
+      } else if (type === 'interaction.resolved' && data) {
+        this.interactionKinds.forget(sessionId, String(data.approvalId ?? ''));
+      }
+    }
+    return events;
+  }
+
+  /**
+   * Observe raw interaction notifications WITHOUT projecting or persisting
+   * them. Replay streams skip events that are already persisted, but the
+   * requested->resolved kind mapping must still be tracked in stream order so
+   * a newly arriving resolved event maps to the same decision as live.
+   */
+  private observeRawInteractionEvent(sessionId: string, notification: ProxyNotification): void {
+    if (
+      notification.method !== 'interaction.requested'
+      && notification.method !== 'interaction.resolved'
+    ) {
+      return;
+    }
+    const data = notification.params?.data as Record<string, unknown> | undefined;
+    if (!data) return;
+    const interactionId = typeof data.interactionId === 'string' ? data.interactionId : '';
+    if (!interactionId) return;
+    if (notification.method === 'interaction.requested') {
+      const context = data.context as Record<string, unknown> | undefined;
+      const kinds = context?.permissionOptionKinds;
+      if (kinds && typeof kinds === 'object') {
+        this.interactionKinds.record(sessionId, interactionId, kinds);
+      }
+    } else {
+      this.interactionKinds.forget(sessionId, interactionId);
+    }
   }
 
   /** Persist the native event and broadcast its optional UI projection. */
@@ -1355,6 +1426,7 @@ export class SessionEventCoordinator {
   }
 
   handleProxyExit(sessionId: string, code: number | null): void {
+    this.interactionKinds.forgetSession(sessionId);
     // Pending approvals that were in flight against this proxy will never
     // resolve now — drop them so the UI's approval list stays accurate.
     this.approvals.clearSession(sessionId);
@@ -1466,8 +1538,8 @@ export class SessionEventCoordinator {
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
     }
     if (terminalStatus === 'completed') {
-      // Issue #57: an unnamed session derives its title from the agent's
-      // native title (or the first user message) once turns start completing.
+      // Issue #57: acceptance starts the bounded title poll; completion is a
+      // retry point after Host restart or an earlier failed lookup.
       // Fire-and-forget; failures are logged inside AutoTitleService.
       void this.autoTitle.maybeAutoTitle(sessionId);
     }

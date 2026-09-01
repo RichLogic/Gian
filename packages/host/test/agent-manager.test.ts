@@ -153,7 +153,7 @@ test('agent manager detects configured official CLIs and development proxies', a
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy, zcode: proxy },
     environmentCliPaths: bins,
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -166,6 +166,12 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
     ['dsh', false, null],
+    // The ZCode CLI is discovered in the app bundle and probes 0.16.5, but
+    // the fixture HOME lacks ~/.zcode/cli/config.json: readiness reports
+    // invalid via the generic readinessIssue (WP0 G1 / frozen O2), and the
+    // kind is excluded from the product Agents list below only because no
+    // Agent row is auto-created for kinds whose CLI is not ready.
+    ['zcode', false, '0.16.5'],
   ]);
   // Kind status still works for Grok (adapter stays in the tree).
   assert.equal((await manager.status('grok')).cli.version, '0.1.42');
@@ -270,7 +276,7 @@ test('agent manager validates and persists a user CLI path', async t => {
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy, zcode: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   } as const;
@@ -310,7 +316,7 @@ test('a Codex path change projects a new immutable Runtime Profile generation', 
     dataDir: join(root, 'data'),
     releaseVersion: '0.5.3',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy, zcode: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -367,7 +373,7 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy, zcode: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
     legacyProxyDefaults: {
@@ -838,7 +844,7 @@ test('checkProxyUpdate is unmanaged for development proxies', async t => {
     dataDir: join(root, 'data'),
     releaseVersion: '0.4.4',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy },
+    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, grok: proxy, dsh: proxy, zcode: proxy },
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -1203,6 +1209,7 @@ test('proxies catalog is static product metadata without Grok', async t => {
       ['codex', 'Codex', { light: '/api/proxies/codex/logo/light', dark: '/api/proxies/codex/logo/dark' }],
       ['kimi', 'Kimi Code', { light: '/api/proxies/kimi/logo/light', dark: '/api/proxies/kimi/logo/dark' }],
       ['dsh', 'DeepSeek Harness', { light: '/api/proxies/dsh/logo/light', dark: '/api/proxies/dsh/logo/dark' }],
+      ['zcode', 'ZCode', { light: '/api/proxies/zcode/logo/light', dark: '/api/proxies/zcode/logo/dark' }],
     ],
   );
   for (const entry of manager.proxiesCatalog()) {

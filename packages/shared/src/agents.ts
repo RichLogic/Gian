@@ -90,8 +90,11 @@ export interface AgentCliStatus {
   verifiedVersions?: string[];
   /** Stable launcher/runtime identity used by immutable Session profiles. */
   contentFingerprint?: string | null;
-  source: 'override' | 'official-user' | 'path' | null;
+  source: 'managed' | 'override' | 'official-user' | 'official-system' | 'path' | null;
   error?: string;
+  /** Generic, actionable repair hint when state is not ready (Revision 2
+   * §13.2). Providers stay anonymous; the Web never matches error strings. */
+  readinessIssue?: { code: string; message: string; repairable: boolean };
 }
 
 export interface AgentProxyStatus {

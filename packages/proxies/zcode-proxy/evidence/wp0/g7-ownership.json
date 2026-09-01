@@ -1,0 +1,329 @@
+{
+  "gate": "G7",
+  "scope": "offline-isolated-home",
+  "results": {
+    "list-initial": {
+      "ok": true,
+      "value": {
+        "sessions": []
+      }
+    },
+    "initialListShape": {
+      "kind": "object",
+      "keys": [
+        "sessions"
+      ]
+    },
+    "create": {
+      "ok": true,
+      "value": {
+        "messages": [],
+        "projection": {
+          "activeToolCalls": [],
+          "backgroundJobs": [],
+          "contextUsed": 0,
+          "contextWindow": 1000000,
+          "mode": "build",
+          "pendingPermissions": [],
+          "sessionId": "unknown",
+          "status": "idle",
+          "target": null,
+          "totalTokenCount": 0,
+          "turnCount": 0
+        },
+        "protocol": {
+          "name": "ZCode Protocol",
+          "version": 1
+        },
+        "runtime": {
+          "eventSeq": 0,
+          "pendingRequestIds": [],
+          "goalVerifications": [],
+          "goalVerificationTimeline": [],
+          "stateRevision": 0
+        },
+        "session": {
+          "createdAt": 1787984619659,
+          "mode": "build",
+          "model": {
+            "modelId": "GLM-5.3-Flash",
+            "providerId": "bigmodel"
+          },
+          "traceId": "694c818e-51ed-4219-ae54-1feb8e3742d2",
+          "sessionId": "sess_9e535341-4624-48e8-82ed-43520ceb84ed",
+          "sessionKind": "interactive",
+          "status": "idle",
+          "target": null,
+          "title": "",
+          "updatedAt": 1787984619659,
+          "workspace": {
+            "workspacePath": "/tmp/zcode-wp0-ws-mxMcuu",
+            "workspaceKey": "/tmp/zcode-wp0-ws-mxMcuu"
+          }
+        },
+        "settings": {
+          "mode": {
+            "current": "build"
+          },
+          "model": {
+            "available": [
+              {
+                "contextWindow": 1000000,
+                "label": "GLM-5.3-Flash",
+                "maxOutputTokens": 128000,
+                "providerLabel": "BigModel - Coding Plan",
+                "reasoning": {
+                  "enabled": true,
+                  "levels": [
+                    {
+                      "value": "low",
+                      "label": "low"
+                    },
+                    {
+                      "value": "high",
+                      "label": "high"
+                    },
+                    {
+                      "value": "max",
+                      "label": "max"
+                    }
+                  ],
+                  "defaultLevel": "max",
+                  "providerOptionsByLevel": {
+                    "low": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "low"
+                      }
+                    },
+                    "high": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "high"
+                      }
+                    },
+                    "max": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "max"
+                      }
+                    }
+                  }
+                },
+                "ref": {
+                  "modelId": "GLM-5.3-Flash",
+                  "providerId": "bigmodel"
+                },
+                "supportsImages": true,
+                "supportsPdf": false,
+                "supportsVideo": true
+              },
+              {
+                "contextWindow": 200000,
+                "label": "glm-5-turbo",
+                "maxOutputTokens": 128000,
+                "providerLabel": "BigModel - Coding Plan",
+                "reasoning": {
+                  "enabled": true,
+                  "levels": [
+                    {
+                      "value": "enabled",
+                      "label": "enabled"
+                    },
+                    {
+                      "value": "disabled",
+                      "label": "disabled"
+                    }
+                  ],
+                  "defaultLevel": "enabled",
+                  "providerOptionsByLevel": {
+                    "enabled": {
+                      "openaiCompatible": {
+                        "thinking": {
+                          "type": "enabled"
+                        }
+                      }
+                    },
+                    "disabled": {
+                      "openaiCompatible": {
+                        "thinking": {
+                          "type": "disabled"
+                        }
+                      }
+                    }
+                  }
+                },
+                "ref": {
+                  "modelId": "GLM-5-Turbo",
+                  "providerId": "bigmodel"
+                },
+                "supportsImages": false,
+                "supportsPdf": false,
+                "supportsVideo": false
+              },
+              {
+                "contextWindow": 1000000,
+                "label": "GLM-5.3",
+                "maxOutputTokens": 128000,
+                "providerLabel": "BigModel - Coding Plan",
+                "reasoning": {
+                  "enabled": true,
+                  "levels": [
+                    {
+                      "value": "low",
+                      "label": "low"
+                    },
+                    {
+                      "value": "high",
+                      "label": "high"
+                    },
+                    {
+                      "value": "max",
+                      "label": "max"
+                    }
+                  ],
+                  "defaultLevel": "max",
+                  "providerOptionsByLevel": {
+                    "low": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "low"
+                      }
+                    },
+                    "high": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "high"
+                      }
+                    },
+                    "max": {
+                      "openaiCompatible": {
+                        "reasoningEffort": "max"
+                      }
+                    }
+                  }
+                },
+                "ref": {
+                  "modelId": "GLM-5.3",
+                  "providerId": "bigmodel"
+                },
+                "supportsImages": false,
+                "supportsPdf": false,
+                "supportsVideo": false
+              }
+            ],
+            "current": {
+              "modelId": "GLM-5.3-Flash",
+              "providerId": "bigmodel"
+            },
+            "lastUsed": {
+              "modelId": "GLM-5.3-Flash",
+              "providerId": "bigmodel"
+            }
+          },
+          "permission": {
+            "mode": "build"
+          },
+          "thoughtLevel": {
+            "available": [
+              {
+                "label": "low",
+                "value": "low"
+              },
+              {
+                "label": "high",
+                "value": "high"
+              },
+              {
+                "label": "max",
+                "value": "max"
+              }
+            ],
+            "current": "max",
+            "defaultLevel": "max",
+            "enabled": true
+          }
+        },
+        "slashCommands": [
+          {
+            "description": "Show or set the current session goal.",
+            "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+            "name": "goal",
+            "source": "builtin"
+          },
+          {
+            "description": "Compact the current conversation with optional instructions.",
+            "inputHint": "/compact [instructions]",
+            "name": "compact",
+            "source": "builtin"
+          },
+          {
+            "description": "Create or update workspace AGENTS.md instructions.",
+            "inputHint": "/init [notes]",
+            "name": "init",
+            "source": "builtin"
+          },
+          {
+            "description": "Switch to Plan mode and optionally send a task.",
+            "inputHint": "/plan [task]",
+            "name": "plan",
+            "source": "builtin"
+          }
+        ],
+        "todos": [],
+        "todoGroups": []
+      }
+    },
+    "subscribe": {
+      "ok": true,
+      "value": {
+        "eventSeq": 0,
+        "events": [],
+        "sessionId": "sess_9e535341-4624-48e8-82ed-43520ceb84ed"
+      }
+    },
+    "close": {
+      "ok": true,
+      "value": {
+        "closed": true
+      }
+    },
+    "read-after-close": {
+      "ok": false,
+      "code": -32004,
+      "message": "Session is not active: sess_9e535341-4624-48e8-82ed-43520ceb84ed"
+    },
+    "resume-after-close": {
+      "ok": false,
+      "code": -32004,
+      "message": "Session not found: sess_9e535341-4624-48e8-82ed-43520ceb84ed"
+    },
+    "list-after-close": {
+      "ok": true,
+      "value": {
+        "sessions": []
+      }
+    },
+    "create-with-same-id": {
+      "ok": false,
+      "code": -32602,
+      "message": "sessionId is only supported for imported history creates"
+    },
+    "resume-unknown": {
+      "ok": false,
+      "code": -32004,
+      "message": "Session not found: nonsense-native-id"
+    },
+    "second-list": {
+      "ok": true,
+      "value": {
+        "sessions": []
+      }
+    },
+    "second-read": {
+      "ok": false,
+      "code": -32004,
+      "message": "Session is not active: sess_9e535341-4624-48e8-82ed-43520ceb84ed"
+    },
+    "second-resume": {
+      "ok": false,
+      "code": -32004,
+      "message": "Session not found: sess_9e535341-4624-48e8-82ed-43520ceb84ed"
+    }
+  }
+}

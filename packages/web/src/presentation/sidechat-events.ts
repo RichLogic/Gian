@@ -440,6 +440,7 @@ export function projectSideChatSnapshot(
         data: {
           text,
           ...(entry.context_items ? { context_items: entry.context_items } : {}),
+          ...(entry.composer_document ? { composer_document: entry.composer_document } : {}),
         },
       },
     });

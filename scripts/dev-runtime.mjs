@@ -85,6 +85,8 @@ export function resolveDevEnvironment(
     'GIAN_CODEX_PROXY_ENTRY',
     'GIAN_KIMI_PROXY_ENTRY',
     'GIAN_GROK_PROXY_ENTRY',
+    'GIAN_DSH_PROXY_ENTRY',
+    'GIAN_ZCODE_PROXY_ENTRY',
   ]) {
     const value = typeof env[key] === 'string' ? env[key].trim() : '';
     if (value) proxyEntries[key] = value;

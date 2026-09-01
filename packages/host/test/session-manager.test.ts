@@ -2254,8 +2254,8 @@ test('setModel with empty string clears stored model override', async () => {
       executor: 'claude',
       name: 'model-clear',
     });
-    sessions.setModel(session.id, 'claude-opus-4-8');
-    sessions.setModel(session.id, '');
+    await sessions.setModel(session.id, 'claude-opus-4-8');
+    await sessions.setModel(session.id, '');
 
     const row = db.prepare('SELECT model FROM sessions WHERE id = ?').get(session.id) as
       | { model: string | null }
@@ -3820,7 +3820,7 @@ test('session.rotated notification updates native_session_id and broadcasts sess
   }
 });
 
-test('command_execution with `git worktree add` records detected_worktree_path and broadcasts', async () => {
+test('shell-wrapped command_execution with `git worktree add` records detected_worktree_path and broadcasts', async () => {
   const { dir, db, sessions, proxyMgr, broadcaster } = setup();
   const repo = createGitRepo({ initialBranch: 'main' });
   try {
@@ -3846,7 +3846,7 @@ test('command_execution with `git worktree add` records detected_worktree_path a
       },
     });
 
-    fireBash(`git worktree add -b feature/agent ${wtPath} main`);
+    fireBash(`/bin/zsh -lc 'git worktree add -b feature/agent ${wtPath} main'`);
 
     await waitFor(() => {
       const current = db
@@ -3887,7 +3887,7 @@ test('command_execution with `git worktree add` records detected_worktree_path a
 
     // Idempotent: the completion event re-carries the same command — no
     // second write, no second broadcast.
-    fireBash(`git worktree add -b feature/agent ${wtPath} main`);
+    fireBash(`/bin/zsh -lc 'git worktree add -b feature/agent ${wtPath} main'`);
     const updatesAfter = broadcaster.messages.filter(
       m => m.type === 'session:updated'
         && (m as { session: { detected_worktree_path?: string | null } }).session.detected_worktree_path,
@@ -3992,5 +3992,130 @@ test('worktree detection never disturbs Gian-owned worktree sessions', async () 
     db.close();
     rmSync(dir, { recursive: true, force: true });
     repo.cleanup();
+  }
+});
+
+test('setModel atomically re-resolves effort for catalog-capable proxies', async () => {
+  const { dir, db, wsId, proxyMgr, broadcaster, sessions } = setup();
+  const catalogOptions: import('@gian/shared').ConfigOption[] = [
+    {
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: false,
+      defaultValue: 'gpt-fast',
+      choices: [
+        { value: 'gpt-fast', displayName: 'Fast' },
+        { value: 'gpt-standard', displayName: 'Standard' },
+      ],
+    },
+    {
+      id: 'thinking',
+      displayName: 'Thinking',
+      binding: 'turn',
+      role: 'effort',
+      control: 'select',
+      required: false,
+      defaultValue: 'medium',
+      choices: [
+        { value: 'medium', displayName: 'Medium' },
+        { value: 'high', displayName: 'High' },
+      ],
+    },
+  ];
+    // The default executor avoids the FakeProxyManager client swap; declare
+    // the capability and catalog before the first bring-up so initialize()
+    // remembers them for the capability gate.
+    proxyMgr.client.capabilities = { 'catalog.resolve': 1 };
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'codex-test',
+      input: [{ type: 'text' as const }],
+      configOptions: catalogOptions,
+      slashCommands: [],
+    };
+  try {
+      const session = await sessions.createSession({
+        workspace_id: wsId,
+        executor: 'claude',
+        model: 'gpt-fast',
+        thinking_effort: 'low',
+      });
+      sessions.persistTurnConfigOptions(session.id, catalogOptions, 'rev-1');
+    // The stale low effort survives until the model switch — exactly the
+    // production defect (k3 low → kimi-for-coding on).
+    sessions.setEffort(session.id, 'low');
+    assert.equal(sessions.getSession(session.id).thinking_effort, 'low');
+
+    const broadcastsBeforeSetModel = broadcaster.messages.length;
+    await sessions.setModel(session.id, 'gpt-standard');
+
+    const row = db.prepare(
+      `SELECT model, thinking_effort, turn_config_json, turn_config_options_json,
+              turn_config_revision, updated_at
+         FROM sessions WHERE id = ?`,
+    ).get(session.id) as {
+      model: string;
+      thinking_effort: string | null;
+      turn_config_json: string;
+      turn_config_options_json: string;
+      turn_config_revision: string;
+      updated_at: string;
+    };
+    assert.equal(row.model, 'gpt-standard');
+    // The resolved default of the NEW model replaced the stale effort.
+    assert.equal(row.thinking_effort, 'medium');
+    const turnConfig = JSON.parse(row.turn_config_json) as Record<string, unknown>;
+    assert.equal(turnConfig.model, 'gpt-standard');
+    assert.equal(turnConfig.thinking, 'medium');
+    assert.notEqual(row.turn_config_revision, 'rev-1');
+    assert.deepEqual(
+      (JSON.parse(row.turn_config_options_json) as Array<{ id: string }>).map(option => option.id),
+      ['model', 'thinking'],
+    );
+
+    // The resolve request carried the target model WITHOUT the stale effort.
+    assert.equal(proxyMgr.client.resolveCalls.length, 1);
+    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.turnConfig, { model: 'gpt-standard' });
+
+    // Exactly one canonical session:updated carrying every changed field.
+    const modelBroadcasts = broadcaster.messages
+      .slice(broadcastsBeforeSetModel)
+      .filter(message => (message as { type?: string }).type === 'session:updated');
+    assert.equal(modelBroadcasts.length, 1, 'setModel must broadcast exactly one session:updated');
+    const fields = (modelBroadcasts[0] as unknown as {
+      session: { id: string } & Record<string, unknown>;
+    }).session;
+    assert.equal(fields.id, session.id);
+    assert.equal(fields.model, 'gpt-standard');
+    assert.equal(fields.thinking_effort, 'medium');
+    assert.deepEqual(fields.turn_config, { model: 'gpt-standard', thinking: 'medium' });
+    assert.ok(Array.isArray(fields.turn_config_options));
+    assert.equal(typeof fields.turn_config_revision, 'string');
+    assert.notEqual(fields.turn_config_revision, 'rev-1');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('setModel without catalog.resolve keeps the legacy synchronous write', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'codex',
+      model: 'gpt-fast',
+    });
+    proxyMgr.client.capabilities = {};
+    await sessions.setModel(session.id, 'gpt-standard');
+    const row = db.prepare('SELECT model, turn_config_json FROM sessions WHERE id = ?')
+      .get(session.id) as { model: string; turn_config_json: string };
+    assert.equal(row.model, 'gpt-standard');
+    assert.equal(proxyMgr.client.resolveCalls.length, 0);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

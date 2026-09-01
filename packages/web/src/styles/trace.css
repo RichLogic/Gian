@@ -43,6 +43,9 @@
 }
 
 .trace-pinned-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   position: sticky;
   top: 0;
   z-index: 6;

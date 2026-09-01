@@ -24,11 +24,12 @@ obvious from the subject.
 
 ## Node version
 
-Use **Node.js v22**. Node v25 breaks the `better-sqlite3` native binding.
-Use `nvm` or `fnm` to pin to v22 if your machine has multiple versions:
+Use **Node.js v24** (`>=24 <25`). Node v25 breaks the `better-sqlite3`
+native binding. Use `nvm` or `fnm` to pin to v24 if your machine has multiple
+versions:
 
 ```bash
-nvm use 22
+nvm use 24
 ```
 
 ## Checks before pushing
@@ -55,7 +56,7 @@ scripts/           development and release tooling
 docs/              architecture, protocol, roadmap, AI/quality/ADR docs
 ```
 
-Changes to `packages/shared/src/` affect all three packages — rebuild shared
+Changes to `packages/shared/src/` affect the other workspaces — rebuild shared
 first:
 
 ```bash
@@ -64,7 +65,6 @@ pnpm -F @gian/shared build
 
 ## Agent-assisted development
 
-This repo uses a team-of-agents workflow. Follow
-[`docs/collaboration.md`](docs/collaboration.md) for Issue ownership, branch and
-worktree isolation, review, and handoff rules. Historical milestones are kept
-under [`docs/archive/`](docs/archive/); they are not an active backlog.
+Keep Agent-assisted changes under the same branch, review, test, and commit
+rules above. Internal planning records are not part of the public source tree;
+GitHub Issues and pull requests are the public coordination surface.

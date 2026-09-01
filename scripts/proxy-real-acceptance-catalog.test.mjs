@@ -11,7 +11,10 @@ test('real Proxy catalog covers every request and notification schema', async ()
   const catalog = await loadProxyRealAcceptanceCatalog();
   assert.equal(validateProxyRealAcceptanceCatalog(catalog), catalog);
   assert.ok(catalog.scenarios.length >= 25);
-  assert.deepEqual(Object.keys(catalog.providers).sort(), ['claude', 'codex', 'dsh', 'grok', 'kimi']);
+  assert.deepEqual(
+    Object.keys(catalog.providers).sort(),
+    ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode'],
+  );
 });
 
 test('real Proxy catalog rejects a missing provider classification', async () => {

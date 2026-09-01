@@ -1,0 +1,111 @@
+{
+  "gate": "G4",
+  "sub": "param names + mutation targets",
+  "results": {
+    "baseline": {
+      "label": "baseline",
+      "sessionMode": "build",
+      "settingsMode": {
+        "current": "build"
+      },
+      "permission": {
+        "mode": "build"
+      },
+      "thoughtLevel": {
+        "available": [
+          {
+            "label": "low",
+            "value": "low"
+          },
+          {
+            "label": "high",
+            "value": "high"
+          },
+          {
+            "label": "max",
+            "value": "max"
+          }
+        ],
+        "current": "max",
+        "defaultLevel": "max",
+        "enabled": true
+      },
+      "model": {
+        "modelId": "GLM-5.3-Flash",
+        "providerId": "bigmodel"
+      }
+    },
+    "setThoughtLevelEmptyParams": "thoughtLevel is required",
+    "setModeEmptyParams": "Invalid params — mode: Invalid option: expected one of \"plan\"|\"build\"|\"edit\"|\"yolo\"|\"auto\"",
+    "setModelEmptyParams": "Invalid params — model: Invalid input: expected object, received undefined",
+    "setThoughtLevel {\"thoughtLevel\":\"low\"}": {
+      "ok": true
+    },
+    "after-setThoughtLevel {\"thoughtLevel\":\"low\"}": {
+      "label": "after-setThoughtLevel {\"thoughtLevel\":\"low\"}",
+      "sessionMode": "build",
+      "settingsMode": {
+        "current": "build"
+      },
+      "permission": {
+        "mode": "build"
+      },
+      "thoughtLevel": {
+        "available": [
+          {
+            "label": "low",
+            "value": "low"
+          },
+          {
+            "label": "high",
+            "value": "high"
+          },
+          {
+            "label": "max",
+            "value": "max"
+          }
+        ],
+        "current": "low",
+        "defaultLevel": "max",
+        "enabled": true
+      },
+      "model": {
+        "modelId": "GLM-5.3-Flash",
+        "providerId": "bigmodel"
+      }
+    },
+    "after-setMode-plan": {
+      "label": "after-setMode-plan",
+      "sessionMode": "build",
+      "settingsMode": {
+        "current": "plan"
+      },
+      "permission": {
+        "mode": "plan"
+      },
+      "thoughtLevel": {
+        "available": [
+          {
+            "label": "low",
+            "value": "low"
+          },
+          {
+            "label": "high",
+            "value": "high"
+          },
+          {
+            "label": "max",
+            "value": "max"
+          }
+        ],
+        "current": "low",
+        "defaultLevel": "max",
+        "enabled": true
+      },
+      "model": {
+        "modelId": "GLM-5.3-Flash",
+        "providerId": "bigmodel"
+      }
+    }
+  }
+}

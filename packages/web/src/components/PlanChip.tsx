@@ -224,6 +224,7 @@ function AgentRunRow({
   const providerName =
     agent.provider === 'claude' ? 'Claude' :
     agent.provider === 'codex' ? 'Codex' :
+    agent.provider === 'zcode' ? 'ZCode' :
     'Kimi';
   const statusLabel =
     agent.status === 'running' ? t('coding.status.running') :

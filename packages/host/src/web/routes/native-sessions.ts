@@ -1,4 +1,4 @@
-import type { ApprovalMode, Executor, NativeSession } from '@gian/shared';
+import { supportsNativeSessions, type ApprovalMode, type Executor, type NativeSession } from '@gian/shared';
 import type { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
@@ -48,8 +48,8 @@ export function registerNativeSessionRoutes(
     }>();
     const executor = body.executor;
     const nativeId = body.native_session_id;
-    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi' && executor !== 'grok') {
-      return c.json({ error: 'executor must be claude, codex, kimi, or grok' }, 400);
+    if (executor === undefined || !supportsNativeSessions(executor)) {
+      return c.json({ error: 'executor does not support native session adoption' }, 400);
     }
     if (!nativeId) return c.json({ error: 'native_session_id required' }, 400);
 
@@ -57,9 +57,12 @@ export function registerNativeSessionRoutes(
     if ((approvalMode === 'custom' || approvalMode === 'full-access') && executor !== 'codex') {
       return c.json({ error: `${approvalMode} approval mode is codex-only` }, 400);
     }
-    if ((executor === 'kimi' || executor === 'grok') && body.approval_mode !== undefined) {
+    if (
+      (executor === 'kimi' || executor === 'grok' || executor === 'zcode')
+      && body.approval_mode !== undefined
+    ) {
       return c.json({
-        error: `${executor} uses executor-native mode; approval_mode must be omitted`,
+        error: `${executor} resolves approval through its proxy catalog; approval_mode must be omitted`,
       }, 400);
     }
     return serializeNativeMutation(`${executor}:${nativeId}`, async () => {
@@ -202,12 +205,19 @@ export function registerNativeSessionRoutes(
   app.delete('/api/workspaces/:id/native-sessions/:nativeId', async c => {
     const nativeId = c.req.param('nativeId');
     const executor = c.req.query('executor') as Executor | undefined;
-    if (executor !== 'claude' && executor !== 'codex' && executor !== 'kimi' && executor !== 'grok') {
-      return c.json({ error: 'executor query param must be claude, codex, kimi, or grok' }, 400);
+    if (executor === undefined || !supportsNativeSessions(executor)) {
+      return c.json({ error: 'executor does not support native session surfaces' }, 400);
     }
     if (executor === 'kimi') {
       return c.json({
         error: 'Kimi ACP does not expose destructive native-session deletion.',
+      }, 400);
+    }
+    if (executor === 'zcode') {
+      // Frozen D10: ZCode exposes no native delete; Gian never destroys
+      // provider history on its behalf.
+      return c.json({
+        error: 'ZCode does not expose destructive native-session deletion.',
       }, 400);
     }
     const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
@@ -268,7 +278,7 @@ export function registerNativeSessionRoutes(
 
     const pluginSessions: NativeSession[] = [];
     const legacyExecutors: Array<'claude' | 'codex'> = [];
-    for (const executor of ['claude', 'codex', 'kimi', 'grok'] as const) {
+    for (const executor of ['claude', 'codex', 'kimi', 'grok', 'zcode'] as const) {
       try {
         const discovered = await sessions.listPluginNativeSessions(executor, workspace.path);
         if (discovered !== null) pluginSessions.push(...discovered);

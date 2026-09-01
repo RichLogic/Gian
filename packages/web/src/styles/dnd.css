@@ -1,0 +1,26 @@
+/* Drag reorder (2026-08-29) — the shared indicators for the sidebar rail
+   lists (Tasks tasks/subtasks, Sessions workspaces/sessions) and the
+   Settings management rows. The controller lives in src/dnd-reorder.ts.
+   The insertion line uses an inset box-shadow so it never shifts layout. */
+
+.dnd-dragging {
+  opacity: 0.4;
+}
+
+.dnd-before {
+  box-shadow: inset 0 2px 0 var(--accent, currentColor);
+}
+
+.dnd-after {
+  box-shadow: inset 0 -2px 0 var(--accent, currentColor);
+}
+
+/* Grip affordance on the Settings > Workspaces rows (drag replaces the
+   up/down arrows there). */
+.management-drag-grip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: oklch(from var(--text) l c h / 0.4);
+  cursor: grab;
+}

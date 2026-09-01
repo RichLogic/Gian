@@ -14,7 +14,7 @@
 
 import { constants } from 'node:fs';
 import { access, readlink, realpath } from 'node:fs/promises';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { runProtectedCommand } from './protected-command.js';
 import { runtimeContentSnapshot } from './content-snapshot.js';
 import type {
@@ -35,6 +35,20 @@ export interface DshRuntimeProviderOptions {
 interface Candidate {
   path: string;
   source: 'override' | 'managed' | 'official-user' | 'path';
+}
+
+function uniquePath(entries: Array<string | undefined>): string {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of entries) {
+    for (const entry of (value ?? '').split(delimiter)) {
+      const trimmed = entry.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      result.push(trimmed);
+    }
+  }
+  return result.join(delimiter);
 }
 
 function firstVersion(text: string): string | null {
@@ -82,10 +96,17 @@ export class DshRuntimeProvider implements CliRuntimeProvider {
     for (const candidate of candidates) {
       try {
         await access(candidate.path, constants.X_OK);
-        const binaryPath = await realpath(candidate.path);
-        if (!isAbsolute(binaryPath) || seen.has(binaryPath)) continue;
-        seen.add(binaryPath);
-        installed.push({ cli: this.id, binaryPath, source: candidate.source });
+        const canonicalPath = await realpath(candidate.path);
+        if (!isAbsolute(canonicalPath) || seen.has(canonicalPath)) continue;
+        seen.add(canonicalPath);
+        // Keep the npm launcher path. Resolving `.bin/dsh` to its JavaScript
+        // target makes `/usr/bin/env node` depend on the Finder-launched App's
+        // minimal PATH and loses the launcher identity used by snapshots.
+        installed.push({
+          cli: this.id,
+          binaryPath: candidate.path,
+          source: candidate.source,
+        });
       } catch {
         if (candidate.source === 'override') {
           // Preserve the explicit candidate so probe emits an actionable
@@ -140,6 +161,21 @@ export class DshRuntimeProvider implements CliRuntimeProvider {
       DSH_TELEMETRY_DISABLED: '1',
       NO_COLOR: '1',
       FORCE_COLOR: '0',
+      // Packaged Gian starts Host with its bundled Node as process.execPath,
+      // but a Finder launch does not put that directory on PATH. npm's DSH
+      // launcher uses `#!/usr/bin/env node`, so make that exact runtime
+      // discoverable for both the version probe and the Proxy child.
+      PATH: uniquePath([
+        dirname(process.execPath),
+        this.options.pathEnv,
+        process.env.PATH,
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        '/usr/sbin',
+        '/sbin',
+      ]),
     };
   }
 

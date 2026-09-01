@@ -169,4 +169,37 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
       return c.json({ error: errorMessage(error) }, 400);
     }
   });
+
+  // Sidebar drag reorder (migration 067, 2026-08-29): `scope` picks the
+  // order column (`workspace` = Sessions rail workspace/unfiled group,
+  // `task` = Tasks rail subtask list), `parentId` the owning workspace/task
+  // (null = the unfiled group). The caller passes the scope's full ordered id
+  // list; values are rewritten to a dense 1..n sequence and the parent guard
+  // keeps stray ids from leaking order into a scope they don't belong to.
+  // `updated_at` is deliberately NOT bumped — it drives the rail's activity
+  // fallback order and the row's relative-time label. No WS broadcast (the
+  // web operation layer converges canonical state itself, like
+  // /api/workspaces/reorder).
+  app.post('/api/sessions/reorder', async c => {
+    const body = await c.req.json<{
+      scope?: string;
+      parentId?: string | null;
+      ids?: string[];
+    }>();
+    if ((body.scope !== 'workspace' && body.scope !== 'task') || !Array.isArray(body.ids)) {
+      return c.json({ error: 'scope (workspace|task) and ids required' }, 400);
+    }
+    const column = body.scope === 'workspace' ? 'workspace_order' : 'task_order';
+    const parentColumn = body.scope === 'workspace' ? 'workspace_id' : 'task_id';
+    const update = body.parentId == null
+      ? db.prepare(`UPDATE sessions SET ${column} = ? WHERE id = ? AND ${parentColumn} IS NULL`)
+      : db.prepare(`UPDATE sessions SET ${column} = ? WHERE id = ? AND ${parentColumn} = ?`);
+    db.transaction(() => {
+      body.ids!.forEach((id, index) => {
+        if (body.parentId == null) update.run(index + 1, id);
+        else update.run(index + 1, id, body.parentId);
+      });
+    })();
+    return c.json({ ok: true });
+  });
 }

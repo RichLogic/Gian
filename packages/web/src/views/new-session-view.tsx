@@ -20,6 +20,7 @@ import {
   composerDocumentUserText,
   normalizeBrowserElementCapture,
   normalizeComposerDocument,
+  usesCliCapabilitySurface,
   usesNativeExecutorConfig,
 } from '@gian/shared';
 import { loadAgents, loadResolvedProxyCatalog, peekAgents } from '../api.js';
@@ -513,6 +514,14 @@ export function NewSessionView({
       setServiceTier(null);
       return;
     }
+    if (!usesCliCapabilitySurface(executor)) {
+      // Catalog-driven agents (e.g. ZCode) resolve options through the
+      // gian.proxy catalog, not the legacy per-CLI capability surface.
+      setModels([]);
+      setProxyModes([]);
+      setServiceTier(null);
+      return;
+    }
     const cli = executor;
     setModels(getModelsCached(cli, agentId) ?? []);
     setProxyModes(getModesCached(cli, agentId) ?? []);
@@ -751,7 +760,7 @@ export function NewSessionView({
   // statically (issue #57). Zero or 2+ ready agents get the picker drop
   // (not-ready rows render disabled).
   const showAgentPicker = readyAgents.length !== 1;
-  const cliExecutor = executor && usesNativeExecutorConfig(executor) ? null : executor;
+  const cliExecutor = executor && usesCliCapabilitySurface(executor) ? executor : null;
   const configuredDefaults = selectedAgent?.defaults;
   const catalogReady = catalog.configOptions.length > 0;
   const catalogModel = optionByRole(catalog.configOptions, 'model');

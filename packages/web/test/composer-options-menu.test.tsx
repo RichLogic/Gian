@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { Executor, Session } from '@gian/shared';
 
 import { Composer } from '../src/components/Composer.js';
+import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 
 vi.mock('../src/api.js', () => ({
@@ -94,6 +95,7 @@ function renderComposer(
 describe('Composer independent catalog controls', () => {
   beforeEach(() => {
     localStorage.clear();
+    clearComposerCapabilityCaches();
   });
 
   it('renders independent model and Thinking controls without a combined trigger', async () => {

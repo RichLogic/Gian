@@ -134,7 +134,7 @@ describe('Settings Adopt management', () => {
 });
 
 describe('Settings Workspaces reduction', () => {
-  it('keeps only ordering and Hide/Show actions', async () => {
+  it('keeps only drag ordering and Hide/Show actions', async () => {
     vi.mocked(api.updateWorkspace).mockImplementation(async (id, patch) => ({
       ...workspaces.find(workspace => workspace.id === id)!,
       hidden: patch.hidden ? 1 : 0,
@@ -142,7 +142,17 @@ describe('Settings Workspaces reduction', () => {
     renderWithOperations(<SettingsBody config={config()} activeSection="workspaces" workspaces={workspaces} />);
     expect(screen.queryByRole('button', { name: /new workspace/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Move down' })[0]!);
+    // 2026-08-29: ordering is drag-based (no more Move up/down arrows). jsdom
+    // has no DataTransfer — fireEvent attaches the init object onto the event.
+    // Rows measure 0×0 in jsdom, so clientY 0 lands the drop 'after' Beta:
+    // Alpha moves below it.
+    expect(screen.queryByRole('button', { name: 'Move down' })).toBeNull();
+    const rowA = screen.getByText('Alpha').closest('.management-row')!;
+    const rowB = screen.getByText('Beta').closest('.management-row')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: () => {} };
+    fireEvent.dragStart(rowA, { dataTransfer });
+    fireEvent.dragOver(rowB, { dataTransfer, clientY: 0 });
+    fireEvent.drop(rowB, { dataTransfer });
     await waitFor(() => expect(api.reorderWorkspaces).toHaveBeenCalledWith(['ws-b', 'ws-a', 'ws-hidden']));
     fireEvent.click(screen.getAllByRole('button', { name: 'Hide' })[0]!);
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledWith('ws-a', { hidden: true }));

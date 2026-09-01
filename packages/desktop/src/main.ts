@@ -483,6 +483,22 @@ function showUnsafeExitBlocked(): void {
   );
 }
 
+function showReplacementStartFailed(): void {
+  console.error('[desktop] replacement could not be started after the managed Host exited');
+  dialog.showErrorBox(
+    'Gian could not restart',
+    'The managed Host exited, but Gian could not start its replacement. Open Gian again manually.',
+  );
+}
+
+function showReplacementBusy(): void {
+  console.error('[desktop] restart rejected because a normal quit is already draining the managed Host');
+  dialog.showErrorBox(
+    'Gian is already quitting',
+    'Gian is already waiting for the managed Host and CLI processes to stop. If the App remains open, wait a moment and try Restart again.',
+  );
+}
+
 /**
  * A replacement must never be armed before the managed Host has actually
  * exited. Electron's relaunch helper and Squirrel updater both remember their
@@ -493,7 +509,10 @@ function runAfterManagedHostExit(startReplacement: () => boolean): Promise<boole
   if (replacementOperation) return replacementOperation;
   // A normal OS quit owns the existing drain attempt. Do not attach a second
   // replacement continuation to the same process exit.
-  if (managedHostQuitGate.isDraining()) return Promise.resolve(false);
+  if (managedHostQuitGate.isDraining()) {
+    showReplacementBusy();
+    return Promise.resolve(false);
+  }
 
   stopDesktopServicesForExit();
   const child = managedHost;
@@ -512,6 +531,7 @@ function runAfterManagedHostExit(startReplacement: () => boolean): Promise<boole
     // The Host was confirmed gone, but the updater/relauncher itself failed.
     // Restore a packaged Host so the current window does not become stranded.
     resumeDesktopServicesAfterCancelledExit(hadLiveManagedHost);
+    showReplacementStartFailed();
     return false;
   }).finally(() => {
     if (replacementOperation === operation) replacementOperation = null;
@@ -982,7 +1002,10 @@ ipcMain.handle('desktop:open-logs', async event => {
 });
 
 ipcMain.handle('desktop:restart-app', async event => {
-  if (!isMainWindowSender(event.sender)) return false;
+  if (!isMainWindowSender(event.sender)) {
+    console.error('[desktop] restart rejected from a non-main renderer');
+    return false;
+  }
   return runAfterManagedHostExit(() => {
     // Reply to the renderer before quitting. GianDev's Host is externally
     // owned, so the drain above is an immediate no-op in development.

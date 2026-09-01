@@ -639,6 +639,42 @@ function sessionName(db: Db, sessionId: string): string | null {
   return row?.name ?? null;
 }
 
+test('e2e: accepted first turn starts auto-title before a long-running turn completes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-auto-title-e2e-running-'));
+  const workspacePath = join(dir, 'workspace');
+  mkdirSync(workspacePath, { recursive: true });
+  const db = openDatabase(dir);
+  try {
+    const workspaceId = seedWorkspace(db, workspacePath);
+    const proxies = new RecordingProxyManager();
+    const broadcaster = new RecordingBroadcaster();
+    const sessions = makeManager(db, dir, proxies, broadcaster);
+    const session = await sessions.createSession({
+      workspace_id: workspaceId,
+      executor: 'codex',
+    });
+    assert.equal(sessionName(db, session.id), null);
+
+    await sessions.sendMessage(session.id, 'investigate why automatic titles are missing');
+    assert.equal(sessions.getSession(session.id).status, 'running');
+
+    // No turn.completed notification: a long first turn must not leave the
+    // newly-created conversation unnamed while it works.
+    await waitFor(() => sessionName(db, session.id) !== null);
+    assert.equal(sessionName(db, session.id), 'Codex LM Summary');
+    assert.ok(
+      broadcaster.messages.some(message =>
+        message.type === 'session:updated'
+          && message.session.id === session.id
+          && message.session.name === 'Codex LM Summary'),
+      'auto-title broadcasts while the accepted first turn is still running',
+    );
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('e2e: codex session writes its native LM title back on turn completion', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-auto-title-e2e-codex-'));
   const workspacePath = join(dir, 'workspace');

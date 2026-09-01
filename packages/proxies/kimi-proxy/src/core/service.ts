@@ -636,8 +636,48 @@ export class KimiProxyService {
     if (!session.activeTurnId) {
       throw createAppError(409, 'INVALID_REQUEST', 'This session does not have an active turn.');
     }
-    await this.runtime.cancel(session.nativeSessionId);
-    this.cancelApprovalsForSession(session.id);
+    // Barrier order (frozen state machine): the session barrier rises
+    // SYNCHRONOUSLY before the cancel RPC, so no create can slip into the
+    // cancel await window. Cancel failure still drains; both failures are
+    // combined; only cancel+drain success lifts the temporary barrier.
+    const lease = this.runtime.beginSessionTerminalDrain(session.nativeSessionId);
+    let cancelError: unknown = null;
+    try {
+      await this.runtime.cancel(session.nativeSessionId);
+      this.cancelApprovalsForSession(session.id);
+    } catch (error) {
+      cancelError = error;
+    }
+    let cleanupError: unknown = null;
+    try {
+      await lease.drain();
+    } catch (error) {
+      cleanupError = error;
+      lease.keepBlocked();
+    }
+    const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    if (cancelError !== null && cleanupError !== null) {
+      throw createAppError(
+        500,
+        'SESSION_ERROR',
+        `Interrupt failed: cancel: ${describe(cancelError)}; terminal cleanup: ${describe(cleanupError)}`,
+      );
+    }
+    if (cleanupError !== null) {
+      throw createAppError(
+        500,
+        'SESSION_ERROR',
+        `Terminal cleanup after interrupt failed: ${describe(cleanupError)}`,
+      );
+    }
+    if (cancelError !== null) {
+      // Cleanup verified; per the frozen machine the barrier only lifts on
+      // cancel+drain success, so the session stays blocked until the next
+      // turn's successful finalizer drain re-enables terminal creation.
+      lease.keepBlocked();
+      throw createAppError(500, 'SESSION_ERROR', `Interrupt cancel failed: ${describe(cancelError)}`);
+    }
+    lease.releaseForNextTurn();
     return { ok: true, session: this.serializeSession(session) };
   }
 
@@ -709,15 +749,44 @@ export class KimiProxyService {
       await this.runtime.cancel(session.nativeSessionId).catch(() => undefined);
     }
     this.cancelApprovalsForSession(session.id);
-
+    // Frozen close order: the PERMANENT barrier rises synchronously before
+    // any RPC; cancel (active turn) and native close failures never skip the
+    // terminal drain; every error is combined and the close reports failure
+    // instead of a clean teardown. The binding is deleted only by this
+    // drain's successful release — never inside the client RPC wrapper.
+    const lease = this.runtime.beginSessionTerminalDrain(session.nativeSessionId, { permanent: true });
+    const failures: string[] = [];
+    const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    if (session.activeTurnId) {
+      try {
+        await this.runtime.cancel(session.nativeSessionId).catch((error) => {
+          throw error;
+        });
+      } catch (error) {
+        failures.push(`cancel: ${describe(error)}`);
+      }
+    }
     const nativeCloseSupported = (
       this.runtime.negotiated?.agentCapabilities?.sessionCapabilities?.close != null
     );
     if (nativeCloseSupported && session.attached) {
-      await this.runtime.closeSession({ sessionId: session.nativeSessionId });
+      try {
+        await this.runtime.closeSession({ sessionId: session.nativeSessionId });
+      } catch (error) {
+        failures.push(`native close: ${describe(error)}`);
+      }
     }
-
+    try {
+      await lease.drain();
+    } catch (error) {
+      failures.push(`terminal cleanup: ${describe(error)}`);
+      lease.keepBlocked();
+    }
     this.removeSession(session);
+    if (failures.length > 0) {
+      throw createAppError(500, 'SESSION_ERROR', `Session close failed: ${failures.join('; ')}`);
+    }
+    lease.releaseForNextTurn();
     return {
       ok: true,
       nativeClosed: nativeCloseSupported,
@@ -778,6 +847,30 @@ export class KimiProxyService {
 
       this.activeTurns.delete(proxySessionId);
       this.toolCallsByNativeId.delete(current.nativeSessionId);
+      // Turn-scoped terminal harvest precedes the terminal turn notification.
+      // A failed harvest must finish the turn as failed: the session keeps
+      // its create barrier, never reporting a clean completion over an
+      // unverified process group.
+      const lease = this.runtime.beginSessionTerminalDrain(current.nativeSessionId);
+      try {
+        await lease.drain();
+      } catch (cleanupError) {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        this.cancelApprovalsForSession(proxySessionId);
+        this.updateSession(current, {
+          activeTurnId: null,
+          status: 'error',
+          lastError: message,
+        });
+        this.emitEvent('turn.failed', this.eventEnvelope(current, {
+          turnId,
+          code: 'TERMINAL_CLEANUP_FAILED',
+          message,
+        }, turnId));
+        lease.keepBlocked();
+        return;
+      }
+      lease.releaseForNextTurn();
       this.updateSession(current, {
         activeTurnId: null,
         status: 'idle',
@@ -797,15 +890,31 @@ export class KimiProxyService {
       this.activeTurns.delete(proxySessionId);
       this.toolCallsByNativeId.delete(current.nativeSessionId);
       this.cancelApprovalsForSession(proxySessionId);
+      // Turn-scoped terminal harvest precedes the terminal turn notification.
+      // Its failure is appended to the original failure instead of being
+      // swallowed; the turn stays failed either way.
+      const lease = this.runtime.beginSessionTerminalDrain(current.nativeSessionId);
+      let failureMessage = mappedError.message;
+      let cleanupFailed = false;
+      try {
+        await lease.drain();
+      } catch (cleanupError) {
+        cleanupFailed = true;
+        lease.keepBlocked();
+        failureMessage = `${failureMessage}; terminal cleanup also failed: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`;
+      }
+      if (!cleanupFailed) lease.releaseForNextTurn();
       this.updateSession(current, {
         activeTurnId: null,
         status: 'error',
-        lastError: mappedError.message,
+        lastError: failureMessage,
       });
       this.emitEvent('turn.failed', this.eventEnvelope(current, {
         turnId,
         code: runtimeErrorCode(mappedError) ?? 'PROMPT_FAILED',
-        message: current.lastError,
+        message: failureMessage,
       }, turnId));
     }
   }
@@ -981,6 +1090,7 @@ export class KimiProxyService {
     signal: NodeJS.Signals | null;
     expected: boolean;
     error?: Error;
+    terminalCleanupError?: string;
   }): void {
     this.unclaimedUpdates.clear();
     this.toolCallsByNativeId.clear();
@@ -998,11 +1108,16 @@ export class KimiProxyService {
         }, turn.turnId));
       }
       this.activeTurns.delete(session.id);
+      // A failed terminal harvest is a failed runtime handover even when the
+      // stop itself was expected: keep the reason visible on every session.
+      const lastError = event.terminalCleanupError
+        ? `Terminal cleanup failed: ${event.terminalCleanupError}`
+        : event.expected ? null : 'Kimi ACP process stopped unexpectedly.';
       this.updateSession(session, {
         attached: false,
         activeTurnId: null,
         status: 'stale',
-        lastError: event.expected ? null : 'Kimi ACP process stopped unexpectedly.',
+        lastError,
       });
     }
 
@@ -1012,6 +1127,9 @@ export class KimiProxyService {
         signal: event.signal,
         expected: event.expected,
         error: event.error?.message ?? null,
+        ...(event.terminalCleanupError !== undefined
+          ? { terminalCleanupError: event.terminalCleanupError }
+          : {}),
       },
     });
   }

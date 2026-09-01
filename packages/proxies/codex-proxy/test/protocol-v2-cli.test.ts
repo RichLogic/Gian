@@ -85,7 +85,7 @@ test('Codex CLI negotiates gian.proxy/2.1 independently from its app-server vers
     const result = initializeResultSchema.parse(initialized.result);
     assert.equal(result.protocol.version, '2.1');
     assert.equal(result.plugin.id, 'codex');
-    assert.equal(result.plugin.version, '0.2.10');
+    assert.equal(result.plugin.version, '0.2.11');
     assert.equal(result.process.scope, 'shared');
     assert.equal(result.capabilities.interaction, 1);
     assert.equal(result.capabilities['session.replay'], 1);

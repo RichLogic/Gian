@@ -16,8 +16,8 @@ import {
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('the default release set includes DSH and excludes the hidden Grok Proxy', () => {
-  assert.deepEqual(shippingProxyIds, ['claude', 'codex', 'kimi', 'dsh']);
+test('the default release set includes ZCode and excludes the hidden Grok Proxy', () => {
+  assert.deepEqual(shippingProxyIds, ['claude', 'codex', 'kimi', 'dsh', 'zcode']);
 });
 
 test('proxy bundle has one shebang and supports CommonJS dynamic require', async t => {
@@ -67,6 +67,12 @@ test('bundled shipping proxy self-test ignores an ancestor app package.json', as
       source: 'packages/proxies/kimi-proxy/src/cli/spawn.ts',
       manifest: 'packages/proxies/kimi-proxy/package.json',
     },
+    {
+      id: 'zcode',
+      expectedId: 'com.zhipu.zcode',
+      source: 'packages/proxies/zcode-proxy/src/cli/spawn.ts',
+      manifest: 'packages/proxies/zcode-proxy/package.json',
+    },
   ];
 
   for (const plugin of plugins) {
@@ -80,7 +86,7 @@ test('bundled shipping proxy self-test ignores an ancestor app package.json', as
     const expectedVersion = JSON.parse(await readFile(join(repoRoot, plugin.manifest), 'utf8')).version;
     const result = await execFileAsync(process.execPath, [output, '--self-test'], { encoding: 'utf8' });
     const response = JSON.parse(result.stdout.trim());
-    assert.equal(response.id, plugin.id);
+    assert.equal(response.id, plugin.expectedId ?? plugin.id);
     assert.equal(response.ok, true);
     assert.equal(response.pluginVersion, expectedVersion);
   }

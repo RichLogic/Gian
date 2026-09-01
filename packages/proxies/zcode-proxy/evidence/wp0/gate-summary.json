@@ -1,0 +1,112 @@
+{
+  "wp": "WP0",
+  "date": "2026-08-29",
+  "note": "Every gate records 'validatedPortion' (proven by committed evidence) and 'deferredPortion' (requires the WP7 real-provider canary). A gate is not PASS unless BOTH columns are satisfied; deferred portions keep production enablement blocked.",
+  "zcodeVersion": "0.16.5",
+  "runtime": {
+    "entry": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+    "entrySha256": "3597160465b67da248fa3fb919920ca30d4e093003a4d70cde2a2e33903cbabc",
+    "closureFiles": 343,
+    "closureBytes": 46075897,
+    "closureDigest": "f39dfd0e12c3552f8c6f34d160aed009797bee1a3543eb3233b6b9a1ff3277f3",
+    "algorithm": "sha256 over sorted (relativePath \\0 fileSha256 \\0) pairs of the whole glm resource directory"
+  },
+  "evidenceIntegrity": {
+    "historicalConfigRead": "The ORIGINAL WP0 isolation helper copied model/provider metadata from the machine's real ~/.zcode/cli/config.json (replacing the apiKey before writing the isolated copy). No secret value was found in committed evidence (secret scans clean; committed fixtures contain only placeholder/model metadata). The helper has since been rewritten (deterministic closure) to build a fully synthetic throwaway config and no longer reads the real file. Claims of 'zero credential reads' for the historical runs were inaccurate and have been removed.",
+    "g6Statefulness": "The G6 probe performs a STATEFUL session/resume over probe-owned history (which may persist a session.resumed event); it is not read-only. It now fails closed unless WP0_ALLOW_STATEFUL_PROBES=1 is set with explicit authorization.",
+    "syntheticConfigSchema": "Deterministic closure follow-up (2026-08-30): the FIRST synthetic config was NOT accepted by the real app-server — session/create returned model_config_missing because the schema refines model references to provider/model form (bundle functions Yhr/Yp) and the bare model id made the whole model section parse to undefined. The shared generator (test/fixtures/synthetic-zcode-config.mjs) now emits the minimal schema-exact config (provider/model ref, kind openai-compatible, unreachable loopback baseURL, DUMMY-NOT-A-SECRET), proven by the real app-server lifecycle CANARY (test/real-app-server-lifecycle.canary.ts, explicit entry test:real-app-server — not part of the default deterministic suite: session/create + session/read PASS, no session/send, no provider request). Fake-server tests could not catch this; the earlier 'synthetic config works' claims were only valid for the historical real-config-derived runs."
+  },
+  "gates": {
+    "G0": {
+      "verdict": "PASS",
+      "validatedPortion": "workspace/readState is a side-effect-free Catalog source: session/list count unchanged across calls; returns modelCatalog + full settings (models with reasoning levels, supportsImages, contextWindow, labels) + slashCommands. catalog.list/resolve must still prove zero inner session/create in WP2 contract tests (they do).",
+      "deferredPortion": "none within scope; catalog freshness across real runtime upgrades is re-checked by canary scenarios.",
+      "evidence": [
+        "g0-method-probe.json",
+        "g0b-readstate.json",
+        "g0d-readstate-config.json"
+      ],
+      "repro": "node probes/wp0/probe-g0d-readstate-config.mjs"
+    },
+    "G1": {
+      "verdict": "FAIL (Plan A) / fallback per frozen O2",
+      "validatedPortion": "--settings is documented in `zcode --help` but rejected by the 0.16.5 argument parser in all 6 forms/placements. Without CLI config, session/create fails deterministically with 'Model config is missing. Create <home>/.zcode/cli/config.json with an explicit model provider before running ZCode.' (-32603). The CORRECTED synthetic config (provider/model reference, placeholder key, unreachable loopback endpoint) is proven against the REAL app-server by the explicit canary test/real-app-server-lifecycle.canary.ts (entry test:real-app-server; session/create + session/read PASS; no session/send, no provider request, no quota).",
+      "deferredPortion": "Which user action regenerates ~/.zcode/cli/config.json (zcode login, desktop login, or manual editing) is NOT verified; readiness guidance therefore names the file and the required fact only, and Gian never writes ~/.zcode (frozen O2).",
+      "evidence": [
+        "g1-settings.json",
+        "test/real-app-server-lifecycle.canary.ts (explicit canary entry test:real-app-server)"
+      ],
+      "repro": "node probes/wp0/probe-g1-settings.mjs && pnpm --filter @gian/zcode-proxy test:real-app-server"
+    },
+    "G2": {
+      "verdict": "PARTIAL (static validated; live DEFERRED to authorized canary)",
+      "validatedPortion": "interaction/requestPermission params schema extracted from bundle: {requestId, sessionId, turnId?, toolCallId, toolName, reason, riskLevel: low|medium|high|critical, input?, origin?, options[>=1]}; option = {optionId, kind, name, description?, response} where response = {decision: allow|deny|escalate|modify, reason?, permissionUpdates?: [...]}. Faithful round-trip = echo the selected option's exact response payload. Reverse-request default timeout constant yCt=15e3 sits beside the preferences schema; ZCODE_E2E_ASK_USER_QUESTION_CLOCK_SCALE exists as a test hook. The adapter implements the exact-payload round-trip against the fake server (WP2 tests).",
+      "deferredPortion": "Live human-delay verification (20-30s) against a real tool approval -> explicit authorization point; per frozen O3, production enablement of interaction stays blocked, and the capability remains undeclared unless the canary opt-in env is set.",
+      "evidence": [
+        "g2-interaction-static.json"
+      ],
+      "repro": "node probes/wp0/probe-g2-static.mjs"
+    },
+    "G3": {
+      "verdict": "PARTIAL (schema frozen; live DEFERRED to authorized canary)",
+      "validatedPortion": "session/send params = {sessionId: string, content: string, attachments?: array}; content is a plain string (arrays/objects rejected -32602); the attachments key exists and accepts items (loose item validation).",
+      "deferredPortion": "A real image/file turn plus model-conditioned rejection -> authorization point. input.localImage/localFile capabilities stay undeclared until then.",
+      "evidence": [
+        "g3-send-shape.json"
+      ],
+      "repro": "node probes/wp0/probe-g3-send-shape.mjs"
+    },
+    "G4": {
+      "verdict": "PARTIAL (idle semantics validated; next-send effect DEFERRED to authorized canary)",
+      "validatedPortion": "Idle set* are deterministic with read-back: session/setModel {model:{providerId,modelId}} (unknown model -> -32603 with a bounded available-models list); session/setMode {mode: plan|build|edit|yolo|auto} mutates BOTH settings.mode.current and settings.permission.mode (ZCode 'mode' IS the permission mode; specialCatalogs.approvalMode mapping justified); session/setThoughtLevel param is {thoughtLevel: string} — NOT 'level' (Revision 1 wrong). Failure shapes are typed; bad values leave state unchanged. New sessions inherit lastUsed model.",
+      "deferredPortion": "That the applied snapshot actually governs the NEXT real send (and rollback-under-failure on a live turn path) requires a real turn -> authorization point.",
+      "evidence": [
+        "g4-turnconfig.json",
+        "g4b-turnconfig-detail.json"
+      ],
+      "repro": "node probes/wp0/probe-g4-turnconfig.mjs && node probes/wp0/probe-g4b-turnconfig-detail.mjs"
+    },
+    "G5": {
+      "verdict": "DEFERRED (design compatible; live determinism = authorized canary)",
+      "validatedPortion": "A retained Revision-1 probe log (log-final-1787938277649.ndjson) shows stop racing natural completion with terminal resultType 'success' — the race is real, and the adapter maps by (interrupt accepted AND causally cancelled) -> interrupted, observed success -> completed, other cancelled -> cancelled (WP2 tests cover the mapping). session/stop returns {} immediately.",
+      "deferredPortion": "Long-tool cancel determinism against a live turn requires a real model call -> authorization point.",
+      "evidence": [
+        "../../../docs/proposals/zcode-proxy-execution.md"
+      ],
+      "repro": "canary scenario (WP7)"
+    },
+    "G6": {
+      "verdict": "PARTIAL (replay shape/identity validated; live/replay equivalence DEFERRED to authorized canary)",
+      "validatedPortion": "Persisted sessions need resume before read; session/events replay is THIN (title/session-lifecycle only; seq cursor continues); full history = session/messages with info.anchor.turnId as the stable native turnId equal to the live computer-use turnId; tool parts carry callID/tool/state{status,input,output,metadata.serialization}. Replay merge = messages (content spine) + events. The adapter implements the merge and the projector tests assert stable ids across refetch.",
+      "deferredPortion": "Canonical fingerprint equality between LIVE and replay projections for one real turn -> authorization point. NOTE: the G6 probe is STATEFUL (session/resume may persist a session.resumed event); it fails closed without WP0_ALLOW_STATEFUL_PROBES=1.",
+      "evidence": [
+        "g6-replay.json"
+      ],
+      "repro": "WP0_ALLOW_STATEFUL_PROBES=1 node probes/wp0/probe-g6-replay.mjs (explicit authorization required; probe-owned /tmp sessions only)"
+    },
+    "G7": {
+      "verdict": "PARTIAL (core ownership semantics validated; running/desktop-active conflicts DEFERRED to authorized canary)",
+      "validatedPortion": "Inner session/close on an EMPTY session purges it permanently (read/resume -> -32004, gone from session/list). Sessions WITH history survive close and process exit (visible/resumable from a fresh app-server). Error taxonomy: 'Session is not active' (persisted, not loaded) vs 'Session not found' (unknown/purged). create(sessionId) is only legal for 'imported history creates'. Outer session.close therefore NEVER calls inner close: detach = unsubscribe + drop adapter state.",
+      "deferredPortion": "Running-session and desktop-active ownership conflict behavior (external turn detection -> fail/detach/quarantine/history.changed) requires live contention -> authorization point.",
+      "evidence": [
+        "g7-ownership.json",
+        "g6-replay.json"
+      ],
+      "repro": "node probes/wp0/probe-g7-ownership.mjs"
+    },
+    "G8": {
+      "verdict": "PASS",
+      "validatedPortion": "Execution closure = the whole glm resource directory (343 files, 46 MB, includes zcode.cjs + bundled plugins/ + .node-bundle-meta.json). Fingerprint = sha256 over sorted (relativePath, fileSha256) pairs; any file change invalidates the runtimeKey and retires the generation. The Host adapter reproduces the same closure-hash approach.",
+      "deferredPortion": "none within scope.",
+      "evidence": [
+        "g8-runtime-fingerprint.json"
+      ],
+      "repro": "node probes/wp0/probe-g8-fingerprint.mjs"
+    }
+  },
+  "productDecisions": {
+    "O1": "superseded in practice: G0 found a side-effect-free catalog source (workspace/readState); the bootstrap Catalog remains the fallback only while readState reports the unconfigured vocabulary (available=0 / zcode-unconfigured).",
+    "O2": "triggered: --settings is not viable on 0.16.5; readiness returns generic repairable invalid naming ~/.zcode/cli/config.json and the missing explicit model provider (no unverified login-command claim); Gian never writes ~/.zcode.",
+    "O3": "armed: interaction is implemented behind the canary-only GIAN_ZCODE_ENABLE_INTERACTION opt-in for canary verification, but the capability is undeclared by default and production enablement stays blocked until the 20-30s human-delay gate passes live."
+  }
+}

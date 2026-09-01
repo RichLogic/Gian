@@ -14,6 +14,9 @@ overrides:
   js-yaml: 4.3.1
 
 patchedDependencies:
+  '@agentclientprotocol/sdk@0.23.0':
+    hash: f6c793aced1f0bd3e72bf99d6adfb78ec2d95ba21b45c9629cac2724bc59d220
+    path: patches/@agentclientprotocol__sdk@0.23.0.patch
   node-pty@1.1.0:
     hash: dd4be6ca2416fc0cfe2e652940387284ec3cd200a6281faf32b585b4bed84573
     path: patches/node-pty@1.1.0.patch
@@ -182,7 +185,7 @@ importers:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.23.0
-        version: 0.23.0(zod@4.4.3)
+        version: 0.23.0(patch_hash=f6c793aced1f0bd3e72bf99d6adfb78ec2d95ba21b45c9629cac2724bc59d220)(zod@4.4.3)
     devDependencies:
       '@gian/proxy-protocol':
         specifier: workspace:*
@@ -198,7 +201,7 @@ importers:
     dependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.23.0
-        version: 0.23.0(zod@4.4.3)
+        version: 0.23.0(patch_hash=f6c793aced1f0bd3e72bf99d6adfb78ec2d95ba21b45c9629cac2724bc59d220)(zod@4.4.3)
     devDependencies:
       '@gian/proxy-protocol':
         specifier: workspace:*
@@ -208,6 +211,19 @@ importers:
         version: 24.12.2
       typescript:
         specifier: ^5.9.0
+        version: 5.9.3
+
+  packages/proxies/zcode-proxy:
+    dependencies:
+      '@gian/proxy-protocol':
+        specifier: workspace:*
+        version: link:../../proxy-protocol
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.2
+        version: 24.12.2
+      typescript:
+        specifier: ^5.9.3
         version: 5.9.3
 
   packages/proxy-protocol:
@@ -3576,7 +3592,7 @@ snapshots:
 
   '@adobe/css-tools@4.4.4': {}
 
-  '@agentclientprotocol/sdk@0.23.0(zod@4.4.3)':
+  '@agentclientprotocol/sdk@0.23.0(patch_hash=f6c793aced1f0bd3e72bf99d6adfb78ec2d95ba21b45c9629cac2724bc59d220)(zod@4.4.3)':
     dependencies:
       zod: 4.4.3
 

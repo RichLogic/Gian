@@ -15,7 +15,8 @@
     "packages/tool-mcp/test",
     "e2e/specs",
     "packages/proxies/dsh-bridge/test",
-    "packages/proxies/dsh-proxy/test"
+    "packages/proxies/dsh-proxy/test",
+    "packages/proxies/zcode-proxy/test"
   ],
   "optionalDiscoveryRoots": [
     "e2e/specs"
@@ -51,11 +52,11 @@
         "packages/host/test/ext-tree-id.test.ts",
         "packages/host/test/file-003-raw-preview.test.ts",
         "packages/host/test/fork-inherit-config.test.ts",
-        "packages/host/test/git-classify-failure.test.ts",
         "packages/host/test/gian-tool-authorization.test.ts",
         "packages/host/test/gian-tool-credentials.test.ts",
         "packages/host/test/gian-tool-environment.test.ts",
         "packages/host/test/gian-tool-mcp-http.test.ts",
+        "packages/host/test/git-classify-failure.test.ts",
         "packages/host/test/health.test.ts",
         "packages/host/test/history-canonicalize.test.ts",
         "packages/host/test/input-items.test.ts",
@@ -107,10 +108,10 @@
       "id": "host-integration",
       "patterns": [
         "packages/host/test/agent-instructions.test.ts",
-        "packages/host/test/managed-agent-skill.test.ts",
         "packages/host/test/ai-scaffold.test.ts",
         "packages/host/test/ai-views.test.ts",
         "packages/host/test/auto-title.test.ts",
+        "packages/host/test/boot-descriptors.test.ts",
         "packages/host/test/cc-events-regression.test.ts",
         "packages/host/test/chat-display-contract.test.ts",
         "packages/host/test/config-sanitize.test.ts",
@@ -132,9 +133,13 @@
         "packages/host/test/file-005-attachment-upload.test.ts",
         "packages/host/test/file-006-files-recursive.test.ts",
         "packages/host/test/file-012-absolute-preview.test.ts",
-        "packages/host/test/history-store.test.ts",
+        "packages/host/test/gian-session-host-services.test.ts",
+        "packages/host/test/gian-tool-service.test.ts",
+        "packages/host/test/gian-tool-worktree.test.ts",
         "packages/host/test/github-release-fetch.test.ts",
+        "packages/host/test/history-store.test.ts",
         "packages/host/test/jsonl-watcher.test.ts",
+        "packages/host/test/managed-agent-skill.test.ts",
         "packages/host/test/model-002-warmup-retry.test.ts",
         "packages/host/test/native-001-scanner.test.ts",
         "packages/host/test/onboarding-state.test.ts",
@@ -146,10 +151,12 @@
         "packages/host/test/sec-012-one-shot-bypass.test.ts",
         "packages/host/test/sec-014-reveal-boundary.test.ts",
         "packages/host/test/sec-016-settings-write-boundary.test.ts",
-        "packages/host/test/settings-file.test.ts",
-        "packages/host/test/sidechat-fork-integration.test.ts",
+        "packages/host/test/session-agent-binding.test.ts",
         "packages/host/test/session-name-001.test.ts",
         "packages/host/test/session-name-routing.test.ts",
+        "packages/host/test/settings-file.test.ts",
+        "packages/host/test/sidebar-reorder.test.ts",
+        "packages/host/test/sidechat-fork-integration.test.ts",
         "packages/host/test/storage.test.ts",
         "packages/host/test/subtask-lifecycle.test.ts",
         "packages/host/test/task-session-archive.test.ts",
@@ -160,12 +167,7 @@
         "packages/host/test/workspace-hide.test.ts",
         "packages/host/test/workspace-management.test.ts",
         "packages/host/test/workspace-pin.test.ts",
-        "packages/host/test/ws-state-sync-contract.test.ts",
-        "packages/host/test/boot-descriptors.test.ts",
-        "packages/host/test/session-agent-binding.test.ts",
-        "packages/host/test/gian-tool-service.test.ts",
-        "packages/host/test/gian-session-host-services.test.ts",
-        "packages/host/test/gian-tool-worktree.test.ts"
+        "packages/host/test/ws-state-sync-contract.test.ts"
       ],
       "module": "host",
       "scope": "integration",
@@ -189,7 +191,6 @@
         "packages/host/test/agent-manager.test.ts",
         "packages/host/test/agent-updater-safety.test.ts",
         "packages/host/test/agents-routes.test.ts",
-        "packages/host/test/runtime-keying.test.ts",
         "packages/host/test/apps-route.test.ts",
         "packages/host/test/codex-proxy-client.test.ts",
         "packages/host/test/command-runtime-provider.test.ts",
@@ -199,6 +200,7 @@
         "packages/host/test/file-011-changes-scope-codex.test.ts",
         "packages/host/test/file-013-commits-submenu.test.ts",
         "packages/host/test/file-014-branch-base.test.ts",
+        "packages/host/test/gian-tool-rpc.test.ts",
         "packages/host/test/git-002-branch-parsing.test.ts",
         "packages/host/test/git-003-branch-ops.test.ts",
         "packages/host/test/git-async-responsiveness.test.ts",
@@ -209,18 +211,18 @@
         "packages/host/test/kimi-proxy-client.test.ts",
         "packages/host/test/kimi-runtime-manager.test.ts",
         "packages/host/test/kimi-session-store-compat.test.ts",
+        "packages/host/test/protocol-v1-routing.test.ts",
         "packages/host/test/protocol-v2-client.test.ts",
         "packages/host/test/protocol-v2-mock-integration.test.ts",
-        "packages/host/test/protocol-v1-routing.test.ts",
         "packages/host/test/proxy-client.test.ts",
+        "packages/host/test/runtime-keying.test.ts",
         "packages/host/test/sec-014-ext-tree.test.ts",
         "packages/host/test/session-manager.test.ts",
         "packages/host/test/sidechat-fork-system.test.ts",
-        "packages/host/test/workspace-create-path.test.ts",
         "packages/host/test/workspace-clone.test.ts",
+        "packages/host/test/workspace-create-path.test.ts",
         "packages/host/test/worktree-detect.test.ts",
-        "packages/host/test/wt-001-worktree-lifecycle.test.ts",
-        "packages/host/test/gian-tool-rpc.test.ts"
+        "packages/host/test/wt-001-worktree-lifecycle.test.ts"
       ],
       "module": "host",
       "scope": "system",
@@ -532,9 +534,19 @@
       ],
       "module": "codex-proxy",
       "scope": "system",
-      "purposes": ["regression", "contract", "smoke"],
-      "sideEffects": ["temporary-filesystem", "child-process", "fake-provider"],
-      "platforms": ["any"],
+      "purposes": [
+        "regression",
+        "contract",
+        "smoke"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
       "runner": "codex-proxy-node"
     },
     {
@@ -578,7 +590,9 @@
       "id": "kimi-proxy-system",
       "patterns": [
         "packages/proxies/kimi-proxy/test/kimi-acp-client.test.ts",
-        "packages/proxies/kimi-proxy/test/protocol-v2-cli.test.ts"
+        "packages/proxies/kimi-proxy/test/protocol-v2-cli.test.ts",
+        "packages/proxies/kimi-proxy/test/terminal-service.test.ts",
+        "packages/proxies/kimi-proxy/test/terminal-lifecycle-race.test.ts"
       ],
       "module": "kimi-proxy",
       "scope": "system",
@@ -847,6 +861,31 @@
         "any"
       ],
       "runner": "dsh-proxy-node"
+    },
+    {
+      "id": "zcode-proxy-unit",
+      "patterns": [
+        "packages/proxies/zcode-proxy/test/catalog.test.ts",
+        "packages/proxies/zcode-proxy/test/lifecycle.test.ts",
+        "packages/proxies/zcode-proxy/test/interaction-replay.test.ts",
+        "packages/proxies/zcode-proxy/test/validator.test.ts",
+        "packages/proxies/zcode-proxy/test/transport.test.ts"
+      ],
+      "module": "zcode-proxy",
+      "scope": "unit",
+      "purposes": [
+        "regression",
+        "contract"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "fake-provider"
+      ],
+      "platforms": [
+        "any"
+      ],
+      "runner": "zcode-proxy-node"
     }
   ],
   "specialEntrypoints": [
@@ -877,6 +916,20 @@
         "child-process",
         "loopback-port",
         "fake-provider"
+      ]
+    },
+    {
+      "id": "zcode-real-app-server-canary",
+      "path": "scripts/run-zcode-app-server-canary.mjs",
+      "scope": "canary",
+      "purposes": [
+        "compatibility",
+        "regression"
+      ],
+      "sideEffects": [
+        "temporary-filesystem",
+        "child-process",
+        "platform-tool"
       ]
     },
     {

@@ -1,7 +1,8 @@
 // Trace frontend MVP — SessionMain wiring tests.
 // Pins: the Chat/Trace segmented toggle swaps the transcript for the Trace
-// view (fed by Core's persisted snapshot with a derived fallback), and clicking a trace row routes the
-// item detail into the chat-owned panel 2 via ChatPanelOpenContext.
+// view (fed by Core's persisted snapshot with a derived fallback), its full
+// overview header stays pinned, and clicking a trace row routes the item
+// detail into the chat-owned panel 2 via ChatPanelOpenContext.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -125,9 +126,14 @@ describe('SessionMain Chat/Trace wiring (Trace MVP)', () => {
     expect(screen.getByText('queued follow-up')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Trace' }));
-    expect(screen.getByTestId('trace-view')).toBeInTheDocument();
-    expect(screen.getByTestId('trace-toolbar')).toHaveClass('trace-pinned-head');
-    expect(screen.getByTestId('trace-toolbar').parentElement).toBe(screen.getByTestId('trace-view'));
+    const traceView = screen.getByTestId('trace-view');
+    const pinnedHeader = screen.getByTestId('trace-pinned-header');
+    expect(traceView).toBeInTheDocument();
+    expect(pinnedHeader).toHaveClass('trace-pinned-head');
+    expect(pinnedHeader.parentElement).toBe(traceView);
+    expect(pinnedHeader).toContainElement(screen.getByTestId('trace-toolbar'));
+    expect(pinnedHeader).toContainElement(screen.getByTestId('trace-timeline'));
+    expect(pinnedHeader).toContainElement(screen.getByTestId('trace-stats'));
     expect(document.querySelector('.composer')).toBeNull();
     expect(document.querySelector('.main-underbar')).toBeNull();
     expect(screen.queryByText('queued follow-up')).not.toBeInTheDocument();
@@ -220,7 +226,8 @@ describe('SessionMain Chat/Trace wiring (Trace MVP)', () => {
       </LocaleProvider>,
     );
     await userEvent.click(screen.getByRole('button', { name: 'Trace' }));
-    expect(screen.getByTestId('trace-partial')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-pinned-header'))
+      .toContainElement(screen.getByTestId('trace-partial'));
     expect(screen.getByTestId('trace-view')).toHaveAttribute('data-partial', 'true');
   });
 });

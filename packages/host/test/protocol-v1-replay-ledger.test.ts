@@ -221,3 +221,125 @@ test('a replay stream revision rebuilds only replay-owned turns', () => {
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('incremental replay tracks skipped requested events for resolved mapping (Finding 5)', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'gian-proxy-replay-kinds-'));
+  try {
+    const db = openDatabase(dataDir);
+    db.prepare(
+      `INSERT INTO sessions
+        (id, name, type, executor, approval_mode, status, archived,
+         native_session_id, created_at, updated_at)
+       VALUES ('session-ix', 'Kinds', 'coding', 'kimi', 'ask', 'new', 0,
+               'native-ix', datetime('now'), datetime('now'))`,
+    ).run();
+
+    const requestedTurn: ReplayEvent[] = [
+      replayEventSchemaUnion.parse({
+        method: 'turn.started',
+        eventId: 'ix-event-1',
+        sessionId: 'session-ix',
+        replayStreamId: 'replay-ix',
+        sequence: 1,
+        sourceTurnId: 'provider-turn-ix',
+        emittedAt: '2026-08-30T10:00:00.000Z',
+        data: {},
+      }),
+      replayEventSchemaUnion.parse({
+        method: 'interaction.requested',
+        eventId: 'ix-event-2',
+        sessionId: 'session-ix',
+        replayStreamId: 'replay-ix',
+        sequence: 2,
+        sourceTurnId: 'provider-turn-ix',
+        emittedAt: '2026-08-30T10:00:01.000Z',
+        data: {
+          interactionId: 'ix-1',
+          title: 'Read',
+          description: 'Requesting approval',
+          presentation: { kind: 'permission', tone: 'warning' },
+          inputs: [],
+          actions: [
+            { id: 'approve_once', label: 'Approve once', style: 'primary' },
+            { id: 'approve_always', label: 'Approve for this session', style: 'secondary' },
+          ],
+          context: {
+            permissionOptionKinds: {
+              approve_once: 'allow_once',
+              approve_always: 'allow_always',
+            },
+          },
+        },
+      }),
+      replayEventSchemaUnion.parse({
+        method: 'turn.completed',
+        eventId: 'ix-event-3',
+        sessionId: 'session-ix',
+        replayStreamId: 'replay-ix',
+        sequence: 3,
+        sourceTurnId: 'provider-turn-ix',
+        emittedAt: '2026-08-30T10:00:02.000Z',
+        data: { stopReason: 'completed' },
+      }),
+    ];
+    const makeCoordinator = () => new SessionEventCoordinator(
+      db,
+      new SessionRepository(db),
+      new SessionHistoryStore(db),
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      null,
+      {} as never,
+      { sendMessage: async () => undefined },
+    );
+    const first = makeCoordinator().persistKimiReplay(
+      'session-ix',
+      requestedTurn,
+      '2026-08-30T10:00:00.000Z',
+      'replay-ix',
+    );
+    assert.equal(first.events, 3);
+
+    // Incremental refresh: the requested event is already persisted and must
+    // skip projection, but its kind mapping must still be tracked so the NEW
+    // resolved event maps to allow_session exactly like the live path would.
+    const resolvedEvent = replayEventSchemaUnion.parse({
+      method: 'interaction.resolved',
+      eventId: 'ix-event-4',
+      sessionId: 'session-ix',
+      replayStreamId: 'replay-ix',
+      sequence: 4,
+      sourceTurnId: 'provider-turn-ix',
+      emittedAt: '2026-08-30T10:00:03.000Z',
+      data: {
+        interactionId: 'ix-1',
+        outcome: 'submitted',
+        actionId: 'approve_always',
+      },
+    });
+    const incremental = makeCoordinator().persistKimiReplay(
+      'session-ix',
+      [...requestedTurn, resolvedEvent],
+      '2026-08-30T10:00:00.000Z',
+      'replay-ix',
+    );
+    assert.equal(incremental.events, 1, 'only the resolved event is new');
+
+    const persisted = db.prepare(
+      `SELECT data FROM events
+        WHERE session_id = 'session-ix' AND type = 'interaction.resolved'`,
+    ).get() as { data: string };
+    const stored = JSON.parse(persisted.data) as {
+      display?: { data?: { decision?: string } };
+    };
+    assert.equal(
+      stored.display?.data?.decision,
+      'allow_session',
+      'incremental replay must map through the skipped requested event kinds',
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

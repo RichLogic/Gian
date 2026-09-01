@@ -3,7 +3,6 @@ import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { Session } from '@gian/shared';
 import type { Mode } from '../components/Topbar.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
-import type { ChatPanelTarget } from '../presentation/chat-panel.js';
 
 interface UseSessionSelectionInput {
   mode: Mode;
@@ -11,7 +10,7 @@ interface UseSessionSelectionInput {
   sessionsRef: RefObject<Session[]>;
   activeSessionIdRef: RefObject<string | null>;
   setActiveSessionId: Dispatch<SetStateAction<string | null>>;
-  setChatPanel: Dispatch<SetStateAction<ChatPanelTarget | null>>;
+  restoreChatPanelForSession: (sessionId: string | null) => void;
   ops: OperationDispatcher;
 }
 
@@ -21,7 +20,7 @@ export function useSessionSelection({
   sessionsRef,
   activeSessionIdRef,
   setActiveSessionId,
-  setChatPanel,
+  restoreChatPanelForSession,
   ops,
 }: UseSessionSelectionInput): (sessionId: string) => void {
   // Mark-viewed routes through the operation layer (Phase 2a): the unread
@@ -35,10 +34,10 @@ export function useSessionSelection({
   }, [ops, sessionsRef]);
 
   const selectSession = useCallback((sessionId: string) => {
-    setChatPanel(null);
+    restoreChatPanelForSession(sessionId);
     setActiveSessionId(sessionId);
     markSessionViewed(sessionId);
-  }, [markSessionViewed, setActiveSessionId, setChatPanel]);
+  }, [markSessionViewed, restoreChatPanelForSession, setActiveSessionId]);
 
   useEffect(() => {
     if (mode !== 'tasks' || !activeSubtaskId) return;

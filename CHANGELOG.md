@@ -4,9 +4,48 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.3 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.4 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.4] - 2026-09-01
+
+### Added
+
+- Added ZCode as a production Agent integration, using the Agent runtime from
+  ZCode.app with model, Thinking, approval, permission, native-session, and
+  replay support. Workspaces run in isolated app-server processes.
+- Added persistent manual ordering for sidebar workspaces, Tasks, and
+  Sessions.
+
+### Changed
+
+- Published Codex Proxy 0.2.11, Kimi Proxy 0.2.6, and ZCode Proxy 0.1.0.
+- Kimi now provides the ACP terminal service used by its native command tools
+  and preserves catalog controls and terminal availability across runtime
+  invalidation, detach, and reattach.
+- Untitled non-Claude Sessions begin native title discovery as soon as the
+  first Turn is accepted instead of waiting for a long Turn to finish.
+
+### Fixed
+
+- Codex capacity failures now settle with their real provider error and leave
+  the Session recoverable.
+- Side Chats preserve their owning panel, tool details, and inline quoted
+  context when switching between parent and child conversations.
+- ZCode no longer hangs after provider business errors or loses terminal
+  events that share native identities. Permission retries remain one card,
+  interrupts cancel the actual foreground execution, and provider request
+  headers and identifiers stay out of conversation events.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- ZCode requires a separately configured ZCode CLI provider account. Gian
+  does not import Desktop authorization or modify `~/.zcode`.
+- ZCode Proxy 0.1.0 accepts text only; file and image inputs are not exposed.
+- Scheduled Automations and Grok are not included in the 0.5.4 product
+  surface.
 
 ## [0.5.3] - 2026-08-28
 
@@ -470,6 +509,7 @@ until Developer ID signing and notarization are available.
 - The published build contained a placeholder GitHub OAuth client ID and could
   not complete first-run login. It was superseded by 0.1.1.
 
+[0.5.4]: https://github.com/RichLogic/Gian/releases/tag/v0.5.4
 [0.5.3]: https://github.com/RichLogic/Gian/releases/tag/v0.5.3
 [0.5.2]: https://github.com/RichLogic/Gian/releases/tag/v0.5.2
 [0.5.1]: https://github.com/RichLogic/Gian/releases/tag/v0.5.1

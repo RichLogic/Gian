@@ -123,7 +123,11 @@ function normalizeStoredTurnConfig(
   return result;
 }
 
-function reconcileTurnConfig(
+/** Exported for regression tests: the Side Chat model/effort convergence
+ *  contract — a requested value that the current catalog does not advertise
+ *  (e.g. a stale effort after a model switch) fails loudly instead of
+ *  reaching the Provider. */
+export function reconcileTurnConfig(
   options: readonly ConfigOption[],
   requested: Record<string, ConfigValue>,
 ): Record<string, ConfigValue> {

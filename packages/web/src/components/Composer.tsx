@@ -1,7 +1,7 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesNativeExecutorConfig } from '@gian/shared';
+import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
 import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
@@ -537,7 +537,7 @@ export function Composer({
   const fixed = variant !== 'full';
   const configurableSidechat = variant === 'sidechat';
   const hardDisabled = disabled && disabledSubmitBehavior === 'block';
-  const cliExecutor = usesNativeExecutorConfig(executor) ? null : executor;
+  const cliExecutor = usesCliCapabilitySurface(executor) ? executor : null;
   const zoomImage = useContext(ImageZoomContext);
   // Restore text AND already-uploaded attachments from the per-session draft —
   // before v2 only the text survived a session switch and the chips vanished
@@ -555,7 +555,13 @@ export function Composer({
   // "adjust state during render" pattern so the textarea never paints the
   // outgoing draft against the incoming session id.
   const lastSessionRef = useRef(session.id);
+  /** Monotonic generation for catalog.resolve requests; stale responses are
+   *  dropped so an older model's overlay can never win a race. */
+  const resolveGenerationRef = useRef(0);
   if (lastSessionRef.current !== session.id) {
+    // Switching sessions invalidates every in-flight catalog.resolve: the
+    // old session's overlay must never bleed into the new session's menu.
+    resolveGenerationRef.current += 1;
     const referencedIds = composerReferenceIds(composerDocument);
     writeDraft(lastSessionRef.current, {
       text,
@@ -765,6 +771,13 @@ export function Composer({
         });
       return () => { alive = false; };
     }
+    if (!usesCliCapabilitySurface(executor)) {
+      // Catalog-driven agents without a resolved catalog (e.g. the ZCode
+      // bootstrap) expose no CLI slash surface at all.
+      setSlashCommands([]);
+      setSlashLoading(false);
+      return;
+    }
     const cached = getSlashCached(executor, workspaceId, agentId);
     if (cached) {
       setSlashCommands(cached);
@@ -792,7 +805,7 @@ export function Composer({
   }, [catalogReady, catalog.slashCommands, executor, agentId, fixed, session.id, workspaceId, slashRefreshVersion]);
 
   useEffect(() => {
-    if (catalogReady || usesNativeExecutorConfig(executor) || !workspaceId) return;
+    if (catalogReady || !usesCliCapabilitySurface(executor) || !workspaceId) return;
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent).detail as { workspaceId?: unknown } | undefined;
       if (detail?.workspaceId === workspaceId) {
@@ -1229,6 +1242,7 @@ export function Composer({
 
   function maybeResolve(nextTurn: Record<string, ConfigValue>): void {
     if (!catalog.resolveAdvertised || !catalog.catalogRevision) return;
+    const generation = ++resolveGenerationRef.current;
     const sessionConfig: Record<string, ConfigValue> = {};
     for (const option of mergedOptions) {
       if (option.binding !== 'session') continue;
@@ -1241,6 +1255,7 @@ export function Composer({
       turnConfig: nextTurn,
       sessionId: session.id,
     }).then((resolved) => {
+      if (resolveGenerationRef.current !== generation) return;
       setResolvedOverlay({
         options: mergeTurnCatalog(resolved.configOptions, undefined),
         defaults: {
@@ -1250,6 +1265,9 @@ export function Composer({
         error: null,
       });
     }).catch((error: unknown) => {
+      // A failed resolve must keep the previous overlay's menu; only the
+      // error surfaces (and only if this request is still the latest one).
+      if (resolveGenerationRef.current !== generation) return;
       setResolvedOverlay((previous) => ({
         ...(previous ?? {}),
         error: error instanceof Error ? error.message : String(error),
@@ -1282,6 +1300,18 @@ export function Composer({
       ) {
         onSetServiceTier?.(null);
       }
+      // A model change invalidates the previous model's effort value: never
+      // send the stale effort to catalog.resolve (the proxy rejects unknown
+      // model/effort combinations). Drop it from the resolve request; the
+      // resolved default replaces it in the overlay.
+      const effortId = mergedOptions.find(candidate => candidate.role === 'effort')?.id;
+      const resolveTurn: Record<string, ConfigValue> = {
+        ...(session.turn_config ?? {}),
+        [option.id]: value,
+      };
+      if (effortId) delete resolveTurn[effortId];
+      maybeResolve(resolveTurn);
+      return;
     }
     else if (option.role === 'effort') onSetEffort(value == null ? null : String(value));
     else if (option.role === 'approval_mode') {

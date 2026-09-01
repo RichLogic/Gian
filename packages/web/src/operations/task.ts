@@ -39,7 +39,7 @@ import {
   type ThinkingEffort,
 } from '@gian/shared';
 
-import { completeSubtask, createSubtask, reopenSubtask } from '../api.js';
+import { completeSubtask, createSubtask, reopenSubtask, reorderTasks } from '../api.js';
 import { toast } from '../feedback.js';
 import { registry } from './registry.js';
 import { sessionEntityKey } from './session.js';
@@ -49,6 +49,14 @@ import type { OperationDefinition, OptimisticOverlay } from './types.js';
 export function taskEntityKey(taskId: string): string {
   return `task:${taskId}`;
 }
+
+/** Entity key of the whole-list order overlay (`task:list:order`) — the
+ *  sidebar drag reorder mirrors the workspace list pattern (see
+ *  operations/workspace.ts): the value is the FULL ordered id array of the
+ *  dragged scope (the open group), applied over the canonical list by the
+ *  view while the run is in flight. */
+export const TASK_LIST_ENTITY_KEY = 'task:list';
+export const TASK_ORDER_FIELD = 'order';
 
 /** WS round-trips are normally well under this; expiry marks the outcome
  *  unknown (never failed) per proposal §4.3. */
@@ -67,6 +75,25 @@ export function wireSubtaskCanonicalSink(
   sink: ((sessionId: string, partial: Partial<Session>) => void) | null,
 ): void {
   subtaskCanonicalSink = sink;
+}
+
+/**
+ * Canonical task-list convergence for `task.reorder` (the reorder REST
+ * endpoint does NOT broadcast — same no-broadcast rule as workspace reorder,
+ * see operations/workspace.ts). Wired by App with the canonical
+ * `setTasks`/`loadTasks`; tests substitute a fake.
+ */
+export interface TaskCanonicalSink {
+  /** Stamp the confirmed manual order onto the canonical tasks. */
+  applyOrder(ids: string[]): void;
+  /** Reload the authoritative list. */
+  refetch(): void;
+}
+
+let taskCanonicalSink: TaskCanonicalSink | null = null;
+
+export function wireTaskCanonicalSink(sink: TaskCanonicalSink | null): void {
+  taskCanonicalSink = sink;
 }
 
 interface TaskIdInput {
@@ -197,6 +224,27 @@ const taskReopenSubtask: OperationDefinition<{ sessionId: string }, { sessionId:
   timeoutMs: WS_TIMEOUT_MS,
 };
 
+/** Sidebar drag reorder of the open-task list (migration 067): whole-list
+ *  overlay of the open group's ordered ids (`task:list:order`), REST executor,
+ *  sink convergence — the same shape as `workspace.reorder`. */
+const taskReorder: OperationDefinition<{ ids: string[] }, string[]> = {
+  policy: 'optimistic',
+  entityKey: () => TASK_LIST_ENTITY_KEY,
+  optimisticWrites: input => [{ field: TASK_ORDER_FIELD, value: input.ids }],
+  execute: async input => {
+    if (!(await reorderTasks(input.ids))) throw new Error('reorder tasks failed');
+    return input.ids;
+  },
+  reconcile: ids => {
+    taskCanonicalSink?.applyOrder(ids);
+    taskCanonicalSink?.refetch();
+  },
+  // REST failures have no error envelope — surface them here (the overlay
+  // rollback is the store's job).
+  rollback: error => toast({ kind: 'error', message: error.message }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
 registry.register('task.rename', taskRename);
 registry.register('task.toggleDone', taskToggleDone);
 registry.register('task.pin', taskPin);
@@ -205,6 +253,7 @@ registry.register('task.delete', taskDelete);
 registry.register('task.createSubtask', taskCreateSubtask);
 registry.register('task.completeSubtask', taskCompleteSubtask);
 registry.register('task.reopenSubtask', taskReopenSubtask);
+registry.register('task.reorder', taskReorder);
 
 /** Task fields an overlay may write (Phase 3a set). */
 const TASK_OVERLAY_FIELDS = new Set(['name', 'status', 'pinned_at']);

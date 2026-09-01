@@ -22,7 +22,7 @@ export function createGianToolMcpServer(options: {
   call?: import('./adapter.js').GianMcpRpcCall;
 }): Server {
   const server = new Server(
-    { name: 'gian-tool', version: '0.5.3' },
+    { name: 'gian-tool', version: '0.5.4' },
     { capabilities: { tools: {} } },
   );
   const callerId = options.callerId

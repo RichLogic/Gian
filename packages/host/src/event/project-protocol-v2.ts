@@ -1,6 +1,30 @@
 import type { DisplayEvent, FileChangeSummary } from '@gian/shared';
 import { INTERACTION_KINDS, PRESENTATION_TONES, type ProxyNotification } from '@gian/proxy-protocol';
 
+/** ACP PermissionOption.kind closed set carried by the proxy inside
+ *  `interaction.requested.context.permissionOptionKinds`. */
+const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
+
+/** Native optionId -> ACP permission kind for one pending interaction.
+ *  Keys are session-scoped: protocol interactionIds are unique per session
+ *  only, never globally. */
+export type InteractionKindLookup = (
+  sessionId: string,
+  approvalId: string,
+) => ReadonlyMap<string, string> | undefined;
+
+/** Gian decision derived from the ACP permission kind. Unknown or missing
+ *  kinds return undefined so the caller keeps its existing safe fallback. */
+function decisionForKind(kind: string | undefined): 'allow_once' | 'allow_session' | 'decline' | undefined {
+  switch (kind) {
+    case 'allow_once': return 'allow_once';
+    case 'allow_always': return 'allow_session';
+    case 'reject_once':
+    case 'reject_always': return 'decline';
+    default: return undefined;
+  }
+}
+
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? Date.now() : parsed;
@@ -176,6 +200,16 @@ function projectInteractionRequested(
   const kind = typeof presentation.kind === 'string' ? presentation.kind : 'question';
   const actions = Array.isArray(data.actions) ? data.actions : [];
   const inputs = Array.isArray(data.inputs) ? data.inputs : [];
+  // Schema-valid context extension from the proxy: the ACP PermissionOption
+  // kind per native optionId. Only the closed ACP kind set is accepted;
+  // anything else keeps the legacy safe fallback.
+  const contextKinds = asRecord(asRecord(data.context).permissionOptionKinds);
+  const permissionKindById = new Map<string, string>();
+  for (const [optionId, value] of Object.entries(contextKinds)) {
+    if (typeof value === 'string' && ACP_PERMISSION_KINDS.has(value)) {
+      permissionKindById.set(optionId, value);
+    }
+  }
   const protocolActions = actions
     .filter((action): action is Record<string, unknown> => (
       Boolean(action) && typeof action === 'object' && !Array.isArray(action)
@@ -213,7 +247,10 @@ function projectInteractionRequested(
   const nativeOptions = protocolActions.map((action) => ({
     optionId: action.id,
     label: action.label,
-    kind: action.id || 'other',
+    // Prefer the ACP PermissionOption.kind relayed in the requested context;
+    // fall back to the legacy raw action id so pre-existing proxies keep
+    // rendering exactly as before.
+    kind: permissionKindById.get(action.id) ?? (action.id || 'other'),
   }));
   // §12 rendering hints: pass the presentation kind/tone through verbatim
   // (whitelisted) so the web card can label and tint itself instead of
@@ -265,6 +302,7 @@ export function projectProtocolV2Notification(
   notification: ProxyNotification,
   sessionId: string,
   turn: number,
+  interactionKinds?: InteractionKindLookup,
 ): DisplayEvent[] {
   if (!('sessionId' in notification.params) && notification.method !== 'catalog.changed') {
     return [];
@@ -317,7 +355,16 @@ export function projectProtocolV2Notification(
       return projectActivity(data, sessionId, turn, ts);
     case 'interaction.requested':
       return projectInteractionRequested(data, sessionId, turn, ts);
-    case 'interaction.resolved':
+    case 'interaction.resolved': {
+      // The strict resolved schema carries only the opaque actionId, so the
+      // Gian decision is derived from the requested event's option-kind map
+      // before this projection is persisted or broadcast. Live ingestion and
+      // database replay feed the same lookup, keeping both decisions equal.
+      const actionId = typeof data.actionId === 'string' ? data.actionId : null;
+      const kind = actionId && interactionKinds
+        ? interactionKinds(sessionId, String(data.interactionId ?? ''))?.get(actionId)
+        : undefined;
+      const mappedDecision = decisionForKind(kind ?? undefined);
       return [{
         session_id: sessionId,
         turn,
@@ -326,12 +373,14 @@ export function projectProtocolV2Notification(
         type: 'interaction.resolved',
         data: {
           approvalId: String(data.interactionId ?? ''),
-          decision: data.outcome === 'submitted' ? 'allow_once' : 'decline',
+          decision: mappedDecision
+            ?? (data.outcome === 'submitted' ? 'allow_once' : 'decline'),
           auto: data.outcome !== 'submitted',
-          nativeOptionId: typeof data.actionId === 'string' ? data.actionId : null,
+          nativeOptionId: actionId,
           ...(typeof data.displaySummary === 'string' ? { answers: { summary: data.displaySummary } } : {}),
         },
       }];
+    }
     case 'plan.updated': {
       const steps = Array.isArray(data.steps) ? data.steps : [];
       return [{

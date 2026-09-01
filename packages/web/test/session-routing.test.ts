@@ -9,6 +9,7 @@ import {
   buildRailSections,
   applySessionUpdate,
   isTurnRunning,
+  orderByIds,
   planCreatedSessionFirstMessage,
   sortSessionsForRail,
   sortWorkspacesForRail,
@@ -385,5 +386,49 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
     expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
     expect(sections.byWs.has(null as unknown as string)).toBe(false);
     expect(sections.projectWsIds).toEqual(['ws-a']);
+  });
+});
+
+describe('sortSessionsForRail: manual drag order (migration 067)', () => {
+  function row(id: string, workspace_order: number | null, updated_at: string, pinned_at: string | null = null) {
+    return { id, pinned_at, updated_at, workspace_order };
+  }
+
+  it('manual order wins within the unpinned group; NULL (never dragged) keeps activity order above it', () => {
+    const dragged1 = row('a', 1, '2026-08-01T10:00:00Z');
+    const dragged2 = row('b', 2, '2026-08-01T12:00:00Z');
+    const fresh = row('c', null, '2026-08-02T00:00:00Z');
+    const older = row('d', null, '2026-08-01T11:00:00Z');
+    // NULL rows first (activity DESC), then the manual range by its values.
+    expect(sortSessionsForRail([dragged2, dragged1, older, fresh]).map(r => r.id))
+      .toEqual(['c', 'd', 'a', 'b']);
+  });
+
+  it('pinned sessions still sort above and ignore workspace_order', () => {
+    const pinned = row('p', 9, '2026-07-01T00:00:00Z', '2026-08-01T10:00:00Z');
+    const dragged = row('a', 1, '2026-08-01T12:00:00Z');
+    expect(sortSessionsForRail([dragged, pinned]).map(r => r.id)).toEqual(['p', 'a']);
+  });
+
+  it('rows predating the migration (no workspace_order field) keep pure activity order', () => {
+    const a = { id: 'a', pinned_at: null, updated_at: '2026-08-01T10:00:00Z' };
+    const b = { id: 'b', pinned_at: null, updated_at: '2026-08-01T12:00:00Z' };
+    expect(sortSessionsForRail([a, b]).map(r => r.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('orderByIds: whole-list drag overlay merge', () => {
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+
+  it('reorders listed ids into the overlay order', () => {
+    expect(orderByIds(rows, ['c', 'a', 'b']).map(r => r.id)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('unlisted rows keep their relative order at the end', () => {
+    expect(orderByIds(rows, ['b']).map(r => r.id)).toEqual(['b', 'a', 'c']);
+  });
+
+  it('unknown overlay ids are skipped', () => {
+    expect(orderByIds(rows, ['zzz', 'b', 'a', 'c']).map(r => r.id)).toEqual(['b', 'a', 'c']);
   });
 });

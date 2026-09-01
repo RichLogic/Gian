@@ -236,11 +236,11 @@
         "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md"
       ],
       "optionalPatterns": [
-        "docs/operations/gian-tool-v0-api-and-implementation.md",
         "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
         "docs/adr/0044-authorize-gian-tool-by-role-and-direct-session-ownership.md",
         "docs/adr/0049-inject-session-scoped-gian-mcp.md",
-        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md"
+        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md"
       ],
       "modules": [
         "shared",
@@ -431,11 +431,24 @@
     },
     {
       "id": "codex-proxy",
-      "patterns": ["packages/proxies/codex-proxy/**"],
-      "modules": ["codex-proxy", "host"],
-      "scopes": ["unit", "integration", "system"],
-      "checks": ["typecheck"],
-      "specialEntrypoints": ["real-provider-canaries"],
+      "patterns": [
+        "packages/proxies/codex-proxy/**"
+      ],
+      "modules": [
+        "codex-proxy",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "real-provider-canaries"
+      ],
       "reason": "Codex proxy changes expand to stdio app-server lifecycle tests, proxy contracts, Host clients, and deferred real-provider compatibility."
     },
     {
@@ -524,6 +537,28 @@
         "dsh-proxy-runtime-canary"
       ],
       "reason": "DSH proxy implements gian.proxy/2.1 against the frozen bridge contract."
+    },
+    {
+      "id": "zcode-proxy-package",
+      "patterns": [
+        "packages/proxies/zcode-proxy/**"
+      ],
+      "modules": [
+        "zcode-proxy",
+        "proxy-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "specialEntrypoints": [
+        "zcode-real-app-server-canary"
+      ],
+      "reason": "ZCode proxy implements gian.proxy/2.1 over the WP0-frozen ZCode Protocol v1 facts."
     }
   ]
 }

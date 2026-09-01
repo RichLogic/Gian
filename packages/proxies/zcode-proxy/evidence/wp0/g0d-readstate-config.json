@@ -1,0 +1,495 @@
+{
+  "gate": "G0",
+  "sub": "workspace/readState with config",
+  "results": {
+    "sessionCountBefore": 0,
+    "topKeys": [
+      "modelCatalog",
+      "settings",
+      "slashCommands",
+      "workspace"
+    ],
+    "model": {
+      "current": {
+        "modelId": "GLM-5.3-Flash",
+        "providerId": "bigmodel"
+      },
+      "availableCount": 3,
+      "available": [
+        {
+          "contextWindow": 1000000,
+          "label": "GLM-5.3-Flash",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "low",
+                "label": "low"
+              },
+              {
+                "value": "high",
+                "label": "high"
+              },
+              {
+                "value": "max",
+                "label": "max"
+              }
+            ],
+            "defaultLevel": "max",
+            "providerOptionsByLevel": {
+              "low": {
+                "openaiCompatible": {
+                  "reasoningEffort": "low"
+                }
+              },
+              "high": {
+                "openaiCompatible": {
+                  "reasoningEffort": "high"
+                }
+              },
+              "max": {
+                "openaiCompatible": {
+                  "reasoningEffort": "max"
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5.3-Flash",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": true,
+          "supportsPdf": false,
+          "supportsVideo": true
+        },
+        {
+          "contextWindow": 200000,
+          "label": "glm-5-turbo",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "enabled",
+                "label": "enabled"
+              },
+              {
+                "value": "disabled",
+                "label": "disabled"
+              }
+            ],
+            "defaultLevel": "enabled",
+            "providerOptionsByLevel": {
+              "enabled": {
+                "openaiCompatible": {
+                  "thinking": {
+                    "type": "enabled"
+                  }
+                }
+              },
+              "disabled": {
+                "openaiCompatible": {
+                  "thinking": {
+                    "type": "disabled"
+                  }
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5-Turbo",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": false,
+          "supportsPdf": false,
+          "supportsVideo": false
+        },
+        {
+          "contextWindow": 1000000,
+          "label": "GLM-5.3",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "low",
+                "label": "low"
+              },
+              {
+                "value": "high",
+                "label": "high"
+              },
+              {
+                "value": "max",
+                "label": "max"
+              }
+            ],
+            "defaultLevel": "max",
+            "providerOptionsByLevel": {
+              "low": {
+                "openaiCompatible": {
+                  "reasoningEffort": "low"
+                }
+              },
+              "high": {
+                "openaiCompatible": {
+                  "reasoningEffort": "high"
+                }
+              },
+              "max": {
+                "openaiCompatible": {
+                  "reasoningEffort": "max"
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5.3",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": false,
+          "supportsPdf": false,
+          "supportsVideo": false
+        }
+      ]
+    },
+    "mode": {
+      "current": "build"
+    },
+    "permission": {
+      "mode": "build"
+    },
+    "thoughtLevel": {
+      "available": [
+        {
+          "label": "low",
+          "value": "low"
+        },
+        {
+          "label": "high",
+          "value": "high"
+        },
+        {
+          "label": "max",
+          "value": "max"
+        }
+      ],
+      "current": "max",
+      "defaultLevel": "max",
+      "enabled": true
+    },
+    "slashCommands": [
+      {
+        "description": "Show or set the current session goal.",
+        "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+        "name": "goal",
+        "source": "builtin"
+      },
+      {
+        "description": "Compact the current conversation with optional instructions.",
+        "inputHint": "/compact [instructions]",
+        "name": "compact",
+        "source": "builtin"
+      },
+      {
+        "description": "Create or update workspace AGENTS.md instructions.",
+        "inputHint": "/init [notes]",
+        "name": "init",
+        "source": "builtin"
+      },
+      {
+        "description": "Switch to Plan mode and optionally send a task.",
+        "inputHint": "/plan [task]",
+        "name": "plan",
+        "source": "builtin"
+      }
+    ],
+    "modelCatalog": {
+      "available": [
+        {
+          "contextWindow": 1000000,
+          "label": "GLM-5.3-Flash",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "low",
+                "label": "low"
+              },
+              {
+                "value": "high",
+                "label": "high"
+              },
+              {
+                "value": "max",
+                "label": "max"
+              }
+            ],
+            "defaultLevel": "max",
+            "providerOptionsByLevel": {
+              "low": {
+                "openaiCompatible": {
+                  "reasoningEffort": "low"
+                }
+              },
+              "high": {
+                "openaiCompatible": {
+                  "reasoningEffort": "high"
+                }
+              },
+              "max": {
+                "openaiCompatible": {
+                  "reasoningEffort": "max"
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5.3-Flash",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": true,
+          "supportsPdf": false,
+          "supportsVideo": true
+        },
+        {
+          "contextWindow": 200000,
+          "label": "glm-5-turbo",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "enabled",
+                "label": "enabled"
+              },
+              {
+                "value": "disabled",
+                "label": "disabled"
+              }
+            ],
+            "defaultLevel": "enabled",
+            "providerOptionsByLevel": {
+              "enabled": {
+                "openaiCompatible": {
+                  "thinking": {
+                    "type": "enabled"
+                  }
+                }
+              },
+              "disabled": {
+                "openaiCompatible": {
+                  "thinking": {
+                    "type": "disabled"
+                  }
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5-Turbo",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": false,
+          "supportsPdf": false,
+          "supportsVideo": false
+        },
+        {
+          "contextWindow": 1000000,
+          "label": "GLM-5.3",
+          "maxOutputTokens": 128000,
+          "providerLabel": "BigModel - Coding Plan",
+          "reasoning": {
+            "enabled": true,
+            "levels": [
+              {
+                "value": "low",
+                "label": "low"
+              },
+              {
+                "value": "high",
+                "label": "high"
+              },
+              {
+                "value": "max",
+                "label": "max"
+              }
+            ],
+            "defaultLevel": "max",
+            "providerOptionsByLevel": {
+              "low": {
+                "openaiCompatible": {
+                  "reasoningEffort": "low"
+                }
+              },
+              "high": {
+                "openaiCompatible": {
+                  "reasoningEffort": "high"
+                }
+              },
+              "max": {
+                "openaiCompatible": {
+                  "reasoningEffort": "max"
+                }
+              }
+            }
+          },
+          "ref": {
+            "modelId": "GLM-5.3",
+            "providerId": "bigmodel"
+          },
+          "supportsImages": false,
+          "supportsPdf": false,
+          "supportsVideo": false
+        }
+      ],
+      "providers": [
+        {
+          "kind": "openai-compatible",
+          "label": "BigModel - Coding Plan",
+          "models": [
+            {
+              "contextWindow": 1000000,
+              "label": "GLM-5.3-Flash",
+              "maxOutputTokens": 128000,
+              "modelId": "GLM-5.3-Flash",
+              "reasoning": {
+                "enabled": true,
+                "levels": [
+                  {
+                    "value": "low",
+                    "label": "low"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ],
+                "defaultLevel": "max",
+                "providerOptionsByLevel": {
+                  "low": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "low"
+                    }
+                  },
+                  "high": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "high"
+                    }
+                  },
+                  "max": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "max"
+                    }
+                  }
+                }
+              },
+              "supportsImages": true,
+              "supportsPdf": false,
+              "supportsVideo": true
+            },
+            {
+              "contextWindow": 200000,
+              "label": "glm-5-turbo",
+              "maxOutputTokens": 128000,
+              "modelId": "GLM-5-Turbo",
+              "reasoning": {
+                "enabled": true,
+                "levels": [
+                  {
+                    "value": "enabled",
+                    "label": "enabled"
+                  },
+                  {
+                    "value": "disabled",
+                    "label": "disabled"
+                  }
+                ],
+                "defaultLevel": "enabled",
+                "providerOptionsByLevel": {
+                  "enabled": {
+                    "openaiCompatible": {
+                      "thinking": {
+                        "type": "enabled"
+                      }
+                    }
+                  },
+                  "disabled": {
+                    "openaiCompatible": {
+                      "thinking": {
+                        "type": "disabled"
+                      }
+                    }
+                  }
+                }
+              },
+              "supportsImages": false,
+              "supportsPdf": false,
+              "supportsVideo": false
+            },
+            {
+              "contextWindow": 1000000,
+              "label": "GLM-5.3",
+              "maxOutputTokens": 128000,
+              "modelId": "GLM-5.3",
+              "reasoning": {
+                "enabled": true,
+                "levels": [
+                  {
+                    "value": "low",
+                    "label": "low"
+                  },
+                  {
+                    "value": "high",
+                    "label": "high"
+                  },
+                  {
+                    "value": "max",
+                    "label": "max"
+                  }
+                ],
+                "defaultLevel": "max",
+                "providerOptionsByLevel": {
+                  "low": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "low"
+                    }
+                  },
+                  "high": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "high"
+                    }
+                  },
+                  "max": {
+                    "openaiCompatible": {
+                      "reasoningEffort": "max"
+                    }
+                  }
+                }
+              },
+              "supportsImages": false,
+              "supportsPdf": false,
+              "supportsVideo": false
+            }
+          ],
+          "providerId": "bigmodel",
+          "source": "builtin"
+        }
+      ],
+      "revision": 0
+    },
+    "sessionCountAfter": 0,
+    "sideEffectFree": true
+  }
+}

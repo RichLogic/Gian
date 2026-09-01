@@ -154,6 +154,7 @@ export function main(argv = process.argv.slice(2)) {
     'grok-proxy-node',
     'dsh-bridge-node',
     'dsh-proxy-node',
+    'zcode-proxy-node',
   ]);
   if (selected.some(entry => entry.runner === 'host-node-tsx' || proxyRunners.has(entry.runner))) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
@@ -241,6 +242,13 @@ export function main(argv = process.argv.slice(2)) {
     'dsh-proxy-node',
     '@gian/dsh-proxy',
     join(rootDir, 'packages', 'proxies', 'dsh-proxy'),
+    env,
+  );
+  runBuiltPackageTests(
+    selected,
+    'zcode-proxy-node',
+    '@gian/zcode-proxy',
+    join(rootDir, 'packages', 'proxies', 'zcode-proxy'),
     env,
   );
 }

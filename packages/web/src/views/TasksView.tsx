@@ -12,13 +12,17 @@ import type { CreateSessionInput } from './new-session-view.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { taskEntityKey } from '../operations/task.js';
+import { sessionNeedsAttention, orderByIds } from '../session-routing.js';
+import { moveById, useDragReorder } from '../dnd-reorder.js';
+import type { RowDragProps } from '../dnd-reorder.js';
 import {
   useOperationDispatch,
   useOperationPending,
   useOperationRun,
   usePendingOperations,
+  useSessionOrderOverlay,
+  useTaskOrderOverlay,
 } from '../operations/use-operations.js';
-import { sessionNeedsAttention } from '../session-routing.js';
 import type { PendingFirstMessage } from '../pending-first-message.js';
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
@@ -65,10 +69,12 @@ function Icon({ d, size = 14, stroke = 1.8, filled = false }: { d: string; size?
 
 /** A Subtask is a Session with type==='subtask' and a matching task_id. Open
  *  subtasks come first — pinned ones float to the top (pinned_at DESC), the
- *  rest keep the stable "steps" order (created_at DESC, decided 2026-07-01)
- *  that doesn't jump around on activity. User-completed subtasks
- *  (`completed_at`) sink to the bottom (created_at DESC); they can't be
- *  pinned. ISO-8601 strings compare lexicographically in time order. */
+ *  rest follow the manual drag order (migration 067 `task_order`; NULL =
+ *  never dragged — those keep the stable "steps" order (created_at DESC,
+ *  decided 2026-07-01) ABOVE the manual range, so a fresh subtask still lands
+ *  on top). User-completed subtasks (`completed_at`) sink to the bottom
+ *  (created_at DESC); they can't be pinned. ISO-8601 strings compare
+ *  lexicographically in time order. */
 export function subtasksFor(sessions: Session[], taskId: string): Session[] {
   return sessions
     .filter(s => s.task_id === taskId && s.type === 'subtask')
@@ -81,14 +87,34 @@ export function subtasksFor(sessions: Session[], taskId: string): Session[] {
         if (ap && bp) return bp.localeCompare(ap);
         if (ap) return -1;
         if (bp) return 1;
+        const am = a.task_order != null ? 1 : 0;
+        const bm = b.task_order != null ? 1 : 0;
+        if (am !== bm) return am - bm;
+        if (am && bm) return a.task_order! - b.task_order!;
       }
       return b.created_at.localeCompare(a.created_at);
     });
 }
 
-/** Task ordering (2026-08-03: task pin removed): creation time, newest first
- *  (created_at DESC) — the same order in both the open and done groups. */
-function compareTasks(a: Task, b: Task): number {
+/** The subtask rows the user can drag (2026-08-29): open AND unpinned. Pinned
+ *  rows keep their pinned_at order above the draggable range; completed rows
+ *  stay sunk at the bottom. The `session.reorder` overlay/endpoint covers
+ *  exactly this subset. */
+export function reorderableSubtasks(sessions: Session[], taskId: string): Session[] {
+  return subtasksFor(sessions, taskId)
+    .filter(s => s.completed_at == null && s.pinned_at == null);
+}
+
+/** Task ordering: manual drag order (migration 067 `sort_order`) wins; tasks
+ *  never dragged (NULL) keep the automatic creation-time order (created_at
+ *  DESC) ABOVE the manual range, so a fresh task still lands on top. The same
+ *  order applies in both the open and done groups (2026-08-03: task pin no
+ *  longer affects ordering). Exported for the unit tests. */
+export function compareTasks(a: Task, b: Task): number {
+  const am = a.sort_order != null ? 1 : 0;
+  const bm = b.sort_order != null ? 1 : 0;
+  if (am !== bm) return am - bm;
+  if (am && bm) return a.sort_order! - b.sort_order!;
   return b.created_at.localeCompare(a.created_at);
 }
 
@@ -651,6 +677,21 @@ function TasksList({
     [visible],
   );
 
+  // Task drag reorder (2026-08-29): the open group is the draggable range;
+  // the 完成 section keeps its automatic order. While the `task.reorder` run
+  // is in flight its whole-list overlay (the dragged id order) wins over the
+  // canonical sort; on confirm the Host's sort_order column reproduces it.
+  const taskOrderOverlay = useTaskOrderOverlay();
+  const openOrdered = useMemo(
+    () => (taskOrderOverlay ? orderByIds(open, taskOrderOverlay) : open),
+    [open, taskOrderOverlay],
+  );
+  const taskDnd = useDragReorder((dragId, targetId, place) => {
+    const current = openOrdered.map(task => task.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) dispatch('task.reorder', { ids: next });
+  });
+
   const taskActions = useTaskActions(sessions, setRenamingTaskId);
   // Destructive-pending row treatment (proposal §5): a task being deleted
   // stays visible with a pending affordance until `task:deleted` lands — a
@@ -673,72 +714,9 @@ function TasksList({
   }
 
   // Open tasks (spec §C): EVERY one is expanded with its subtasks nested, so
-  // multiple concurrent tasks stay visible at once. Aligned with the Sessions
-  // rail (CodingView): each task is a `.sb-group` header — clicking it ONLY
-  // toggles collapse, exactly like a project group (2026-08-03: tasks are no
-  // longer selectable; only subtasks are). The hover "⋯" menu carries
-  // rename/completed-Session visibility/done, "+" opens the task-context
-  // new-session form.
-  const renderOpen = (group: Task[]) =>
-    group.map(task => {
-      const completedSessionsHidden = tasksWithCompletedHidden.has(task.id);
-      const childSubs = subtasksFor(sessions, task.id)
-        .filter(session => !completedSessionsHidden || session.completed_at == null);
-      const isCollapsed = collapsedTasks.has(task.id);
-      const deleting = deletingTaskIds.has(task.id);
-      return (
-        <div key={task.id} className="tasks-list-task">
-          <div
-            className={`sb-group task-group${isCollapsed ? '' : ' open'}`}
-            onClick={() => toggleTaskCollapsed(task.id)}
-          >
-            <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={14} /></span>
-            {renamingTaskId === task.id ? (
-              <TaskRenameInput task={task} onDone={() => setRenamingTaskId(null)} />
-            ) : (
-              <span className="task-group-name">{task.name}</span>
-            )}
-            {deleting && (
-              <span className="ri-age" data-testid={`task-deleting-${task.id}`}>{t('tasks.deleting')}</span>
-            )}
-            {/* 2026-08-04: the 待处理 count badge was removed from task
-                headers — attention is conveyed per subtask row (StatusIcon),
-                not rolled up onto the task title. */}
-            {!deleting && (
-            <span className="sb-group-acts">
-              <TaskMenu
-                task={task}
-                anchorClass="sb-act"
-                completedSessionsHidden={completedSessionsHidden}
-                onToggleCompletedSessions={() => toggleCompletedSessions(task.id)}
-                onRename={taskActions.rename(task)}
-                onToggleDone={taskActions.toggleDone(task)}
-                onDelete={taskActions.remove(task)}
-              />
-              <button
-                type="button"
-                className="sb-act"
-                data-testid={`task-new-session-${task.id}`}
-                aria-label={t('tasks.menu.newSession')}
-                title={t('tasks.menu.newSession')}
-                onClick={e => { e.stopPropagation(); onNewSession(task.id); }}
-              >
-                <Icon d={I.plus} size={13} />
-              </button>
-            </span>
-            )}
-          </div>
-          {!isCollapsed && childSubs.map(st => (
-            <SubtaskRow
-              key={st.id}
-              subtask={st}
-              active={st.id === activeSubtaskId}
-              onSelect={() => onSelectSubtask(task.id, st.id)}
-            />
-          ))}
-        </div>
-      );
-    });
+  // multiple concurrent tasks stay visible at once. Each task renders as an
+  // <OpenTaskGroup> — the header drags for task reorder (taskDnd), the
+  // subtask rows drag within the task (the group's own controller).
 
   return (
     <aside className="sidebar">
@@ -768,7 +746,26 @@ function TasksList({
         {visible.length === 0 && !creating && (
           <p className="tasks-list-empty">{t('tasks.empty')}</p>
         )}
-        {open.length > 0 && renderOpen(open)}
+        {openOrdered.map(task => (
+          <OpenTaskGroup
+            key={task.id}
+            task={task}
+            sessions={sessions}
+            activeSubtaskId={activeSubtaskId}
+            isCollapsed={collapsedTasks.has(task.id)}
+            completedSessionsHidden={tasksWithCompletedHidden.has(task.id)}
+            renaming={renamingTaskId === task.id}
+            deleting={deletingTaskIds.has(task.id)}
+            dragProps={taskDnd.rowProps(task.id)}
+            dragClass={taskDnd.rowClass(task.id)}
+            onToggleCollapsed={() => toggleTaskCollapsed(task.id)}
+            onToggleCompletedSessions={() => toggleCompletedSessions(task.id)}
+            onRenameDone={() => setRenamingTaskId(null)}
+            onSelectSubtask={onSelectSubtask}
+            onNewSession={onNewSession}
+            taskActions={taskActions}
+          />
+        ))}
         {done.length > 0 && (
           <>
             <button
@@ -804,6 +801,137 @@ function TasksList({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * One open task in the sidebar (2026-08-29: extracted from TasksList so the
+ * subtask list can own hooks): the `.sb-group` header — clicking it ONLY
+ * toggles collapse, exactly like a Sessions-rail project group (2026-08-03:
+ * tasks are no longer selectable; only subtasks are) — with the hover "⋯"
+ * menu (rename/completed-Session visibility/done) and the "+" task-context
+ * new-session form opener. The header drags for TASK reorder via TasksList's
+ * controller; subtask rows drag WITHIN the task via this group's own
+ * controller (open + unpinned rows form the draggable range —
+ * `reorderableSubtasks`; pinned rows keep their pinned_at order above it,
+ * completed rows stay sunk at the bottom).
+ */
+function OpenTaskGroup({
+  task,
+  sessions,
+  activeSubtaskId,
+  isCollapsed,
+  completedSessionsHidden,
+  renaming,
+  deleting,
+  dragProps,
+  dragClass,
+  onToggleCollapsed,
+  onToggleCompletedSessions,
+  onRenameDone,
+  onSelectSubtask,
+  onNewSession,
+  taskActions,
+}: {
+  task: Task;
+  sessions: Session[];
+  activeSubtaskId: string | null;
+  isCollapsed: boolean;
+  completedSessionsHidden: boolean;
+  renaming: boolean;
+  deleting: boolean;
+  /** Task-level drag (owned by TasksList's controller) on the group header. */
+  dragProps: RowDragProps;
+  dragClass: string;
+  onToggleCollapsed: () => void;
+  onToggleCompletedSessions: () => void;
+  onRenameDone: () => void;
+  onSelectSubtask: (taskId: string, subtaskId: string) => void;
+  onNewSession: (taskId: string) => void;
+  taskActions: ReturnType<typeof useTaskActions>;
+}) {
+  const t = useT();
+  const dispatch = useOperationDispatch();
+  // Subtask drag reorder: while the `session.reorder` run is in flight its
+  // whole-range overlay (the dragged id order) wins over the canonical
+  // `task_order` sort; on confirm the Host column reproduces it.
+  const orderOverlay = useSessionOrderOverlay('task', task.id);
+  const rows = useMemo(() => {
+    const base = subtasksFor(sessions, task.id)
+      .filter(session => !completedSessionsHidden || session.completed_at == null);
+    if (!orderOverlay) return base;
+    const sortable = base.filter(s => s.completed_at == null && s.pinned_at == null);
+    return [
+      ...base.filter(s => s.completed_at == null && s.pinned_at != null),
+      ...orderByIds(sortable, orderOverlay),
+      ...base.filter(s => s.completed_at != null),
+    ];
+  }, [sessions, task.id, completedSessionsHidden, orderOverlay]);
+  const subDnd = useDragReorder((dragId, targetId, place) => {
+    const current = rows
+      .filter(s => s.completed_at == null && s.pinned_at == null)
+      .map(s => s.id);
+    const next = moveById(current, dragId, targetId, place);
+    if (next !== current) {
+      dispatch('session.reorder', { scope: 'task', parentId: task.id, ids: next });
+    }
+  });
+
+  return (
+    <div className="tasks-list-task">
+      <div
+        className={`sb-group task-group${isCollapsed ? '' : ' open'}${dragClass}`}
+        onClick={onToggleCollapsed}
+        {...dragProps}
+      >
+        <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={14} /></span>
+        {renaming ? (
+          <TaskRenameInput task={task} onDone={onRenameDone} />
+        ) : (
+          <span className="task-group-name">{task.name}</span>
+        )}
+        {deleting && (
+          <span className="ri-age" data-testid={`task-deleting-${task.id}`}>{t('tasks.deleting')}</span>
+        )}
+        {/* 2026-08-04: the 待处理 count badge was removed from task
+            headers — attention is conveyed per subtask row (StatusIcon),
+            not rolled up onto the task title. */}
+        {!deleting && (
+        <span className="sb-group-acts">
+          <TaskMenu
+            task={task}
+            anchorClass="sb-act"
+            completedSessionsHidden={completedSessionsHidden}
+            onToggleCompletedSessions={onToggleCompletedSessions}
+            onRename={taskActions.rename(task)}
+            onToggleDone={taskActions.toggleDone(task)}
+            onDelete={taskActions.remove(task)}
+          />
+          <button
+            type="button"
+            className="sb-act"
+            data-testid={`task-new-session-${task.id}`}
+            aria-label={t('tasks.menu.newSession')}
+            title={t('tasks.menu.newSession')}
+            onClick={e => { e.stopPropagation(); onNewSession(task.id); }}
+          >
+            <Icon d={I.plus} size={13} />
+          </button>
+        </span>
+        )}
+      </div>
+      {!isCollapsed && rows.map(st => (
+        <SubtaskRow
+          key={st.id}
+          subtask={st}
+          active={st.id === activeSubtaskId}
+          onSelect={() => onSelectSubtask(task.id, st.id)}
+          drag={st.completed_at == null && st.pinned_at == null
+            ? { props: subDnd.rowProps(st.id), className: subDnd.rowClass(st.id) }
+            : undefined}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -863,10 +991,14 @@ function SubtaskRow({
   subtask,
   active,
   onSelect,
+  drag,
 }: {
   subtask: Session;
   active: boolean;
   onSelect: () => void;
+  /** Drag-reorder wiring (OpenTaskGroup's controller); absent for pinned and
+   *  completed rows, which are outside the draggable range. */
+  drag?: { props: RowDragProps; className: string };
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
@@ -881,13 +1013,14 @@ function SubtaskRow({
   );
   return (
     <div
-      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}`}
+      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}${drag?.className ?? ''}`}
       role="button"
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
       }}
+      {...(drag?.props ?? {})}
     >
       <div className="ri-body">
         <div className="ri-row1">

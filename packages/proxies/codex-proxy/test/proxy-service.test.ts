@@ -1219,6 +1219,136 @@ test('retryable Codex stream errors preserve the active turn until completion', 
   }
 });
 
+test('Codex model capacity errors fail only the turn and allow a different model retry', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'use the busy model' }],
+      model: 'gpt-5.6-sol',
+    });
+
+    harness.runtime.emitNotification({
+      method: 'error',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        error: {
+          message: 'Selected model is at capacity. Please try a different model.',
+          codexErrorInfo: 'serverOverloaded',
+          additionalDetails: null,
+        },
+        willRetry: false,
+      },
+    });
+
+    await waitFor(() => harness.events.some((entry) => entry.method === 'runtime.error'));
+    const failure = harness.events.find((entry) => entry.method === 'runtime.error');
+    assert.deepEqual(failure?.params.data, {
+      message: 'Selected model is at capacity. Please try a different model.',
+      code: 'serverOverloaded',
+      retryable: true,
+    });
+
+    const afterFailure = harness.service.getSession({ sessionId: created.session.id }).session;
+    assert.equal(afterFailure.status, 'idle');
+    assert.equal(afterFailure.lastError, null);
+
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'retry on another model' }],
+      model: 'gpt-5.6-terra',
+    });
+    assert.equal(harness.runtime.startTurnCalls.at(-1)?.options.model, 'gpt-5.6-terra');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('gian.proxy/2 exposes Codex capacity failures as retryable turn errors', async () => {
+  const harness = await createHarness();
+  harness.runtime.listAllModels = async () => ['gpt-5.6-sol', 'gpt-5.6-terra'].map((model, index) => ({
+    id: model,
+    model,
+    displayName: model,
+    description: 'test model',
+    hidden: false,
+    isDefault: index === 0,
+    defaultReasoningEffort: 'high',
+    supportedReasoningEfforts: [{ reasoningEffort: 'high' }],
+  }));
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new CodexProtocolV2Adapter(
+    harness.service,
+    '0.2.11',
+    (method, params) => {
+      notifications.push({ method, params });
+      proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+    },
+  );
+  try {
+    await adapter.handle(v2Request('1', 'initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    }));
+    const created = resultSchemas['session.create'].parse(await adapter.handle(v2Request('2', 'session.create', {
+      sessionId: 'capacity-session',
+      workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] },
+      config: {},
+    })));
+    const nativeSessionId = created.session.nativeSession?.id;
+    assert.ok(nativeSessionId);
+    await adapter.handle(v2Request('3', 'turn.start', {
+      sessionId: 'capacity-session',
+      streamId: created.session.streamId,
+      turnId: 'capacity-turn',
+      input: [{ type: 'text', text: 'use the busy model' }],
+      config: { model: 'gpt-5.6-sol', effort: 'high' },
+    }));
+
+    harness.runtime.emitNotification({
+      method: 'error',
+      params: {
+        threadId: nativeSessionId,
+        turnId: 'turn-1',
+        error: {
+          message: 'Selected model is at capacity. Please try a different model.',
+          codexErrorInfo: 'serverOverloaded',
+          additionalDetails: null,
+        },
+        willRetry: false,
+      },
+    });
+
+    await waitFor(() => notifications.some((entry) => entry.method === 'turn.failed'));
+    const failed = notifications.find((entry) => entry.method === 'turn.failed');
+    assert.deepEqual((failed?.params.data as { error?: unknown }).error, {
+      domainCode: 'RUNTIME_UNAVAILABLE',
+      message: 'Selected model is at capacity. Please try a different model.',
+      retryable: true,
+      details: { providerCode: 'serverOverloaded' },
+    });
+    assert.equal(
+      notifications.some((entry) => entry.method === 'session.updated'
+        && (entry.params.data as { state?: unknown }).state === 'idle'),
+      true,
+    );
+
+    const retry = resultSchemas['turn.start'].parse(await adapter.handle(v2Request('4', 'turn.start', {
+      sessionId: 'capacity-session',
+      streamId: created.session.streamId,
+      turnId: 'capacity-retry-turn',
+      input: [{ type: 'text', text: 'retry on another model' }],
+      config: { model: 'gpt-5.6-terra', effort: 'high' },
+    })));
+    assert.equal(retry.accepted, true);
+    assert.equal(harness.runtime.startTurnCalls.at(-1)?.options.model, 'gpt-5.6-terra');
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('non-retryable Codex runtime errors remain terminal', async () => {
   const harness = await createHarness();
   try {
@@ -1239,8 +1369,14 @@ test('non-retryable Codex runtime errors remain terminal', async () => {
     });
 
     await waitFor(() => harness.events.some((entry) => entry.method === 'runtime.error'));
+    const failure = harness.events.find((entry) => entry.method === 'runtime.error');
+    assert.deepEqual(failure?.params.data, {
+      message: 'request failed',
+      retryable: false,
+    });
     const failed = harness.service.getSession({ sessionId: created.session.id }).session;
     assert.equal(failed.status, 'error');
+    assert.equal(failed.lastError, 'request failed');
   } finally {
     await harness.cleanup();
   }

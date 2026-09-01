@@ -1,6 +1,11 @@
 import type { Executor } from '@gian/shared';
 
-export type RuntimeSource = 'managed' | 'override' | 'official-user' | 'path';
+export type RuntimeSource =
+  | 'managed'
+  | 'override'
+  | 'official-user'
+  | 'official-system'
+  | 'path';
 
 export interface InstalledRuntime {
   cli: Executor;

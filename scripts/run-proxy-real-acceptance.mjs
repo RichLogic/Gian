@@ -34,13 +34,14 @@ import {
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const allowRealTurnEnvironment = 'GIAN_ALLOW_REAL_AGENT_TURN';
 const defaultTimeoutMs = 180_000;
-const providerIds = ['claude', 'codex', 'kimi', 'grok', 'dsh'];
+const providerIds = ['claude', 'codex', 'kimi', 'grok', 'dsh', 'zcode'];
 const proxyPaths = {
   claude: join(rootDir, 'packages/proxies/cc-proxy/dist/src/cli/spawn.js'),
   codex: join(rootDir, 'packages/proxies/codex-proxy/dist/src/cli/spawn.js'),
   kimi: join(rootDir, 'packages/proxies/kimi-proxy/dist/src/cli/spawn.js'),
   grok: join(rootDir, 'packages/proxies/grok-proxy/dist/src/cli/spawn.js'),
   dsh: join(rootDir, 'packages/proxies/dsh-proxy/dist/src/cli/spawn.js'),
+  zcode: join(rootDir, 'packages/proxies/zcode-proxy/dist/src/cli/spawn.js'),
 };
 const binaryArguments = {
   claude: [],
@@ -48,6 +49,7 @@ const binaryArguments = {
   kimi: binary => ['--kimi-bin', binary],
   grok: binary => ['--grok-bin', binary],
   dsh: [],
+  zcode: [],
 };
 const binaryEnvironment = {
   claude: 'CLAUDE_BIN',
@@ -55,6 +57,7 @@ const binaryEnvironment = {
   kimi: 'KIMI_BIN',
   grok: 'GROK_BIN',
   dsh: 'DSH_BIN',
+  zcode: 'ZCODE_BIN',
 };
 
 function delay(ms) {
@@ -103,7 +106,7 @@ function parseArgs(argv) {
 
 function redact(text) {
   return String(text)
-    .replace(/(authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password)(["'\s:=]+)([^\s,"'}]+)/giu, '$1$2[redacted]')
+    .replace(/(authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|set[_-]?cookie|cookie)(["'\s:=]+)([^\s,"'}]+)/giu, '$1$2[redacted]')
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/giu, 'Bearer [redacted]');
 }
 
@@ -173,6 +176,9 @@ class ValidatedProxyClient extends EventEmitter {
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
           ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.1' }
+          : {}),
+        ...(this.provider === 'zcode'
+          ? { GIAN_PLUGIN_ID: 'com.zhipu.zcode' }
           : {}),
       },
     });
@@ -357,10 +363,14 @@ function splitConfig(catalog, cheapestConfig) {
   for (const [id, value] of Object.entries(cheapestConfig)) {
     const option = options.get(id);
     if (!option) throw new Error(`Current catalog has no cheapest config option ${id}.`);
-    if (option.choices && !option.choices.some(choice => Object.is(choice.value, value))) {
-      throw new Error(`Current catalog does not offer ${id}=${String(value)}.`);
+    const selected = value === '$catalog-default' ? option.defaultValue : value;
+    if (selected === undefined) {
+      throw new Error(`Current catalog has no default for ${id}.`);
     }
-    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
+    if (option.choices && !option.choices.some(choice => Object.is(choice.value, selected))) {
+      throw new Error(`Current catalog does not offer ${id}=${String(selected)}.`);
+    }
+    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = selected;
   }
   return { sessionConfig, turnConfig };
 }
@@ -433,6 +443,7 @@ function chooseAction(actions) {
 
 async function waitForTurn(client, session, turnId, from, options = {}) {
   const handled = new Set();
+  const responseDelays = [];
   const deadline = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
   while (Date.now() < deadline) {
     if (client.protocolFailure) throw client.protocolFailure;
@@ -467,6 +478,12 @@ async function waitForTurn(client, session, turnId, from, options = {}) {
         actionId: action.id,
         values: interactionValues(interaction.inputs),
       };
+      const interactionDelayMs = options.interactionDelayMs ?? 0;
+      if (interactionDelayMs > 0) {
+        const startedAt = Date.now();
+        await delay(interactionDelayMs);
+        responseDelays.push(Date.now() - startedAt);
+      }
       await client.request('interaction.respond', params);
       await client.request('interaction.respond', params);
     }
@@ -475,7 +492,12 @@ async function waitForTurn(client, session, turnId, from, options = {}) {
       && notification.params?.turnId === turnId
       && (notification.method === 'turn.completed' || notification.method === 'turn.failed')
     ));
-    if (terminal) return { terminal, notifications, interactionsHandled: handled.size };
+    if (terminal) return {
+      terminal,
+      notifications,
+      interactionsHandled: handled.size,
+      interactionResponseDelaysMs: responseDelays,
+    };
     await delay(25);
   }
   throw new Error(`Timed out waiting for turn ${turnId}.`);
@@ -567,11 +589,14 @@ async function runPromptScenario(context, scenario, session) {
   });
   assert.equal(result.accepted, true);
   assert.equal(result.turnId, turnId);
-  const turn = await waitForTurn(client, session, turnId, from);
+  const turn = await waitForTurn(client, session, turnId, from, {
+    interactionDelayMs: context.providerConfig.interactionDelayMs ?? 0,
+  });
   const assessment = assessScenario(catalog, provider, scenario, turn.notifications, {
     turnId,
     expectedMarker: marker,
     interactionsHandled: turn.interactionsHandled,
+    interactionResponseDelaysMs: turn.interactionResponseDelaysMs,
     terminalMethod: turn.terminal.method,
     stopReason: turn.terminal.params.data.stopReason ?? null,
   });
@@ -789,13 +814,16 @@ async function runReplayScenario(context, scenario) {
   });
   const live = await waitForTurn(client, session, turnId, from);
   const nativeSessionId = session.nativeSession?.id;
+  // Native discovery intentionally excludes sessions currently owned by this
+  // Proxy. Detach first, then prove that the idle native session is
+  // discoverable and can be reattached for replay.
+  await client.request('session.close', { sessionId: session.id, streamId: session.streamId });
   let listed = { sessions: [], nextCursor: null };
   for (let attempt = 0; attempt < 25; attempt += 1) {
     listed = await client.request('session.native.list', { cwd: context.workspace });
     if (listed.sessions.some(native => native.id === nativeSessionId)) break;
     await delay(100);
   }
-  await client.request('session.close', { sessionId: session.id, streamId: session.streamId });
   const replayAttachment = await client.request('session.create', {
     sessionId: `${context.provider}-replay-import-${randomUUID()}`,
     workspace: { cwd: context.workspace, roots: [context.workspace] },

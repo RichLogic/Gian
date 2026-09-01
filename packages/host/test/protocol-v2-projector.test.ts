@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { ProxyNotification } from '@gian/shared';
 import { projectNotification } from '../src/event/project-notification.js';
 import { projectProtocolV2Notification } from '../src/event/project-protocol-v2.js';
+import { InteractionKindRegistry } from '../src/event/interaction-kind-registry.js';
 
 function v2Notification(
   method: string,
@@ -220,4 +221,198 @@ test('protocol v2 step and request events remain trace-only', () => {
   }), 'session-1', 1);
   assert.deepEqual(step, []);
   assert.deepEqual(request, []);
+});
+
+/** Mirrors the coordinator's projectEventsWithKindTracking: requested events
+ *  record their option kinds, resolved events consume them. Used by both the
+ *  live path and database replay, so this helper is exactly the parity
+ *  contract under test. */
+function projectWithKindTracking(
+  notification: ProxyNotification,
+  registry: InteractionKindRegistry,
+  sessionId = 'session-1',
+) {
+  const events = projectNotification(
+    'kimi',
+    notification,
+    sessionId,
+    1,
+    (notificationSessionId, approvalId) => registry.lookup(notificationSessionId, approvalId),
+  );
+  for (const event of events) {
+    const type = event.display?.type;
+    const data = event.display?.data as Record<string, unknown> | undefined;
+    if ((type === 'interaction.approval' || type === 'interaction.question') && data) {
+      registry.record(sessionId, String(data.approvalId ?? ''), data.nativeOptions);
+    } else if (type === 'interaction.resolved' && data) {
+      registry.forget(sessionId, String(data.approvalId ?? ''));
+    }
+  }
+  return events;
+}
+
+const kimiPhoneyRequest = v2Notification('interaction.requested', {
+  interactionId: 'ix-kimi',
+  title: 'Read',
+  description: 'Requesting approval to Reading .git/logs/HEAD',
+  presentation: { kind: 'permission', tone: 'warning' },
+  inputs: [],
+  actions: [
+    { id: 'approve_once', label: 'Approve once', style: 'primary' },
+    { id: 'approve_always', label: 'Approve for this session', style: 'secondary' },
+    { id: 'reject', label: 'Reject', style: 'danger' },
+  ],
+  context: {
+    subject: { toolName: 'Read', inputPreview: '.git/logs/HEAD' },
+    permissionOptionKinds: {
+      approve_once: 'allow_once',
+      approve_always: 'allow_always',
+      reject: 'reject_once',
+    },
+  },
+});
+
+test('requested context ACP kinds flow into nativeOptions and rejected style', () => {
+  const registry = new InteractionKindRegistry();
+  const [event] = projectWithKindTracking(kimiPhoneyRequest, registry);
+  assert.equal(event?.display?.type, 'interaction.approval');
+  const data = event?.display?.data as Record<string, unknown>;
+  assert.deepEqual(data.nativeOptions, [
+    { optionId: 'approve_once', label: 'Approve once', kind: 'allow_once' },
+    { optionId: 'approve_always', label: 'Approve for this session', kind: 'allow_always' },
+    { optionId: 'reject', label: 'Reject', kind: 'reject_once' },
+  ]);
+  // Reject action style is decided by the ACP kind, not the opaque id text.
+  assert.deepEqual(data.actions, [
+    { id: 'approve_once', label: 'Approve once', style: 'primary' },
+    { id: 'approve_always', label: 'Approve for this session', style: 'secondary' },
+    { id: 'reject', label: 'Reject', style: 'danger' },
+  ]);
+});
+
+test('allow_always resolves to allow_session before persistence, live and replay', () => {
+  const cases = [
+    { actionId: 'approve_once', expected: 'allow_once' },
+    { actionId: 'approve_always', expected: 'allow_session' },
+    { actionId: 'reject', expected: 'decline' },
+  ] as const;
+  for (const { actionId, expected } of cases) {
+    // Live pass and replay pass build independent registries from the same
+    // stream order — both must derive the identical persisted decision.
+    for (const label of ['live', 'replay'] as const) {
+      const registry = new InteractionKindRegistry();
+      projectWithKindTracking(kimiPhoneyRequest, registry);
+      const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+        interactionId: 'ix-kimi',
+        outcome: 'submitted',
+        actionId,
+      }), registry);
+      const data = resolved?.display?.data as Record<string, unknown>;
+      assert.equal(data.decision, expected, `${label} ${actionId}`);
+      assert.equal(data.nativeOptionId, actionId);
+      assert.equal('kind' in data, false, 'resolved schema gains no kind field');
+    }
+  }
+  // Resolved consumption forgets the mapping: no stale registry entries.
+  const drained = new InteractionKindRegistry();
+  projectWithKindTracking(kimiPhoneyRequest, drained);
+  assert.ok(drained.lookup('session-1', 'ix-kimi'));
+  projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-kimi',
+    outcome: 'submitted',
+    actionId: 'approve_once',
+  }), drained);
+  assert.equal(drained.lookup('session-1', 'ix-kimi'), undefined);
+});
+
+test('interaction kind registry is session-scoped against id collisions (Finding 5)', () => {
+  const registry = new InteractionKindRegistry();
+  const allowRequest = v2Notification('interaction.requested', {
+    interactionId: 'shared-ix',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [{ id: 'approve_always', label: 'Always', style: 'secondary' }],
+    context: { permissionOptionKinds: { approve_always: 'allow_always' } },
+  });
+  const rejectRequest = v2Notification('interaction.requested', {
+    interactionId: 'shared-ix',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [{ id: 'reject', label: 'Reject', style: 'danger' }],
+    context: { permissionOptionKinds: { reject: 'reject_once' } },
+  });
+
+  projectWithKindTracking(allowRequest, registry, 'session-a');
+  projectWithKindTracking(rejectRequest, registry, 'session-b');
+
+  const resolvedFor = (sessionId: string, actionId: string) => {
+    const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+      interactionId: 'shared-ix',
+      outcome: 'submitted',
+      actionId,
+    }), registry, sessionId);
+    return (resolved?.display?.data as Record<string, unknown>).decision;
+  };
+  assert.equal(resolvedFor('session-a', 'approve_always'), 'allow_session');
+  assert.equal(resolvedFor('session-b', 'reject'), 'decline');
+
+  // forgetSession clears only that session's entries.
+  const scoped = new InteractionKindRegistry();
+  projectWithKindTracking(allowRequest, scoped, 'session-a');
+  projectWithKindTracking(rejectRequest, scoped, 'session-b');
+  scoped.forgetSession('session-a');
+  assert.equal(scoped.lookup('session-a', 'shared-ix'), undefined);
+  assert.ok(scoped.lookup('session-b', 'shared-ix'));
+});
+
+test('missing or unknown kinds keep the legacy safe fallback', () => {
+  // No permissionOptionKinds in context: kinds stay the legacy action id and
+  // the resolved decision keeps the historical submitted→allow_once default.
+  const registry = new InteractionKindRegistry();
+  const legacyRequest = v2Notification('interaction.requested', {
+    interactionId: 'ix-legacy',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [{ id: 'approve_always', label: 'Approve always', style: 'secondary' }],
+  });
+  projectWithKindTracking(legacyRequest, registry);
+  const [requested] = projectNotification('kimi', legacyRequest, 'session-1', 1);
+  assert.deepEqual(
+    ((requested?.display?.data as Record<string, unknown>).nativeOptions as Array<Record<string, unknown>>),
+    [{ optionId: 'approve_always', label: 'Approve always', kind: 'approve_always' }],
+  );
+  const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-legacy',
+    outcome: 'submitted',
+    actionId: 'approve_always',
+  }), registry);
+  assert.equal(
+    (resolved?.display?.data as Record<string, unknown>).decision,
+    'allow_once',
+  );
+
+  // Kinds outside the ACP closed set are ignored at the requested boundary.
+  const [suspicious] = projectNotification('kimi', v2Notification('interaction.requested', {
+    interactionId: 'ix-suspicious',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [{ id: 'ok', label: 'OK', style: 'primary' }],
+    context: { permissionOptionKinds: { ok: 'allow_everything_forever' } },
+  }), 'session-1', 1);
+  assert.equal(
+    ((suspicious?.display?.data as Record<string, unknown>).nativeOptions as Array<Record<string, unknown>>)[0]?.kind,
+    'ok',
+  );
+});
+
+test('cancelled resolutions decline regardless of kind knowledge', () => {
+  const registry = new InteractionKindRegistry();
+  projectWithKindTracking(kimiPhoneyRequest, registry);
+  const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-kimi',
+    outcome: 'cancelled',
+  }), registry);
+  const data = resolved?.display?.data as Record<string, unknown>;
+  assert.equal(data.decision, 'decline');
+  assert.equal(data.auto, true);
 });

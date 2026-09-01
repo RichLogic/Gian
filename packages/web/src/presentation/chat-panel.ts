@@ -19,9 +19,10 @@ export type ChatPanelRequest =
       kind: 'event-feed';
       turn: number;
       /** Optional anchor: a transcript item identity
-       *  (`transcriptItemIdentity`) of one row of the turn. The feed scrolls
-       *  that row into view and flashes it (`.trow.is-anchor-flash`) — used
-       *  by the turn work block, whose rows jump to their feed counterpart. */
+       *  (`transcriptItemIdentity`) of one row of the turn. The feed expands
+       *  that row, scrolls it into view, and flashes it
+       *  (`.trow.is-anchor-flash`) — used by the turn work block, whose rows
+       *  jump to their feed counterpart. */
       anchorId?: string;
     }
   | {

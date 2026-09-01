@@ -135,7 +135,7 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
   requireRecord(catalog, 'catalog');
   const providers = requireRecord(catalog.providers, 'providers');
   const providerIds = Object.keys(providers);
-  if (providerIds.length < 5) throw new Error('Catalog must include all four Gian Proxies plus DSH.');
+  if (providerIds.length < 6) throw new Error('Catalog must include every shipping-candidate Gian Proxy.');
 
   const resultSchemas = requireRecord(catalog.resultSchemas, 'resultSchemas');
   if (!sameMembers(Object.keys(resultSchemas), PROXY_METHODS)) {
