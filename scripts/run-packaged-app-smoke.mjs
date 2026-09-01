@@ -545,7 +545,10 @@ async function completePackagedOnboarding({
 
   // Step 1 remains explicit even for an already connected account.
   await onboarding.locator('.onboarding-actions .btn.primary').click();
-  const claude = onboarding.locator('.onboarding-agent:has(.exec-dot.claude)');
+  const claude = onboarding.locator('.onboarding-agent').filter({
+    has: onboarding.getByRole('heading', { name: 'Claude Code', exact: true }),
+  });
+  await claude.waitFor({ timeout: 30_000 });
   const cliPath = claude.locator('.onboarding-cli-path input');
   await cliPath.fill(fakeClaude);
   await claude.locator('.onboarding-cli-path button').click();
