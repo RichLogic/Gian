@@ -217,15 +217,27 @@ export class GitHubAuthService {
       'user-agent': 'Gian',
       'x-github-api-version': API_VERSION,
     });
+    let authenticated = false;
     if (this.options.store.isAvailable()) {
       const credential = await this.options.store.load();
-      if (credential) headers.set('authorization', `Bearer ${credential.token}`);
+      if (credential) {
+        headers.set('authorization', `Bearer ${credential.token}`);
+        authenticated = true;
+      }
     }
-    return this.fetchImpl(url, {
+    const init: RequestInit = {
       headers,
       redirect: 'error',
       ...(signal ? { signal } : {}),
-    });
+    };
+    const response = await this.fetchImpl(url, init);
+    if (!authenticated || response.status !== 401) return response;
+
+    // Release metadata is public. An expired/revoked OAuth credential must
+    // not block Agent updates, but the token also must not cross the retry.
+    const anonymousHeaders = new Headers(headers);
+    anonymousHeaders.delete('authorization');
+    return this.fetchImpl(url, { ...init, headers: anonymousHeaders });
   }
 
   private async poll(pending: PendingAuthorization): Promise<GitHubAuthFinishResult> {

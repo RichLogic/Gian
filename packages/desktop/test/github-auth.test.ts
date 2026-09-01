@@ -185,6 +185,39 @@ test('release metadata requests use the signed-in credential only for exact GitH
   assert.equal(calls[2]?.init?.redirect, 'error');
 });
 
+test('release metadata retries anonymously after an expired credential returns 401', async () => {
+  const token = 'expired-github-token-sentinel';
+  const store = memoryStore();
+  store.saved = { token, user };
+  const calls: Array<{ url: string; authorization: string | null }> = [];
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store,
+    fetch: (async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get('authorization'),
+      });
+      return calls.length === 1
+        ? Response.json({ message: 'Bad credentials' }, { status: 401 })
+        : Response.json([{ tag_name: 'proxy-claude-v0.2.3' }]);
+    }) as typeof fetch,
+  });
+
+  const response = await service.fetchReleaseMetadata({ repository: 'RichLogic/Gian' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [
+    {
+      url: 'https://api.github.com/repos/RichLogic/Gian/releases?per_page=100',
+      authorization: `Bearer ${token}`,
+    },
+    {
+      url: 'https://api.github.com/repos/RichLogic/Gian/releases?per_page=100',
+      authorization: null,
+    },
+  ]);
+});
+
 test('release metadata rejects arbitrary repositories and unsafe tags before fetching', async () => {
   const calls: string[] = [];
   const service = new GitHubAuthService({
