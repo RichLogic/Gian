@@ -476,14 +476,20 @@ async function runPackagedTerminalJourney({
   const beforeSize = await fileText(join(workspacePath, 'size-before.txt'));
   assert.match(beforeSize, /^\d+ \d+\n?$/);
   await electronApp.evaluate(({ BrowserWindow }) => {
-    BrowserWindow.getAllWindows()[0]?.setSize(1440, 620);
+    const target = BrowserWindow.getAllWindows()[0];
+    if (!target) return;
+    const [width, height] = target.getSize();
+    target.setSize(
+      width >= 1_300 ? width - 240 : width + 240,
+      height >= 700 ? height - 140 : height + 140,
+    );
   });
   await expect(first.locator('.xterm-screen')).toBeVisible();
   await sendTerminalCommand(first, `stty size > size-after.txt; printf 'PACKAGED_RESIZED\\n'`);
   await expect.poll(async () => {
     const afterSize = await fileText(join(workspacePath, 'size-after.txt'));
     return /^\d+ \d+\n?$/.test(afterSize) && afterSize !== beforeSize;
-  }).toBe(true);
+  }, { timeout: 10_000 }).toBe(true);
   await expect.poll(() => terminalText(first)).toContain('PACKAGED_RESIZED');
 
   await window.getByTestId('sheet-tab-term').nth(1).click();
