@@ -140,11 +140,22 @@ test('agent manager detects configured official CLIs and development proxies', a
     kimi: join(root, 'bin', 'kimi'),
     grok: join(root, 'bin', 'grok'),
   };
+  const zcode = join(
+    root,
+    'home',
+    'Applications',
+    'ZCode.app',
+    'Contents',
+    'Resources',
+    'glm',
+    'zcode.cjs',
+  );
   await Promise.all([
     executable(bins.claude, 'claude 2.1.220'),
     executable(bins.codex, 'codex-cli 0.146.0'),
     executable(bins.kimi, 'kimi 0.31.1'),
     executable(bins.grok, 'grok 0.1.42'),
+    executable(zcode, 'zcode 0.16.5'),
   ]);
   const proxy = join(root, 'proxy.mjs');
   await writeFile(proxy, 'export {};\n');
@@ -166,7 +177,7 @@ test('agent manager detects configured official CLIs and development proxies', a
     ['codex', true, '0.146.0'],
     ['kimi', true, '0.31.1'],
     ['dsh', false, null],
-    // The ZCode CLI is discovered in the app bundle and probes 0.16.5, but
+    // The isolated ZCode fixture probes 0.16.5, but
     // the fixture HOME lacks ~/.zcode/cli/config.json: readiness reports
     // invalid via the generic readinessIssue (WP0 G1 / frozen O2), and the
     // kind is excluded from the product Agents list below only because no
