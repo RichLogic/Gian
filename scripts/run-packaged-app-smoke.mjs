@@ -545,6 +545,10 @@ async function completePackagedOnboarding({
 
   // Step 1 remains explicit even for an already connected account.
   await onboarding.locator('.onboarding-actions .btn.primary').click();
+  const addClaude = onboarding.getByTestId('onboarding-add-claude');
+  if (await addClaude.isVisible()) {
+    await addClaude.getByRole('button').click();
+  }
   const claude = onboarding.locator('.onboarding-agent').filter({
     has: onboarding.getByRole('heading', { name: 'Claude Code', exact: true }),
   });
