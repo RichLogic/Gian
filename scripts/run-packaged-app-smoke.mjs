@@ -475,6 +475,8 @@ async function runPackagedTerminalJourney({
 
   const beforeSize = await fileText(join(workspacePath, 'size-before.txt'));
   assert.match(beforeSize, /^\d+ \d+\n?$/);
+  const beforeBounds = await first.locator('.xterm-screen').boundingBox();
+  assert.ok(beforeBounds, 'packaged terminal has no pre-resize bounds');
   await electronApp.evaluate(({ BrowserWindow }) => {
     const target = BrowserWindow.getAllWindows()[0];
     if (!target) return;
@@ -484,6 +486,14 @@ async function runPackagedTerminalJourney({
       height >= 700 ? height - 140 : height + 140,
     );
   });
+  await expect.poll(async () => {
+    const afterBounds = await first.locator('.xterm-screen').boundingBox();
+    return Boolean(afterBounds) && (
+      Math.abs(afterBounds.width - beforeBounds.width) >= 1
+      || Math.abs(afterBounds.height - beforeBounds.height) >= 1
+    );
+  }, { timeout: 10_000 }).toBe(true);
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
   await expect(first.locator('.xterm-screen')).toBeVisible();
   await sendTerminalCommand(first, `stty size > size-after.txt; printf 'PACKAGED_RESIZED\\n'`);
   await expect.poll(async () => {
