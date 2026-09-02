@@ -75,7 +75,7 @@ test('ERR-017: systemd rendering quotes spaces and escapes percent specifiers', 
   const rendered = renderDaemonUnit({
     platform: 'linux', template, installDir, nodeBin, home, launchdPath,
   });
-  assert.match(rendered, /ExecStart="\/opt\/Node 24%%\/\$\$runtime\/node" "\/srv\/Gian & 100%% \$\$\{ROOT\} ready\/packages\/host\/dist\/index\.js"/);
+  assert.match(rendered, /ExecStart=:"\/opt\/Node 24%%\/\$runtime\/node" "\/srv\/Gian & 100%% \$\{ROOT\} ready\/packages\/host\/dist\/index\.js"/);
   assert.ok(rendered.includes('WorkingDirectory=/srv/Gian\\x20&\\x20100%%\\x20${ROOT}\\x20ready/packages/host'));
   assert.match(rendered, /Environment="PATH=\/opt\/Kimi 100%%:\/usr\/bin"/);
   assert.ok(rendered.includes('StandardOutput=append:/home/user\\x20name%%/.gian/logs/host.out'));

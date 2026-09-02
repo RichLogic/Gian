@@ -43,13 +43,6 @@ function systemdPath(value) {
     .replaceAll('%', '%%');
 }
 
-function systemdExecQuote(value) {
-  // ExecStart performs its own $FOO/${FOO} expansion after tokenization,
-  // including inside double quotes. `$$` is the documented literal-dollar
-  // escape. Other unit directives do not use that ExecStart expansion pass.
-  return systemdQuote(value).replaceAll('$', () => '$$');
-}
-
 function substitute(template, values) {
   const placeholder = /{{([A-Z0-9_]+)}}/g;
   const templateWithoutPlaceholders = template.replace(placeholder, '');
@@ -88,7 +81,9 @@ export function renderDaemonUnit({
   }
   if (platform === 'linux') {
     return substitute(template, {
-      EXEC_START: `${systemdExecQuote(node)} ${systemdExecQuote(join(root, 'packages/host/dist/index.js'))}`,
+      // The `:` executable prefix disables systemd's $FOO/${FOO} expansion.
+      // Gian resolves both paths before rendering, so every dollar is literal.
+      EXEC_START: `:${systemdQuote(node)} ${systemdQuote(join(root, 'packages/host/dist/index.js'))}`,
       WORKING_DIRECTORY: systemdPath(join(root, 'packages/host')),
       STANDARD_OUTPUT: systemdPath(`append:${join(userHome, '.gian/logs/host.out')}`),
       STANDARD_ERROR: systemdPath(`append:${join(userHome, '.gian/logs/host.err')}`),
