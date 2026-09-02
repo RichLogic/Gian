@@ -56,6 +56,7 @@ export const CAPABILITY_NAMES = [
   'session.native.delete',
   'session.replay',
   'session.create.forkBoundaries',
+  'session.create.hostBindingProof',
   'sidechat',
   'session.fork',
   'session.fork.atTurn',

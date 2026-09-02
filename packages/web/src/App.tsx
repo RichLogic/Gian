@@ -830,6 +830,7 @@ export function App() {
     openChatPanel,
     addTerminalTab,
     addBrowserTab,
+    openWorkspaceInSheet,
     openNewWorkspaceInSheet,
   } = useWorkbench({
     authStatus: runtimeAuthStatus,
@@ -1758,6 +1759,7 @@ export function App() {
                       activeSection={settingsSection}
                       onSectionChange={onSettingsNavSelect}
                       workspaces={displayWorkspaces}
+                      onWorkspaceOpened={openWorkspaceInSheet}
                       onSessionOpened={openAdoptedSession}
                       identity={identity}
                       onSignOut={signOut}

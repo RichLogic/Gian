@@ -15,6 +15,9 @@ one-shot runner, and it keeps stdout exclusively for bridge JSON-RPC.
 The current production baseline is `@deepseek-ai/dsh@0.1.1-rc.2`. The Bridge
 waits for late Provider registration before its first Catalog and projects the
 selected Provider, model, and reasoning effort into the Agent's actual request.
+Existing Gian-owned Sessions resume through `AgentRegistry.resume` only when
+the Proxy and Bridge both validate the Host's per-process binding proof.
+Unattested IDs and history adoption fail closed.
 
 ## Test
 

@@ -7,8 +7,9 @@
  * - `session/event`, `agent/status`, `agent/error`, `agent/inbox/*`
  * - `ctx.userQuestions.registerProvider / ask`
  * - `ctx.approval` watermark listeners (`approval/request`) and outcome set
- * - `ctx.sessionPersistence.list / inspect / prepare / readFrom` (no delete,
- *   no cross-process owner field, so native list/delete/attach stay absent)
+ * - `ctx.sessionPersistence.list / inspect / prepare / readFrom` (no delete or
+ *   owner field, so native list/delete/adoption stay absent; an exact
+ *   Host-attested binding may resume through `ctx.agents.resume`)
  *
  * The fake implementation in `fake-host.ts` replays the exact same shapes for
  * deterministic contract tests with zero model calls.
@@ -21,8 +22,9 @@ export interface BridgeSessionCreateParams {
   cwd: string;
   roots: string[];
   config: Record<string, BridgeJsonValue>;
-  /** Omitted for new sessions; only accepted against a resumed native id. */
+  /** Omitted for new sessions; resume requires the exact Host-attested id. */
   nativeSessionId?: string;
+  hostBindingProof?: string;
   restartNewStream?: boolean;
 }
 

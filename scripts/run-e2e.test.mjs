@@ -36,6 +36,7 @@ test('Playwright owns the real Host and Web processes rather than pnpm wrappers'
   const config = await readFile(new URL('../playwright.config.ts', import.meta.url), 'utf8');
 
   assert.match(config, /globalTimeout: CI \? 40 \* 60_000 : 15 \* 60_000/);
+  assert.match(config, /workers: CI \? 4 : 1/);
   assert.match(config, /command: 'node dist\/index\.js'/);
   assert.match(config, /command: 'node node_modules\/vite\/bin\/vite\.js preview'/);
   assert.match(config, /reuseExistingServer: EXTERNAL_SERVERS \|\| \(!CI && !ISOLATED\)/);

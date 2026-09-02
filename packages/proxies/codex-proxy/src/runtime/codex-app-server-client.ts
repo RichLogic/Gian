@@ -24,6 +24,13 @@ function abortReason(signal: AbortSignal, fallback: string) {
 // The umbrella `codex app-server --listen stdio://` form first shipped in 0.100.0.
 export const MIN_CODEX_STDIO_VERSION = '0.100.0';
 export const MAX_APP_SERVER_JSONL_LINE_BYTES = 16 * 1024 * 1024;
+const APP_SERVER_FRAME_PREFIX_BYTES = 16 * 1024;
+
+function isDiscardableThreadSnapshotFrame(line: Uint8Array): boolean {
+  const prefix = Buffer.from(line.subarray(0, APP_SERVER_FRAME_PREFIX_BYTES)).toString('utf8');
+  return /"method"\s*:\s*"thread\/started"/.test(prefix)
+    && /"thread"\s*:/.test(prefix);
+}
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 64 * 1024;
 
 function isUnsupportedStdioDiagnostic(value: string) {
@@ -279,7 +286,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.2.11' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.12' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -411,12 +418,20 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     }
 
     let buffered = Buffer.alloc(0);
+    let discardingThreadSnapshot = false;
     const fail = (cause: unknown, fallback: string) => {
       this.handleRuntimeFailure(generation, toError(cause, fallback));
     };
     stdout.on('data', (chunk: Buffer | string) => {
       if (this.activeGeneration !== generation || this.process !== child) return;
-      const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (discardingThreadSnapshot) {
+        const newlineIndex = incoming.indexOf(0x0a);
+        if (newlineIndex < 0) return;
+        incoming = incoming.subarray(newlineIndex + 1);
+        discardingThreadSnapshot = false;
+        if (incoming.length === 0) return;
+      }
       buffered = buffered.length === 0 ? Buffer.from(incoming) : Buffer.concat([buffered, incoming]);
 
       while (true) {
@@ -425,6 +440,13 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
         let line = buffered.subarray(0, newlineIndex);
         buffered = buffered.subarray(newlineIndex + 1);
         if (line.length > MAX_APP_SERVER_JSONL_LINE_BYTES) {
+          if (isDiscardableThreadSnapshotFrame(line)) {
+            this.emit(
+              'debug',
+              `Discarded oversized Codex thread/started history snapshot (${line.length} bytes).`,
+            );
+            continue;
+          }
           fail(
             new Error(
               `Codex app-server JSONL line exceeds ${MAX_APP_SERVER_JSONL_LINE_BYTES} bytes.`,
@@ -450,6 +472,15 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
       }
 
       if (buffered.length > MAX_APP_SERVER_JSONL_LINE_BYTES) {
+        if (isDiscardableThreadSnapshotFrame(buffered)) {
+          this.emit(
+            'debug',
+            `Discarding oversized Codex thread/started history snapshot (>${MAX_APP_SERVER_JSONL_LINE_BYTES} bytes).`,
+          );
+          buffered = Buffer.alloc(0);
+          discardingThreadSnapshot = true;
+          return;
+        }
         fail(
           new Error(
             `Codex app-server JSONL line exceeds ${MAX_APP_SERVER_JSONL_LINE_BYTES} bytes before newline.`,

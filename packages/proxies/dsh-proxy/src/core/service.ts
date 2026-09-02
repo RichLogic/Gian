@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.1.4';
+export const PLUGIN_VERSION = '0.1.5';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -163,6 +163,17 @@ export class DshProxyService {
     const session = this.sessions.get(sessionId);
     if (!session) throw new ServiceError('SESSION_NOT_FOUND', `Session ${sessionId} is not attached.`);
     return session;
+  }
+
+  hasSession(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
+  }
+
+  discardAttachment(sessionId: string, createFingerprint: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session?.createFingerprint === createFingerprint && session.activeTurn === null) {
+      this.sessions.delete(sessionId);
+    }
   }
 
   requireStream(sessionId: string, streamId: string): AttachedSession {

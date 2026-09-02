@@ -23,7 +23,7 @@ export {
 
 /** Cordis hook name used when the bundle is mounted as a DSH plugin row. */
 export const BRIDGE_SERVICE_NAME = 'gian-dsh-bridge';
-export const BRIDGE_SERVICE_VERSION = '0.1.1';
+export const BRIDGE_SERVICE_VERSION = '0.1.2';
 export const name = BRIDGE_SERVICE_NAME;
 export const inject = ['agents', 'sessions'];
 

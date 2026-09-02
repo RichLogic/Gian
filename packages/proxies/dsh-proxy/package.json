@@ -1,6 +1,6 @@
 {
   "name": "@gian/dsh-proxy",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "ai.deepseek.harness — shared-scope Gian Proxy translating gian.proxy/2.1 over gian.dsh.bridge/1.0",
   "type": "module",

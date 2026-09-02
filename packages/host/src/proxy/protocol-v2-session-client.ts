@@ -90,6 +90,14 @@ export class ProtocolV2Host {
     return this.client.isExited();
   }
 
+  nativeSessionHostBindingProof(params: {
+    sessionId: string;
+    nativeSessionId: string;
+    cwd: string;
+  }): string {
+    return this.client.nativeSessionHostBindingProof(params);
+  }
+
   initialize(): Promise<InitializeResult> {
     this.initialized ??= this.client.initialize();
     return this.initialized;
@@ -309,6 +317,16 @@ export class ProtocolV2SessionClient implements ProxyClient {
         nativeSession: {
           id: params.nativeSessionId,
           ...(history ? { history } : {}),
+          ...(history === 'none'
+            && initialized.capabilities['session.create.hostBindingProof'] !== undefined
+            ? {
+              hostBindingProof: this.host.nativeSessionHostBindingProof({
+                sessionId: this.hostSessionId,
+                nativeSessionId: params.nativeSessionId,
+                cwd: params.cwd,
+              }),
+            }
+            : {}),
         },
       } : {}),
     });

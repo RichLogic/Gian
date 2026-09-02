@@ -8,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
 import { BridgeClient, BridgeClientError } from '../runtime/bridge-client.js';
 
-const PLUGIN_VERSION = '0.1.4';
+const PLUGIN_VERSION = '0.1.5';
 
 function bridgeArgs(argv: string[], explicit: string | undefined): string[] {
   const configured = process.env.GIAN_DSH_HOST_ARGS;
@@ -69,7 +69,12 @@ async function main(): Promise<void> {
     },
   };
 
-  const adapter = new DshV2Adapter(bridge, { pluginVersion: PLUGIN_VERSION });
+  const adapter = new DshV2Adapter(bridge, {
+    pluginVersion: PLUGIN_VERSION,
+    ...(process.env.GIAN_HOST_BINDING_KEY
+      ? { hostBindingKey: process.env.GIAN_HOST_BINDING_KEY }
+      : {}),
+  });
   adapter.setEmitSink((method, params) => writer.notification(method, params));
 
   const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });

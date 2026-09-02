@@ -124,6 +124,10 @@ export function createApp(ctx: AppContext): AppHandle {
             const descriptor = await ctx.agentManager!.proxyLaunchDescriptor(executor, version);
             return { entryPath: descriptor.entryPath, protocol: descriptor.protocol };
           },
+          resolveCurrentProxy: async (executor: import('@gian/shared').Executor) => {
+            const descriptor = await ctx.agentManager!.proxyLaunchDescriptor(executor);
+            return { entryPath: descriptor.entryPath, protocol: descriptor.protocol };
+          },
         }
       : {}),
   });

@@ -164,6 +164,66 @@ test('ProxyManager keys shared hosts by (kind, path): two Codex paths get two ho
   await manager.closeAll();
 });
 
+test('ProxyManager resolves a ZCode Proxy installed after Host boot', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-zcode-late-install-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const proxyEntry = join(root, 'fake-zcode-proxy.mjs');
+  await writeFile(proxyEntry, `
+    import { createInterface } from 'node:readline';
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    const reply = (request, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n');
+    for await (const line of input) {
+      const request = JSON.parse(line);
+      if (request.method === 'initialize') {
+        reply(request, {
+          protocol: { name: 'gian.proxy', version: '2.0' },
+          plugin: { id: 'com.zhipu.zcode', name: 'ZCode', version: '0.1.0' },
+          process: { scope: 'shared' },
+          capabilities: {},
+        });
+      } else if (request.method === 'catalog.list') {
+        reply(request, { catalogRevision: 'zcode-late', input: [{ type: 'text' }], configOptions: [], slashCommands: [] });
+      } else if (request.method === 'shutdown') {
+        reply(request, { ok: true });
+        process.exit(0);
+      }
+    }
+  `);
+  let resolves = 0;
+  const manager = new ProxyManager({
+    dataDir: root,
+    ccProxyEntry: '/unused/cc-proxy.mjs',
+    runtimeManager: {
+      async acquire() {
+        return {
+          cli: 'zcode',
+          binaryPath: '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs',
+          version: '0.16.5',
+          source: 'managed',
+          env: {},
+          async release() {},
+        };
+      },
+    } as never,
+    resolveCurrentProxy: async executor => {
+      assert.equal(executor, 'zcode');
+      resolves += 1;
+      return {
+        entryPath: proxyEntry,
+        protocol: { pluginVersion: '0.1.0', processScope: 'shared' },
+      };
+    },
+  });
+  t.after(() => manager.closeAll().catch(() => undefined));
+
+  const client = await manager.getOrCreate('late-zcode-session', 'zcode', {
+    cliPath: '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs',
+  });
+  assert.equal((await client.initialize()).plugin.id, 'com.zhipu.zcode');
+  assert.equal((await client.catalog()).catalogRevision, 'zcode-late');
+  assert.equal(resolves, 1);
+});
+
 test('ProxyManager keeps exact Runtime Profile Proxy versions isolated', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-proxy-version-keying-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -189,6 +189,7 @@ export function ApprovalCard({
   const hasProtocolActions = protocolActions.length > 0;
   const isNative = !hasProtocolActions && (item.nativeOptions?.length ?? 0) > 0;
   const [inputValues, setInputValues] = useState<Record<string, string | boolean | string[]>>({});
+  const [externalUrlOpened, setExternalUrlOpened] = useState(false);
   const kimiQuestion = isKimiQuestion(item);
   // Plan bodies are model-written markdown — repair spec-invalid tables the
   // same way the transcript renderer does.
@@ -246,11 +247,24 @@ export function ApprovalCard({
         )}
         <div className="ap2-actions">
           {resolving && <ResolvingNote />}
+          {item.externalUrl && !externalUrlOpened && (
+            <a
+              className="btn sm secondary"
+              href={item.externalUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => setExternalUrlOpened(true)}
+            >
+              {t('transcript.approval.openReconnect')}
+            </a>
+          )}
           {dangerLast(protocolActions).map(action => (
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
-              disabled={resolving || !inputsReady}
+              disabled={resolving || !inputsReady || Boolean(
+                item.externalUrl && action.id === 'accept' && !externalUrlOpened,
+              )}
               onClick={() => onApprove(
                 item.approvalId,
                 actionDecision(action.id),
@@ -261,7 +275,9 @@ export function ApprovalCard({
                 },
               )}
             >
-              {action.label}
+              {item.externalUrl && action.id === 'accept'
+                ? t('transcript.approval.confirmReconnect')
+                : action.label}
             </button>
           ))}
         </div>

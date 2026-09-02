@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import {
   HostProtocolValidator,
@@ -6,6 +7,7 @@ import {
   PROTOCOL_NAME,
   SUPPORTED_PROTOCOL_VERSIONS,
   ProxyProtocolError,
+  signNativeSessionHostBinding,
   jsonRpcErrorObjectSchema,
   type DomainCode,
   type InitializeResult,
@@ -68,6 +70,7 @@ export class ProtocolV2Client {
   private connectionError: Error | null = null;
   private initializePromise: Promise<InitializeResult> | null = null;
   private processGroupCleanup: Promise<void> | null = null;
+  private readonly hostBindingKey = randomBytes(32).toString('base64url');
 
   constructor(private readonly options: ProtocolV2ClientOptions) {
     const log = options.log ?? (() => {});
@@ -85,6 +88,7 @@ export class ProtocolV2Client {
         ...proxyChildEnvironment(process.env, options.env),
         GIAN_PLUGIN_ID: options.pluginId,
         GIAN_PLUGIN_DATA_DIR: options.dataDir,
+        GIAN_HOST_BINDING_KEY: this.hostBindingKey,
         ...(options.runtimeBin ? { GIAN_RUNTIME_BIN: options.runtimeBin } : {}),
         GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
       },
@@ -92,6 +96,17 @@ export class ProtocolV2Client {
     this.bindStdout();
     this.bindStderr();
     this.bindLifecycle();
+  }
+
+  nativeSessionHostBindingProof(params: {
+    sessionId: string;
+    nativeSessionId: string;
+    cwd: string;
+  }): string {
+    return signNativeSessionHostBinding(this.hostBindingKey, {
+      pluginId: this.options.pluginId,
+      ...params,
+    });
   }
 
   isExited(): boolean {

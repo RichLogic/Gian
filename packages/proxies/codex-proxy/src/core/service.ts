@@ -77,6 +77,8 @@ interface ActiveTurnContext {
   generation: number;
   outputText: string;
   isCompact: boolean;
+  /** Provider turn id can differ from the synthetic Gian compact turn id. */
+  runtimeTurnId?: string;
 }
 
 interface PendingTurnContext {
@@ -539,6 +541,8 @@ export class CodexProxyService {
   private nextTurnGeneration = 1;
   /** Compaction usage is untrustworthy until its replacement history is live. */
   private readonly contextCompactionUsageGuards = new Map<string, ContextCompactionUsageGuard>();
+  /** Threads owned by this Proxy whose app-server attachment was lost. */
+  private readonly detachedThreads = new Set<string>();
 
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
@@ -669,6 +673,7 @@ export class CodexProxyService {
       cwd,
       threadId,
       configuredPermissions,
+      runtimeConfig: input.config ? { ...input.config } : null,
       model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
       thinking,
       status: 'idle',
@@ -724,6 +729,7 @@ export class CodexProxyService {
       cwd: source.cwd,
       threadId: forked.thread.id,
       configuredPermissions: forked.configuredPermissions,
+      runtimeConfig: params.config ? { ...params.config } : source.runtimeConfig,
       model: source.model,
       thinking: source.thinking,
       status: 'idle',
@@ -900,8 +906,10 @@ export class CodexProxyService {
 
   async interruptTurn(params: { sessionId: string }) {
     const session = await this.ensureSessionUsable(this.requireSessionById(params.sessionId));
-    const activeTurnId = session.activeTurnId
-      ?? this.activeTurnsByThreadId.get(session.threadId)?.turnId
+    const context = this.activeTurnsByThreadId.get(session.threadId);
+    const activeTurnId = context?.runtimeTurnId
+      ?? session.activeTurnId
+      ?? context?.turnId
       ?? null;
     if (!activeTurnId) {
       throw createAppError(409, 'INVALID_REQUEST', 'This session does not have an active turn.');
@@ -1085,7 +1093,13 @@ export class CodexProxyService {
     });
 
     try {
-      await this.runtime.compactThread(updatedSession.threadId);
+      // Current app-server keeps thread/compact/start open for the entire
+      // provider compaction. Do not hold the outer turn.start response barrier
+      // behind that long-lived request: notifications are the lifecycle.
+      const compact = this.runtime.compactThread(updatedSession.threadId);
+      void compact.catch(error => {
+        this.failCompactRequest(updatedSession.id, updatedSession.threadId, turnId, requestId, error);
+      });
     } catch (error) {
       this.activeTurnsByThreadId.delete(updatedSession.threadId);
       this.updateSession(updatedSession, {
@@ -1100,6 +1114,35 @@ export class CodexProxyService {
       session: this.serializeSession(updatedSession),
       turn: { id: turnId, status: 'running' },
     };
+  }
+
+  private failCompactRequest(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    requestId: number | string | undefined,
+    error: unknown,
+  ): void {
+    const context = this.activeTurnsByThreadId.get(threadId);
+    const session = this.sessionsById.get(sessionId);
+    if (!context || context.turnId !== turnId || !session) return;
+    const message = error instanceof Error ? error.message : String(error);
+    this.activeTurnsByThreadId.delete(threadId);
+    this.contextCompactionUsageGuards.delete(threadId);
+    const updated = this.updateSession(session, {
+      activeTurnId: null,
+      status: 'error',
+      lastError: message,
+    });
+    this.emitEvent('turn.failed', {
+      requestId,
+      sessionId: updated.id,
+      turnId,
+      data: {
+        code: 'COMPACT_FAILED',
+        message,
+      },
+    });
   }
 
   /**
@@ -1127,6 +1170,7 @@ export class CodexProxyService {
     });
     this.activeTurnsByThreadId.delete(oldThreadId);
     this.contextCompactionUsageGuards.delete(oldThreadId);
+    this.detachedThreads.delete(oldThreadId);
 
     this.emitEvent('session.rotated', {
       sessionId: updated.id,
@@ -1193,6 +1237,7 @@ export class CodexProxyService {
     this.sessionsById.delete(session.id);
     this.sessionsByThreadId.delete(session.threadId);
     this.contextCompactionUsageGuards.delete(session.threadId);
+    this.detachedThreads.delete(session.threadId);
     this.pendingTurnsByThreadId.delete(session.threadId);
     const approvals = this.approvalsBySessionId.get(session.id);
     if (approvals) {
@@ -1279,6 +1324,26 @@ export class CodexProxyService {
     if (session.status === 'error') {
       throw createAppError(409, 'SESSION_ERROR', session.lastError ?? 'The session is in error state.');
     }
+    if (this.detachedThreads.has(session.threadId)) {
+      try {
+        const resumed = await this.runtime.resumeThread(session.threadId, {
+          ...(session.runtimeConfig ? { config: session.runtimeConfig } : {}),
+        });
+        this.detachedThreads.delete(session.threadId);
+        return this.updateSession(session, {
+          configuredPermissions: resumed.configuredPermissions,
+          lastError: null,
+        });
+      } catch (error) {
+        const message = `Could not reattach Codex thread ${session.threadId}: ${String(error)}`;
+        this.updateSession(session, {
+          status: 'stale',
+          activeTurnId: null,
+          lastError: message,
+        });
+        throw createAppError(409, 'SESSION_STALE', message);
+      }
+    }
     return session;
   }
 
@@ -1286,6 +1351,7 @@ export class CodexProxyService {
     const detail = cause.message.trim() || 'Codex app-server stopped.';
     const message = `Codex runtime stopped while the session had an active turn: ${detail}`;
     for (const session of this.sessionsById.values()) {
+      this.detachedThreads.add(session.threadId);
       const context = this.activeTurnsByThreadId.get(session.threadId);
       if (context) {
         this.emitEvent('turn.failed', {
@@ -1340,6 +1406,7 @@ export class CodexProxyService {
     }
     const requestId = context?.requestId;
     const turnId = runtimeTurnId ?? context?.turnId;
+    if (context?.isCompact && runtimeTurnId) context.runtimeTurnId = runtimeTurnId;
 
     if (message.method === 'item/agentMessage/delta' && context) {
       const delta = typeof (message.params as { delta?: unknown } | undefined)?.delta === 'string'
@@ -1498,6 +1565,28 @@ export class CodexProxyService {
         stage: 'completed',
         manual: existing?.manual ?? context?.isCompact ?? false,
       });
+      // thread/compacted is deprecated in current app-server. The item
+      // completion is now the authoritative terminal boundary for a manual
+      // compact intercepted by Gian.
+      if (context?.isCompact) {
+        this.activeTurnsByThreadId.delete(threadId);
+        const updatedSession = this.updateSession(session, {
+          activeTurnId: null,
+          status: 'idle',
+          lastError: null,
+        });
+        this.emitEvent('turn.completed', {
+          requestId,
+          sessionId: updatedSession.id,
+          turnId: context.turnId,
+          data: {
+            status: 'completed',
+            summary: null,
+            compacted: true,
+          },
+          rawRuntimeEvent: message,
+        });
+      }
       return;
     }
 

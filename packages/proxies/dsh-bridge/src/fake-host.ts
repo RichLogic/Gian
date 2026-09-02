@@ -12,6 +12,7 @@
  */
 
 import { DSH_SESSION_FORMAT_VERSION, type BridgeJsonValue } from './schema.js';
+import { verifyHostBinding } from './host-binding.js';
 import type {
   BridgeHost,
   BridgeHostEvent,
@@ -41,6 +42,7 @@ export interface FakeHostOptions {
   autoQuestion?: boolean;
   /** When set, the host has no reliable ownership API (default). */
   reliableOwnership?: boolean;
+  hostBindingKey?: string;
 }
 
 let sessionCounter = 0;
@@ -74,7 +76,7 @@ export class FakeDshRuntime implements BridgeHost {
   private early: BridgeHostEvent[] = [];
 
   constructor(private readonly options: FakeHostOptions = {}) {
-    this.bridgeVersion = options.bridgeVersion ?? '0.1.1';
+    this.bridgeVersion = options.bridgeVersion ?? '0.1.2';
     this.dshVersion = options.dshVersion ?? '0.1.1-rc.2';
   }
 
@@ -164,6 +166,21 @@ export class FakeDshRuntime implements BridgeHost {
   }
 
   async sessionCreate(params: BridgeSessionCreateParams): Promise<Record<string, unknown>> {
+    if (params.nativeSessionId !== undefined) {
+      if (params.restartNewStream === true) {
+        throw new Error('RUNTIME_UNAVAILABLE: native session adoption is not supported');
+      }
+      const key = this.options.hostBindingKey;
+      const proof = params.hostBindingProof;
+      if (key === undefined || proof === undefined || !verifyHostBinding(key, {
+        pluginId: 'ai.deepseek.harness',
+        sessionId: params.sessionId,
+        nativeSessionId: params.nativeSessionId,
+        cwd: params.cwd,
+      }, proof)) {
+        throw new Error('RUNTIME_UNAVAILABLE: native attach requires a valid Host ownership proof');
+      }
+    }
     const nativeId = params.nativeSessionId ?? mintId('dsn');
     const record: FakeSession = {
       id: params.sessionId,

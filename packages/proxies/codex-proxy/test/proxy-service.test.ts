@@ -807,6 +807,31 @@ test('runtimeStopped emits one session-scoped turn.failed before clearing an act
   }
 });
 
+test('idle sessions reattach before the first turn after app-server replacement', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({
+      cwd: '/tmp/work',
+      config: { feature: 'kept' },
+    });
+    harness.runtime.emitRuntimeStopped(new Error('fixture app-server replacement'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    await harness.service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'continue after restart' }],
+    });
+
+    assert.deepEqual(harness.runtime.resumeThreadCalls.at(-1), {
+      threadId: created.session.threadId,
+      config: { feature: 'kept' },
+    });
+    assert.equal(harness.runtime.startTurnCalls.length, 1);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('session.create binds a session to a thread and returns id + threadId', async () => {
   const harness = await createHarness();
   try {
@@ -1106,6 +1131,63 @@ test('Codex native /compact uses app-server thread/compact/start', async () => {
   }
 });
 
+test('manual compact releases the response barrier and completes on the contextCompaction item', async () => {
+  const harness = await createHarness();
+  let resolveCompact!: () => void;
+  const compactFinished = new Promise<void>(resolve => { resolveCompact = resolve; });
+  harness.runtime.compactThread = async (threadId: string) => {
+    harness.runtime.compactCalls.push(threadId);
+    await compactFinished;
+    return {};
+  };
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/work' });
+    const started = await Promise.race([
+      harness.service.startTurn({
+        sessionId: created.session.id,
+        input: [{ type: 'text', text: '/compact' }],
+      }, 91),
+      new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('compact held the response barrier')), 100);
+        timer.unref();
+      }),
+    ]);
+    assert.equal(started.turn.status, 'running');
+
+    const nativeTurnId = 'native-compact-turn';
+    harness.runtime.emitNotification(bindCompactionFixture(
+      CODEX_APP_SERVER_V2_COMPACTION.boundaryStarted,
+      created.session.threadId,
+      nativeTurnId,
+    ));
+    await harness.service.interruptTurn({ sessionId: created.session.id });
+    assert.deepEqual(harness.runtime.interruptCalls.at(-1), {
+      threadId: created.session.threadId,
+      turnId: nativeTurnId,
+    });
+
+    harness.runtime.emitNotification(bindCompactionFixture(
+      CODEX_APP_SERVER_V2_COMPACTION.boundaryCompleted,
+      created.session.threadId,
+      nativeTurnId,
+    ));
+    await waitFor(() => harness.events.some(event => event.method === 'turn.completed'));
+    assert.equal(
+      harness.service.getSession({ sessionId: created.session.id }).session.status,
+      'idle',
+    );
+    assert.equal(
+      (harness.events.find(event => event.method === 'turn.completed')?.params.data as {
+        compacted?: boolean;
+      }).compacted,
+      true,
+    );
+  } finally {
+    resolveCompact();
+    await harness.cleanup();
+  }
+});
+
 test('gian.proxy/2 emits compact turn.started before its turn-scoped usage reset', async () => {
   const harness = await createHarness();
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -1281,7 +1363,7 @@ test('gian.proxy/2 exposes Codex capacity failures as retryable turn errors', as
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.11',
+    '0.2.12',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });

@@ -86,6 +86,11 @@ export interface ProxyManagerConfig {
     executor: Executor,
     version: string,
   ) => Promise<{ entryPath: string; protocol?: ProxyProtocolDescriptor }>;
+  /** Resolve the currently activated managed Proxy after Host boot. This is
+   *  required when an Agent installs its first Proxy without replacing Host. */
+  resolveCurrentProxy?: (
+    executor: Executor,
+  ) => Promise<{ entryPath: string; protocol?: ProxyProtocolDescriptor }>;
 }
 
 /**
@@ -1072,7 +1077,12 @@ export class ProxyManager {
   }
 
   private async getOrCreateZcodeHost(cliPath: string | null): Promise<SharedRuntimeHost | null> {
-    if (!this.cfg.zcodeProxyEntry) {
+    const launch = this.cfg.resolveCurrentProxy
+      ? await this.cfg.resolveCurrentProxy('zcode')
+      : this.cfg.zcodeProxyEntry
+        ? { entryPath: this.cfg.zcodeProxyEntry, protocol: this.cfg.zcodeProxy }
+        : null;
+    if (!launch) {
       throw new Error(
         'zcode executor requested but zcodeProxyEntry is not configured',
       );
@@ -1082,12 +1092,12 @@ export class ProxyManager {
         'zcode executor requested but CliRuntimeManager is not configured',
       );
     }
-    const key = ProxyManager.hostKey(cliPath);
+    const key = `${ProxyManager.hostKey(cliPath)}\u0000${launch.entryPath}\u0000${launch.protocol?.pluginVersion ?? 'legacy'}`;
     const current = this.zcodeHosts.get(key);
     if (current) return current;
     let pending = this.zcodeHostInits.get(key);
     if (!pending) {
-      pending = this.startZcodeHost(key, cliPath);
+      pending = this.startZcodeHost(key, cliPath, launch);
       this.zcodeHostInits.set(key, pending);
     }
     try {
@@ -1097,7 +1107,11 @@ export class ProxyManager {
     }
   }
 
-  private async startZcodeHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
+  private async startZcodeHost(
+    key: string,
+    cliPath: string | null,
+    launch: { entryPath: string; protocol?: ProxyProtocolDescriptor },
+  ): Promise<SharedRuntimeHost> {
     const lease = await this.cfg.runtimeManager!.acquire('zcode', cliPath);
     let runtimeOwner: object | undefined = this.trackStartupRuntime('zcode', lease);
     let reservation: RuntimeProcessGroupReservation | undefined;
@@ -1110,10 +1124,10 @@ export class ProxyManager {
           () => reservation!.cancelBeforeSpawn(),
         );
       }
-      const protocol = this.requireProtocol('zcode', this.cfg.zcodeProxy, 'shared');
+      const protocol = this.requireProtocol('zcode', launch.protocol, 'shared');
       host = this.createProtocolHost('zcode', {
         protocol,
-        entry: this.cfg.zcodeProxyEntry!,
+        entry: launch.entryPath,
         dataDir: this.hostDataDir('zcode', key),
         // GIAN_RUNTIME_BIN for zcode-proxy is the ZCode CLI entry (zcode.cjs).
         runtimeBin: lease.binaryPath,

@@ -55,6 +55,26 @@ test('ProtocolV2Client routes responses by request id', async () => {
   }
 });
 
+test('ProtocolV2Host attests an exact no-replay native Session reattach', async () => {
+  const dir = makeTempDir();
+  const host = new ProtocolV2Host({
+    ...clientOptions(dir),
+    executor: 'claude',
+  });
+  try {
+    const facade = host.createSessionClient('sess_owned');
+    const session = await facade.createSession({
+      cwd: '/tmp/owned-project',
+      nativeSessionId: 'native-owned',
+      history: 'none',
+    });
+    assert.equal(session.nativeSessionId, 'native-owned');
+  } finally {
+    await host.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('ProtocolV2Client surfaces error responses', async () => {
   const dir = makeTempDir();
   const client = new ProtocolV2Client(clientOptions(dir));

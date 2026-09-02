@@ -1104,6 +1104,9 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     || data.tone === 'danger'
     ? data.tone
     : undefined;
+  const externalUrl = typeof data.externalUrl === 'string' && data.externalUrl.startsWith('https://')
+    ? data.externalUrl
+    : undefined;
   return {
     kind: 'approval',
     id: env.call_id,
@@ -1123,6 +1126,7 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     ...(typeof data.subject === 'string' && data.subject ? { hasSubject: true } : {}),
     ...(interactionKind ? { interactionKind } : {}),
     ...(tone ? { tone } : {}),
+    ...(externalUrl ? { externalUrl } : {}),
     ts: env.ts,
     turn: env.turn,
   };

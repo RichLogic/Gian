@@ -84,6 +84,9 @@ export interface SessionRecord {
   cwd: string;
   threadId: string;
   configuredPermissions: ConfiguredPermissions;
+  /** Exact app-server config used to attach this thread. Reused only when a
+   *  replacement app-server must reattach the still-live Gian session. */
+  runtimeConfig: Record<string, unknown> | null;
   model: string | null;
   thinking: ThinkingLevel | null;
   status: SessionStatus;

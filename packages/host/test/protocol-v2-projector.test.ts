@@ -121,6 +121,27 @@ test('protocol v2 interaction.requested whitelists kind/tone and flattens subjec
   assert.equal(toolData.subject, 'AskUserQuestion');
 });
 
+test('protocol v2 exposes only credential-free HTTPS URL elicitations', () => {
+  const project = (url: string) => projectNotification('codex', v2Notification('interaction.requested', {
+    interactionId: `ix-${url}`,
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [
+      { id: 'accept', label: 'Accept', style: 'primary' },
+      { id: 'decline', label: 'Decline', style: 'danger' },
+    ],
+    context: { subject: { mode: 'url', url } },
+  }), 'session-1', 1)[0]?.display?.data as Record<string, unknown>;
+
+  assert.equal(
+    project('https://chatgpt.com/apps/linear').externalUrl,
+    'https://chatgpt.com/apps/linear',
+  );
+  assert.equal('externalUrl' in project('http://chatgpt.com/apps/linear'), false);
+  assert.equal('externalUrl' in project('https://user:secret@example.com/connect'), false);
+  assert.equal('externalUrl' in project('not a url'), false);
+});
+
 test('protocol v2 content kinds map to message, reasoning, and notice surfaces', () => {
   const cases = [
     ['content.delta', { contentId: 'text-1', kind: 'text', delta: 'hello' }, 'message'],

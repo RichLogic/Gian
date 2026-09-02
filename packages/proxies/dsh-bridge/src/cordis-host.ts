@@ -18,9 +18,10 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
-import { BridgeWriter } from './jsonrpc.js';
+import { BridgeProtocolError, BridgeWriter } from './jsonrpc.js';
 import { BridgeServer } from './server.js';
 import { DSH_SESSION_FORMAT_VERSION, type BridgeJsonValue } from './schema.js';
+import { verifyHostBinding } from './host-binding.js';
 import type {
   BridgeHost,
   BridgeHostEvent,
@@ -91,6 +92,11 @@ interface CordisAgentRegistry {
     agentOptions?: { provider?: string; model?: string };
     setup?: (ctx: AnyContext) => void;
   }): Promise<CordisAgentHandle>;
+  resume(options: {
+    resumeSessionId: string;
+    agentOptions?: { provider?: string; model?: string };
+    setup?: (ctx: AnyContext) => void;
+  }): Promise<CordisAgentHandle>;
 }
 
 interface CordisReasoningInfo {
@@ -148,7 +154,11 @@ interface CordisHostOptions {
  */
 export function mountBridge(options: CordisHostOptions): () => Promise<void> {
   const writer = new BridgeWriter(options.stdout ?? process.stdout);
-  const host = new CordisDshHost(options.ctx, options.bridgeVersion ?? '0.1.1');
+  const host = new CordisDshHost(
+    options.ctx,
+    options.bridgeVersion ?? '0.1.2',
+    process.env.GIAN_HOST_BINDING_KEY,
+  );
   const server = new BridgeServer({ host, writer });
   const input = options.stdin ?? process.stdin;
 
@@ -261,7 +271,11 @@ export class CordisDshHost implements BridgeHost {
   private firstCatalog = true;
   private disposed = false;
 
-  constructor(ctx: AnyContext, bridgeVersion: string) {
+  constructor(
+    ctx: AnyContext,
+    bridgeVersion: string,
+    private readonly hostBindingKey: string | undefined = undefined,
+  ) {
     this.ctx = ctx;
     this.bridgeVersion = bridgeVersion;
     this.dshVersion = this.readDshVersion();
@@ -478,13 +492,26 @@ export class CordisDshHost implements BridgeHost {
 
   async sessionCreate(params: BridgeSessionCreateParams): Promise<Record<string, unknown>> {
     if (params.nativeSessionId !== undefined) {
-      throw new Error('RUNTIME_UNAVAILABLE: native attach requires a reliable ownership API');
+      if (params.restartNewStream === true) {
+        throw new Error('RUNTIME_UNAVAILABLE: native session adoption is not supported');
+      }
+      const proof = params.hostBindingProof;
+      if (this.hostBindingKey === undefined
+        || proof === undefined
+        || !verifyHostBinding(this.hostBindingKey, {
+          pluginId: 'ai.deepseek.harness',
+          sessionId: params.sessionId,
+          nativeSessionId: params.nativeSessionId,
+          cwd: params.cwd,
+        }, proof)) {
+        throw new Error('RUNTIME_UNAVAILABLE: native attach requires a valid Host ownership proof');
+      }
     }
     if (this.sessions.has(params.sessionId)) {
       throw new Error(`SESSION_BUSY: DSH bridge session ${params.sessionId} already exists`);
     }
 
-    const nativeId = `session-${randomUUID()}`;
+    const nativeId = params.nativeSessionId ?? `session-${randomUUID()}`;
     const models = await this.catalogModels();
     const defaults = this.defaultSelection(models);
     const model = typeof params.config.model === 'string' ? params.config.model : defaults.model;
@@ -492,12 +519,33 @@ export class CordisDshHost implements BridgeHost {
       ? params.config.provider
       : defaults.provider;
     const selection: DshModelSelectionRef = { current: { provider, model } };
-    const handle = await this.agentRegistry().create({
-      sessionId: nativeId,
-      meta: { cwd: params.cwd },
-      agentOptions: { provider, model },
-      setup: agentCtx => installModelSelection(agentCtx, selection),
-    });
+    const setup = (agentCtx: AnyContext) => installModelSelection(agentCtx, selection);
+    let handle: CordisAgentHandle;
+    try {
+      handle = params.nativeSessionId === undefined
+        ? await this.agentRegistry().create({
+          sessionId: nativeId,
+          meta: { cwd: params.cwd },
+          agentOptions: { provider, model },
+          setup,
+        })
+        : await this.agentRegistry().resume({
+          resumeSessionId: nativeId,
+          agentOptions: { provider, model },
+          setup,
+        });
+    } catch (error) {
+      if (params.nativeSessionId !== undefined
+        && error instanceof Error
+        && /^session ".+" not found$/.test(error.message)) {
+        throw new BridgeProtocolError(
+          -32000,
+          `DSH native session ${params.nativeSessionId} was not found.`,
+          'NATIVE_SESSION_NOT_FOUND',
+        );
+      }
+      throw error;
+    }
     const createdAtMs = handle.agent.session.header?.createdAt;
     const record: CordisSessionRecord = {
       id: params.sessionId,

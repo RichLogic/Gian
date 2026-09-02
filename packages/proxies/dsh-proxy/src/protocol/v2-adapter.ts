@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { verifyNativeSessionHostBinding } from '@gian/proxy-protocol';
 import {
   PLUGIN_ID,
   PLUGIN_NAME,
@@ -51,6 +52,7 @@ export interface ConfigOption {
 const CAPABILITIES: Record<string, number> = {
   'catalog.resolve': 1,
   'session.replay': 1,
+  'session.create.hostBindingProof': 1,
   'event.reasoning': 1,
   'event.usage': 1,
   'event.step': 1,
@@ -91,7 +93,7 @@ export class DshV2Adapter {
 
   constructor(
     private readonly bridge: BridgeClient,
-    private readonly options: { pluginVersion?: string } = {},
+    private readonly options: { pluginVersion?: string; hostBindingKey?: string } = {},
   ) {
     this.service = new DshProxyService({
       emit: (event) => this.emit(event.method, event.params),
@@ -387,6 +389,7 @@ export class DshV2Adapter {
     config: Record<string, ConfigValue>;
     nativeSessionId: string | null;
     history: 'none' | 'replay';
+    hostBindingProof: string | null;
     hostServices: unknown[];
   } {
     const sessionId = stringField(params, 'sessionId');
@@ -397,8 +400,19 @@ export class DshV2Adapter {
     const native = (params.nativeSession ?? null) as Record<string, unknown> | null;
     const nativeSessionId = native && typeof native.id === 'string' ? native.id : null;
     const history = native && native.history === 'replay' ? 'replay' as const : 'none' as const;
+    const hostBindingProof = native && typeof native.hostBindingProof === 'string'
+      ? native.hostBindingProof
+      : null;
     const hostServices = Array.isArray(params.hostServices) ? params.hostServices : [];
-    return { sessionId, workspace: { cwd, roots }, config, nativeSessionId, history, hostServices };
+    return {
+      sessionId,
+      workspace: { cwd, roots },
+      config,
+      nativeSessionId,
+      history,
+      hostBindingProof,
+      hostServices,
+    };
   }
 
   private async sessionCreate(params: Record<string, unknown>): Promise<unknown> {
@@ -406,26 +420,56 @@ export class DshV2Adapter {
     if (parsed.hostServices.length > 0) {
       throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'integration.mcp.streamableHttp is not declared.');
     }
-    // Native session attach fails closed without a reliable ownership API.
     if (parsed.nativeSessionId !== null) {
-      throw new ServiceError('RUNTIME_UNAVAILABLE', 'DSH native session attach requires a reliable ownership API.');
+      const key = this.options.hostBindingKey;
+      const binding = {
+        pluginId: PLUGIN_ID,
+        sessionId: parsed.sessionId,
+        nativeSessionId: parsed.nativeSessionId,
+        cwd: parsed.workspace.cwd,
+      };
+      if (parsed.history !== 'none'
+        || key === undefined
+        || parsed.hostBindingProof === null
+        || !verifyNativeSessionHostBinding(key, binding, parsed.hostBindingProof)) {
+        throw new ServiceError(
+          'RUNTIME_UNAVAILABLE',
+          'DSH native session attach requires a valid Host ownership proof.',
+        );
+      }
     }
     this.validateConfigSnapshot(parsed.config, 'session');
     const createFp = createHash('sha256').update(canonicalJson({ ...parsed })).digest('hex');
+    const alreadyAttached = this.service.hasSession(parsed.sessionId);
     const attached = this.service.attach({
       sessionId: parsed.sessionId,
       cwd: parsed.workspace.cwd,
       roots: parsed.workspace.roots,
       sessionConfig: parsed.config,
-      nativeSessionId: null,
+      nativeSessionId: parsed.nativeSessionId,
       createFingerprint: createFp,
     });
-    const remote = await this.bridge.request('session.create', {
-      sessionId: parsed.sessionId,
-      workspace: { cwd: parsed.workspace.cwd, roots: parsed.workspace.roots },
-      config: parsed.config,
-    });
-    attached.nativeSessionId = nativeIdFromBridge(remote) ?? attached.id;
+    if (alreadyAttached) return { session: this.snapshot(attached.id, attached.streamId) };
+    try {
+      const remote = await this.bridge.request('session.create', {
+        sessionId: parsed.sessionId,
+        workspace: { cwd: parsed.workspace.cwd, roots: parsed.workspace.roots },
+        config: parsed.config,
+        ...(parsed.nativeSessionId === null
+          ? {}
+          : {
+            nativeSession: {
+              id: parsed.nativeSessionId,
+              history: 'none',
+              hostBindingProof: parsed.hostBindingProof,
+            },
+          }),
+      });
+      attached.nativeSessionId = nativeIdFromBridge(remote) ?? attached.id;
+    } catch (error) {
+      this.service.discardAttachment(parsed.sessionId, createFp);
+      throw error;
+    }
     return { session: this.snapshot(attached.id, attached.streamId) };
   }
 

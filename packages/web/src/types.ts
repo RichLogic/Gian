@@ -252,6 +252,8 @@ export interface ApprovalItem {
   interactionKind?: 'question' | 'choice' | 'confirmation' | 'permission';
   /** gian.proxy/2.0 §12 presentation tone — drives the card's tint. */
   tone?: 'neutral' | 'info' | 'warning' | 'danger';
+  /** Validated HTTPS URL for a two-step external authorization interaction. */
+  externalUrl?: string;
   /** Timestamp of the lifecycle event that resolved this approval. */
   resolvedAt?: number;
   ts: number;

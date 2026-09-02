@@ -267,6 +267,7 @@ function projectInteractionRequested(
   // picks it up. A plain-string subject passes through as-is.
   const rawSubject = asRecord(data.context).subject;
   let subject: string | undefined;
+  let externalUrl: string | undefined;
   if (typeof rawSubject === 'string') {
     subject = rawSubject;
   } else if (rawSubject && typeof rawSubject === 'object' && !Array.isArray(rawSubject)) {
@@ -274,6 +275,16 @@ function projectInteractionRequested(
     const toolName = typeof subjectRecord.toolName === 'string' ? subjectRecord.toolName : '';
     const inputPreview = typeof subjectRecord.inputPreview === 'string' ? subjectRecord.inputPreview : '';
     if (toolName) subject = inputPreview ? `${toolName}\n${inputPreview}` : toolName;
+    if (subjectRecord.mode === 'url' && typeof subjectRecord.url === 'string') {
+      try {
+        const parsed = new URL(subjectRecord.url);
+        if (parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '') {
+          externalUrl = parsed.toString();
+        }
+      } catch {
+        // Only credential-free absolute HTTPS URLs become clickable.
+      }
+    }
   }
   return [{
     session_id: sessionId,
@@ -292,6 +303,7 @@ function projectInteractionRequested(
       ...(interactionKind ? { interactionKind } : {}),
       ...(tone ? { tone } : {}),
       ...(subject ? { subject } : {}),
+      ...(externalUrl ? { externalUrl } : {}),
       ...(protocolActions.length > 0 ? { actions: protocolActions } : {}),
       ...(protocolInputs.length > 0 ? { inputs: protocolInputs } : {}),
     },

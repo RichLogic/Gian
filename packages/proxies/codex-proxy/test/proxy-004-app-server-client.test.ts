@@ -169,7 +169,7 @@ async function installRuntime(
 
 test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
   assert.deepEqual(buildInitializeParams(), {
-    clientInfo: { name: 'codex-proxy', version: '0.2.11' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.12' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -423,6 +423,43 @@ test('PROXY-004: oversized stdout line fails before an unbounded buffer can grow
   child.stdout.write(Buffer.alloc(MAX_APP_SERVER_JSONL_LINE_BYTES + 1, 0x78));
   await within(stopped, 1_000, 'oversized line runtimeStopped');
   assert.deepEqual(child.killSignals, ['SIGTERM']);
+  child.exit();
+});
+
+test('PROXY-004: oversized thread snapshot is discarded while bounded resume response survives', async () => {
+  const client = new CodexAppServerClient();
+  const { child } = await installRuntime(client);
+  const debug: string[] = [];
+  client.on('debug', message => debug.push(String(message)));
+  child.stdin.onWrite = (raw) => {
+    const request = JSON.parse(raw) as { id: number; method: string };
+    if (request.method !== 'thread/resume') return;
+    const snapshot = JSON.stringify({
+      method: 'thread/started',
+      params: {
+        thread: {
+          id: 'thread-large-history',
+          turns: [{ id: 'legacy', padding: 'x'.repeat(MAX_APP_SERVER_JSONL_LINE_BYTES) }],
+        },
+      },
+    });
+    queueMicrotask(() => {
+      child.stdout.write(`${snapshot}\n`);
+      child.stdout.write(`${JSON.stringify({
+        id: request.id,
+        result: {
+          ...CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response,
+          thread: { id: 'thread-large-history' },
+        },
+      })}\n`);
+    });
+  };
+
+  const resumed = await client.resumeThread('thread-large-history');
+  assert.equal(resumed.thread.id, 'thread-large-history');
+  assert.ok(debug.some(message => message.includes('Discarded oversized Codex thread/started')));
+  assert.equal(internals(client).activeGeneration, 1);
+  await client.stop();
   child.exit();
 });
 

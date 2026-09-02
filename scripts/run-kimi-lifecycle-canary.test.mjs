@@ -18,9 +18,9 @@ function configOptions(mode = 'default') {
   return [{
     id: 'mode',
     role: 'approval_mode',
-    binding: 'session',
+    binding: 'turn',
     control: 'select',
-    defaultValue: 'default',
+    defaultValue: mode,
     currentValue: mode,
     choices: [
       { value: 'default', displayName: 'Default' },
@@ -65,7 +65,8 @@ class FakeKimiLifecycleClient extends EventEmitter {
       nativeSession: { id: session.nativeSessionId },
       streamId: session.streamId,
       state: session.activeTurnId ? 'running' : 'idle',
-      sessionConfig: { mode: session.mode },
+      sessionConfig: {},
+      turnConfigOptions: configOptions(session.mode),
       lastError: null,
       createdAt: '2026-08-09T00:00:00.000Z',
       updatedAt: '2026-08-09T00:00:00.000Z',
@@ -107,6 +108,7 @@ class FakeKimiLifecycleClient extends EventEmitter {
       };
     }
     if (method === 'session.create') {
+      assert.deepEqual(params.config, {}, 'Kimi Session creation must not send turn-bound config.');
       const nativeSessionId = params.nativeSession?.id
         ?? `native-${FakeKimiLifecycleClient.nextNative++}`;
       let native = FakeKimiLifecycleClient.nativeSessions.get(nativeSessionId);
@@ -162,7 +164,7 @@ class FakeKimiLifecycleClient extends EventEmitter {
       queueMicrotask(() => this.notify('turn.completed', {
         sessionId: session.id,
         turnId,
-        data: { stopReason: 'cancelled' },
+        data: { stopReason: 'interrupted' },
       }));
       return { accepted: true, turnId };
     }
@@ -310,6 +312,7 @@ test('Kimi lifecycle canary covers config, stop, concurrency, background drain, 
     binaryPath: process.execPath,
     activationImpl: async () => ({ compatible: true, activationRecorded: true }),
     ClientClass: FakeKimiLifecycleClient,
+    backgroundObservationMs: 10,
     detachedObservationMs: 0,
     timeoutMs: 2_000,
     rssGrowthBudgetMiB: 1,
@@ -332,10 +335,12 @@ test('Kimi lifecycle canary covers config, stop, concurrency, background drain, 
     restored: true,
   });
   assert.equal(summary.sameSessionBusyRejected, true);
-  assert.equal(summary.interruptedTurnCancelled, true);
+  assert.equal(summary.interruptedTurnStopped, true);
   assert.equal(summary.dualSessionConcurrent, true);
-  assert.equal(summary.backgroundAgent.launched, true);
+  assert.equal(summary.backgroundAgent.requested, true);
+  assert.equal(summary.backgroundAgent.parentTurnCompleted, true);
   assert.equal(summary.backgroundAgent.drainedAfterParentTurn, true);
+  assert.equal(summary.backgroundAgent.replayObserved, true);
   assert.equal(summary.crashResume.proxyCrashed, true);
   assert.equal(summary.crashResume.nativeSessionReused, true);
   assert.equal(summary.crashResume.replayObserved, true);

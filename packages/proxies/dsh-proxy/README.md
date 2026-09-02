@@ -26,9 +26,13 @@ The suite runs the complete `gian.proxy/2.1` contract through
 `@gian/proxy-protocol`'s `HostProtocolValidator` against a fake bridge runtime:
 initialize identity, capabilities (including `event.step`/`event.request`),
 catalog, session create/idempotency, turn lifecycle, step/request/usage
-projection, and hostServices fail-closed — zero model calls.
+projection, authenticated Host-owned reattach, foreign native-ID rejection,
+and hostServices fail-closed — zero model calls.
 
 The production Bridge targets `@deepseek-ai/dsh@0.1.1-rc.2`. Catalog Provider,
 model, and reasoning selections are applied through DSH's per-Agent request
 waterfalls. Typed file/image inputs and interactive approval/question routing
 remain unadvertised until the real Bridge owns those native boundaries.
+After a Host restart, an exact persisted Gian Session binding is attested with
+a per-process HMAC and resumed through DSH's persistence API; arbitrary native
+history adoption remains unavailable.

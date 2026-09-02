@@ -773,6 +773,8 @@ export const ZH: Messages = {
   'transcript.approval.keepPlanning': '否，继续规划',
   'transcript.approval.allowOnce': '允许一次',
   'transcript.approval.resolving': '处理中…',
+  'transcript.approval.openReconnect': '打开重新连接页面',
+  'transcript.approval.confirmReconnect': '我已重新连接',
   'transcript.approval.allowSession': '允许本会话',
   'transcript.approval.decline': '拒绝',
   'transcript.approval.once': '一次',

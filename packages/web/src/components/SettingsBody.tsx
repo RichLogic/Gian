@@ -213,6 +213,7 @@ interface Props {
   activeSection?: NavKey;
   onSectionChange?: (section: NavKey) => void;
   workspaces?: Workspace[];
+  onWorkspaceOpened?: (workspaceId: string) => void;
   onSessionOpened?: (session: import('@gian/shared').Session) => void;
   identity?: AppIdentity | null;
   onSignOut?: () => void;
@@ -236,6 +237,7 @@ export function SettingsBody({
   onSignOut,
   onSectionChange,
   workspaces = [],
+  onWorkspaceOpened,
   onSessionOpened,
 }: Props) {
   const t = useT();
@@ -250,6 +252,7 @@ export function SettingsBody({
       onSignOut={onSignOut}
       onSectionChange={onSectionChange}
       workspaces={workspaces}
+      onWorkspaceOpened={onWorkspaceOpened}
       onSessionOpened={onSessionOpened}
     />
   );
@@ -257,7 +260,7 @@ export function SettingsBody({
 
 function SettingsBodyInner({
   config, apps, terminalOptions, activeSection, identity, onSignOut,
-  onSectionChange, workspaces, onSessionOpened,
+  onSectionChange, workspaces, onWorkspaceOpened, onSessionOpened,
 }: {
   config: SystemConfig;
   apps: string[];
@@ -267,6 +270,7 @@ function SettingsBodyInner({
   onSignOut?: () => void;
   onSectionChange?: (section: NavKey) => void;
   workspaces: Workspace[];
+  onWorkspaceOpened?: (workspaceId: string) => void;
   onSessionOpened?: (session: import('@gian/shared').Session) => void;
 }) {
   const t = useT();
@@ -751,7 +755,7 @@ function SettingsBodyInner({
           </div>
         </section>
         </> : standaloneSection === 'workspaces' ? (
-          <SettingsWorkspacesPage workspaces={workspaces} />
+          <SettingsWorkspacesPage workspaces={workspaces} onWorkspaceOpened={onWorkspaceOpened} />
         ) : standaloneSection === 'archive' ? (
           <SettingsArchivePage workspaces={workspaces} />
         ) : (

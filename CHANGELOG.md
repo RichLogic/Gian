@@ -4,9 +4,50 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.4 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.5.5 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.5.5] - 2026-09-02
+
+### Changed
+
+- Published Codex Proxy 0.2.12, Kimi Proxy 0.2.7, and DeepSeek Harness Proxy
+  0.1.5 with Bridge 0.1.2. ZCode remains on Proxy 0.1.0.
+- Existing Host-owned DSH Sessions now resume through the Harness persistence
+  API only after both Proxy and Bridge verify an exact per-process ownership
+  proof.
+
+### Fixed
+
+- Settings can open a Workspace's detail view again, restoring access to its
+  repository, worktree, CLAUDE.md, and native Session controls without
+  bringing back the removed Workspace Dock item.
+- ZCode can launch an activated Proxy installed after Host startup instead of
+  remaining unavailable until another Host restart.
+- App upgrades retire the legacy LaunchAgent before starting the packaged Host,
+  preventing two Host generations from competing for production resources.
+- Manual Codex `/compact` returns promptly, follows the current
+  `contextCompaction` lifecycle, and remains interruptible. Codex also
+  reattaches idle threads after app-server replacement and drops oversized
+  startup history snapshots instead of terminating the shared runtime.
+- URL-mode Codex MCP reconnection now opens only a validated HTTPS page and
+  sends Accept only after the user explicitly confirms that reconnection
+  completed.
+- Kimi live events continue above the replayed occurrence floor after a Host
+  restart, so one persisted event id cannot be reused with changed content.
+- DSH Sessions reattach after Host restart without allowing foreign native ids
+  or history adoption. A missing persisted native Session rolls back cleanly
+  so an empty Gian Session can create a safe replacement.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- ZCode Proxy 0.1.0 accepts text only; file and image inputs are not exposed.
+- DSH Proxy 0.1.5 accepts text and workspace tools. Typed file/image inputs
+  and interactive approval/question routing remain unadvertised.
+- Scheduled Automations and Grok are not included in the 0.5.5 product
+  surface.
 
 ## [0.5.4] - 2026-09-01
 

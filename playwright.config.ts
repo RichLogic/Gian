@@ -21,7 +21,11 @@ export default defineConfig({
   // runs below the point where browser layout/PTY handshakes starve each other
   // on high-core machines; this is still enough parallelism for the 56-case
   // suite without turning timing pressure into product failures.
-  workers: 4,
+  // On macOS, multiple TypeScript-config workers can retain fsevents handles
+  // after every assertion finishes and delay the release gate until the
+  // global timeout. Keep hosted Linux parallel; use one deterministic local
+  // worker so teardown returns promptly.
+  workers: CI ? 4 : 1,
   // Visual baselines are intentionally shared across developer macOS and
   // Linux CI. Individual assertions carry a small cross-platform pixel
   // tolerance for font rasterization while still catching layout drift.

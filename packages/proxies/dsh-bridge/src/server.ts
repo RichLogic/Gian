@@ -142,6 +142,9 @@ export class BridgeServer {
       ? native.id
       : undefined;
     const history = native !== null ? native.history : undefined;
+    const hostBindingProof = native !== null && typeof native.hostBindingProof === 'string'
+      ? native.hostBindingProof
+      : undefined;
     return {
       sessionId: stringField(params, 'sessionId'),
       cwd: stringField(workspace, 'cwd'),
@@ -150,6 +153,7 @@ export class BridgeServer {
         : [],
       config,
       ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
+      ...(hostBindingProof === undefined ? {} : { hostBindingProof }),
       ...(history === 'replay' ? { restartNewStream: true } : {}),
     };
   }

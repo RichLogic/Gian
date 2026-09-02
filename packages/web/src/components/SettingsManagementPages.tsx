@@ -342,7 +342,13 @@ export function SettingsAdoptPage({
   );
 }
 
-export function SettingsWorkspacesPage({ workspaces }: { workspaces: Workspace[] }) {
+export function SettingsWorkspacesPage({
+  workspaces,
+  onWorkspaceOpened,
+}: {
+  workspaces: Workspace[];
+  onWorkspaceOpened?: (workspaceId: string) => void;
+}) {
   const t = useT();
   const dispatch = useOperationDispatch();
   const visible = workspaces.filter(workspace => workspace.name !== '__gian_root__' && workspace.hidden !== 1);
@@ -372,15 +378,20 @@ export function SettingsWorkspacesPage({ workspaces }: { workspaces: Workspace[]
             <div
               className={`management-row workspace-management-row${dnd.rowClass(workspace.id)}`}
               key={workspace.id}
+              data-testid={`ws-item-${workspace.id}`}
               {...dnd.rowProps(workspace.id)}
             >
               <span className="management-drag-grip" aria-hidden>
                 <Icon path={ICONS.grip} />
               </span>
-              <div className="management-row-copy">
+              <button
+                type="button"
+                className="management-row-copy ws-item-main"
+                onClick={() => onWorkspaceOpened?.(workspace.id)}
+              >
                 <strong>{workspace.name}</strong>
                 <span className="mono">{workspace.path}</span>
-              </div>
+              </button>
               <button className="btn sm secondary" onClick={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: true })}>
                 <Icon path={ICONS.eyeOff} /> {t('settings.workspaces.hide')}
               </button>
@@ -396,11 +407,19 @@ export function SettingsWorkspacesPage({ workspaces }: { workspaces: Workspace[]
         <div className="management-list">
           {hidden.length === 0 && <ManagementEmpty>{t('settings.workspaces.hiddenEmpty')}</ManagementEmpty>}
           {hidden.map(workspace => (
-            <div className="management-row workspace-management-row" key={workspace.id}>
-              <div className="management-row-copy">
+            <div
+              className="management-row workspace-management-row"
+              key={workspace.id}
+              data-testid={`ws-item-${workspace.id}`}
+            >
+              <button
+                type="button"
+                className="management-row-copy ws-item-main"
+                onClick={() => onWorkspaceOpened?.(workspace.id)}
+              >
                 <strong>{workspace.name}</strong>
                 <span className="mono">{workspace.path}</span>
-              </div>
+              </button>
               <button className="btn sm secondary" onClick={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: false })}>
                 {t('settings.workspaces.show')}
               </button>

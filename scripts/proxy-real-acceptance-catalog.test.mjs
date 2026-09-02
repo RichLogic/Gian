@@ -24,6 +24,7 @@ test('real Proxy catalog covers every request and notification schema', async ()
     Object.keys(catalog.providers).sort(),
     ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode'],
   );
+  assert.equal(catalog.providers.codex.cheapestConfig.service_tier, false);
 });
 
 test('real Proxy catalog rejects a missing provider classification', async () => {

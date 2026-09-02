@@ -6,7 +6,7 @@
   "plugin": {
     "id": "ai.deepseek.harness",
     "bundle": "@gian/dsh-bridge",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "runtime": {
     "id": "deepseek-harness",

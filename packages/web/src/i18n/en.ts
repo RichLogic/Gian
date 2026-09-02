@@ -773,6 +773,8 @@ export const EN: Messages = {
   'transcript.approval.keepPlanning': 'No, keep planning',
   'transcript.approval.allowOnce': 'Allow once',
   'transcript.approval.resolving': 'Resolving…',
+  'transcript.approval.openReconnect': 'Open reconnect page',
+  'transcript.approval.confirmReconnect': 'I’ve reconnected',
   'transcript.approval.allowSession': 'Allow session',
   'transcript.approval.decline': 'Decline',
   'transcript.approval.once': 'once',

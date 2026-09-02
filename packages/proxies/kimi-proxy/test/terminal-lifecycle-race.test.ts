@@ -190,7 +190,7 @@ async function makeHarness(options: {
   const service = new KimiProxyService({ runtime });
   await service.initialize();
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
-  const adapter = new KimiProtocolV2Adapter(service, '0.2.6', (method, params) => {
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.7', (method, params) => {
     notifications.push({ method, params });
   });
   await adapter.handle({

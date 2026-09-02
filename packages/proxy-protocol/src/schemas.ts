@@ -400,6 +400,7 @@ export type HostServiceDescriptor = z.infer<typeof hostServiceDescriptorSchema>;
 const nativeSessionRefSchema = z.strictObject({
   id: nonEmptyStringSchema,
   history: z.enum(NATIVE_HISTORY_MODES).optional(),
+  hostBindingProof: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
 });
 
 const turnConfigFields = {

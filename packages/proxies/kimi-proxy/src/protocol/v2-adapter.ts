@@ -953,6 +953,7 @@ export class KimiProtocolV2Adapter {
     this.sessionByServiceId.set(session.serviceSessionId, session);
     this.ledger.attach(session.id, session.streamId);
     this.replayBySession.set(session.id, replay);
+    this.seedLiveOccurrences(replay.events);
     void this.publishCatalogIfCommandsArrive(session);
     return { session: this.serialize(session) };
   }
@@ -1726,7 +1727,7 @@ export class KimiProtocolV2Adapter {
         kind: contentKind,
         ...(contentKind === 'text' ? { format: 'plain' } : {}),
         delta: text,
-      }, this.nextContentDeltaIdentity(session.id, turnId, contentId));
+      }, this.nextContentDeltaIdentity(session, turnId, contentId));
       return;
     }
     if (kind === 'usage_update') {
@@ -1797,7 +1798,7 @@ export class KimiProtocolV2Adapter {
       ...(update.rawOutput !== undefined || update.rawInput !== undefined
         ? { details: jsonValue(update.rawOutput ?? update.rawInput) }
         : {}),
-    }, this.nextFactUpdateIdentity(session.id, turnId, 'activity', activityId));
+    }, this.nextFactUpdateIdentity(session, turnId, 'activity', activityId));
     if (status !== 'running') open.delete(activityId);
   }
 
@@ -1815,7 +1816,7 @@ export class KimiProtocolV2Adapter {
       session,
       turnId,
       data,
-      this.nextFactUpdateIdentity(session.id, turnId, 'plan', data.planId),
+      this.nextFactUpdateIdentity(session, turnId, 'plan', data.planId),
     );
   }
 
@@ -1899,7 +1900,7 @@ export class KimiProtocolV2Adapter {
           title: 'Tool',
           status,
           presentation: { type: 'tool', data: { name: 'tool' } },
-        }, this.nextFactUpdateIdentity(session.id, turnId, 'activity', activityId));
+        }, this.nextFactUpdateIdentity(session, turnId, 'activity', activityId));
       }
       activities.clear();
     }
@@ -2147,7 +2148,7 @@ export class KimiProtocolV2Adapter {
     session.sequence += 1;
     const key = this.turnKey(session.id, turnId);
     const sourceTurnId = this.sourceTurnIdFor(session, turnId);
-    const occurrenceKey = `${key}\u0000event:${method}`;
+    const occurrenceKey = `${sourceTurnId}\u0000event:${method}`;
     const occurrence = (this.eventOccurrences.get(occurrenceKey) ?? 0) + 1;
     this.eventOccurrences.set(occurrenceKey, occurrence);
     const eventId = this.turnEventId(sourceTurnId, method, data, identity, occurrence);
@@ -2200,23 +2201,23 @@ export class KimiProtocolV2Adapter {
   }
 
   private nextContentDeltaIdentity(
-    sessionId: string,
+    session: AttachedSession,
     turnId: string,
     contentId: string,
   ): string {
-    const key = `${this.turnKey(sessionId, turnId)}\u0000content:${contentId}`;
+    const key = `${this.sourceTurnIdFor(session, turnId)}\u0000content:${contentId}`;
     const occurrence = (this.eventOccurrences.get(key) ?? 0) + 1;
     this.eventOccurrences.set(key, occurrence);
     return `${contentId}:delta:${occurrence}`;
   }
 
   private nextFactUpdateIdentity(
-    sessionId: string,
+    session: AttachedSession,
     turnId: string,
     kind: 'activity' | 'plan',
     factId: string,
   ): string {
-    const key = `${this.turnKey(sessionId, turnId)}\u0000${kind}:${factId}`;
+    const key = `${this.sourceTurnIdFor(session, turnId)}\u0000${kind}:${factId}`;
     const occurrence = (this.eventOccurrences.get(key) ?? 0) + 1;
     this.eventOccurrences.set(key, occurrence);
     return `${factId}:update:${occurrence}`;
@@ -2224,6 +2225,7 @@ export class KimiProtocolV2Adapter {
 
   private clearTurn(sessionId: string, turnId: string): void {
     const key = this.turnKey(sessionId, turnId);
+    const sourceTurnId = this.sourceTurnIds.get(key);
     this.activeTurnBySession.delete(sessionId);
     this.startedTurns.delete(key);
     this.pendingUsageByTurn.delete(key);
@@ -2232,7 +2234,9 @@ export class KimiProtocolV2Adapter {
     this.openActivitiesByTurn.delete(key);
     this.openContentByTurn.delete(key);
     for (const occurrenceKey of [...this.eventOccurrences.keys()]) {
-      if (occurrenceKey.startsWith(`${key}\u0000`)) this.eventOccurrences.delete(occurrenceKey);
+      if (sourceTurnId && occurrenceKey.startsWith(`${sourceTurnId}\u0000`)) {
+        this.eventOccurrences.delete(occurrenceKey);
+      }
     }
     for (const degradedKey of [...this.degradedUpdateCounts.keys()]) {
       if (degradedKey.startsWith(`${key}`)) this.degradedUpdateCounts.delete(degradedKey);
@@ -2244,6 +2248,31 @@ export class KimiProtocolV2Adapter {
     const requestKey = this.requestByTurn.get(key);
     if (requestKey) this.turnsByRequest.delete(requestKey);
     this.requestByTurn.delete(key);
+  }
+
+  /** Replayed native history establishes the occurrence floor for a turn.
+   *  If the same native turn continues after a Host/Proxy reattach, new live
+   *  deltas and mutable fact updates must not reuse an already persisted id. */
+  private seedLiveOccurrences(events: ReplayEvent[]): void {
+    const sourceTurnId = events.at(-1)?.sourceTurnId;
+    if (!sourceTurnId) return;
+    const increment = (key: string) => {
+      this.eventOccurrences.set(key, (this.eventOccurrences.get(key) ?? 0) + 1);
+    };
+    for (const event of events) {
+      if (event.sourceTurnId !== sourceTurnId) continue;
+      increment(`${event.sourceTurnId}\u0000event:${event.method}`);
+      if (event.method === 'content.delta') {
+        const contentId = nonEmptyString(event.data.contentId);
+        if (contentId) increment(`${event.sourceTurnId}\u0000content:${contentId}`);
+      } else if (event.method === 'activity.updated') {
+        const activityId = nonEmptyString(event.data.activityId);
+        if (activityId) increment(`${event.sourceTurnId}\u0000activity:${activityId}`);
+      } else if (event.method === 'plan.updated') {
+        const planId = nonEmptyString(event.data.planId);
+        if (planId) increment(`${event.sourceTurnId}\u0000plan:${planId}`);
+      }
+    }
   }
 
   private turnKey(sessionId: string, turnId: string): string {

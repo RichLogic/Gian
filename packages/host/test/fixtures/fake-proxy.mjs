@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const emittedAt = '2026-04-26T00:00:00.000Z';
@@ -9,6 +10,23 @@ function write(obj) {
 
 function result(id, value) {
   write({ jsonrpc: '2.0', id, result: value });
+}
+
+function validHostBinding(req) {
+  const native = req.params.nativeSession;
+  if (!native || native.history !== 'none') return true;
+  const key = process.env.GIAN_HOST_BINDING_KEY;
+  if (!key || typeof native.hostBindingProof !== 'string') return false;
+  const payload = JSON.stringify([
+    'gian.proxy/2.1/session.create/host-binding/v1',
+    process.env.GIAN_PLUGIN_ID ?? 'claude',
+    req.params.sessionId,
+    native.id,
+    req.params.workspace.cwd,
+  ]);
+  const expected = Buffer.from(createHmac('sha256', key).update(payload).digest('base64url'));
+  const received = Buffer.from(native.hostBindingProof);
+  return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
 for await (const line of rl) {
@@ -31,7 +49,12 @@ for await (const line of rl) {
           version: '0.2.0',
         },
         process: { scope: 'session' },
-        capabilities: { 'session.replay': 1, interaction: 1, 'catalog.resolve': 1 },
+        capabilities: {
+          'session.replay': 1,
+          'session.create.hostBindingProof': 1,
+          interaction: 1,
+          'catalog.resolve': 1,
+        },
       });
       break;
     case 'catalog.list':
@@ -54,6 +77,18 @@ for await (const line of rl) {
       });
       break;
     case 'session.create':
+      if (!validHostBinding(req)) {
+        write({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: {
+            code: -32000,
+            message: 'invalid Host binding proof',
+            data: { domainCode: 'RUNTIME_UNAVAILABLE', retryable: false, details: {} },
+          },
+        });
+        break;
+      }
       result(req.id, {
         session: {
           id: req.params.sessionId,

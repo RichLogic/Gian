@@ -2493,6 +2493,21 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
   assert.deepEqual(replayData('activity.updated', isStableTool), liveData('activity.updated', isStableTool));
   assert.deepEqual(replayData('turn.completed'), liveData('turn.completed'));
 
+  const occurrenceFloor = (adapter as unknown as {
+    eventOccurrences: Map<string, number>;
+  }).eventOccurrences;
+  const replayContentId = String(replayData('content.delta')[0]?.contentId ?? '');
+  assert.equal(
+    occurrenceFloor.get(`${liveSourceTurnId}\u0000content:${replayContentId}`),
+    replayIds('content.delta').length,
+    'reattached live deltas must continue after replayed occurrence ids',
+  );
+  assert.equal(
+    occurrenceFloor.get(`${liveSourceTurnId}\u0000activity:tool-stable`),
+    replayIds('activity.updated', isStableTool).length,
+    'reattached tool updates must continue after replayed occurrence ids',
+  );
+
   const livePlans = liveData('plan.updated');
   const replayPlans = replayData('plan.updated');
   assert.deepEqual(replayPlans, livePlans, 'plan data must match live and replay');
@@ -2748,7 +2763,7 @@ test('Kimi gian.proxy/2 relays ACP permission kinds in context and keeps optionI
   });
   const service = new KimiProxyService({ runtime });
   await service.initialize();
-  const adapter = new KimiProtocolV2Adapter(service, '0.2.6', (method, params) => {
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.7', (method, params) => {
     notifications.push({ method, params });
     // The context extension must survive the strict gian.proxy/2 schema.
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });

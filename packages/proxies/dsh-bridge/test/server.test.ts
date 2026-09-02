@@ -5,13 +5,17 @@ import { PassThrough, Writable } from 'node:stream';
 import { BridgeServer } from '../src/server.js';
 import { BridgeWriter } from '../src/jsonrpc.js';
 import { FakeDshRuntime } from '../src/fake-host.js';
+import { signHostBinding } from '../src/host-binding.js';
 
 interface Output {
   notifications: Array<{ method: string; params: Record<string, unknown> }>;
   results: Array<Record<string, unknown>>;
 }
 
-function makeHarness(options: { script?: 'success' | 'approval' | 'question' | 'interrupt' | 'error' | 'multi-step' } = {}) {
+function makeHarness(options: {
+  script?: 'success' | 'approval' | 'question' | 'interrupt' | 'error' | 'multi-step';
+  hostBindingKey?: string;
+} = {}) {
   const runtime = new FakeDshRuntime(options);
   const notifications: Output['notifications'] = [];
   const out = new Writable({
@@ -106,6 +110,52 @@ test('two root sessions keep their event streams isolated', async () => {
   const g2Text = JSON.stringify(g2.events);
   assert.ok(g1Text.includes('hello a') || g1.events.some((e) => JSON.stringify(e).includes('hello a')));
   assert.equal(g2Text.includes('hello a'), false);
+});
+
+test('bridge session.create preserves an authenticated Host-owned native id', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const { server } = makeHarness({ hostBindingKey });
+  await request(server, 'initialize', { protocol: { versions: ['1.0'] } });
+  const binding = {
+    pluginId: 'ai.deepseek.harness',
+    sessionId: 'g1',
+    nativeSessionId: 'native-owned',
+    cwd: '/a',
+  };
+  const created = await request(server, 'session.create', {
+    sessionId: binding.sessionId,
+    workspace: { cwd: binding.cwd, roots: [binding.cwd] },
+    config: {},
+    nativeSession: {
+      id: binding.nativeSessionId,
+      history: 'none',
+      hostBindingProof: signHostBinding(hostBindingKey, binding),
+    },
+  }) as { session: { nativeId: string } };
+  assert.equal(created.session.nativeId, binding.nativeSessionId);
+
+  await assert.rejects(() => request(server, 'session.create', {
+    sessionId: 'g2',
+    workspace: { cwd: '/a', roots: ['/a'] },
+    config: {},
+    nativeSession: {
+      id: 'foreign',
+      history: 'none',
+      hostBindingProof: signHostBinding(hostBindingKey, binding),
+    },
+  }), /valid Host ownership proof/);
+
+  const adoptionBinding = { ...binding, sessionId: 'g3', nativeSessionId: 'native-history' };
+  await assert.rejects(() => request(server, 'session.create', {
+    sessionId: adoptionBinding.sessionId,
+    workspace: { cwd: adoptionBinding.cwd, roots: [adoptionBinding.cwd] },
+    config: {},
+    nativeSession: {
+      id: adoptionBinding.nativeSessionId,
+      history: 'replay',
+      hostBindingProof: signHostBinding(hostBindingKey, adoptionBinding),
+    },
+  }), /native session adoption is not supported/);
 });
 
 test('one session close leaves the shared peer running', async () => {

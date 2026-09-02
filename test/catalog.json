@@ -294,6 +294,7 @@
         "packages/desktop/test/browser-project.test.ts",
         "packages/desktop/test/browser-element.test.ts",
         "packages/desktop/test/config.test.ts",
+        "packages/desktop/test/legacy-host-retirement.test.ts",
         "packages/desktop/test/managed-host-shutdown.test.ts",
         "packages/desktop/test/managed-host.test.ts",
         "packages/desktop/test/native-notifications.test.ts",

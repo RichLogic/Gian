@@ -82,6 +82,13 @@ describe('parseApprovalRequested', () => {
     expect(item?.tone).toBe('danger');
   });
 
+  it('passes through a validated external interaction URL', () => {
+    const item = parseApprovalRequested(envelope({
+      externalUrl: 'https://chatgpt.com/apps/linear',
+    }));
+    expect(item?.externalUrl).toBe('https://chatgpt.com/apps/linear');
+  });
+
   it('drops unknown interactionKind and tone values', () => {
     const item = parseApprovalRequested(envelope({
       interactionKind: 'widget',

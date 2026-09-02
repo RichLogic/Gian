@@ -155,14 +155,14 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.10",
+      "pluginVersion": "0.2.12",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
         "model": "gpt-5.6-luna",
         "effort": "low",
         "approval_mode": "ask",
-        "service_tier": "flex"
+        "service_tier": false
       },
       "capabilities": [
         "input.localImage",
@@ -171,6 +171,8 @@
         "session.native.list",
         "session.replay",
         "sidechat",
+        "integration.mcp.streamableHttp",
+        "session.create.forkBoundaries",
         "session.fork",
         "session.fork.atTurn",
         "turn.steer",
@@ -201,7 +203,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.3",
+      "pluginVersion": "0.2.7",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -285,7 +287,7 @@
     "dsh": {
       "displayName": "DeepSeek Harness Bridge",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.4",
+      "pluginVersion": "0.1.5",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",

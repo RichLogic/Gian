@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { CordisDshHost, dshVersionFromEntrypoint } from '../src/cordis-host.js';
+import { signHostBinding } from '../src/host-binding.js';
 
 test('DSH runtime version follows the real CLI entry behind an npm launcher symlink', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-dsh-version-'));
@@ -79,6 +80,132 @@ test('first Catalog waits for late latest-DSH Provider registration', async () =
     'deepseek-official',
     'opencode-go',
   ]);
+});
+
+test('real Cordis host resumes the exact authenticated Host-owned native session id', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const resumed: Array<Record<string, unknown>> = [];
+  let createCalled = false;
+  const nativeSessionId = 'session-owned-by-gian';
+  const agentContext = { on: () => () => true };
+  const agent = {
+    id: nativeSessionId,
+    status: 'idle' as const,
+    session: { id: nativeSessionId, header: { createdAt: 1_700_000_000_000 }, events: [] },
+    ctx: agentContext,
+    cancel: () => undefined,
+    whenIdle: async () => undefined,
+    followup: () => undefined,
+    steer: () => undefined,
+  };
+  const host = new CordisDshHost({
+    agents: {
+      create: async () => {
+        createCalled = true;
+        return { agent, dispose: async () => undefined };
+      },
+      resume: async (options: Record<string, unknown>) => {
+        resumed.push(options);
+        (options.setup as ((ctx: unknown) => void) | undefined)?.(agentContext);
+        return { agent, dispose: async () => undefined };
+      },
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    on: () => () => true,
+  } as never, '0.1.2', hostBindingKey);
+  const request = {
+    sessionId: 'gian-session',
+    nativeSessionId,
+    cwd: '/tmp/project',
+    roots: ['/tmp/project'],
+    config: {},
+  };
+  const result = await host.sessionCreate({
+    ...request,
+    hostBindingProof: signHostBinding(hostBindingKey, {
+      pluginId: 'ai.deepseek.harness',
+      sessionId: request.sessionId,
+      nativeSessionId,
+      cwd: request.cwd,
+    }),
+  }) as { session: { id: string; nativeId: string; createdAt: string } };
+
+  assert.equal(createCalled, false);
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0]?.resumeSessionId, nativeSessionId);
+  assert.deepEqual(resumed[0]?.agentOptions, {
+    provider: 'deepseek-official',
+    model: 'deepseek-chat',
+  });
+  assert.equal(result.session.id, 'gian-session');
+  assert.equal(result.session.nativeId, nativeSessionId);
+  assert.equal(result.session.createdAt, new Date(1_700_000_000_000).toISOString());
+});
+
+test('real Cordis host rejects a foreign or conflicting native binding proof', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const host = new CordisDshHost({
+    agents: {
+      create: async () => assert.fail('native attach must not create'),
+      resume: async () => assert.fail('invalid proof must not resume'),
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    on: () => () => true,
+  } as never, '0.1.2', hostBindingKey);
+
+  await assert.rejects(() => host.sessionCreate({
+    sessionId: 'gian-session',
+    nativeSessionId: 'foreign-session',
+    hostBindingProof: signHostBinding(hostBindingKey, {
+      pluginId: 'ai.deepseek.harness',
+      sessionId: 'different-gian-session',
+      nativeSessionId: 'foreign-session',
+      cwd: '/tmp/project',
+    }),
+    cwd: '/tmp/project',
+    roots: ['/tmp/project'],
+    config: {},
+  }), /valid Host ownership proof/);
+});
+
+test('real Cordis host reports a missing persisted native Session canonically', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const nativeSessionId = 'native-missing';
+  const host = new CordisDshHost({
+    agents: {
+      create: async () => assert.fail('native attach must not create'),
+      resume: async () => { throw new Error(`session "${nativeSessionId}" not found`); },
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    on: () => () => true,
+  } as never, '0.1.2', hostBindingKey);
+  const binding = {
+    pluginId: 'ai.deepseek.harness',
+    sessionId: 'gian-session',
+    nativeSessionId,
+    cwd: '/tmp/project',
+  };
+
+  await assert.rejects(() => host.sessionCreate({
+    sessionId: binding.sessionId,
+    nativeSessionId,
+    hostBindingProof: signHostBinding(hostBindingKey, binding),
+    cwd: binding.cwd,
+    roots: [binding.cwd],
+    config: {},
+  }), (error: unknown) => (
+    error instanceof Error
+    && (error as Error & { domainCode?: string }).domainCode === 'NATIVE_SESSION_NOT_FOUND'
+  ));
 });
 
 test('latest DSH turn config selects the advertised model, effort, and approval policy', async () => {

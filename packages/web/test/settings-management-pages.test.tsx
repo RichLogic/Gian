@@ -159,4 +159,20 @@ describe('Settings Workspaces reduction', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show' }));
     await waitFor(() => expect(api.updateWorkspace).toHaveBeenCalledWith('ws-hidden', { hidden: false }));
   });
+
+  it('opens the selected workspace in the Workbench without restoring removed row actions', () => {
+    const onWorkspaceOpened = vi.fn();
+    renderWithOperations(
+      <SettingsBody
+        config={config()}
+        activeSection="workspaces"
+        workspaces={workspaces}
+        onWorkspaceOpened={onWorkspaceOpened}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Alpha.*\/repo\/a/ }));
+    expect(onWorkspaceOpened).toHaveBeenCalledWith('ws-a');
+    expect(screen.queryByRole('button', { name: /new workspace/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
+  });
 });

@@ -66,6 +66,7 @@ import {
   ManagedHostQuitGate,
   ManagedHostReplacementGate,
 } from './managed-host-shutdown.js';
+import { retireLegacyHostLaunchAgent } from './legacy-host-retirement.js';
 import { BrowserController, registerBrowserScheme } from './browser-controller.js';
 import {
   AppUpdateController,
@@ -153,6 +154,7 @@ let screenshotController: ScreenshotController | null = null;
 let screenshotPreferencesStore: FileScreenshotPreferenceStore | null = null;
 let screenshotPreferences: ScreenshotPreferences = { ...DEFAULT_SCREENSHOT_PREFERENCES };
 let managedHost: ChildProcess | null = null;
+let legacyHostRetirement: Promise<void> | null = null;
 let githubAuthService: GitHubAuthService | null = null;
 let githubReleaseBroker: GitHubReleaseMetadataBroker | null = null;
 let loadingSurface:
@@ -755,6 +757,14 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
   if (mainWindow === window) screenshotController?.invalidateTarget();
 
   const promise = (async () => {
+    if (app.isPackaged) {
+      legacyHostRetirement ??= retireLegacyHostLaunchAgent({
+        homeDir: app.getPath('home'),
+      }).then(result => {
+        if (result.retired) console.log(`[desktop] retired legacy Host LaunchAgent: ${result.sourcePath}`);
+      });
+      await legacyHostRetirement;
+    }
     await ensureGitHubReleaseBroker();
     const readiness = await ensureHostAvailable({
       healthUrl: targets.healthUrl,

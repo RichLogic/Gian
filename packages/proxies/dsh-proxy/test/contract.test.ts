@@ -9,6 +9,7 @@ import { test } from 'node:test';
 
 import {
   HostProtocolValidator,
+  signNativeSessionHostBinding,
   type ProxyNotification,
 } from '@gian/proxy-protocol';
 
@@ -77,7 +78,14 @@ function fakeBridge(
         case 'session.create':
           session += 1;
           sessions.set(sid ?? '', { events: [] });
-          return { session: { id: sid, nativeId: `native-${session}`, cwd: (params.workspace as { cwd: string }).cwd, state: 'idle' } };
+          return {
+            session: {
+              id: sid,
+              nativeId: (params.nativeSession as { id?: string } | undefined)?.id ?? `native-${session}`,
+              cwd: (params.workspace as { cwd: string }).cwd,
+              state: 'idle',
+            },
+          };
         case 'session.get':
           return { session: { id: sid, nativeId: 'native-1', state: 'idle' } };
         case 'session.close':
@@ -128,8 +136,11 @@ function fakeBridge(
   };
 }
 
-function adapterWith(bridge: FakeBridge) {
-  const adapter = new DshV2Adapter(bridge as never, { pluginVersion: '0.1.3' });
+function adapterWith(bridge: FakeBridge, hostBindingKey?: string) {
+  const adapter = new DshV2Adapter(bridge as never, {
+    pluginVersion: '0.1.3',
+    ...(hostBindingKey ? { hostBindingKey } : {}),
+  });
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   adapter.setEmitSink((method, params) => notifications.push({ method, params }));
   return { adapter, notifications };
@@ -178,6 +189,7 @@ test('initialize: only accepts gian.proxy 2.1 and returns exact identity', async
   assert.equal(result.capabilities['turn.interrupt'], undefined);
   assert.equal(result.capabilities['event.step'], 1);
   assert.equal(result.capabilities['event.request'], 1);
+  assert.equal(result.capabilities['session.create.hostBindingProof'], 1);
 });
 
 test('initialize rejects non-2.1 versions', async () => {
@@ -189,8 +201,9 @@ test('initialize rejects non-2.1 versions', async () => {
   assert.equal(init.error.data?.domainCode, 'INCOMPATIBLE_PROTOCOL');
 });
 
-test('session.create returns a session snapshot; non-empty hostServices rejected', async () => {
-  const { adapter } = adapterWith(fakeBridge());
+test('session.create accepts only an authenticated Host-owned no-replay reattach', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const { adapter } = adapterWith(fakeBridge(), hostBindingKey);
   await call(adapter, 'initialize', {
     protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.5.0' },
@@ -218,9 +231,107 @@ test('session.create returns a session snapshot; non-empty hostServices rejected
     sessionId: 's_3',
     workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
     config: {},
-    nativeSession: { id: 'ext-1', history: 'none' },
+    nativeSession: {
+      id: 'ext-1',
+      history: 'none',
+      hostBindingProof: signNativeSessionHostBinding(hostBindingKey, {
+        pluginId: PLUGIN_ID,
+        sessionId: 's_3',
+        nativeSessionId: 'ext-1',
+        cwd: '/tmp/p',
+      }),
+    },
   });
-  assert.equal(attach.error?.data?.domainCode, 'RUNTIME_UNAVAILABLE');
+  assert.equal(attach.error, null);
+  assert.deepEqual(
+    (attach.result as { session: { nativeSession?: unknown } }).session.nativeSession,
+    { id: 'ext-1' },
+  );
+
+  const foreign = await call(adapter, 'session.create', {
+    sessionId: 's_4',
+    workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
+    config: {},
+    nativeSession: {
+      id: 'foreign',
+      history: 'none',
+      hostBindingProof: signNativeSessionHostBinding(hostBindingKey, {
+        pluginId: PLUGIN_ID,
+        sessionId: 's_4',
+        nativeSessionId: 'different-native-id',
+        cwd: '/tmp/p',
+      }),
+    },
+  });
+  assert.equal(foreign.error?.data?.domainCode, 'RUNTIME_UNAVAILABLE');
+
+  const adoption = await call(adapter, 'session.create', {
+    sessionId: 's_5',
+    workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
+    config: {},
+    nativeSession: {
+      id: 'ext-2',
+      history: 'replay',
+      hostBindingProof: signNativeSessionHostBinding(hostBindingKey, {
+        pluginId: PLUGIN_ID,
+        sessionId: 's_5',
+        nativeSessionId: 'ext-2',
+        cwd: '/tmp/p',
+      }),
+    },
+  });
+  assert.equal(adoption.error?.data?.domainCode, 'RUNTIME_UNAVAILABLE');
+});
+
+test('failed native resume rolls back the attachment so Host can create a safe replacement', async () => {
+  const hostBindingKey = 'test-host-binding-key';
+  const base = fakeBridge();
+  let failResume = true;
+  const bridge: FakeBridge = {
+    ...base,
+    async request(method, params) {
+      if (method === 'session.create' && params.nativeSession !== undefined && failResume) {
+        failResume = false;
+        const error = new Error('DSH native session was not found.') as Error & { domainCode: string };
+        error.domainCode = 'NATIVE_SESSION_NOT_FOUND';
+        throw error;
+      }
+      return base.request(method, params);
+    },
+  };
+  const { adapter } = adapterWith(bridge, hostBindingKey);
+  await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  const binding = {
+    pluginId: PLUGIN_ID,
+    sessionId: 's_replacement',
+    nativeSessionId: 'native-missing',
+    cwd: '/tmp/p',
+  };
+  const failed = await call(adapter, 'session.create', {
+    sessionId: binding.sessionId,
+    workspace: { cwd: binding.cwd, roots: [binding.cwd] },
+    config: {},
+    nativeSession: {
+      id: binding.nativeSessionId,
+      history: 'none',
+      hostBindingProof: signNativeSessionHostBinding(hostBindingKey, binding),
+    },
+  });
+  assert.equal(failed.error?.data?.domainCode, 'NATIVE_SESSION_NOT_FOUND');
+
+  const replacement = await call(adapter, 'session.create', {
+    sessionId: binding.sessionId,
+    workspace: { cwd: binding.cwd, roots: [binding.cwd] },
+    config: {},
+  });
+  assert.equal(replacement.error, null);
+  assert.deepEqual(
+    (replacement.result as { session: { nativeSession?: unknown } }).session.nativeSession,
+    { id: 'native-1' },
+  );
 });
 
 test('turn.start emits accepted then turn.started and a single terminal event', async () => {

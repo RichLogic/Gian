@@ -61,6 +61,37 @@ function makeQuestion(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
 // ---------------------------------------------------------------------------
 
 describe('APR-001: pending approval card surface (.ap2)', () => {
+  it('requires the reconnect page to open before accepting a URL elicitation', async () => {
+    const onApprove = vi.fn();
+    const user = userEvent.setup();
+    render(<ApprovalCard
+      item={makeApproval({
+        interactionKind: 'permission',
+        externalUrl: 'https://chatgpt.com/apps/linear',
+        actions: [
+          { id: 'accept', label: 'Accept', style: 'primary' },
+          { id: 'decline', label: 'Decline', style: 'danger' },
+        ],
+      })}
+      onApprove={onApprove}
+    />);
+
+    const confirm = screen.getByRole('button', { name: 'I’ve reconnected' });
+    expect(confirm).toBeDisabled();
+    const open = screen.getByRole('link', { name: 'Open reconnect page' });
+    expect(open).toHaveAttribute('href', 'https://chatgpt.com/apps/linear');
+    expect(open).toHaveAttribute('target', '_blank');
+    await user.click(open);
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onApprove).toHaveBeenCalledWith(
+      'appr-1',
+      'allow_once',
+      undefined,
+      { category: 'command', nativeOptionId: 'accept' },
+    );
+  });
+
   it('renders the cmd subject with a `$ ` prompt and no v2 chrome', () => {
     const onApprove = vi.fn();
     render(<ApprovalCard item={makeApproval()} onApprove={onApprove} />);
