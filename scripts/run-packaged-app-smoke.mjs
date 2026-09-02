@@ -375,9 +375,36 @@ async function installPackagedWebSocketCloseHook(window) {
   await window.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     const sockets = [];
+    const frames = { sent: [], received: [], terminalReplays: [] };
+    const recordType = (target, raw) => {
+      if (typeof raw !== 'string') return;
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed?.type === 'string') target.push(parsed.type);
+        if (parsed?.type === 'term:replay') {
+          frames.terminalReplays.push({
+            termId: parsed.term_id,
+            text: Array.isArray(parsed.chunks) ? parsed.chunks.map(atob).join('') : '',
+            alive: parsed.alive,
+            code: parsed.code,
+            signal: parsed.signal,
+          });
+        }
+      } catch {
+        // Diagnostics only; product framing owns validation.
+      }
+    };
     const TrackingWebSocket = new Proxy(NativeWebSocket, {
       construct(target, args) {
         const socket = Reflect.construct(target, args);
+        const send = socket.send.bind(socket);
+        Object.defineProperty(socket, 'send', {
+          value: raw => {
+            recordType(frames.sent, raw);
+            send(raw);
+          },
+        });
+        socket.addEventListener('message', event => recordType(frames.received, event.data));
         sockets.push(socket);
         return socket;
       },
@@ -388,6 +415,14 @@ async function installPackagedWebSocketCloseHook(window) {
     });
     Object.defineProperty(window, '__gianCloseLatestPackagedWs', {
       value: () => sockets.at(-1)?.close(4000, 'packaged terminal replay gap'),
+      configurable: true,
+    });
+    Object.defineProperty(window, '__gianPackagedWsFrames', {
+      value: () => ({
+        sent: [...frames.sent],
+        received: [...frames.received],
+        terminalReplays: frames.terminalReplays.map(replay => ({ ...replay })),
+      }),
       configurable: true,
     });
   });
@@ -518,7 +553,7 @@ async function runPackagedTerminalJourney({
 
   await sendTerminalCommand(first, [
     `printf started > .packaged-offline-started`,
-    `sleep 0.25`,
+    `while [ ! -f .packaged-offline-release ]; do sleep 0.05; done`,
     `printf 'PACKAGED_OFFLINE_REPLAY\\n'`,
     `printf done > .packaged-offline-done`,
     `exit 7`,
@@ -533,12 +568,32 @@ async function runPackagedTerminalJourney({
   await expect(window.getByTestId('app-shell')).not.toHaveAttribute('data-connection', 'ready', {
     timeout: 5_000,
   });
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+  await writeFile(join(workspacePath, '.packaged-offline-release'), 'release');
   await expect.poll(() => fileText(join(workspacePath, '.packaged-offline-done')), {
     timeout: 10_000,
   }).toBe('done');
   await expect(window.getByTestId('app-shell')).toHaveAttribute('data-connection', 'ready', {
     timeout: 15_000,
   });
+  const reconnectFrames = await window.evaluate(() => window.__gianPackagedWsFrames?.());
+  assert.ok(
+    reconnectFrames?.sent?.includes('term:replay-request'),
+    `reconnected terminal did not request replay: ${JSON.stringify(reconnectFrames)}`,
+  );
+  await expect.poll(async () => {
+    const frames = await window.evaluate(() => window.__gianPackagedWsFrames?.());
+    const matching = frames?.terminalReplays?.filter(replay => replay.termId === firstId) ?? [];
+    return matching.length >= 2 ? matching.at(-1) : null;
+  }, { timeout: 15_000 }).not.toBeNull();
+  const replayFrames = await window.evaluate(() => window.__gianPackagedWsFrames?.());
+  const replayFrame = replayFrames?.terminalReplays
+    ?.filter(replay => replay.termId === firstId)
+    .at(-1);
+  assert.ok(
+    replayFrame?.text?.includes('PACKAGED_OFFLINE_REPLAY'),
+    `Host terminal replay omitted offline output: ${JSON.stringify(replayFrame)}`,
+  );
   await expect.poll(() => terminalText(first), { timeout: 15_000 })
     .toContain('PACKAGED_OFFLINE_REPLAY');
   await expect.poll(() => terminalText(first), { timeout: 15_000 })
