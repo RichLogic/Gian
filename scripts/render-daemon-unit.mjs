@@ -31,6 +31,18 @@ export function systemdQuote(value) {
     .replaceAll('%', '%%')}"`;
 }
 
+function systemdPath(value) {
+  // Path-valued directives such as WorkingDirectory= do not strip shell-like
+  // outer quotes. Encode characters that unit syntax tokenizes while keeping
+  // the first byte as `/`, so systemd still recognizes an absolute path.
+  return value
+    .replaceAll('\\', '\\\\')
+    .replaceAll(' ', '\\x20')
+    .replaceAll('"', '\\x22')
+    .replaceAll("'", '\\x27')
+    .replaceAll('%', '%%');
+}
+
 function systemdExecQuote(value) {
   // ExecStart performs its own $FOO/${FOO} expansion after tokenization,
   // including inside double quotes. `$$` is the documented literal-dollar
@@ -77,9 +89,9 @@ export function renderDaemonUnit({
   if (platform === 'linux') {
     return substitute(template, {
       EXEC_START: `${systemdExecQuote(node)} ${systemdExecQuote(join(root, 'packages/host/dist/index.js'))}`,
-      WORKING_DIRECTORY: systemdQuote(join(root, 'packages/host')),
-      STANDARD_OUTPUT: systemdQuote(`append:${join(userHome, '.gian/logs/host.out')}`),
-      STANDARD_ERROR: systemdQuote(`append:${join(userHome, '.gian/logs/host.err')}`),
+      WORKING_DIRECTORY: systemdPath(join(root, 'packages/host')),
+      STANDARD_OUTPUT: systemdPath(`append:${join(userHome, '.gian/logs/host.out')}`),
+      STANDARD_ERROR: systemdPath(`append:${join(userHome, '.gian/logs/host.err')}`),
       ENVIRONMENT_PATH: systemdQuote(`PATH=${safeValue(launchdPath, 'launchdPath')}`),
     });
   }
