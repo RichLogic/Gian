@@ -473,7 +473,8 @@ test('emoji bytes split across stdout chunks survive the bounded tail (Finding 1
   const created = await service.create({
     sessionId: SESSION,
     command: '/bin/sh',
-    args: ['-c', 'printf "\\xf0\\x9f\\x98\\x80\\xf0\\x9f\\x98\\x80\\xf0\\x9f\\x98\\x80"; printf "\\xf0\\x9f\\x98\\x80\\xf0\\x9f\\x98\\x80"'],
+    // POSIX sh printf requires octal escapes; dash prints \\xNN literally.
+    args: ['-c', 'printf "\\360\\237\\230\\200\\360\\237\\230\\200\\360\\237\\230\\200"; printf "\\360\\237\\230\\200\\360\\237\\230\\200"'],
     outputByteLimit: 12,
   }, { env: BASE_ENV });
   await service.waitForExit({ sessionId: SESSION, terminalId: created.terminalId });

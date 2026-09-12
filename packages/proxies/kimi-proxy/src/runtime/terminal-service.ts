@@ -26,6 +26,7 @@ const DEFAULT_TERM_GRACE_MS = 2_000;
 const DEFAULT_GROUP_VERIFY_MS = 2_000;
 const DEFAULT_GROUP_POLL_MS = 50;
 const DEFAULT_EXIT_SETTLE_MS = 2_000;
+const DEFAULT_OUTPUT_DRAIN_GRACE_MS = 50;
 
 export type TerminalStatus = 'running' | 'killing' | 'exited' | 'releasing' | 'released';
 
@@ -90,7 +91,7 @@ interface TerminalRecord {
   totalBytes: number;
   truncated: boolean;
   status: TerminalStatus;
-  /** Settled synchronously by the child exit listener. */
+  /** Published only after the root exited and its bounded output-drain window. */
   exitStatus: TerminalExitStatus | null;
   exit: Promise<TerminalExit>;
   harvest: Promise<void>;
@@ -529,9 +530,25 @@ export class KimiTerminalService {
     }
 
     const terminalId = randomUUID();
-    let resolveExit!: (exit: TerminalExit) => void;
-    const exit = new Promise<TerminalExit>((resolve) => {
-      resolveExit = resolve;
+    let resolveRootExit!: (exit: TerminalExit) => void;
+    const rootExit = new Promise<TerminalExit>((resolve) => {
+      resolveRootExit = resolve;
+    });
+    let resolveStdoutDrained!: () => void;
+    const stdoutDrained = new Promise<void>((resolve) => { resolveStdoutDrained = resolve; });
+    let resolveStderrDrained!: () => void;
+    const stderrDrained = new Promise<void>((resolve) => { resolveStderrDrained = resolve; });
+    const outputDrained = Promise.all([stdoutDrained, stderrDrained]);
+    const exit = rootExit.then(async (settled) => {
+      // POSIX reports the root exit independently from pipe EOF. Give Node a
+      // bounded window to flush the root's final bytes, but never wait for a
+      // background process that inherited stdout/stderr and kept the pipe
+      // open after the root exited.
+      await Promise.race([
+        outputDrained,
+        this.sleep(DEFAULT_OUTPUT_DRAIN_GRACE_MS),
+      ]);
+      return settled;
     });
     const record: TerminalRecord = {
       terminalId,
@@ -551,8 +568,10 @@ export class KimiTerminalService {
     this.records.set(terminalId, record);
 
     child.once('exit', (code, signal) => {
-      record.exitStatus = { exitCode: code, signal: signal ?? null };
-      resolveExit({ exitCode: code, signal: signal ?? null });
+      resolveRootExit({ exitCode: code, signal: signal ?? null });
+    });
+    void exit.then((settled) => {
+      record.exitStatus = { exitCode: settled.exitCode, signal: settled.signal };
       if (record.status === 'running' || record.status === 'killing') {
         record.status = 'exited';
       }
@@ -566,8 +585,24 @@ export class KimiTerminalService {
     child.stderr.on('data', (chunk: Buffer) => {
       this.appendOutput(record, stderr.write(chunk));
     });
-    child.stdout.once('end', () => this.appendOutput(record, stdout.end()));
-    child.stderr.once('end', () => this.appendOutput(record, stderr.end()));
+    let stdoutEnded = false;
+    const finishStdout = () => {
+      if (stdoutEnded) return;
+      stdoutEnded = true;
+      this.appendOutput(record, stdout.end());
+      resolveStdoutDrained();
+    };
+    let stderrEnded = false;
+    const finishStderr = () => {
+      if (stderrEnded) return;
+      stderrEnded = true;
+      this.appendOutput(record, stderr.end());
+      resolveStderrDrained();
+    };
+    child.stdout.once('end', finishStdout);
+    child.stdout.once('close', finishStdout);
+    child.stderr.once('end', finishStderr);
+    child.stderr.once('close', finishStderr);
 
     return { terminalId };
   }
