@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -10,13 +10,11 @@ import type {
 import {
   completeOnboarding,
   createAgent,
-  installAgentCli,
-  installAgentProxy,
+  installManagedRuntime,
   loadAgentDraftDefaults,
   loadAgents,
   loadProxies,
   saveOnboardingProjectRoot,
-  updateAgent,
 } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { OnboardingView } from '../src/views/OnboardingView.js';
@@ -25,14 +23,12 @@ import { createOperationHarness } from './operation-test-utils.js';
 vi.mock('../src/api.js', () => ({
   completeOnboarding: vi.fn(),
   createAgent: vi.fn(),
-  installAgentCli: vi.fn(),
-  installAgentProxy: vi.fn(),
+  installManagedRuntime: vi.fn(),
   loadAgentDraftDefaults: vi.fn(),
   loadAgents: vi.fn(),
   loadProxies: vi.fn(),
   pickWorkspaceFolder: vi.fn(),
   saveOnboardingProjectRoot: vi.fn(),
-  updateAgent: vi.fn(),
 }));
 
 const PROXIES: ProxyCatalogEntry[] = [
@@ -105,14 +101,7 @@ describe('OnboardingView', () => {
       cliPath: null,
     }));
     vi.mocked(createAgent).mockImplementation(async input => agent(input.proxy ?? 'claude', input.name));
-    vi.mocked(updateAgent).mockImplementation(async (id, patch) => ({
-      ...agent('claude', 'Claude Code'),
-      id,
-      ...patch,
-      defaults: { model: '', thinking: '', mode: '' },
-    }));
-    vi.mocked(installAgentProxy).mockImplementation(async () => ({ agent: {} }) as never);
-    vi.mocked(installAgentCli).mockImplementation(async () => ({ agent: {} }) as never);
+    vi.mocked(installManagedRuntime).mockResolvedValue({} as never);
     vi.mocked(saveOnboardingProjectRoot).mockResolvedValue({ projectRoot: '~/Coding' });
     vi.mocked(completeOnboarding).mockResolvedValue({ ...state(), completed: true });
   });
@@ -210,26 +199,20 @@ describe('OnboardingView', () => {
     await waitFor(() => expect(createAgent).toHaveBeenCalledWith({
       name: 'Kimi Code',
       proxy: 'kimi',
-      cliPath: null,
     }));
     // Never a restart while the wizard is open.
     expect(restartApp).not.toHaveBeenCalled();
   });
 
-  it('installs the official CLI before activating its Proxy', async () => {
+  it('installs the certified Proxy + managed CLI combination through one operation', async () => {
     const missingAgents = [
       agent('codex', 'Codex', false),
       agent('claude', 'Claude Code', false),
       agent('kimi', 'Kimi Code', false),
     ];
-    const cliReadyCodex = agent('codex', 'Codex');
-    cliReadyCodex.ready = false;
-    cliReadyCodex.plugin = missingAgents[0]!.plugin;
-    const cliOnly = [cliReadyCodex, missingAgents[1]!, missingAgents[2]!];
     const codexReady = [agent('codex', 'Codex'), missingAgents[1]!, missingAgents[2]!];
     vi.mocked(loadAgents)
       .mockResolvedValueOnce(missingAgents)
-      .mockResolvedValueOnce(cliOnly)
       .mockResolvedValue(codexReady);
     const { wrapper } = createOperationHarness();
     render(
@@ -248,17 +231,12 @@ describe('OnboardingView', () => {
     expect(continueButton).toBeDisabled();
     await userEvent.click(screen.getAllByRole('button', { name: 'Set up' })[0]!);
 
-    await waitFor(() => expect(installAgentProxy).toHaveBeenCalledWith('codex'));
-    expect(installAgentCli).toHaveBeenCalledWith('codex');
-    expect(vi.mocked(installAgentCli).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(installAgentProxy).mock.invocationCallOrder[0]!,
-    );
+    await waitFor(() => expect(installManagedRuntime)
+      .toHaveBeenCalledWith('codex', 'agent-codex-1'));
     await waitFor(() => expect(continueButton).toBeEnabled());
   });
 
-  it('saves a CLI path write-through without restarting mid-wizard', async () => {
-    const restartApp = vi.fn().mockResolvedValue(true);
-    (window as { gianDesktop?: unknown }).gianDesktop = { appVariant: 'production', restartApp };
+  it('never exposes a per-Agent CLI path editor', async () => {
     const { wrapper } = createOperationHarness();
     render(
       <LocaleProvider locale="en">
@@ -272,15 +250,7 @@ describe('OnboardingView', () => {
     );
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    const pathInput = (await screen.findAllByDisplayValue('/bin/claude'))[0]!;
-    await userEvent.clear(pathInput);
-    await userEvent.type(pathInput, '/Users/test/bin/claude-mix');
-    const row = pathInput.closest('article')!;
-    await userEvent.click(within(row).getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(updateAgent).toHaveBeenCalledWith('agent-claude-1', {
-      cliPath: '/Users/test/bin/claude-mix',
-    }));
-    expect(restartApp).not.toHaveBeenCalled();
+    expect(screen.queryByPlaceholderText('/absolute/path/to/cli')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
   });
 });

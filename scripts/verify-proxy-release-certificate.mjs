@@ -39,6 +39,9 @@ export function validateProxyReleaseCertificate(
 ) {
   const issues = [];
   if (certificate?.schemaVersion !== 1) issues.push('certificate schemaVersion must be 1');
+  if (!/^release-[a-f0-9]{40}$/u.test(certificate?.certificateId ?? '')) {
+    issues.push('certificate has no valid immutable certificateId');
+  }
   if (certificate?.stage !== 'release') issues.push('certificate stage must be release');
   if (certificate?.admissionEligible !== true) issues.push('certificate is not admission eligible');
   if (certificate?.qualified !== true) issues.push('certificate is not qualified');
@@ -104,6 +107,11 @@ export function validateProxyReleaseCertificate(
     if (tuple.cli?.verified !== true
       || !packageCandidate.runtime?.verifiedCliVersions?.includes(tuple.cli?.version)) {
       issues.push(`${id} CLI tuple is not a verified version`);
+    }
+    if (!/^[a-f0-9]{64}$/u.test(tuple.cli?.sha256 ?? '')
+      || !Number.isSafeInteger(tuple.cli?.size)
+      || tuple.cli.size <= 0) {
+      issues.push(`${id} CLI tuple has no exact artifact identity`);
     }
   }
 

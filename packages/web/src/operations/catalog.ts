@@ -6,6 +6,7 @@
  * Agents page can drive busy/disabled states from pending runs.
  */
 import type {
+  ManagedRuntimeGeneration,
   ProxyCatalogList,
   RuntimeDiscoverResponse,
   RuntimeProbeResponse,
@@ -14,6 +15,7 @@ import type {
 import {
   discoverProxyRuntime,
   installCatalogProxy,
+  installManagedRuntime,
   probeProxyRuntime,
   rollbackCatalogProxy,
   syncProxyCatalog,
@@ -39,6 +41,7 @@ export const CATALOG_SYNC_ENTITY_KEY = 'catalog:sync';
 
 /** Installs download/verify bounded archives — same budget as Agent installs. */
 const INSTALL_TIMEOUT_MS = 120_000;
+const RUNTIME_INSTALL_TIMEOUT_MS = 5 * 60_000;
 /** Conditional metadata sync is a plain REST round-trip. */
 const REST_TIMEOUT_MS = 30_000;
 
@@ -58,6 +61,17 @@ const catalogInstallProxy: OperationDefinition<CatalogPluginInput, CatalogMutati
   entityKey: input => catalogEntityKey(input.pluginId),
   execute: input => installCatalogProxy(input.pluginId),
   timeoutMs: INSTALL_TIMEOUT_MS,
+};
+
+interface CatalogRuntimeInstallInput extends CatalogPluginInput {
+  agentId?: string;
+}
+
+const catalogInstallRuntime: OperationDefinition<CatalogRuntimeInstallInput, ManagedRuntimeGeneration> = {
+  policy: 'pending',
+  entityKey: input => runtimeEntityKey(input.pluginId),
+  execute: input => installManagedRuntime(input.pluginId, input.agentId),
+  timeoutMs: RUNTIME_INSTALL_TIMEOUT_MS,
 };
 
 const catalogUpdateProxy: OperationDefinition<CatalogPluginInput, CatalogMutationReceipt> = {
@@ -96,6 +110,7 @@ const catalogProbeRuntime: OperationDefinition<RuntimeProbeInput, RuntimeProbeRe
 
 registry.register('catalog.sync', catalogSync);
 registry.register('catalog.installProxy', catalogInstallProxy);
+registry.register('catalog.installRuntime', catalogInstallRuntime);
 registry.register('catalog.updateProxy', catalogUpdateProxy);
 registry.register('catalog.rollbackProxy', catalogRollbackProxy);
 registry.register('catalog.discoverRuntime', catalogDiscoverRuntime);

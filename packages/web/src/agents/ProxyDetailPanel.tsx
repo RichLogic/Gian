@@ -83,7 +83,7 @@ export function ProxyDetailPanel({
   docGeneration: number | null;
   showBack: boolean;
   busy: boolean;
-  onAction: (action: 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
+  onAction: (action: 'install_runtime' | 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
   onCreateAgent: () => void;
   onClose: () => void;
 }) {
@@ -104,6 +104,7 @@ export function ProxyDetailPanel({
   const compat = compatibilityMessage(item);
   const actions = item.availableActions;
   const canUse = actions.includes('create_agent')
+    || actions.includes('install_runtime')
     || actions.includes('install_proxy')
     || actions.includes('update_proxy');
   const cliPath = generation?.runtime?.entryPath ?? developmentFallback?.cli.path ?? null;
@@ -178,7 +179,7 @@ export function ProxyDetailPanel({
           <dl className="kv-grid">
             <dt>{t('agents.runtime.proxyVersionLabel')}</dt>
             <dd><span className="mono">{proxyVersion ?? t('agents.proxy.versions.none')}</span></dd>
-            <dt>CLI</dt>
+            <dt>Runtime</dt>
             <dd>
               <span className="mono">{cliVersion ?? t('agents.runtime.notInstalled')}</span>
               {generation && <span className="hint">{t('agents.runtime.certified')}</span>}
@@ -211,6 +212,12 @@ export function ProxyDetailPanel({
           </dl>
 
           <div className="act-row">
+            {actions.includes('install_runtime') && (
+              <button type="button" className="btn xs primary" disabled={busy}
+                      data-testid="proxy-action-install-runtime" onClick={() => onAction('install_runtime')}>
+                {t('agents.catalog.action.installRuntime')}
+              </button>
+            )}
             {actions.includes('update_proxy') && (
               <>
                 <span className="delta mono">
@@ -236,7 +243,7 @@ export function ProxyDetailPanel({
                 {t('agents.catalog.action.rollback')}
               </button>
             )}
-            {!actions.some(action => action === 'install_proxy' || action === 'update_proxy' || action === 'rollback_proxy') && (
+            {!actions.some(action => action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy' || action === 'rollback_proxy') && (
               <span className="delta muted">{t('agents.runtime.current')}</span>
             )}
           </div>

@@ -21,6 +21,7 @@ import type {
   RuntimeProbeRequest,
   RuntimeProbeResponse,
   ManagedRuntimeStatus,
+  ManagedRuntimeGeneration,
 } from '@gian/shared';
 import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
 
@@ -648,6 +649,22 @@ export async function probeProxyRuntime(
 export async function loadManagedRuntimeStatus(pluginId: string): Promise<ManagedRuntimeStatus> {
   const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/runtime`);
   return agentResponse<ManagedRuntimeStatus>(response);
+}
+
+export async function installManagedRuntime(
+  pluginId: string,
+  agentId?: string,
+): Promise<ManagedRuntimeGeneration> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/install`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(agentId ? { agentId } : {}),
+    },
+  );
+  const body = await agentResponse<{ generation: ManagedRuntimeGeneration }>(response);
+  return body.generation;
 }
 
 export interface AgentDraftDefaults {

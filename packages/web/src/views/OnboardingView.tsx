@@ -9,6 +9,7 @@ import type {
 import { loadAgents, loadProxies } from '../api.js';
 import type { PickFolderResult } from '../api.js';
 import { agentEntityKey, agentIdEntityKey } from '../operations/agents.js';
+import { runtimeEntityKey } from '../operations/catalog.js';
 import {
   useOperationDispatch,
   useOperationRun,
@@ -45,10 +46,10 @@ export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
 /**
  * First-run onboarding. Phase 3b (UI Operation Layer): every mutation
  * dispatches a registered pending operation. Step 2 is "add and set up at
- * least one Agent": Agents are created (agent.create) and their paths saved
- * (agent.patch) without any restart — onboarding must never restart
- * mid-wizard and lose itself. When the wizard did touch agents.json, the
- * restart happens once, after `onboarding.complete`.
+ * least one Agent": production saves the Agent first, then installs one
+ * certified Runtime + Proxy generation without a per-Agent executable path.
+ * Onboarding must never restart mid-wizard and lose itself. When the wizard
+ * did touch agents.json, the restart happens once after onboarding.complete.
  */
 export function OnboardingView({
   identity,
@@ -77,7 +78,9 @@ export function OnboardingView({
   const finishRun = useOperationRun(finishRunId);
   const pickingDirectory = pickRun?.phase === 'pending';
   const savingDirectory = finishRun?.phase === 'pending';
-  const anyAgentBusy = usePendingOperations().some(run => run.name.startsWith('agent.'));
+  const anyAgentBusy = usePendingOperations().some(run => (
+    run.name.startsWith('agent.') || run.name === 'catalog.installRuntime'
+  ));
   /** Set when step 2 wrote agents.json; finish() restarts once, after
    *  onboarding.complete (never mid-wizard). */
   const agentsTouched = useRef(false);
@@ -114,7 +117,11 @@ export function OnboardingView({
     }
     const settled = await waitForRunSettle(
       store,
-      dispatch('agent.create', { name, proxy: kind, cliPath }).id,
+      dispatch('agent.create', {
+        name,
+        proxy: kind,
+        ...(cliPath ? { cliPath } : {}),
+      }).id,
     );
     if (settled.phase !== 'confirmed') {
       setError(settled.error ?? 'Add failed');
@@ -125,53 +132,17 @@ export function OnboardingView({
   }
 
   async function setupOne(agent: UserAgentStatus) {
-    if (!agent.proxy) return;
-    setError('');
-    // A Proxy activation smoke starts the exact vendor runtime, so a clean
-    // machine must provision the CLI first. Installing Proxy first made the
-    // fresh pair fail despite both installers being available.
-    if (agent.cli.state !== 'ready') {
-      const settled = await waitForRunSettle(
-        store,
-        dispatch('agent.installCli', { executor: agent.proxy }).id,
-      );
-      if (settled.phase !== 'confirmed') {
-        setError(settled.error ?? 'Install failed');
-        await refreshAgents().catch(() => undefined);
-        return;
-      }
-    }
-    const refreshed = (await refreshAgents().catch(() => []))
-      .find(candidate => candidate.id === agent.id) ?? agent;
-    if (refreshed.plugin.state !== 'ready') {
-      const settled = await waitForRunSettle(
-        store,
-        dispatch('agent.installProxy', { executor: agent.proxy }).id,
-      );
-      if (settled.phase !== 'confirmed') {
-        setError(settled.error ?? 'Install failed');
-        await refreshAgents().catch(() => undefined);
-        return;
-      }
-    }
-    await refreshAgents();
-  }
-
-  async function savePath(agent: UserAgentStatus, path: string) {
     setError('');
     const settled = await waitForRunSettle(
       store,
-      dispatch('agent.patch', {
-        agentId: agent.id,
-        patch: { cliPath: path.trim() || null },
-      }).id,
+      dispatch('catalog.installRuntime', { pluginId: agent.pluginId, agentId: agent.id }).id,
     );
     if (settled.phase !== 'confirmed') {
-      setError(settled.error ?? 'Save failed');
+      setError(settled.error ?? 'Install failed');
+      await refreshAgents().catch(() => undefined);
       return;
     }
-    agentsTouched.current = true;
-    await refreshAgents().catch(() => undefined);
+    await refreshAgents();
   }
 
   async function pickDirectory() {
@@ -271,7 +242,6 @@ export function OnboardingView({
                   key={agent.id}
                   agent={agent}
                   onSetup={() => void setupOne(agent)}
-                  onSavePath={path => void savePath(agent, path)}
                 />
               ))}
               {missingKinds.map(entry => (
@@ -373,22 +343,19 @@ export function OnboardingView({
 function OnboardingAgentRow({
   agent,
   onSetup,
-  onSavePath,
 }: {
   agent: UserAgentStatus;
   onSetup: () => void;
-  onSavePath: (path: string) => void;
 }) {
   const t = useT();
   // Busy = any in-flight operation for THIS Agent or its kind (Phase 3b).
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
   const kindRuns = usePendingOperations(agentEntityKey(agent.proxy));
-  const busy = agentRuns.length > 0 || kindRuns.length > 0;
-  const [path, setPath] = useState(agent.cliPath ?? agent.cli.path ?? '');
+  const runtimeRuns = usePendingOperations(runtimeEntityKey(agent.pluginId));
+  const busy = agentRuns.length > 0 || kindRuns.length > 0 || runtimeRuns.length > 0;
   const cliReady = agent.cli.state === 'ready';
   const proxyReady = agent.plugin.state === 'ready';
   const proxyInstalled = proxyReady || agent.plugin.state === 'outdated';
-  useEffect(() => setPath(agent.cliPath ?? agent.cli.path ?? ''), [agent.cliPath, agent.cli.path]);
   return (
     <article className={`onboarding-agent ${agent.ready ? 'ready' : ''}`}>
       <div className="onboarding-agent-summary">
@@ -404,7 +371,7 @@ function OnboardingAgentRow({
       </div>
       <div className="onboarding-agent-components">
         <span className={cliReady ? 'ready' : 'missing'}>
-          <b>CLI</b>
+          <b>Runtime</b>
           {cliReady
             ? `${agent.cli.version ?? ''} · ${agent.cli.path ?? ''}`
             : t(agent.cli.state === 'invalid' ? 'settings.agents.invalid' : 'settings.agents.notInstalled')}
@@ -415,24 +382,6 @@ function OnboardingAgentRow({
             ? `${agent.plugin.version ?? ''} · ${agent.plugin.source === 'development' ? 'Dev' : 'GitHub'}${agent.plugin.state === 'outdated' ? ` · ${t('settings.agents.updateRequired')}` : ''}`
             : t('settings.agents.notInstalled')}
         </span>
-      </div>
-      <div className="onboarding-cli-path">
-        <input
-          className="input mono"
-          aria-label={`${agent.name} ${t('settings.agents.cliPath')}`}
-          value={path}
-          disabled={busy}
-          placeholder="/absolute/path/to/cli"
-          onChange={event => setPath(event.target.value)}
-        />
-        <button
-          className="btn xs secondary"
-          type="button"
-          disabled={busy || path.trim() === (agent.cliPath ?? agent.cli.path ?? '')}
-          onClick={() => onSavePath(path)}
-        >
-          {t('settings.agents.savePath')}
-        </button>
       </div>
     </article>
   );

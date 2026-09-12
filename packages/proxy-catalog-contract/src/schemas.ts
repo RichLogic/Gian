@@ -128,6 +128,42 @@ export const downloadAssetSchema = z.strictObject({
   size: positiveSafeIntegerSchema,
 });
 
+const runtimeComponentIdSchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(CATALOG_IDENTIFIER_PATTERN, 'Expected a bounded Runtime component id.');
+
+export const managedRuntimeNativeBinarySchema = z.strictObject({
+  kind: z.literal('native-binary'),
+  runtimeId: catalogRuntimeIdSchema,
+  version: semverSchema,
+  asset: downloadAssetSchema,
+  entryRelativePath: relativePathSchema('Runtime entry'),
+});
+
+export const managedRuntimeDistributionSchema = z.discriminatedUnion('kind', [
+  managedRuntimeNativeBinarySchema,
+  z.strictObject({
+    kind: z.literal('external-app'),
+    runtimeId: catalogRuntimeIdSchema,
+    version: semverSchema,
+    artifactSha256: sha256Schema,
+  }),
+]);
+
+export const certifiedRuntimeCombinationSchema = z.strictObject({
+  generationId: runtimeComponentIdSchema,
+  certificate: z.strictObject({
+    id: runtimeComponentIdSchema,
+    sha256: sha256Schema,
+  }),
+  runtime: managedRuntimeDistributionSchema.nullable(),
+  companions: z.array(z.strictObject({
+    id: runtimeComponentIdSchema,
+    distribution: managedRuntimeNativeBinarySchema,
+  })).max(16),
+});
+
 const sourceDocumentationSchema = z.strictObject({
   overview: relativePathSchema('overview'),
   setup: relativePathSchema('setup'),
@@ -159,6 +195,7 @@ const catalogChannelSchema = z.strictObject({
   pluginVersion: semverSchema,
   manifest: downloadAssetSchema.optional(),
   artifacts: platformArtifactMapSchema.optional(),
+  combination: certifiedRuntimeCombinationSchema.optional(),
 }).superRefine((value, context) => {
   const artifacts = value.artifacts ?? {};
   const hasArtifact = Object.values(artifacts).some((asset) => asset !== undefined);
@@ -174,6 +211,13 @@ const catalogChannelSchema = z.strictObject({
       code: 'custom',
       path: ['manifest'],
       message: 'Documentation-only channels must not declare a downloadable Manifest coordinate.',
+    });
+  }
+  if (!hasArtifact && value.combination) {
+    context.addIssue({
+      code: 'custom',
+      path: ['combination'],
+      message: 'A certified Runtime combination requires an installable Proxy artifact.',
     });
   }
 });
@@ -254,6 +298,7 @@ export const compiledCatalogEntryV1Schema = z.strictObject({
     runtime: compiledRuntimeSummarySchema.nullable(),
     manifest: downloadAssetSchema.optional(),
     artifacts: platformArtifactMapSchema,
+    combination: certifiedRuntimeCombinationSchema.optional(),
   }).superRefine((value, context) => {
     const hasArtifact = Object.values(value.artifacts).some((asset) => asset !== undefined);
     if (hasArtifact && !value.manifest) {
@@ -268,6 +313,13 @@ export const compiledCatalogEntryV1Schema = z.strictObject({
         code: 'custom',
         path: ['manifest'],
         message: 'Documentation-only channels must not declare a downloadable Manifest coordinate.',
+      });
+    }
+    if (!hasArtifact && value.combination) {
+      context.addIssue({
+        code: 'custom',
+        path: ['combination'],
+        message: 'A certified Runtime combination requires an installable Proxy artifact.',
       });
     }
   }),
@@ -378,6 +430,8 @@ export const catalogSignatureEnvelopeV1Schema = z.strictObject({
 
 export type CatalogPluginId = z.infer<typeof catalogPluginIdSchema>;
 export type DownloadAsset = z.infer<typeof downloadAssetSchema>;
+export type CatalogManagedRuntimeDistribution = z.infer<typeof managedRuntimeDistributionSchema>;
+export type CertifiedRuntimeCombination = z.infer<typeof certifiedRuntimeCombinationSchema>;
 export type CatalogEntryV1 = z.infer<typeof catalogEntryV1Schema>;
 export type CatalogAssetRef = z.infer<typeof catalogAssetRefSchema>;
 export type CatalogImageRef = z.infer<typeof catalogImageRefSchema>;

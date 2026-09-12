@@ -8,8 +8,8 @@ const SETUP_URL = 'https://zcode.z.ai';
 
 export const ZCODE_CLI_CONFIG_READINESS_ISSUE = {
   code: 'zcode_cli_config_missing',
-  message: 'ZCode CLI model configuration is missing at ~/.zcode/cli/config.json. '
-    + 'Configure an explicit model provider for ZCode CLI, then retry. '
+  message: 'ZCode model configuration is missing at ~/.zcode/cli/config.json. '
+    + 'Configure an explicit model provider in ZCode, then retry. '
     + 'Gian will not create or modify this file.',
   repairable: true,
 } as const;
@@ -44,8 +44,8 @@ export async function discoverZcodeRuntimes(): Promise<{
   const candidates: Array<{ path: string; source: 'official-user' | 'official-system'; label?: string }> = [];
   const user = join(home, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
   const system = join('/Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  if (await existsFile(user)) candidates.push({ path: user, source: 'official-user', label: 'ZCode CLI' });
-  if (await existsFile(system)) candidates.push({ path: system, source: 'official-system', label: 'ZCode CLI' });
+  if (await existsFile(user)) candidates.push({ path: user, source: 'official-user', label: 'ZCode.app' });
+  if (await existsFile(system)) candidates.push({ path: system, source: 'official-system', label: 'ZCode.app' });
   return {
     candidates,
     setupActions: [
@@ -85,7 +85,7 @@ export async function probeZcodeRuntime(path: string): Promise<{
   }
   return {
     runtimeId: 'zcode',
-    displayName: 'ZCode CLI',
+    displayName: 'ZCode Runtime',
     path,
     version,
     configHome,

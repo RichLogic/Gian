@@ -190,9 +190,23 @@ function processValue(pid, field) {
   return result.stdout.trim();
 }
 
-async function stopRelaunchedDesktop(executable, probePidPath) {
-  const hostPid = Number((await readFile(probePidPath, 'utf8')).trim());
-  assert.ok(Number.isSafeInteger(hostPid) && hostPid > 0, 'fake CLI did not record its Host PID');
+function hostPidForOrigin(origin) {
+  const port = new URL(origin).port;
+  const result = spawnSync('/usr/sbin/lsof', [
+    '-nP',
+    `-iTCP:${port}`,
+    '-sTCP:LISTEN',
+    '-t',
+  ], { encoding: 'utf8' });
+  assert.equal(result.status, 0, `could not locate packaged Host listener: ${result.stderr}`);
+  const pids = [...new Set(result.stdout.trim().split(/\s+/u).filter(Boolean).map(Number))];
+  assert.equal(pids.length, 1, `expected one packaged Host listener, found ${pids.join(', ')}`);
+  return pids[0];
+}
+
+async function stopRelaunchedDesktop(executable, origin) {
+  const hostPid = hostPidForOrigin(origin);
+  assert.ok(Number.isSafeInteger(hostPid) && hostPid > 0, 'packaged Host listener has no valid PID');
   const desktopPid = Number(processValue(hostPid, 'ppid'));
   assert.ok(Number.isSafeInteger(desktopPid) && desktopPid > 0, 'replacement Host has no desktop parent');
   const command = processValue(desktopPid, 'command');
@@ -201,18 +215,6 @@ async function stopRelaunchedDesktop(executable, probePidPath) {
     `refusing to stop unexpected packaged smoke parent: ${command}`,
   );
   process.kill(desktopPid, 'SIGTERM');
-}
-
-async function waitForProbePidChange(path, previousPid, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const nextPid = Number((await readFile(path, 'utf8').catch(() => '')).trim());
-    if (Number.isSafeInteger(nextPid) && nextPid > 0 && nextPid !== previousPid) {
-      return nextPid;
-    }
-    await new Promise(resolveDelay => setTimeout(resolveDelay, 200));
-  }
-  throw new Error('replacement Host did not re-probe the configured CLI');
 }
 
 async function responds(url) {
@@ -635,13 +637,9 @@ async function seedPackagedGitHubCredential(electronApp, token) {
 
 async function completePackagedOnboarding({
   dataDir,
-  desktopToken,
   electronApp,
-  fakeClaude,
-  fakeClaudeProbePid,
-  fakeClaudeVersion,
+  expectedClaudeRuntimeVersion,
   githubToken,
-  origin,
   projectRoot,
   window,
 }) {
@@ -653,63 +651,20 @@ async function completePackagedOnboarding({
 
   // Step 1 remains explicit even for an already connected account.
   await onboarding.locator('.onboarding-actions .btn.primary').click();
-  // This intentionally uses the signed public Catalog, not a routed fixture.
-  // PluginStore verifies the Catalog coordinate, archive bytes, Manifest,
-  // self-test, compatibility and exact Runtime before atomic activation.
-  const installResponse = await desktopFetch(origin, desktopToken, '/api/proxies/claude/install', {
-    method: 'POST',
-    signal: AbortSignal.timeout(120_000),
-  });
-  const installBody = await installResponse.text();
-  assert.equal(
-    installResponse.ok,
-    true,
-    `packaged Claude Proxy install failed (${installResponse.status}): ${installBody}`,
-  );
-  const probeResponse = await desktopFetch(origin, desktopToken, '/api/proxies/claude/runtime/probe', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: fakeClaude }),
-    signal: AbortSignal.timeout(120_000),
-  });
-  const probeBody = await probeResponse.text();
-  assert.equal(
-    probeResponse.ok,
-    true,
-    `packaged Claude Runtime probe failed (${probeResponse.status}): ${probeBody}`,
-  );
-  const probe = JSON.parse(probeBody);
-  assert.equal(probe.readinessIssue ?? null, null, `packaged Claude Runtime is not ready: ${probeBody}`);
-  assert.equal(probe.profile?.path, fakeClaude);
-
-  await window.reload();
-  await onboarding.waitFor({ timeout: 30_000 });
-  await onboarding.locator('.onboarding-actions .btn.primary').click();
   const addClaude = onboarding.getByTestId('onboarding-add-claude');
   if (await addClaude.isVisible()) {
     await addClaude.getByRole('button').click();
   }
   const claude = onboarding.locator('.onboarding-agent').filter({ hasText: 'Claude Code' }).first();
   await claude.waitFor({ timeout: 30_000 });
-  try {
-    await claude.locator('.onboarding-agent-components .ready', { hasText: fakeClaude })
-      .waitFor({ timeout: 30_000 });
-  } catch (error) {
-    const hostLog = await readFile(join(dataDir, 'logs', 'desktop-host.log'), 'utf8')
-      .catch(() => '<unavailable>');
-    const onboardingState = await onboarding.innerText().catch(() => '<unavailable>');
-    throw new Error([
-      `Packaged Claude Runtime path did not become ready: ${error}`,
-      `Onboarding state:\n${onboardingState}`,
-      `Host log tail:\n${hostLog.slice(-8_000)}`,
-    ].join('\n\n'));
-  }
+  const setup = claude.locator('.onboarding-agent-summary button');
+  await setup.waitFor({ timeout: 30_000 });
+  await setup.click();
   try {
     await Promise.race([
-      claude.locator('.onboarding-agent-components .ready', { hasText: 'Proxy' })
-        .waitFor({ timeout: 120_000 }),
+      setup.waitFor({ state: 'detached', timeout: 120_000 }),
       onboarding.getByRole('alert').waitFor({ timeout: 120_000 }).then(async () => {
-        throw new Error(`Proxy installation failed: ${await onboarding.getByRole('alert').innerText()}`);
+        throw new Error(`Runtime installation failed: ${await onboarding.getByRole('alert').innerText()}`);
       }),
     ]);
   } catch (error) {
@@ -717,12 +672,11 @@ async function completePackagedOnboarding({
       .catch(() => '<unavailable>');
     const onboardingState = await onboarding.innerText().catch(() => '<unavailable>');
     throw new Error([
-      `Packaged Claude Proxy installation did not become ready: ${error}`,
+      `Packaged Claude Runtime installation did not become ready: ${error}`,
       `Onboarding state:\n${onboardingState}`,
       `Host log tail:\n${hostLog.slice(-8_000)}`,
     ].join('\n\n'));
   }
-  await claude.locator('.onboarding-agent-summary button').waitFor({ state: 'detached' });
   const agentText = await claude.innerText();
   const installedVersion = agentText.match(/Proxy\s+(\d+\.\d+\.\d+)/)?.[1];
   assert.ok(installedVersion, `could not read installed Claude Proxy version: ${agentText}`);
@@ -748,12 +702,10 @@ async function completePackagedOnboarding({
     `publish stable proxy-claude-v${expectedClaudeManifest.pluginVersion} before packaged verification`,
   );
   assert.equal(activatedManifest.schemaVersion, 4);
-  assert.ok(agentText.includes(fakeClaudeVersion));
-  const configuredHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')
-    .catch(() => '')).trim());
+  assert.ok(agentText.includes(expectedClaudeRuntimeVersion));
   assert.ok(
-    Number.isSafeInteger(configuredHostPid) && configuredHostPid > 0,
-    'configured Claude CLI did not record the onboarding Host PID',
+    agentText.includes(join(dataDir, 'runtimes')),
+    `packaged Runtime was not installed below the Gian data directory: ${agentText}`,
   );
 
   // Any one ready Agent unlocks directory setup; Codex/Kimi stay installable
@@ -770,7 +722,6 @@ async function completePackagedOnboarding({
   // only after onboarding.complete. The caller validates and reattaches to
   // that replacement generation.
   await windowClosed;
-  return configuredHostPid;
 }
 
 function seedPriorVersionFixture(databasePath) {
@@ -863,9 +814,12 @@ export async function main(args = process.argv.slice(2)) {
     join(rootDir, 'packages', 'proxies', 'cc-proxy', 'manifest.json'),
     'utf8',
   ));
-  const fakeClaudeVersion = expectedClaudeManifest.runtime?.verifiedVersions?.[0];
-  assert.equal(typeof fakeClaudeVersion, 'string');
-  await writeFakeClaude(fakeClaude, fakeClaudeVersion, fakeClaudeProbePid);
+  const expectedClaudeRuntimeVersion = expectedClaudeManifest.runtime?.verifiedVersions?.[0];
+  assert.equal(typeof expectedClaudeRuntimeVersion, 'string');
+  // This machine-global decoy must remain unused. The packaged product may
+  // execute only the Runtime downloaded below its own dataDir/runtimes tree.
+  await writeFakeClaude(fakeClaude, '9.8.8', fakeClaudeProbePid);
+  env.CLAUDE_BIN = fakeClaude;
 
   try {
     const firstLaunch = await launchPackagedApp({
@@ -882,15 +836,11 @@ export async function main(args = process.argv.slice(2)) {
     const onboardingDesktopExit = new Promise(resolveExit => {
       electronApp.process().once('exit', resolveExit);
     });
-    const onboardingHostPid = await completePackagedOnboarding({
+    await completePackagedOnboarding({
       dataDir,
-      desktopToken,
       electronApp,
-      fakeClaude,
-      fakeClaudeProbePid,
-      fakeClaudeVersion,
+      expectedClaudeRuntimeVersion,
       githubToken,
-      origin,
       projectRoot,
       window: firstLaunch.window,
     });
@@ -902,7 +852,6 @@ export async function main(args = process.argv.slice(2)) {
       firstHostInstance,
     );
     assert.notEqual(onboardingReplacementHost, firstHostInstance);
-    await waitForProbePidChange(fakeClaudeProbePid, onboardingHostPid);
 
     const onboardingResponse = await desktopFetch(origin, desktopToken, '/api/onboarding');
     assert.equal(onboardingResponse.status, 200);
@@ -911,14 +860,18 @@ export async function main(args = process.argv.slice(2)) {
     assert.equal(finalState.projectRoot, projectRoot);
     const configuredClaude = finalState.agents.find(agent => agent.proxy === 'claude');
     assert.equal(configuredClaude?.ready, true);
-    assert.equal(configuredClaude?.cliPath, fakeClaude);
+    assert.equal(configuredClaude?.cliPath, null);
+    assert.equal(configuredClaude?.cli.source, 'managed');
+    assert.equal(configuredClaude?.cli.version, expectedClaudeRuntimeVersion);
+    assert.ok(configuredClaude?.cli.path?.startsWith(join(dataDir, 'runtimes')));
+    assert.equal(await readFile(fakeClaudeProbePid, 'utf8').catch(() => ''), '');
     const optionalCodex = finalState.agents.find(agent => agent.proxy === 'codex');
     if (optionalCodex) assert.equal(optionalCodex.ready, false);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'zcode'), undefined);
 
-    await stopRelaunchedDesktop(executable, fakeClaudeProbePid);
+    await stopRelaunchedDesktop(executable, origin);
     await waitForHostExit(origin);
     const activeLaunch = await launchPackagedApp({
       executable,
@@ -940,11 +893,9 @@ export async function main(args = process.argv.slice(2)) {
       workspacePath: terminalWorkspace,
     });
 
-    // Change the executable in place immediately before the real packaged
-    // restart. The replacement Host must not reuse the old RuntimeManager or
-    // its version result.
-    const firstHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')).trim());
-    await writeFakeClaude(fakeClaude, '9.8.8', fakeClaudeProbePid);
+    // Mutate the machine-global decoy immediately before a real packaged
+    // restart. The replacement Host must keep the certified managed Runtime.
+    await writeFakeClaude(fakeClaude, '9.9.9', fakeClaudeProbePid);
     const firstDesktopExit = new Promise(resolveExit => {
       electronApp.process().once('exit', resolveExit);
     });
@@ -967,11 +918,10 @@ export async function main(args = process.argv.slice(2)) {
     );
     assert.equal(relaunchedResponse.status, 200);
     const relaunched = await relaunchedResponse.json();
-    assert.equal(relaunched.cli.path, fakeClaude);
-    assert.equal(relaunched.cli.version, '9.8.8');
-    assert.equal(relaunched.cli.source, 'override');
-    const replacementHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')).trim());
-    assert.notEqual(replacementHostPid, firstHostPid, 'app relaunch must replace the Host process');
+    assert.equal(relaunched.cli.path, configuredClaude.cli.path);
+    assert.equal(relaunched.cli.version, expectedClaudeRuntimeVersion);
+    assert.equal(relaunched.cli.source, 'managed');
+    assert.equal(await readFile(fakeClaudeProbePid, 'utf8').catch(() => ''), '');
 
     const databasePath = join(dataDir, 'gian.db');
     seedPriorVersionFixture(databasePath);
@@ -1012,7 +962,7 @@ export async function main(args = process.argv.slice(2)) {
       migrated.close();
     }
 
-    await stopRelaunchedDesktop(executable, fakeClaudeProbePid);
+    await stopRelaunchedDesktop(executable, origin);
     await waitForHostExit(origin);
 
     console.log(`Packaged app smoke passed: ${appPath}`);

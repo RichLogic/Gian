@@ -23,6 +23,7 @@ import { sweepColdEvents } from './events/lifecycle.js';
 import { RuntimeResolver } from './runtime/resolver.js';
 import { RuntimeReadinessCache } from './runtime/readiness-cache.js';
 import { RuntimeControlPlane } from './runtime/control-plane.js';
+import { ManagedRuntimeInstaller } from './runtime/installer.js';
 import { discoverDevelopmentProxyEntries } from './runtime/development-proxy-source.js';
 import { AgentManager } from './agents/manager.js';
 import { legacyAgentBootstrap } from './agents/legacy-bootstrap.js';
@@ -38,6 +39,7 @@ import {
   createPluginArtifactNetwork,
 } from './catalog/index.js';
 import { PluginStore } from './plugin-store/index.js';
+import { downloadVerifiedAsset } from './plugin-store/download.js';
 import { RemoteIdentityBrokerClient } from './remote/identity-broker.js';
 import {
   BROWSER_USE_BROKER_SOCKET_ENV,
@@ -153,19 +155,20 @@ async function main(): Promise<void> {
     policy: catalogPolicy,
   });
   await catalogStore.open();
+  const pluginArtifactNetwork = githubBrokerSocketPath
+    ? createPluginArtifactNetwork({ socketPath: githubBrokerSocketPath })
+    : {
+      async download() {
+        throw new Error('Plugin artifact broker is not configured.');
+      },
+    };
   const pluginStore = new PluginStore({
     dataDir,
     pluginsDir: join(dataDir, 'plugins'),
     updateLockDataDir: agentManager.updateLockDataDir(),
     allowedArtifactRepositories: catalogPolicy.artifactRepositories,
     hostVersion: releaseVersion,
-    network: githubBrokerSocketPath
-      ? createPluginArtifactNetwork({ socketPath: githubBrokerSocketPath })
-      : {
-        async download() {
-          throw new Error('Plugin artifact broker is not configured.');
-        },
-      },
+    network: pluginArtifactNetwork,
     listBindingReferences: () => {
       const rows = db.prepare(
         'SELECT proxy_binding_json, worktree_outcome FROM sessions WHERE proxy_binding_json IS NOT NULL',
@@ -204,6 +207,7 @@ async function main(): Promise<void> {
     policy: catalogPolicy,
     sourceClient: catalogSourceClient,
     readinessCache,
+    managedRuntimeStatus: pluginId => agentManager.managedRuntimeStatus(pluginId),
     officialPresence: async (pluginId) => agentManager.officialPresence(pluginId),
     onPluginGenerationChanged: (pluginId) => {
       readinessCache.invalidate(pluginId);
@@ -211,6 +215,39 @@ async function main(): Promise<void> {
     },
   });
   agentManager.setCatalogService(catalogService);
+  const runtimeInstaller = new ManagedRuntimeInstaller({
+    dataDir,
+    store: agentManager.managedRuntimeGenerationStore(),
+    download: (asset, signal) => downloadVerifiedAsset(
+      pluginArtifactNetwork,
+      asset,
+      catalogPolicy.artifactRepositories,
+      512 * 1024 * 1024,
+      signal,
+    ),
+    probeVersion: async ({ executable, pluginId }) => {
+      const launch = await agentManager.trustedLaunch(pluginId);
+      if (!launch || launch.runtime.kind === 'none') {
+        throw new Error(`${pluginId} Proxy is unavailable for managed Runtime verification.`);
+      }
+      const resolved = await runtimeResolver.resolve({
+        pluginId: parseProxyPluginId(pluginId),
+        pluginVersion: launch.pluginVersion,
+        agentId: 'runtime-installer',
+        entryPath: launch.entryPath,
+        processScope: launch.processScope,
+        runtime: launch.runtime,
+        selectedPath: executable,
+      });
+      try {
+        if (resolved.readinessIssue) throw new Error(resolved.readinessIssue.message);
+        if (!resolved.profile.version) throw new Error(`${pluginId} Runtime reported no version.`);
+        return resolved.profile.version;
+      } finally {
+        await resolved.lease?.release();
+      }
+    },
+  });
   const catalogRefresh = new CatalogRefreshController({
     sourceClient: catalogSourceClient,
   });
@@ -240,6 +277,7 @@ async function main(): Promise<void> {
     },
     runtimeResolver,
     runtimeControl,
+    runtimeInstaller,
     readinessCache,
     agentManager,
     catalogService,

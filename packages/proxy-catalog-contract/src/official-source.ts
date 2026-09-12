@@ -97,6 +97,18 @@ export async function loadOfficialCatalogSource(sourceRoot: string): Promise<Off
       if (!artifact) continue;
       rejectSentinel(artifact.sha256, `${entry.pluginId} ${platform}`);
     }
+    const combination = entry.channels.stable.combination;
+    if (combination) {
+      rejectSentinel(combination.certificate.sha256, `${entry.pluginId} certificate`);
+      if (combination.runtime?.kind === 'native-binary') {
+        rejectSentinel(combination.runtime.asset.sha256, `${entry.pluginId} Runtime`);
+      } else if (combination.runtime?.kind === 'external-app') {
+        rejectSentinel(combination.runtime.artifactSha256, `${entry.pluginId} external Runtime`);
+      }
+      for (const companion of combination.companions) {
+        rejectSentinel(companion.distribution.asset.sha256, `${entry.pluginId} ${companion.id}`);
+      }
+    }
     plugins.push({ directory, entry, documents, logos, sidecar });
   }
   return plugins;
@@ -130,6 +142,19 @@ export function verifyOfficialCatalogSource(
       rejectSentinel(artifact.sha256, `${plugin.entry.pluginId} ${platform}`);
       if (!isApprovedGitHubReleaseAssetUrl(artifact.url, allowed)) {
         throw new Error(`${plugin.entry.pluginId} ${platform} artifact URL is not an allowed artifact URL.`);
+      }
+    }
+    const combination = plugin.entry.channels.stable.combination;
+    if (combination) {
+      const assets = [
+        ...(combination.runtime?.kind === 'native-binary' ? [combination.runtime.asset] : []),
+        ...combination.companions.map(companion => companion.distribution.asset),
+      ];
+      for (const asset of assets) {
+        rejectSentinel(asset.sha256, `${plugin.entry.pluginId} Runtime`);
+        if (!isApprovedGitHubReleaseAssetUrl(asset.url, allowed)) {
+          throw new Error(`${plugin.entry.pluginId} Runtime URL is not an allowed artifact URL.`);
+        }
       }
     }
   }

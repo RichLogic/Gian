@@ -63,7 +63,7 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   const manager = await AgentManager.create({
     allowCreateWithoutCatalog: true,
     dataDir,
-    releaseVersion: '0.5.5',
+    releaseVersion: '0.6.0',
     managedProxies: true,
     generationStore: generations,
     homeDir: join(dataDir, 'user-home'),
@@ -121,6 +121,83 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   assert.deepEqual(persisted.agents.map(item => item.home), [first.home, second.home]);
 });
 
+test('ZCode readiness is projected from its active certified generation without a managed HOME', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-zcode-agent-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const proxyEntry = join(dataDir, 'plugins', 'com.zhipu.zcode', '0.1.1', 'proxy.mjs');
+  const runtimeEntry = join(dataDir, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
+  await executable(proxyEntry);
+  await executable(runtimeEntry);
+  const generations = new ManagedRuntimeGenerationStore(dataDir);
+  await generations.initialize();
+  const candidate: ManagedRuntimeGeneration = {
+    schemaVersion: 1,
+    generationId: 'zcode-0.1.1-runtime-0.16.5',
+    pluginId: 'com.zhipu.zcode',
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '0.1.1',
+      manifestSha256: 'a'.repeat(64),
+      artifactSha256: 'b'.repeat(64),
+      entryPath: proxyEntry,
+      processScope: 'shared',
+      protocolRange: '>=2.2 <3.0',
+    },
+    runtime: {
+      runtimeId: 'zcode',
+      version: '0.16.5',
+      artifactSha256: 'c'.repeat(64),
+      entryPath: runtimeEntry,
+      ownership: 'external-app',
+    },
+    companions: [],
+    certificate: { id: 'zcode-release-1', sha256: 'd'.repeat(64) },
+    state: 'staged',
+    installedAt: '2026-09-12T00:00:00.000Z',
+    activatedAt: null,
+  };
+  const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir,
+    releaseVersion: '0.6.0',
+    managedProxies: true,
+    generationStore: generations,
+    homeDir: join(dataDir, 'user-home'),
+    pathEnv: '/usr/local/bin:/usr/bin',
+    pluginStore: {
+      currentLaunch: async () => ({
+        pluginId: parseProxyPluginId('com.zhipu.zcode'),
+        pluginVersion: '0.1.1',
+        manifestSha256: 'a'.repeat(64),
+        protocolRange: '>=2.2 <3.0',
+        entryPath: proxyEntry,
+        processScope: 'shared' as const,
+        schemaVersion: 4 as const,
+        runtime: {
+          kind: 'external' as const,
+          id: 'zcode',
+          displayName: 'ZCode Runtime',
+          verifiedVersions: ['0.16.5'],
+        },
+      }),
+    } as never,
+  });
+  const agent = await manager.createAgent({ name: 'ZCode', pluginId: 'com.zhipu.zcode' });
+  const missing = await manager.agentStatus(agent.id);
+  assert.equal(missing.ready, false);
+  assert.equal(missing.cli.path, null, 'a local ZCode.app is not active without its certified Proxy combination');
+
+  await generations.stage(candidate);
+  await generations.activate('com.zhipu.zcode', candidate.generationId);
+  manager.managedRuntimeActivated('com.zhipu.zcode');
+  const status = await manager.agentStatus(agent.id);
+  assert.equal(status.home, null);
+  assert.equal(status.ready, true);
+  assert.equal(status.cli.path, runtimeEntry);
+  assert.equal(status.cli.source, 'managed');
+  assert.equal(status.runtimeProfile?.configHome, null);
+});
+
 test('managed Agent creation rejects CLI paths and validates Custom HOME ownership', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-agent-home-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -129,7 +206,7 @@ test('managed Agent creation rejects CLI paths and validates Custom HOME ownersh
   const manager = await AgentManager.create({
     allowCreateWithoutCatalog: true,
     dataDir,
-    releaseVersion: '0.5.5',
+    releaseVersion: '0.6.0',
     managedProxies: true,
     homeDir: join(dataDir, 'user-home'),
     pathEnv: '',
@@ -254,20 +331,31 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
   await mkdir(custom, { mode: 0o700 });
   const manager = await AgentManager.create({
     dataDir,
-    releaseVersion: '0.5.5',
+    releaseVersion: '0.6.0',
     managedProxies: true,
     homeDir: join(dataDir, 'user-home'),
     pathEnv: '',
     catalogService: {
       get: async () => ({
         compatibility: { state: 'compatible' },
-        availableActions: ['install_proxy'],
+        availableActions: ['install_runtime'],
       }),
     } as never,
   });
   const app = new Hono();
+  let deliveredAgentId: string | undefined;
   registerAgentRoutes(app, {
     agents: manager,
+    runtimeDelivery: {
+      install: async (_pluginId: string, agentId?: string) => {
+        deliveredAgentId = agentId;
+        return generation(
+          dataDir,
+          join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs'),
+          join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude'),
+        );
+      },
+    } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({
       catalogRevision: 'test',
@@ -310,4 +398,12 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
   const runtime = await app.request('/api/proxies/claude/runtime');
   assert.equal(runtime.status, 200);
   assert.deepEqual(await runtime.json(), { pluginId: 'claude', active: null, staged: [] });
+
+  const installed = await app.request('/api/proxies/claude/runtime/install', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agentId: createdBody.agent.id }),
+  });
+  assert.equal(installed.status, 200);
+  assert.equal(deliveredAgentId, createdBody.agent.id);
 });

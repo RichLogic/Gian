@@ -24,6 +24,7 @@ export type CatalogRuntimeState =
   | 'invalid';
 
 export type CatalogProxyAction =
+  | 'install_runtime'
   | 'install_proxy'
   | 'update_proxy'
   | 'rollback_proxy'

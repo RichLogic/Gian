@@ -19,7 +19,7 @@ import {
 import { parseProxyPluginId, type OfficialCatalogSourcePolicy } from '@gian/shared';
 
 import { AgentManager } from '../src/agents/manager.js';
-import { CatalogService } from '../src/catalog/service.js';
+import { CatalogService, catalogProxyActions } from '../src/catalog/service.js';
 import { RuntimeReadinessCache } from '../src/runtime/readiness-cache.js';
 import { RuntimeResolver } from '../src/runtime/resolver.js';
 import { CatalogStore } from '../src/catalog/store.js';
@@ -40,6 +40,36 @@ const PNG = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
   'hex',
 );
+
+test('certified combinations expose one unified Runtime install action', () => {
+  assert.deepEqual(catalogProxyActions({
+    compatibility: 'compatible',
+    installation: 'not_installed',
+    updateAvailable: false,
+    runtime: 'setup_required',
+    canRollback: true,
+    installable: true,
+    runtimeInstallable: true,
+  }), ['install_runtime']);
+  assert.deepEqual(catalogProxyActions({
+    compatibility: 'compatible',
+    installation: 'installed',
+    updateAvailable: false,
+    runtime: 'setup_required',
+    canRollback: false,
+    installable: true,
+    runtimeInstallable: true,
+  }), ['install_runtime']);
+  assert.deepEqual(catalogProxyActions({
+    compatibility: 'compatible',
+    installation: 'installed',
+    updateAvailable: true,
+    runtime: 'ready',
+    canRollback: false,
+    installable: true,
+    runtimeInstallable: true,
+  }), ['create_agent'], 'certified combinations must never expose Proxy-only update or rollback');
+});
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');

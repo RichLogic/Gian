@@ -14,20 +14,22 @@ identity canaries.
 
 ## Verified runtime scope
 
-- **Exactly ZCode `0.16.5`** (`runtime.verifiedCliVersions: ["0.16.5"]`).
+- **Exactly ZCode `0.16.5`** (`runtime.verifiedVersions: ["0.16.5"]`).
   Other versions are unverified; the runtime fingerprint (whole `glm` closure)
   must match, otherwise the generation retires.
 - ZCode ships only inside ZCode.app. Gian does **not** download, install,
-  mirror, upgrade, or downgrade it. Discovery: `agents.json` cliPath →
-  `ZCODE_BIN` → `/Applications/ZCode.app/.../zcode.cjs` →
-  `~/Applications/ZCode.app/.../zcode.cjs`.
+  mirror, upgrade, or downgrade it. The unified Runtime installer discovers
+  only `~/Applications/ZCode.app/.../zcode.cjs` and
+  `/Applications/ZCode.app/.../zcode.cjs`, then binds that exact local file to
+  the signed Proxy + Runtime certificate. There is no per-Agent executable
+  path and no downloadable ZCode CLI artifact.
 - The outer Proxy is shared, while inner app-servers are pooled by canonical
   workspace cwd and launched as `app-server --stdio --surface desktop`.
   Process failure in one workspace does not terminate another workspace.
 
 ## Prerequisites the user must satisfy themselves
 
-- The ZCode CLI needs its own model-provider config at
+- ZCode needs its own model-provider config at
   `~/.zcode/cli/config.json`. When it is missing, the Agent reports
   readiness `invalid` with a repairable issue pointing at that file.
 - **Gian never creates or modifies anything under `~/.zcode`.** The evidence
@@ -66,5 +68,5 @@ calls inner close, and provider history is never deleted on Gian's behalf
   before a turn instead of dropping them silently.
 - `interaction/requestUserInput` is not exposed by this verified runtime
   surface. Unknown reverse methods fail closed.
-- Desktop authorization is not imported. Users configure the separate ZCode
-  CLI provider account; Gian never reads Desktop private OAuth services.
+- Desktop authorization is not imported. Users configure the ZCode provider
+  account; Gian never reads Desktop private OAuth services.

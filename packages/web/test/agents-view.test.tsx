@@ -41,6 +41,7 @@ vi.mock('../src/api.js', async () => {
     pickAgentHome: vi.fn(),
     syncProxyCatalog: vi.fn(),
     installCatalogProxy: vi.fn(),
+    installManagedRuntime: vi.fn(),
     updateCatalogProxy: vi.fn(),
     rollbackCatalogProxy: vi.fn(),
   };
@@ -106,6 +107,12 @@ const INSTALLABLE = catalogItem({
   pluginId: 'io.acme.installable',
   displayName: 'Acme Installable',
   availableActions: ['install_proxy'],
+});
+const MANAGED_INSTALLABLE = catalogItem({
+  pluginId: 'io.acme.managed',
+  displayName: 'Acme Managed',
+  runtime: { state: 'setup_required', displayName: 'Acme CLI' },
+  availableActions: ['install_runtime'],
 });
 const NEEDS_APP = catalogItem({
   pluginId: 'io.acme.needs-app',
@@ -217,6 +224,7 @@ function mockApi(agents: UserAgentStatus[], catalog: ProxyCatalogList | Error = 
   vi.mocked(api.pickAgentHome).mockResolvedValue('/Users/test/custom-home');
   vi.mocked(api.syncProxyCatalog).mockResolvedValue(catalogList());
   vi.mocked(api.installCatalogProxy).mockResolvedValue({ pluginId: 'io.acme.installable', pluginVersion: '1.0.0' });
+  vi.mocked(api.installManagedRuntime).mockResolvedValue({} as never);
   vi.mocked(api.updateCatalogProxy).mockResolvedValue({ pluginId: 'io.acme.updatable', pluginVersion: '1.2.0' });
   vi.mocked(api.rollbackCatalogProxy).mockResolvedValue({ pluginId: 'io.acme.updatable', pluginVersion: '1.0.0' });
 }
@@ -303,6 +311,27 @@ describe('AgentsView (My Agents + Proxy Catalog)', () => {
     fireEvent.click(within(needsProxy).getByLabelText('View in Catalog'));
     const proxyPanel = await screen.findByTestId('proxy-detail-panel');
     expect(within(proxyPanel).getByText(/too old for this Gian App/)).toBeTruthy();
+  });
+
+  it('saves the Agent first, then installs the certified managed Runtime', async () => {
+    mockApi([], catalogList([MANAGED_INSTALLABLE]));
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.managed'));
+    const draft = await screen.findByTestId('agent-draft-panel');
+    const save = within(draft).getByTestId('agent-draft-save');
+    expect(save.textContent).toBe('Install & Create');
+    fireEvent.click(save);
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Managed',
+      pluginId: 'io.acme.managed',
+      home: { kind: 'managed' },
+    }));
+    await waitFor(() => expect(api.installManagedRuntime)
+      .toHaveBeenCalledWith('io.acme.managed', expect.any(String)));
+    expect(vi.mocked(api.createAgent).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.installManagedRuntime).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('shows the update action in the Runtime action row and runs it', async () => {

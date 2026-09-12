@@ -249,6 +249,11 @@ export function validateCandidateTuple(certificate, run) {
       || !expected.runtime.verifiedCliVersions.includes(tuple.cli?.version)) {
       issues.push(`${expected.provider} CLI ${String(tuple.cli?.version)} is not verified by this candidate`);
     }
+    if (!/^[a-f0-9]{64}$/u.test(tuple.cli?.sha256 ?? '')
+      || !Number.isSafeInteger(tuple.cli?.size)
+      || tuple.cli.size <= 0) {
+      issues.push(`${expected.provider} CLI candidate has no exact artifact identity`);
+    }
   }
   return { tuples, issues };
 }
@@ -278,6 +283,7 @@ export async function main(argv = process.argv.slice(2)) {
   const git = await revisionState();
   const certificate = {
     schemaVersion: 1,
+    certificateId: `release-${git.revision}`,
     stage: options.stage,
     admissionEligible: options.stage === 'release',
     qualified: false,

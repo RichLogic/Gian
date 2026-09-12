@@ -286,6 +286,20 @@ export class ManagedRuntimeGenerationStore {
     return this.pendingActivations.has(parseProxyPluginId(pluginId));
   }
 
+  /** Startup can finish a first activation before Session services exist:
+   * there is no previous generation, so there are no bindings to advance.
+   * Replacement activations remain pending for the full activation service. */
+  async recoverFreshActivations(): Promise<void> {
+    for (const id of [...this.pendingActivations]) {
+      const value = record(await readJson(join(
+        this.generationRoot,
+        id,
+        'activation-journal.json',
+      )));
+      if (value?.['previousGenerationId'] === null) await this.recover(id);
+    }
+  }
+
   private async readActive(pluginId: string): Promise<ManagedRuntimeGeneration | null> {
     const id = parseProxyPluginId(pluginId);
     let pointer: ManagedRuntimeActivePointer;

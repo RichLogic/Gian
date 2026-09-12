@@ -130,7 +130,7 @@ export async function developmentEntries(root: string): Promise<Record<'claude' 
     kimi: await fakeOfficialProxy(root, 'kimi', 'Kimi Code', '0.2.8'),
     grok: await fakeOfficialProxy(root, 'grok', 'Grok CLI', '0.3.3'),
     dsh: await fakeOfficialProxy(root, 'dsh', 'DeepSeek Harness', '0.1.6'),
-    zcode: await fakeOfficialProxy(root, 'zcode', 'ZCode CLI', '0.1.1'),
+    zcode: await fakeOfficialProxy(root, 'zcode', 'ZCode Runtime', '0.1.1'),
   };
 }
 

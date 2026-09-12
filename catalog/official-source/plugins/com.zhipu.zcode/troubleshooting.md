@@ -1,3 +1,5 @@
 # Troubleshooting
 
-If the Agent cannot start, confirm the ZCode CLI path. Catalog install is unavailable for this documentation-only entry.
+If the Agent cannot start, confirm ZCode.app is installed in `/Applications`
+or `~/Applications`, then retry Runtime detection. Gian does not accept a
+custom executable path for ZCode.

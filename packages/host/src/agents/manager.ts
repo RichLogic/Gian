@@ -114,7 +114,7 @@ const OFFICIAL_RUNTIME_DISPLAY: Record<LegacyExecutorId, string> = {
   kimi: 'Kimi Code',
   grok: 'Grok CLI',
   dsh: 'DeepSeek Harness',
-  zcode: 'ZCode CLI',
+  zcode: 'ZCode Runtime',
 };
 
 const VERIFIED_CLI_VERSIONS: Record<LegacyExecutorId, string[]> = {
@@ -871,6 +871,7 @@ export class AgentManager {
     const generationStore = options.generationStore
       ?? new ManagedRuntimeGenerationStore(options.dataDir);
     await generationStore.initialize();
+    await generationStore.recoverFreshActivations();
     const manager = new AgentManager({
       ...options,
       generationStore,
@@ -1417,6 +1418,23 @@ export class AgentManager {
     };
   }
 
+  managedRuntimeGenerationStore(): ManagedRuntimeGenerationStore {
+    if (!this.options.generationStore) {
+      throw new Error('Managed Runtime generation store is unavailable.');
+    }
+    return this.options.generationStore;
+  }
+
+  managedRuntimeActivated(pluginId: string): void {
+    const id = parseProxyPluginId(pluginId);
+    this.options.readinessCache?.invalidate(id);
+    for (const agent of this.config.agents) {
+      if (agent.pluginId === id) this.invalidateAgentStatus(agent.id);
+    }
+    const legacy = productExecutorForPluginId(id);
+    if (legacy) this.invalidateStatus(legacy);
+  }
+
   async prepareAgentCliTerminal(agentId: string): Promise<{
     executable: string;
     args: string[];
@@ -1602,7 +1620,7 @@ export class AgentManager {
       const mayInstall = this.options.managedProxies
         && catalogItem?.compatibility.state === 'compatible'
         && catalogItem.availableActions.some(action => (
-          action === 'install_proxy' || action === 'update_proxy'
+          action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy'
         ));
       if (!mayInstall) {
         throw new AgentCreateError(
@@ -1628,7 +1646,7 @@ export class AgentManager {
       const mayCreate = item?.availableActions.includes('create_agent')
         || (!this.options.managedProxies && launch !== null && item === null)
         || (this.options.managedProxies && item?.availableActions.some(action => (
-          action === 'install_proxy' || action === 'update_proxy'
+          action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy'
         )));
       if (!mayCreate) {
         throw new AgentCreateError(
@@ -1820,10 +1838,9 @@ export class AgentManager {
     });
   }
 
-  /** Live path/Proxy probe status for one saved Agent. The CLI probe resolves
-   *  the Agent's own path first (then the kind's environment override, PATH,
-   *  and official install locations); the Proxy side stays kind-level because
-   *  a kind has exactly one installed Proxy. */
+  /** Live Runtime/Proxy status for one saved Agent. Production projects only
+   * the active certified generation; GianDev keeps the legacy path probe for
+   * compatibility fixtures. */
   async agentStatus(id: string, refresh = false): Promise<UserAgentStatus> {
     const agent = this.getAgent(id);
     if (refresh) this.invalidateAgentStatus(id);
@@ -1832,7 +1849,7 @@ export class AgentManager {
     if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.agentStatusProbes.get(id);
     if (!refresh && pending?.generation === generation) return pending.promise;
-    if (this.options.managedProxies && this.agentHomes.supports(agent.pluginId)) {
+    if (this.options.managedProxies) {
       const value = await this.managedGenerationAgentStatus(agent);
       this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
@@ -1946,7 +1963,7 @@ export class AgentManager {
           source: null,
           readinessIssue: {
             code: 'RUNTIME_NOT_INSTALLED',
-            message: 'The certified CLI and Proxy combination is not installed.',
+            message: 'The certified Runtime and Proxy combination is not installed.',
             repairable: true,
           },
         },

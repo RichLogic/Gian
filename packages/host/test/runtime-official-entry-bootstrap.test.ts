@@ -74,7 +74,7 @@ const OFFICIAL = [
     command: 'zcode',
     version: '0.16.5',
     runtimeId: 'zcode',
-    displayName: 'ZCode CLI',
+    displayName: 'ZCode Runtime',
   },
 ] as const;
 

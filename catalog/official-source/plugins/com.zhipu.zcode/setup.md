@@ -1,5 +1,7 @@
 # Setup
 
-Install the ZCode CLI and point the saved Agent at that binary.
+Install ZCode.app. Gian discovers and validates its embedded Runtime at the
+standard application location; it never downloads or replaces ZCode.app.
 
-Catalog cannot install this Proxy until a reviewed immutable release asset exists.
+The Gian ZCode Proxy is installed separately from its reviewed immutable Gian
+Release asset.

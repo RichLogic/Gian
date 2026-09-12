@@ -14,6 +14,11 @@ export function proxyReleaseMetadata(releaseId) {
     packageName: definition.packageName,
     version: definition.pluginVersion,
     processScope: definition.manifest.process.scope,
+    runtime: {
+      id: definition.runtime.id,
+      verifiedVersions: [...definition.runtime.verifiedCliVersions],
+      distribution: definition.pluginId === 'com.zhipu.zcode' ? 'external-app' : 'native-binary',
+    },
     tag: `proxy-${definition.id}-v${definition.pluginVersion}`,
     asset: `gian-proxy-${definition.id}-${definition.pluginVersion}-darwin-arm64.tar.gz`,
   };

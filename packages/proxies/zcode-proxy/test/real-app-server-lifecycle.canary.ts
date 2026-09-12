@@ -14,7 +14,7 @@
  *    real ~/.zcode is never read or written;
  *  - the app-server child is always stopped and temp dirs removed.
  *
- * When no real ZCode CLI is installed (or ZCODE_CJS overrides to a missing
+ * When no real ZCode.app Runtime is installed (or ZCODE_CJS overrides to a missing
  * path), the test SKIPS with an explicit unavailable note — that is an
  * honest "not executed", never a fake PASS. On a machine with
  * /Applications/ZCode.app present, this test must PASS.

@@ -15,6 +15,7 @@ import {
   executorSettingsFromCapabilities,
 } from '../components/composer/capabilities.js';
 import { agentIdEntityKey } from '../operations/agents.js';
+import { runtimeEntityKey } from '../operations/catalog.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
 import type { TerminalWire } from '../components/terminal-wire.js';
@@ -54,6 +55,7 @@ export function AgentDetailPanel({
   onRename,
   onSetHome,
   onPickHome,
+  onInstallRuntime,
   onUpdateProxy,
   onSetDefaults,
   onDelete,
@@ -70,6 +72,7 @@ export function AgentDetailPanel({
   onRename: (name: string) => Promise<boolean>;
   onSetHome: (home: { kind: 'managed' } | { kind: 'custom'; path: string }) => Promise<boolean>;
   onPickHome: () => Promise<string | null>;
+  onInstallRuntime?: () => void;
   onUpdateProxy?: () => void;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
   onDelete: () => void;
@@ -80,7 +83,8 @@ export function AgentDetailPanel({
   const t = useT();
   const kind = agent.proxy;
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
-  const busy = agentRuns.length > 0;
+  const runtimeRuns = usePendingOperations(runtimeEntityKey(agent.pluginId));
+  const busy = agentRuns.length > 0 || runtimeRuns.length > 0;
   const [name, setName] = useState(agent.name);
   const resolvedPath = agent.cliPath ?? agent.cli.path ?? '';
   const [customHome, setCustomHome] = useState(agent.home?.kind === 'custom' ? agent.home.path : '');
@@ -251,9 +255,11 @@ export function AgentDetailPanel({
   const runtimeProxyVersion = activeRuntime?.proxy.pluginVersion ?? agent.plugin.version;
   const updateAvailable = !!catalogItem?.installation.updateAvailable
     && catalogItem.availableActions.includes('update_proxy');
+  const installAvailable = !activeRuntime
+    && catalogItem?.availableActions.includes('install_runtime') === true;
   const customHomeEnabled = useCustomHome;
   const externalHome = agent.home === null;
-  const terminalAvailable = !!terminal && agent.cli.state === 'ready';
+  const terminalAvailable = !!terminal && agent.home !== null && agent.cli.state === 'ready';
 
   return (
     <>
@@ -320,7 +326,7 @@ export function AgentDetailPanel({
         <section className="ag-sec">
           <span className="s2-subhead">{t('agents.runtime.title')}</span>
           <dl className="kv-grid">
-            <dt>CLI</dt>
+            <dt>Runtime</dt>
             <dd>
               <span className="rt-line">
                 <span className="mono">{runtimeCliVersion ?? t('agents.runtime.notInstalled')}</span>
@@ -373,7 +379,15 @@ export function AgentDetailPanel({
           </dl>
 
           <div className="act-row" data-testid="agent-runtime-action">
-            {updateAvailable ? (
+            {installAvailable ? (
+              <>
+                <span className="delta">{t('agents.runtime.notInstalledHelp')}</span>
+                <button type="button" className="btn xs primary" disabled={busy}
+                        data-testid="agent-runtime-install" onClick={onInstallRuntime}>
+                  {t('agents.catalog.action.installRuntime')}
+                </button>
+              </>
+            ) : updateAvailable ? (
               <>
                 <span className="delta">
                   <span className="mono">

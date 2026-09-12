@@ -110,6 +110,71 @@ test('compiler emits a signed bundle from source docs, logos, and Manifest sidec
   assert.equal(verified.sequence, 2);
 });
 
+test('compiler binds a certified managed Runtime artifact to the Proxy Manifest', () => {
+  const prepared = compileInput();
+  prepared.entry.channels.stable.combination = {
+    generationId: 'fixture-0.1.0-runtime-1.0.0',
+    certificate: { id: 'fixture-release-1', sha256: 'f'.repeat(64) },
+    runtime: {
+      kind: 'native-binary',
+      runtimeId: 'fixture-cli',
+      version: '1.0.0',
+      asset: {
+        url: 'https://github.com/RichLogic/Gian/releases/download/proxy-fixture-v0.1.0/gian-runtime-fixture-1.0.0-darwin-arm64',
+        sha256: '9'.repeat(64),
+        size: 1024,
+      },
+      entryRelativePath: 'bin/fixture',
+    },
+    companions: [],
+  };
+  prepared.sidecar = Buffer.from(`${JSON.stringify({
+    schemaVersion: 4,
+    id: prepared.entry.pluginId,
+    displayName: prepared.entry.displayName,
+    pluginVersion: prepared.entry.channels.stable.pluginVersion,
+    entry: 'proxy.mjs',
+    protocol: { name: 'gian.proxy', range: '>=2.2 <3.0' },
+    process: { scope: 'session' },
+    runtime: {
+      kind: 'external',
+      id: 'fixture-cli',
+      displayName: 'Fixture CLI',
+      verifiedVersions: ['1.0.0'],
+    },
+    branding: {
+      logo: {
+        light: { path: 'logo-light.png', mediaType: 'image/png', sha256: 'e'.repeat(64) },
+      },
+    },
+  })}\n`);
+  prepared.entry.channels.stable.manifest!.sha256 = createHash('sha256').update(prepared.sidecar).digest('hex');
+  prepared.entry.channels.stable.manifest!.size = prepared.sidecar.byteLength;
+  const compile = () => compileCatalogBundle({
+    sourceId: 'gian-official',
+    sequence: 3,
+    issuedAt: '2026-09-12T00:00:00.000Z',
+    allowedArtifactRepositories: ['RichLogic/Gian'],
+    signingKey: prepared.signingKey,
+    plugins: [{
+      entry: prepared.entry,
+      documents: {
+        overview: '# Overview\n',
+        setup: '# Setup\n',
+        usage: '# Usage\n',
+        troubleshooting: '# Troubleshooting\n',
+      },
+      logos: { light: PNG, dark: PNG },
+      manifestSidecar: prepared.sidecar,
+    }],
+  });
+  const bundle = compile();
+  assert.equal(bundle.index.plugins[0]?.stable.combination?.runtime?.version, '1.0.0');
+
+  prepared.entry.channels.stable.combination.runtime!.version = '2.0.0';
+  assert.throws(compile, /does not match the Manifest/);
+});
+
 test('compiler rejects wrong image magic, disallowed URLs, and sidecar identity drift', () => {
   const prepared = compileInput();
   assert.throws(() => compileCatalogBundle({

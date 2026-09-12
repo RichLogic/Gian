@@ -161,3 +161,26 @@ test('failed post-publish work leaves a fail-closed journal for startup recovery
   assert.equal(cold.hasPendingActivation('claude'), false);
   assert.equal(cold.activeCached('claude')?.generationId, candidate.generationId);
 });
+
+test('startup may complete a pending first activation without Session advancement', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-first-recover-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const candidate = generation(root, 'claude-1', '1.0.0');
+  await writeComponents(candidate);
+  await store.stage(candidate);
+  await assert.rejects(
+    store.activate('claude', candidate.generationId, new Date('2026-09-10T01:00:00.000Z'), async () => {
+      throw new Error('host stopped after pointer publication');
+    }),
+    /host stopped/,
+  );
+
+  const cold = new ManagedRuntimeGenerationStore(root);
+  await cold.initialize();
+  assert.equal(cold.hasPendingActivation('claude'), true);
+  await cold.recoverFreshActivations();
+  assert.equal(cold.hasPendingActivation('claude'), false);
+  assert.equal(cold.activeCached('claude')?.generationId, candidate.generationId);
+});

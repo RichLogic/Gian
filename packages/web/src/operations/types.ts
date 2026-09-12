@@ -108,6 +108,7 @@ export type OperationName =
   // Proxy Catalog (WP4) + Runtime control plane (WP6)
   | 'catalog.sync'
   | 'catalog.installProxy'
+  | 'catalog.installRuntime'
   | 'catalog.updateProxy'
   | 'catalog.rollbackProxy'
   | 'catalog.discoverRuntime'
@@ -220,6 +221,7 @@ export const OPERATION_POLICIES = {
   'agent.restartApp': 'pending',
   'catalog.sync': 'pending',
   'catalog.installProxy': 'pending',
+  'catalog.installRuntime': 'pending',
   'catalog.updateProxy': 'pending',
   'catalog.rollbackProxy': 'pending',
   'catalog.discoverRuntime': 'pending',

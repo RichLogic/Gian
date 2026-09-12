@@ -22,6 +22,9 @@ import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import type { RuntimeControlPlane } from '../runtime/control-plane.js';
 import type { RuntimeResolver } from '../runtime/resolver.js';
+import type { ManagedRuntimeInstaller } from '../runtime/installer.js';
+import { ManagedRuntimeActivationService } from '../runtime/activation-service.js';
+import { ManagedRuntimeDeliveryService } from '../runtime/delivery-service.js';
 import type { AgentManager } from '../agents/manager.js';
 import { ensureAuthConfigured, registerAuthRoutes } from './routes/auth.js';
 import { registerSettingsRoutes } from './routes/settings.js';
@@ -73,6 +76,7 @@ export interface AppContext {
   ) => Promise<LegacyLaunchResolution>;
   runtimeResolver?: RuntimeResolver;
   runtimeControl?: RuntimeControlPlane;
+  runtimeInstaller?: ManagedRuntimeInstaller;
   readinessCache?: import('../runtime/readiness-cache.js').RuntimeReadinessCache;
   agentManager?: AgentManager;
   catalogService?: CatalogService;
@@ -305,6 +309,31 @@ export function createApp(ctx: AppContext): AppHandle {
       }
       : undefined,
   );
+  const runtimeDelivery = ctx.agentManager
+    && ctx.catalogService
+    && ctx.runtimeResolver
+    && ctx.runtimeControl
+    && ctx.runtimeInstaller
+    ? new ManagedRuntimeDeliveryService({
+        agents: ctx.agentManager,
+        catalog: ctx.catalogService,
+        installer: ctx.runtimeInstaller,
+        runtimeControl: ctx.runtimeControl,
+        resolver: ctx.runtimeResolver,
+        activation: new ManagedRuntimeActivationService({
+          store: ctx.agentManager.managedRuntimeGenerationStore(),
+          lockDataDir: ctx.agentManager.updateLockDataDir(),
+          blockers: async pluginId => sessions.runtimeActivationBlockers(pluginId),
+          closeProxy: pluginId => proxy.closeByExecutor(pluginId),
+          drainRuntime: pluginId => ctx.runtimeResolver!.drain(pluginId),
+          // Fresh installation has no prior active generation. DeliveryService
+          // rejects updates before activation; staging and advancing a complete
+          // replacement generation remains a separate atomic update flow.
+          advanceSessions: async () => undefined,
+          onActivated: pluginId => ctx.agentManager!.managedRuntimeActivated(pluginId),
+        }),
+      })
+    : undefined;
 
   // Live Sync v2: on host boot, attach a watcher to every active session so
   // we resume picking up external CLI appends after a host restart. New
@@ -416,6 +445,7 @@ export function createApp(ctx: AppContext): AppHandle {
       agents: ctx.agentManager,
       ...(ctx.runtimeResolver ? { resolver: ctx.runtimeResolver } : {}),
       ...(ctx.runtimeControl ? { runtimeControl: ctx.runtimeControl } : {}),
+      ...(runtimeDelivery ? { runtimeDelivery } : {}),
       closeProxy: executor => proxy.closeByExecutor(executor),
       ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}),
       capabilities: executor => sessions.warmCapabilities(executor),

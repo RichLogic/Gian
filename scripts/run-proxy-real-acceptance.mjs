@@ -431,6 +431,7 @@ export function reasoningExpectedFor(runtimeCatalog, turnConfig) {
 
 async function inspectCliCandidate(provider, binaryPath, allowUnverifiedCli) {
   const definition = definitionByProvider.get(provider);
+  const bytes = await readFile(binaryPath);
   const { stdout, stderr } = await execFileAsync(binaryPath, ['--version'], {
     cwd: rootDir,
     encoding: 'utf8',
@@ -446,7 +447,14 @@ async function inspectCliCandidate(provider, binaryPath, allowUnverifiedCli) {
       `${provider} CLI ${version} is not in runtime.verifiedCliVersions; use --allow-unverified-cli only for focused candidate diagnosis.`,
     );
   }
-  return { path: binaryPath, version, verified, rawVersion };
+  return {
+    path: binaryPath,
+    version,
+    verified,
+    rawVersion,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    size: bytes.byteLength,
+  };
 }
 
 async function prepareProxyCandidate(provider, providerConfig, artifactDir, tempRoot) {
@@ -1747,7 +1755,13 @@ export async function main(argv = process.argv.slice(2)) {
   run.candidateTuple = run.providers.map(provider => ({
     provider: provider.provider,
     proxy: provider.proxyCandidate,
-    cli: provider.cliCandidate,
+    cli: provider.cliCandidate ? {
+      version: provider.cliCandidate.version,
+      verified: provider.cliCandidate.verified,
+      rawVersion: provider.cliCandidate.rawVersion,
+      sha256: provider.cliCandidate.sha256,
+      size: provider.cliCandidate.size,
+    } : null,
   }));
   await Promise.all([
     writeFile(join(outputDir, 'results.json'), `${JSON.stringify(run, null, 2)}\n`, 'utf8'),

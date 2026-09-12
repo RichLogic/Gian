@@ -106,6 +106,7 @@ export const REST_MUTATION_TO_OPERATION = {
   pickAgentHome: ['agent.pickHome'],
   syncProxyCatalog: ['catalog.sync'],
   installCatalogProxy: ['catalog.installProxy'],
+  installManagedRuntime: ['catalog.installRuntime'],
   updateCatalogProxy: ['catalog.updateProxy'],
   rollbackCatalogProxy: ['catalog.rollbackProxy'],
   discoverProxyRuntime: ['catalog.discoverRuntime'],

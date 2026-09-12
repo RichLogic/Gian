@@ -8,6 +8,8 @@ import {
 import type { ManifestV4 } from '@gian/proxy-protocol';
 import {
   parseProxyPluginId,
+  type ManagedRuntimeInstallPlan,
+  type ManagedRuntimePlatform,
   type OfficialCatalogSourcePolicy,
   type ProxyCatalogItem,
   type ProxyCatalogList,
@@ -39,6 +41,7 @@ export class CatalogService {
       hostVersions?: readonly string[];
       platform?: string;
       readinessCache?: RuntimeReadinessCache;
+      managedRuntimeStatus?: (pluginId: string) => Promise<import('@gian/shared').ManagedRuntimeStatus>;
       officialPresence?: (pluginId: string) => Promise<OfficialBundledLaunch | null>;
       onPluginGenerationChanged?: (pluginId: string) => void;
     },
@@ -119,6 +122,80 @@ export class CatalogService {
     const receipt = await this.options.plugins.rollback(id, pluginVersion);
     this.retirePluginGeneration(id);
     return receipt;
+  }
+
+  async managedRuntimePlan(
+    pluginId: string,
+    externalEntryPath?: string,
+  ): Promise<ManagedRuntimeInstallPlan> {
+    const view = await this.captureView();
+    const id = parseProxyPluginId(pluginId);
+    const entry = view.snapshot.index?.plugins.find(item => item.pluginId === id) ?? null;
+    const combination = entry?.stable.combination;
+    if (!entry || !combination) {
+      throw new PluginStoreError(
+        'RUNTIME_COMBINATION_MISSING',
+        `${id} has no certified Runtime combination in the trusted Catalog.`,
+      );
+    }
+    const installed = view.installedById.get(id) ?? null;
+    const current = installed?.versions.find(item => item.version === installed.currentVersion) ?? null;
+    const receipt = current?.state === 'valid' ? current.receipt : null;
+    const launch = receipt ? await this.options.plugins.currentLaunch(id) : null;
+    const platform = this.platform();
+    const archive = entry.stable.artifacts[platform as keyof typeof entry.stable.artifacts];
+    if (
+      !receipt
+      || !launch
+      || !entry.stable.manifest
+      || !archive
+      || launch.pluginVersion !== entry.stable.pluginVersion
+      || receipt.manifestSha256 !== entry.stable.manifest.sha256
+      || receipt.archiveSha256 !== archive.sha256
+    ) {
+      throw new PluginStoreError(
+        'RUNTIME_PROXY_NOT_READY',
+        `${id} must have the exact trusted Catalog Proxy installed before its Runtime.`,
+      );
+    }
+    if (!['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'].includes(platform)) {
+      throw new PluginStoreError('RUNTIME_PLATFORM', `Managed Runtime platform is unsupported: ${platform}.`);
+    }
+    const runtime = combination.runtime?.kind === 'external-app'
+      ? {
+        ...combination.runtime,
+        entryPath: externalEntryPath ?? (() => {
+          throw new PluginStoreError(
+            'RUNTIME_EXTERNAL_NOT_FOUND',
+            `${id} external application Runtime was not found on this machine.`,
+          );
+        })(),
+      }
+      : combination.runtime;
+    return {
+      generationId: combination.generationId,
+      pluginId: id,
+      platform: platform as ManagedRuntimePlatform,
+      proxy: {
+        pluginVersion: launch.pluginVersion,
+        manifestSha256: receipt.manifestSha256,
+        artifactSha256: receipt.archiveSha256,
+        entryPath: launch.entryPath,
+        processScope: launch.processScope,
+        protocolRange: launch.protocolRange,
+      },
+      runtime,
+      companions: combination.companions.map(companion => ({
+        id: companion.id,
+        distribution: { ...companion.distribution },
+      })),
+      certificate: { ...combination.certificate },
+    };
+  }
+
+  managedRuntimeKind(pluginId: string): 'native-binary' | 'external-app' | null {
+    const id = parseProxyPluginId(pluginId);
+    return this.catalogEntry(id)?.stable.combination?.runtime?.kind ?? null;
   }
 
   private retirePluginGeneration(pluginId: string): void {
@@ -293,6 +370,7 @@ export class CatalogService {
         runtimeRepairable: runtime.state === 'invalid' && runtime.readinessIssue?.repairable === true,
         canRollback: Boolean(!bundled && installed && installed.versions.filter((item) => item.state === 'valid').length > 1),
         installable: !bundled && this.entryIsInstallable(entry),
+        runtimeInstallable: Boolean(entry.stable.combination),
       }),
     };
   }
@@ -352,6 +430,7 @@ export class CatalogService {
           runtimeRepairable: runtime.state === 'invalid' && runtime.readinessIssue?.repairable === true,
           canRollback: true,
           installable: false,
+          runtimeInstallable: false,
           official: false,
         })
         : [],
@@ -369,10 +448,23 @@ export class CatalogService {
     launch: PluginCurrentLaunch | OfficialBundledLaunch | null | undefined,
     installation: ProxyCatalogItem['installation']['state'],
   ): Promise<ProxyCatalogItem['runtime']> {
+    const managed = await this.options.managedRuntimeStatus?.(pluginId);
+    if (managed?.active) {
+      return managed.active.runtime
+        ? {
+          state: 'ready',
+          displayName: runtime.displayName
+            ?? (launch?.runtime.kind === 'external' ? launch.runtime.displayName : null)
+            ?? null,
+        }
+        : { state: 'not_required', displayName: null };
+    }
     if (runtime.kind === 'none' || launch?.runtime.kind === 'none') {
       return { state: 'not_required', displayName: null };
     }
-    const displayName = runtime.displayName ?? launch?.runtime.displayName ?? null;
+    const displayName = runtime.displayName
+      ?? (launch?.runtime.kind === 'external' ? launch.runtime.displayName : null)
+      ?? null;
     if (installation !== 'installed' || !launch) {
       return { state: 'setup_required', displayName };
     }
@@ -424,11 +516,23 @@ export function catalogProxyActions(input: {
   runtimeRepairable?: boolean;
   canRollback: boolean;
   installable: boolean;
+  runtimeInstallable?: boolean;
   official?: boolean;
 }): ProxyCatalogItem['availableActions'] {
   const result: ProxyCatalogItem['availableActions'] = [];
   if (
+    input.runtimeInstallable === true
+    && input.compatibility === 'compatible'
+    && (
+      input.installation !== 'installed'
+      || (input.runtime !== 'ready' && input.runtime !== 'not_required')
+    )
+  ) {
+    result.push('install_runtime');
+  }
+  if (
     input.installable
+    && input.runtimeInstallable !== true
     && input.compatibility === 'compatible'
     && input.installation === 'not_installed'
   ) {
@@ -436,18 +540,24 @@ export function catalogProxyActions(input: {
   }
   if (
     input.installable
+    && input.runtimeInstallable !== true
     && input.compatibility === 'compatible'
     && input.installation === 'installed'
     && input.updateAvailable
   ) {
     result.push('update_proxy');
   }
-  if (input.canRollback) result.push('rollback_proxy');
-  if (input.installation === 'installed' && input.runtime === 'setup_required') {
+  if (input.canRollback && input.runtimeInstallable !== true) result.push('rollback_proxy');
+  if (
+    input.runtimeInstallable !== true
+    && input.installation === 'installed'
+    && input.runtime === 'setup_required'
+  ) {
     result.push('open_setup', 'select_runtime');
   }
   if (
-    input.installation === 'installed'
+    input.runtimeInstallable !== true
+    && input.installation === 'installed'
     && input.runtime === 'invalid'
     && input.runtimeRepairable === true
   ) {

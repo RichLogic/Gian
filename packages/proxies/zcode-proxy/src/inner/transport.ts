@@ -54,7 +54,7 @@ export interface InnerNotification {
 }
 
 export interface TransportOptions {
-  /** Module path of the ZCode CLI entry (zcode.cjs or a fake test server). */
+  /** Module path of the Runtime embedded in ZCode.app (or a fake test server). */
   runtimeBin: string;
   /** Working directory handed to `app-server --cwd`. */
   cwd: string;

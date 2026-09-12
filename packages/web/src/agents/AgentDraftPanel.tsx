@@ -73,6 +73,7 @@ export function AgentDraftPanel({
     ?? item.installation.installedVersion
     ?? item.installation.latestVersion;
   const custom = draft.customHome !== null;
+  const installsRuntime = !active && item.availableActions.includes('install_runtime');
   const defaultHome = t('agents.home.draftDefault').replace('{pluginId}', item.pluginId);
 
   return (
@@ -230,7 +231,7 @@ export function AgentDraftPanel({
         <button type="button" className="btn sm primary" data-testid="agent-draft-save"
                 disabled={busy || draftError !== null || (custom && !(draft.customHome?.trim()))}
                 onClick={onSave}>
-          {t('agents.draft.save')}
+          {t(installsRuntime ? 'agents.draft.installAndCreate' : 'agents.draft.save')}
         </button>
       </div>
     </>

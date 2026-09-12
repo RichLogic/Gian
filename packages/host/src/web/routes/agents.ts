@@ -12,8 +12,11 @@ import type { AgentManager } from '../../agents/manager.js';
 import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
 import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
-import type { RuntimeResolver } from '../../runtime/resolver.js';
+import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
 import { RuntimeControlError, type RuntimeControlPlane } from '../../runtime/control-plane.js';
+import { ManagedRuntimeDeliveryError, type ManagedRuntimeDeliveryService } from '../../runtime/delivery-service.js';
+import { ManagedRuntimeInstallError } from '../../runtime/installer.js';
+import { ManagedRuntimeActivationError } from '../../runtime/activation-service.js';
 import { isCanonicalAbsolutePath } from '@gian/shared';
 import { pickPath } from '../pick-path.js';
 import { isCatalogDocumentKey, type CatalogService } from '../../catalog/service.js';
@@ -30,6 +33,11 @@ function errorResponse(error: unknown): { error: string; code?: string } {
       || error instanceof PluginIdImmutableError
       || error instanceof AgentHomeError
       || error instanceof AgentCreateError
+      || error instanceof ManagedRuntimeDeliveryError
+      || error instanceof ManagedRuntimeInstallError
+      || error instanceof ManagedRuntimeActivationError
+      || error instanceof RuntimeResolverError
+      || error instanceof PluginStoreError
       ? { code: error.code } : {}),
   };
 }
@@ -54,6 +62,23 @@ function runtimeApiStatus(error: unknown): 400 | 404 | 409 | 413 | 502 {
   if (error instanceof SyntaxError) return 400;
   const message = error instanceof Error ? error.message : String(error);
   if (message.startsWith('invalid pluginId') || message === 'invalid JSON body') return 400;
+  return 502;
+}
+
+function runtimeDeliveryStatus(error: unknown): 400 | 409 | 502 {
+  if (error instanceof ManagedRuntimeDeliveryError) {
+    if (error.code === 'RUNTIME_AGENT_MISMATCH') return 400;
+    return 409;
+  }
+  if (error instanceof ManagedRuntimeInstallError) {
+    return error.code === 'RUNTIME_PLAN_INVALID' ? 400 : 502;
+  }
+  if (error instanceof ManagedRuntimeActivationError) return 409;
+  if (error instanceof RuntimeResolverError) return 409;
+  if (error instanceof PluginStoreError) {
+    const status = installErrorStatus(error);
+    return status === 410 ? 409 : status;
+  }
   return 502;
 }
 
@@ -225,6 +250,7 @@ export function registerAgentRoutes(
     agents: AgentManager;
     resolver?: RuntimeResolver;
     runtimeControl?: RuntimeControlPlane;
+    runtimeDelivery?: ManagedRuntimeDeliveryService;
     closeProxy: (id: Executor) => Promise<void>;
     capabilities: (id: Executor) => Promise<ProxyCatalog>;
     resolveDefaultsCatalog?: (
@@ -322,6 +348,29 @@ export function registerAgentRoutes(
       return c.json(await options.runtimeControl.discover(pluginId));
     } catch (error) {
       return c.json(errorResponse(error), runtimeApiStatus(error));
+    }
+  });
+
+  app.post('/api/proxies/:pluginId/runtime/install', async c => {
+    if (!options.runtimeDelivery) return c.json({ error: 'managed Runtime delivery unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      const body = await readBoundedJson(c);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return c.json({ error: 'invalid JSON body' }, 400);
+      }
+      const agentId = (body as { agentId?: unknown }).agentId;
+      if (agentId !== undefined && (typeof agentId !== 'string' || agentId.trim() === '')) {
+        return c.json({ error: 'agentId must be a non-empty string' }, 400);
+      }
+      const generation = await options.runtimeDelivery.install(
+        pluginId,
+        typeof agentId === 'string' ? agentId : undefined,
+      );
+      return c.json({ generation });
+    } catch (error) {
+      return c.json(errorResponse(error), runtimeDeliveryStatus(error));
     }
   });
 

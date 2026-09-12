@@ -11,6 +11,12 @@ test('release metadata is derived from every self-describing shipping package', 
     assert.match(metadata.pluginId, /^(?:claude|codex|kimi|grok|[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+)$/);
     assert.match(metadata.version, /^\d+\.\d+\.\d+/);
     assert.ok(metadata.processScope === 'shared' || metadata.processScope === 'session');
+    assert.equal(typeof metadata.runtime.id, 'string');
+    assert.ok(metadata.runtime.verifiedVersions.length > 0);
+    assert.equal(
+      metadata.runtime.distribution,
+      metadata.pluginId === 'com.zhipu.zcode' ? 'external-app' : 'native-binary',
+    );
     assert.equal(metadata.tag, `proxy-${id}-v${metadata.version}`);
     assert.equal(metadata.asset, `gian-proxy-${id}-${metadata.version}-darwin-arm64.tar.gz`);
   }

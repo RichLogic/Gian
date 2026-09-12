@@ -16,7 +16,7 @@ import {
 } from '../api.js';
 import { confirm } from '../feedback.js';
 import type { CreateAgentOperationResult } from '../operations/agents.js';
-import { CATALOG_SYNC_ENTITY_KEY, catalogEntityKey } from '../operations/catalog.js';
+import { CATALOG_SYNC_ENTITY_KEY, catalogEntityKey, runtimeEntityKey } from '../operations/catalog.js';
 import {
   useOperationDispatch,
   useOperationStore,
@@ -114,7 +114,8 @@ function canDraftAgent(item: ProxyCatalogItem): boolean {
   if (item.compatibility.state !== 'compatible') return false;
   if (item.installation.state === 'invalid' || item.installation.state === 'quarantined') return false;
   return item.availableActions.some(action => (
-    action === 'create_agent' || action === 'install_proxy' || action === 'update_proxy'
+    action === 'create_agent' || action === 'install_runtime'
+      || action === 'install_proxy' || action === 'update_proxy'
   ));
 }
 
@@ -204,11 +205,12 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   }
 
   async function runCatalog(
-    name: 'catalog.installProxy' | 'catalog.updateProxy' | 'catalog.rollbackProxy',
+    name: 'catalog.installRuntime' | 'catalog.installProxy' | 'catalog.updateProxy' | 'catalog.rollbackProxy',
     pluginId: string,
+    agentId?: string,
   ): Promise<void> {
     setError('');
-    const settled = await waitForRunSettle(store, dispatch(name, { pluginId }).id);
+    const settled = await waitForRunSettle(store, dispatch(name, { pluginId, ...(agentId ? { agentId } : {}) }).id);
     if (settled.phase === 'confirmed') {
       await refresh();
       return;
@@ -325,6 +327,9 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
     setError('');
     setDraftSaving(true);
     try {
+      const item = catalogItems.find(candidate => candidate.pluginId === selection.pluginId);
+      const installAfterCreate = item?.availableActions.includes('install_runtime') === true
+        && !runtimeByPlugin[selection.pluginId]?.active;
       const settled = await waitForRunSettle(store, dispatch('agent.create', {
         name: draft.name.trim(),
         pluginId: selection.pluginId,
@@ -343,6 +348,16 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
       setDraftHomeSupported(true);
       setSelection({ kind: 'agent', id: result.agent.id });
       await refresh();
+      if (installAfterCreate) {
+        const installed = await waitForRunSettle(store, dispatch('catalog.installRuntime', {
+          pluginId: selection.pluginId,
+          agentId: result.agent.id,
+        }).id);
+        await refresh();
+        if (installed.phase !== 'confirmed') {
+          setError(installed.error ?? 'Runtime installation failed');
+        }
+      }
     } finally {
       setDraftSaving(false);
     }
@@ -600,7 +615,8 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
               docGeneration={catalog?.source.sequence ?? null}
               showBack={narrow}
               onAction={action => { void runCatalog(
-                action === 'install_proxy' ? 'catalog.installProxy'
+                action === 'install_runtime' ? 'catalog.installRuntime'
+                  : action === 'install_proxy' ? 'catalog.installProxy'
                   : action === 'update_proxy' ? 'catalog.updateProxy' : 'catalog.rollbackProxy',
                 selectedProxy.pluginId,
               ); }}
@@ -619,6 +635,10 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
               onRename={name => run('agent.patch', { agentId: selectedAgent.id, patch: { name } })}
               onSetHome={home => run('agent.patch', { agentId: selectedAgent.id, patch: { home } })}
               onPickHome={() => pickHome(selectedAgent.id)}
+              onInstallRuntime={catalogItems.find(item => item.pluginId === selectedAgent.pluginId)
+                ?.availableActions.includes('install_runtime')
+                ? () => { void runCatalog('catalog.installRuntime', selectedAgent.pluginId, selectedAgent.id); }
+                : undefined}
               onUpdateProxy={catalogItems.find(item => item.pluginId === selectedAgent.pluginId)
                 ?.availableActions.includes('update_proxy')
                 ? () => { void runCatalog('catalog.updateProxy', selectedAgent.pluginId); }
@@ -691,11 +711,12 @@ function ProxyDetailWithBusy({
   developmentFallback?: UserAgentStatus;
   docGeneration: number | null;
   showBack: boolean;
-  onAction: (action: 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
+  onAction: (action: 'install_runtime' | 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
   onCreateAgent: () => void;
   onClose: () => void;
 }) {
   const runs = usePendingOperations(catalogEntityKey(item.pluginId));
+  const runtimeRuns = usePendingOperations(runtimeEntityKey(item.pluginId));
   const syncRuns = usePendingOperations(CATALOG_SYNC_ENTITY_KEY);
   return (
     <ProxyDetailPanel
@@ -704,7 +725,7 @@ function ProxyDetailWithBusy({
       developmentFallback={developmentFallback}
       docGeneration={docGeneration}
       showBack={showBack}
-      busy={runs.length > 0 || syncRuns.length > 0}
+      busy={runs.length > 0 || runtimeRuns.length > 0 || syncRuns.length > 0}
       onAction={onAction}
       onCreateAgent={onCreateAgent}
       onClose={onClose}

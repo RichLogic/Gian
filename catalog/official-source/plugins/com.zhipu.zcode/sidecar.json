@@ -14,7 +14,7 @@
   "runtime": {
     "kind": "external",
     "id": "zcode",
-    "displayName": "ZCode CLI",
+    "displayName": "ZCode Runtime",
     "verifiedVersions": [
       "0.16.5"
     ]

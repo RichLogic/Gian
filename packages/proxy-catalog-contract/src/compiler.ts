@@ -174,6 +174,39 @@ function projectRuntime(sidecar: {
   });
 }
 
+function assertCertifiedCombination(
+  entry: CatalogEntryV1,
+  runtime: CompiledRuntimeSummary | null,
+  allowedArtifactRepositories: readonly string[],
+): void {
+  const combination = entry.channels.stable.combination;
+  if (!combination) return;
+  const distributions = [
+    ...(combination.runtime?.kind === 'native-binary' ? [combination.runtime] : []),
+    ...combination.companions.map(companion => companion.distribution),
+  ];
+  for (const distribution of distributions) {
+    if (!isApprovedGitHubReleaseAssetUrl(distribution.asset.url, allowedArtifactRepositories)) {
+      throw new Error(`Runtime artifact URL is not allowed for ${entry.pluginId}.`);
+    }
+  }
+  if (runtime?.kind === 'none') {
+    if (combination.runtime !== null) {
+      throw new Error(`Runtime-free Proxy ${entry.pluginId} cannot declare a Runtime distribution.`);
+    }
+    return;
+  }
+  if (!runtime || !combination.runtime) {
+    throw new Error(`Certified Runtime combination is incomplete for ${entry.pluginId}.`);
+  }
+  if (
+    combination.runtime.runtimeId !== runtime.id
+    || !runtime.verifiedVersions.includes(combination.runtime.version)
+  ) {
+    throw new Error(`Certified Runtime combination does not match the Manifest for ${entry.pluginId}.`);
+  }
+}
+
 function addFile(
   files: Map<string, Buffer>,
   path: string,
@@ -232,6 +265,7 @@ export function compileCatalogBundle(input: CompileCatalogBundleInput): Compiled
       }
     }
     const projection = projectManifestSidecar(sidecar, entry);
+    assertCertifiedCombination(entry, projection.runtime, input.allowedArtifactRepositories);
 
     const documentation = {} as CompiledCatalogEntryV1['documentation'];
     for (const key of CATALOG_DOCUMENT_KEYS) {
@@ -275,6 +309,7 @@ export function compileCatalogBundle(input: CompileCatalogBundleInput): Compiled
         runtime: projection.runtime,
         ...(entry.channels.stable.manifest ? { manifest: entry.channels.stable.manifest } : {}),
         artifacts,
+        ...(entry.channels.stable.combination ? { combination: entry.channels.stable.combination } : {}),
       },
     });
   }

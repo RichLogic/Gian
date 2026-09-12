@@ -111,7 +111,7 @@ test('release candidate binding requires the exact fresh packaged Proxy and veri
         proxyVersion: '0.2.10',
         sha256: 'a'.repeat(64),
       },
-      cli: { version: '0.146.0', verified: true },
+      cli: { version: '0.146.0', verified: true, sha256: 'b'.repeat(64), size: 123 },
     }],
   };
   assert.deepEqual(validateCandidateTuple(certificate, validRun).issues, []);
@@ -143,6 +143,7 @@ test('publish admission accepts only a fresh full-shipping Release certificate f
     }));
   const certificate = {
     schemaVersion: 1,
+    certificateId: `release-${'c'.repeat(40)}`,
     stage: 'release',
     admissionEligible: true,
     qualified: true,
@@ -176,6 +177,8 @@ test('publish admission accepts only a fresh full-shipping Release certificate f
       cli: {
         version: candidate.runtime.verifiedCliVersions[0],
         verified: true,
+        sha256: 'b'.repeat(64),
+        size: 123,
       },
     })),
   };
