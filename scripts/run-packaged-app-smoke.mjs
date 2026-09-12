@@ -81,6 +81,7 @@ export async function validatePackagedApp(appPath) {
     [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'index.js'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'dist', 'cli', 'event-storage-v3.js'), false],
     [join(unpacked, 'node_modules', '@gian', 'host', 'migrations', '001_initial.sql'), false],
+    [join(unpacked, 'node_modules', 'better-sqlite3', 'prebuilds', 'darwin-arm64.node'), false],
   ];
   for (const [path, executableFile] of required) {
     await assertFile(path, executableFile);
@@ -88,7 +89,7 @@ export async function validatePackagedApp(appPath) {
 
   const unpackedFiles = (await readdir(unpacked, { recursive: true }))
     .map(path => String(path).replaceAll('\\', '/'));
-  for (const nativeFile of ['better_sqlite3.node', 'pty.node', 'spawn-helper']) {
+  for (const nativeFile of ['pty.node', 'spawn-helper']) {
     assert.equal(
       unpackedFiles.some(path => path.endsWith(`/${nativeFile}`) || path === nativeFile),
       true,
@@ -138,7 +139,8 @@ export function createPackagedSmokeEnvironment(source, {
     HOME: homeDir,
     NO_COLOR: '1',
     // A fresh packaged profile must not inherit CLIs from the developer's
-    // nvm/Homebrew PATH; the test configures exactly one isolated fake CLI.
+    // nvm/Homebrew PATH. The Runtime control plane probes one exact isolated
+    // fake CLI path below.
     PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
     XDG_CONFIG_HOME: join(homeDir, '.config'),
   };
@@ -633,10 +635,13 @@ async function seedPackagedGitHubCredential(electronApp, token) {
 
 async function completePackagedOnboarding({
   dataDir,
+  desktopToken,
   electronApp,
   fakeClaude,
   fakeClaudeProbePid,
+  fakeClaudeVersion,
   githubToken,
+  origin,
   projectRoot,
   window,
 }) {
@@ -648,17 +653,44 @@ async function completePackagedOnboarding({
 
   // Step 1 remains explicit even for an already connected account.
   await onboarding.locator('.onboarding-actions .btn.primary').click();
+  // This intentionally uses the signed public Catalog, not a routed fixture.
+  // PluginStore verifies the Catalog coordinate, archive bytes, Manifest,
+  // self-test, compatibility and exact Runtime before atomic activation.
+  const installResponse = await desktopFetch(origin, desktopToken, '/api/proxies/claude/install', {
+    method: 'POST',
+    signal: AbortSignal.timeout(120_000),
+  });
+  const installBody = await installResponse.text();
+  assert.equal(
+    installResponse.ok,
+    true,
+    `packaged Claude Proxy install failed (${installResponse.status}): ${installBody}`,
+  );
+  const probeResponse = await desktopFetch(origin, desktopToken, '/api/proxies/claude/runtime/probe', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: fakeClaude }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const probeBody = await probeResponse.text();
+  assert.equal(
+    probeResponse.ok,
+    true,
+    `packaged Claude Runtime probe failed (${probeResponse.status}): ${probeBody}`,
+  );
+  const probe = JSON.parse(probeBody);
+  assert.equal(probe.readinessIssue ?? null, null, `packaged Claude Runtime is not ready: ${probeBody}`);
+  assert.equal(probe.profile?.path, fakeClaude);
+
+  await window.reload();
+  await onboarding.waitFor({ timeout: 30_000 });
+  await onboarding.locator('.onboarding-actions .btn.primary').click();
   const addClaude = onboarding.getByTestId('onboarding-add-claude');
   if (await addClaude.isVisible()) {
     await addClaude.getByRole('button').click();
   }
-  const claude = onboarding.locator(
-    '.onboarding-agent:has(.onboarding-cli-path input)',
-  ).first();
+  const claude = onboarding.locator('.onboarding-agent').filter({ hasText: 'Claude Code' }).first();
   await claude.waitFor({ timeout: 30_000 });
-  const cliPath = claude.locator('.onboarding-cli-path input');
-  await cliPath.fill(fakeClaude);
-  await claude.locator('.onboarding-cli-path button').click();
   try {
     await claude.locator('.onboarding-agent-components .ready', { hasText: fakeClaude })
       .waitFor({ timeout: 30_000 });
@@ -672,10 +704,6 @@ async function completePackagedOnboarding({
       `Host log tail:\n${hostLog.slice(-8_000)}`,
     ].join('\n\n'));
   }
-  // This intentionally uses the public GitHub release channel, not a routed
-  // fixture. AgentManager verifies API asset digests, the exact .sha256 file,
-  // archive bytes, self-test and compatibility before the atomic activation.
-  await claude.locator('.onboarding-agent-summary button').click();
   try {
     await Promise.race([
       claude.locator('.onboarding-agent-components .ready', { hasText: 'Proxy' })
@@ -720,7 +748,7 @@ async function completePackagedOnboarding({
     `publish stable proxy-claude-v${expectedClaudeManifest.pluginVersion} before packaged verification`,
   );
   assert.equal(activatedManifest.schemaVersion, 4);
-  assert.match(agentText, /9\.8\.7/);
+  assert.ok(agentText.includes(fakeClaudeVersion));
   const configuredHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')
     .catch(() => '')).trim());
   assert.ok(
@@ -831,7 +859,13 @@ export async function main(args = process.argv.slice(2)) {
   const terminalWorkspace = join(projectRoot, 'terminal-workspace');
   const githubToken = process.env.GIAN_PACKAGED_SMOKE_GITHUB_TOKEN?.trim()
     || 'gian-packaged-smoke-token';
-  await writeFakeClaude(fakeClaude, '9.8.7', fakeClaudeProbePid);
+  const expectedClaudeManifest = JSON.parse(await readFile(
+    join(rootDir, 'packages', 'proxies', 'cc-proxy', 'manifest.json'),
+    'utf8',
+  ));
+  const fakeClaudeVersion = expectedClaudeManifest.runtime?.verifiedVersions?.[0];
+  assert.equal(typeof fakeClaudeVersion, 'string');
+  await writeFakeClaude(fakeClaude, fakeClaudeVersion, fakeClaudeProbePid);
 
   try {
     const firstLaunch = await launchPackagedApp({
@@ -850,10 +884,13 @@ export async function main(args = process.argv.slice(2)) {
     });
     const onboardingHostPid = await completePackagedOnboarding({
       dataDir,
+      desktopToken,
       electronApp,
       fakeClaude,
       fakeClaudeProbePid,
+      fakeClaudeVersion,
       githubToken,
+      origin,
       projectRoot,
       window: firstLaunch.window,
     });
