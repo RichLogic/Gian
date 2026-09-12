@@ -4,9 +4,58 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.5.5 are unsigned macOS Apple Silicon beta builds. Signed
+Releases through 0.6.0 are unsigned macOS Apple Silicon beta builds. Signed
 and notarized native notifications and automatic updates remain disabled
 until Developer ID signing and notarization are available.
+
+## [0.6.0] - 2026-09-12
+
+### Added
+
+- Added the native Browser workspace with persistent tabs, constrained
+  authentication popups, origin-scoped permissions, downloads, page search,
+  detached DevTools, extension inspection, and session-scoped Browser use.
+- Added Remote Web pairing and control, including QR enrollment, encrypted
+  session state, attachments, task operations, model controls, reconnect
+  recovery, device revocation, and live Desktop connection settings.
+- Added conversation-bound scheduled automations with explicit confirmation,
+  Timer list/detail views, run history, retry-safe dispatch, and restart
+  recovery.
+- Added the read-only Custom inventory for Skills, MCP servers, Hooks, and
+  Rules across supported Agents and Workspace scopes.
+- Added the Proxy Catalog and globally managed Runtime generations, including
+  signed package verification, Runtime discovery/probing, Agent HOME
+  isolation, exact Session bindings, and install/update/rollback controls.
+
+### Changed
+
+- Rebuilt Agents around saved Agent identities plus the signed Proxy Catalog;
+  Runtime paths are selected globally per certified Proxy generation instead
+  of being stored independently on each Agent.
+- Redesigned the primary sidebar and detail panes with persistent sections,
+  Project menus, task assignment, capped lists, improved History visuals, and
+  consistent narrow-window navigation.
+- Updated the target shipping set to Claude Proxy 0.2.4, Codex Proxy 0.2.15,
+  Kimi Proxy 0.2.9, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
+
+### Fixed
+
+- Remote Web now recovers stalled reads and sends, retains drafts until Host
+  receipt, restores remembered sessions, and keeps reconnecting through
+  transient failures without duplicating commands.
+- Browser tabs remain closed after restart, popup and download boundaries stay
+  user-mediated, and packaged extension/runtime state is isolated from the
+  developer profile.
+- Runtime activation, Catalog validation, Proxy lifecycle, SQLite startup,
+  DSH continuation, Codex completion summaries, and packaged smoke now fail
+  closed at their actual ownership boundaries.
+
+### Known limitations
+
+- The macOS build remains unsigned and supports Apple Silicon only.
+- Fresh Agent onboarding requires the matching certified Proxy coordinates in
+  the signed stable Catalog; a missing Catalog entry blocks package acceptance.
+- Grok remains outside the shipping product surface.
 
 ## [0.5.5] - 2026-09-02
 
