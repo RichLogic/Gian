@@ -98,12 +98,20 @@ export type OperationName =
   | 'agent.installProxy'
   | 'agent.checkProxyUpdate'
   | 'agent.pickCliPath'
+  | 'agent.pickHome'
   | 'agent.create'
   | 'agent.delete'
   | 'agent.patch'
   | 'agent.setPath'
   | 'agent.switchProxy'
   | 'agent.restartApp'
+  // Proxy Catalog (WP4) + Runtime control plane (WP6)
+  | 'catalog.sync'
+  | 'catalog.installProxy'
+  | 'catalog.updateProxy'
+  | 'catalog.rollbackProxy'
+  | 'catalog.discoverRuntime'
+  | 'catalog.probeRuntime'
   | 'onboarding.saveProjectRoot'
   | 'onboarding.complete'
   | 'auth.login'
@@ -111,7 +119,14 @@ export type OperationName =
   | 'auth.githubLogin'
   // Terminal
   | 'term.spawn'
-  | 'term.close';
+  | 'term.close'
+  // Conversation-bound Schedules (Issue #51 / ADR-0053)
+  | 'schedule.update'
+  | 'schedule.pause'
+  | 'schedule.resume'
+  | 'schedule.runNow'
+  | 'schedule.archive'
+  | 'schedule.resolveConfirmation';
 
 /**
  * The policy table — the Phase 0 source of truth. `optimistic` renders the
@@ -201,7 +216,14 @@ export const OPERATION_POLICIES = {
   'agent.setPath': 'pending',
   'agent.switchProxy': 'pending',
   'agent.pickCliPath': 'pending',
+  'agent.pickHome': 'pending',
   'agent.restartApp': 'pending',
+  'catalog.sync': 'pending',
+  'catalog.installProxy': 'pending',
+  'catalog.updateProxy': 'pending',
+  'catalog.rollbackProxy': 'pending',
+  'catalog.discoverRuntime': 'pending',
+  'catalog.probeRuntime': 'pending',
   'onboarding.saveProjectRoot': 'pending',
   'onboarding.complete': 'pending',
   'auth.login': 'pending',
@@ -209,6 +231,15 @@ export const OPERATION_POLICIES = {
   'auth.githubLogin': 'pending',
   'term.spawn': 'pending',
   'term.close': 'pending',
+  // Schedule mutations are REST-backed with a stable Idempotency-Key minted
+  // per dispatch; `pending` blocks duplicate submissions on the same entity
+  // (inventory §5 destructive-guard semantics apply to archive as well).
+  'schedule.update': 'pending',
+  'schedule.pause': 'pending',
+  'schedule.resume': 'pending',
+  'schedule.runNow': 'pending',
+  'schedule.archive': 'pending',
+  'schedule.resolveConfirmation': 'pending',
 } satisfies Record<OperationName, OperationPolicy>;
 
 /**

@@ -47,6 +47,22 @@ test('real Proxy catalog rejects incomplete notification coverage', async () => 
   );
 });
 
+test('certification catalog fails closed when package or shipping inventory drifts', async () => {
+  const missing = structuredClone(await loadProxyRealAcceptanceCatalog());
+  delete missing.providers.dsh;
+  assert.throws(
+    () => validateProxyRealAcceptanceCatalog(missing),
+    /must match every Proxy definition exactly/,
+  );
+
+  const stale = structuredClone(await loadProxyRealAcceptanceCatalog());
+  stale.providers.codex.pluginVersion = '99.0.0';
+  assert.throws(
+    () => validateProxyRealAcceptanceCatalog(stale),
+    /does not match package/,
+  );
+});
+
 test('real Proxy runner lets an explicit latest DSH binary override the catalog fixture path', () => {
   assert.equal(
     configuredProviderBinary('dsh', { binary: 'packages/old/dsh' }, {

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 4,
+  "id": "kimi",
+  "displayName": "Kimi Code",
+  "pluginVersion": "0.2.9",
+  "entry": "proxy.mjs",
+  "protocol": {
+    "name": "gian.proxy",
+    "range": ">=2.2 <3.0"
+  },
+  "process": {
+    "scope": "shared"
+  },
+  "runtime": {
+    "kind": "external",
+    "id": "kimi",
+    "displayName": "Kimi Code",
+    "verifiedVersions": [
+      "0.38.0"
+    ]
+  },
+  "branding": {
+    "logo": {
+      "light": {
+        "path": "assets/logo-light.png",
+        "mediaType": "image/png",
+        "sha256": "11d9667286a0d9b4702caa7c929ce66f3e191fd1d4cf62309bce20c013925270"
+      },
+      "dark": {
+        "path": "assets/logo-dark.png",
+        "mediaType": "image/png",
+        "sha256": "cf05e926a83775536db9aa85602ae8f4848bde16913ce9701aba419deeeff338"
+      }
+    }
+  }
+}

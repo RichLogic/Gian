@@ -53,6 +53,14 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
     env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET,
     /gian-github-[a-f0-9]{24}\.sock$/,
   );
+  assert.match(
+    env.GIAN_DESKTOP_REMOTE_BROKER_SOCKET,
+    /gian-remote-[a-f0-9]{24}\.sock$/,
+  );
+  assert.match(
+    env.GIAN_DESKTOP_BROWSER_BROKER_SOCKET,
+    /gian-browser-[a-f0-9]{24}\.sock$/,
+  );
   assert.equal(env.GIAN_RELEASE_VERSION, releaseVersion);
   assert.equal(env.GIAN_DEV_RUNTIME_ID, identity.runtimeId);
   assert.equal(env.GIAN_DEV_WORKTREE, identity.worktree);
@@ -63,20 +71,21 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   assert.equal(env.GIAN_WEB_DIST, undefined);
   assert.equal(env.GIAN_DEV_DATA_DIR, '/tmp/gian-dev-test');
   assert.equal(env.GIAN_DESKTOP_USER_DATA_DIR, '/tmp/gian-dev-electron-test');
-  assert.equal(env.GIAN_CC_PROXY_ENTRY, undefined);
+  assert.equal(env.GIAN_DEV_PROXY_ENTRIES, undefined);
   assert.equal(env.PATH, '/usr/bin');
 });
 
 test('dev environment forwards explicit Proxy entry overrides', () => {
   const env = resolveDevEnvironment({
     PATH: '/usr/bin',
-    GIAN_CC_PROXY_ENTRY: ' /tmp/fake-cc.mjs ',
-    GIAN_KIMI_PROXY_ENTRY: '/tmp/fake-kimi.mjs',
+    GIAN_DEV_PROXY_ENTRIES: ' {"claude":"/tmp/fake-cc.mjs","kimi":"/tmp/fake-kimi.mjs"} ',
     GIAN_DESKTOP_TOKEN: 'production-token',
   });
-  assert.equal(env.GIAN_CC_PROXY_ENTRY, '/tmp/fake-cc.mjs');
-  assert.equal(env.GIAN_KIMI_PROXY_ENTRY, '/tmp/fake-kimi.mjs');
-  assert.equal(env.GIAN_CODEX_PROXY_ENTRY, undefined);
+  assert.equal(
+    env.GIAN_DEV_PROXY_ENTRIES,
+    '{"claude":"/tmp/fake-cc.mjs","kimi":"/tmp/fake-kimi.mjs"}',
+  );
+  assert.equal(env.GIAN_CC_PROXY_ENTRY, undefined);
   assert.equal(env.GIAN_DESKTOP_TOKEN, undefined);
 });
 
@@ -119,4 +128,11 @@ test('desktop clean invalidates incremental state before rebuilding', async () =
   const source = await readFile(join(rootDir, 'packages/desktop/package.json'), 'utf8');
   const pkg = JSON.parse(source);
   assert.match(pkg.scripts.clean, /\*\.tsbuildinfo/);
+});
+
+test('dev supervisor builds the complete Host/Web dependency graph before watch mode', async () => {
+  const source = await readFile(join(rootDir, 'scripts/dev-supervisor.mjs'), 'utf8');
+  assert.match(source, /'--filter', '@gian\/host\^\.\.\.'/);
+  assert.match(source, /'--filter', '@gian\/web\^\.\.\.'/);
+  assert.match(source, /'--filter', '@gian\/zcode-proxy'/);
 });

@@ -6,6 +6,7 @@ import type {
   Executor,
   ProductExecutor,
   ProxyCatalogEntry,
+  ProxyCatalogList,
   Session,
   SystemConfig,
   TerminalOptions,
@@ -16,6 +17,10 @@ import type {
   OnboardingState,
   OnboardingProjectRootResult,
   ProxyCapabilities,
+  RuntimeDiscoverResponse,
+  RuntimeProbeRequest,
+  RuntimeProbeResponse,
+  ManagedRuntimeStatus,
 } from '@gian/shared';
 import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
 
@@ -548,9 +553,107 @@ export async function loadProxies(): Promise<ProxyCatalogEntry[]> {
   return body.proxies;
 }
 
+/** Full `/api/proxies` body: the legacy static kind list plus the
+ *  Host-authoritative Proxy Catalog projection (`catalog.items` drives the
+ *  Agents page marketplace surface; `catalog.source` carries the
+ *  ready/stale/error/empty sync state). */
+export interface ProxyCatalogResponse {
+  proxies: ProxyCatalogEntry[];
+  catalog: ProxyCatalogList;
+}
+
+export async function loadProxyCatalog(): Promise<ProxyCatalogResponse> {
+  const response = await fetch('/api/proxies');
+  return agentResponse<ProxyCatalogResponse>(response);
+}
+
+/** One signed Catalog Markdown document. `url` comes from
+ *  `ProxyCatalogItem.documentation[...]`; 404 means the cached Bundle has no
+ *  such document (offline/stale cache) — the caller renders a placeholder. */
+export async function loadCatalogDocument(url: string): Promise<string | null> {
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Catalog document load failed (${response.status})`);
+  return response.text();
+}
+
+/** Ask the Host to sync the official Catalog (conditional fetch; the
+ *  last-known-good cache survives failures Host-side). Returns the fresh
+ *  projection. */
+export async function syncProxyCatalog(): Promise<ProxyCatalogList> {
+  const response = await fetch('/api/proxies/sync', { method: 'POST' });
+  return agentResponse<ProxyCatalogList>(response);
+}
+
+export interface CatalogMutationReceipt {
+  pluginId: string;
+  pluginVersion: string;
+  [key: string]: unknown;
+}
+
+async function catalogMutation(pluginId: string, action: string): Promise<CatalogMutationReceipt> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/${action}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  const body = await agentResponse<{ receipt: CatalogMutationReceipt }>(response);
+  return body.receipt;
+}
+
+export async function installCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'install');
+}
+
+export async function updateCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'update');
+}
+
+export async function rollbackCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
+  return catalogMutation(pluginId, 'rollback');
+}
+
+/** WP6 Runtime control plane: discover the Runtime one installed Catalog
+ *  Proxy's Manifest declares — kind, display name, candidate paths and the
+ *  Host-projected setup/available actions. The response is authoritative:
+ *  Web renders exactly what the Host returns and never invents actions. */
+export async function discoverProxyRuntime(pluginId: string): Promise<RuntimeDiscoverResponse> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/discover`,
+    { method: 'POST' },
+  );
+  return agentResponse<RuntimeDiscoverResponse>(response);
+}
+
+/** Probe one candidate/manual Runtime path. Web submits the raw path only;
+ *  canonicalization and safety validation stay Host-side. The response
+ *  echoes the selected path, the probed profile, any readinessIssue and the
+ *  refreshed available actions. */
+export async function probeProxyRuntime(
+  pluginId: string,
+  path: string,
+): Promise<RuntimeProbeResponse> {
+  const response = await fetch(
+    `/api/proxies/${encodeURIComponent(pluginId)}/runtime/probe`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path } satisfies RuntimeProbeRequest),
+    },
+  );
+  return agentResponse<RuntimeProbeResponse>(response);
+}
+
+/** Read the exact globally active managed Runtime generation for one Proxy. */
+export async function loadManagedRuntimeStatus(pluginId: string): Promise<ManagedRuntimeStatus> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/runtime`);
+  return agentResponse<ManagedRuntimeStatus>(response);
+}
+
 export interface AgentDraftDefaults {
   name: string;
   cliPath: string | null;
+  home?: { kind: 'managed'; path: null } | null;
 }
 
 /** Prefill for a new draft card: numbered name and the kind's existing path. */
@@ -563,7 +666,9 @@ export async function loadAgentDraftDefaults(
 
 export interface CreateAgentInput {
   name: string;
-  proxy: ProductExecutor;
+  pluginId?: string;
+  proxy?: ProductExecutor;
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string };
   cliPath?: string | null;
   defaults?: Partial<AgentProxyDefaults>;
 }
@@ -580,9 +685,20 @@ export async function createAgent(input: CreateAgentInput): Promise<UserAgentSta
 
 export interface UpdateAgentInput {
   name?: string;
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string };
   cliPath?: string | null;
   proxy?: ProductExecutor;
   defaults?: Partial<AgentProxyDefaults>;
+}
+
+/** Open the native folder picker for a draft or saved Agent HOME. */
+export async function pickAgentHome(agentId?: string): Promise<string | null> {
+  const path = agentId
+    ? `/api/agents/${encodeURIComponent(agentId)}/pick-home`
+    : '/api/agents/pick-home';
+  const response = await fetch(path, { method: 'POST' });
+  const body = await agentResponse<{ path?: string; canceled?: boolean }>(response);
+  return body.path ?? null;
 }
 
 export async function updateAgent(
@@ -937,8 +1053,7 @@ export async function createSubtask(
   taskId: string,
   input: {
     workspace_id: string;
-    agent_id?: string;
-    executor: import('@gian/shared').Executor;
+    agent_id: string;
     name?: string;
     model?: string | null;
     approval_mode?: import('@gian/shared').ApprovalMode;
@@ -1286,14 +1401,29 @@ async function postOpen(
   workingTreeId: string,
   body: { path: string; editor_id?: string; app?: string; builtin?: string },
 ): Promise<{ ok: true } | { error: string }> {
-  const res = await fetch(
+  return postOpenResponse(
     `/api/working_trees/${encodeURIComponent(workingTreeId)}/open`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    },
+    body,
   );
+}
+
+/** Open an already-displayed attachment (absolute path under Host attachments). */
+export async function openAbsoluteFile(
+  path: string,
+  body: { editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
+  return postOpenResponse('/api/files/open', { path, ...body });
+}
+
+async function postOpenResponse(
+  url: string,
+  body: { path: string; editor_id?: string; app?: string; builtin?: string },
+): Promise<{ ok: true } | { error: string }> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (res.ok) return { ok: true };
   try {
     return await res.json() as { error: string };
@@ -1325,4 +1455,298 @@ export async function loadAllFiles(workingTreeId: string): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+// ── Conversation-bound Schedules (Issue #51 / ADR-0053, contract M/N/L) ─────
+// Reads are plain GETs; every write carries a stable `Idempotency-Key` header
+// minted once per logical user command (the operation layer mints it at
+// dispatch time) and errors arrive in the closed
+// `{ error: { code, message, retryable } }` envelope.
+
+export class ScheduleApiError extends Error {
+  readonly code: import('@gian/shared').ScheduleErrorCode;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(input: { code: import('@gian/shared').ScheduleErrorCode; message: string; status: number; retryable?: boolean }) {
+    super(input.message);
+    this.name = 'ScheduleApiError';
+    this.code = input.code;
+    this.status = input.status;
+    this.retryable = input.retryable ?? false;
+  }
+}
+
+async function scheduleResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: { code?: import('@gian/shared').ScheduleErrorCode; message?: string; retryable?: boolean } })
+    | null;
+  if (!response.ok) {
+    throw new ScheduleApiError({
+      code: body?.error?.code ?? 'INTERNAL_ERROR',
+      message: body?.error?.message ?? `Schedule request failed (${response.status})`,
+      status: response.status,
+      retryable: body?.error?.retryable,
+    });
+  }
+  return body as T;
+}
+
+export interface ScheduleListQuery {
+  statuses?: import('@gian/shared').ScheduleStatus[];
+  cursor?: string | null;
+  limit?: number;
+}
+
+export async function loadSchedules(query: ScheduleListQuery = {}): Promise<import('@gian/shared').ScheduleListResponse> {
+  const params = new URLSearchParams();
+  if (query.statuses && query.statuses.length > 0) params.set('status', query.statuses.join(','));
+  if (query.cursor) params.set('cursor', query.cursor);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedules${suffix}`);
+  return scheduleResponse<import('@gian/shared').ScheduleListResponse>(response);
+}
+
+export async function loadSchedule(scheduleId: string): Promise<import('@gian/shared').Schedule> {
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}`);
+  return scheduleResponse<import('@gian/shared').Schedule>(response);
+}
+
+export async function loadScheduleRuns(
+  scheduleId: string,
+  query: { cursor?: string | null; limit?: number } = {},
+): Promise<import('@gian/shared').ScheduleRunListResponse> {
+  const params = new URLSearchParams();
+  if (query.cursor) params.set('cursor', query.cursor);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/runs${suffix}`);
+  return scheduleResponse<import('@gian/shared').ScheduleRunListResponse>(response);
+}
+
+export interface ScheduleUpdateInput {
+  expectedRevision: number;
+  idempotencyKey: string;
+  name?: string;
+  prompt?: string;
+  trigger?: import('@gian/shared').ScheduleTrigger;
+  timezone?: string;
+  misfirePolicy?: import('@gian/shared').ScheduleMisfirePolicy;
+}
+
+export async function updateSchedule(
+  scheduleId: string,
+  input: ScheduleUpdateInput,
+): Promise<import('@gian/shared').Schedule> {
+  const body: Record<string, unknown> = { expected_revision: input.expectedRevision };
+  if (input.name !== undefined) body.name = input.name;
+  if (input.prompt !== undefined) body.prompt = input.prompt;
+  if (input.trigger !== undefined) body.trigger = input.trigger;
+  if (input.timezone !== undefined) body.timezone = input.timezone;
+  if (input.misfirePolicy !== undefined) body.misfire_policy = input.misfirePolicy;
+  const response = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': input.idempotencyKey },
+    body: JSON.stringify(body),
+  });
+  return scheduleResponse<import('@gian/shared').Schedule>(response);
+}
+
+export type ScheduleActionKind = 'pause' | 'resume' | 'run' | 'archive';
+
+/** pause/resume/archive return the updated Schedule; run returns the created
+ *  (or converged) canonical ScheduleRun. */
+export async function scheduleAction(
+  scheduleId: string,
+  action: ScheduleActionKind,
+  input: { idempotencyKey: string; expectedRevision?: number },
+): Promise<import('@gian/shared').Schedule | import('@gian/shared').ScheduleRun> {
+  const body: Record<string, unknown> = {};
+  if (input.expectedRevision !== undefined) body.expected_revision = input.expectedRevision;
+  const response = await fetch(
+    `/api/schedules/${encodeURIComponent(scheduleId)}/${action}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Idempotency-Key': input.idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
+  return scheduleResponse<import('@gian/shared').Schedule | import('@gian/shared').ScheduleRun>(response);
+}
+
+export async function loadScheduleConfirmations(
+  query: { status?: import('@gian/shared').ScheduleConfirmationStatus; limit?: number } = {},
+): Promise<import('@gian/shared').ScheduleConfirmation[]> {
+  const params = new URLSearchParams();
+  if (query.status) params.set('status', query.status);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/schedule-confirmations${suffix}`);
+  const body = await scheduleResponse<{ confirmations: import('@gian/shared').ScheduleConfirmation[] }>(response);
+  return body.confirmations;
+}
+
+export async function resolveScheduleConfirmation(
+  confirmationId: string,
+  decision: 'approve' | 'reject',
+): Promise<import('@gian/shared').ScheduleConfirmation> {
+  const response = await fetch(
+    `/api/schedule-confirmations/${encodeURIComponent(confirmationId)}/resolve`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    },
+  );
+  return scheduleResponse<import('@gian/shared').ScheduleConfirmation>(response);
+}
+
+// ---------------------------------------------------------------------------
+// Customization Inventory (Issue #50) — read-only.
+// Wire shapes mirror `packages/proxy-protocol/src/customization.ts` (the
+// frozen contract); they are re-declared here because the protocol package is
+// Node-only (node:buffer/node:path) and the web bundle must not import it.
+// The Host API is `packages/host/src/web/routes/customizations.ts`.
+// ---------------------------------------------------------------------------
+
+export const CUSTOMIZATION_KINDS = ['skill', 'mcp', 'hook', 'rule'] as const;
+export type CustomizationKind = typeof CUSTOMIZATION_KINDS[number];
+
+export type CustomizationListStatus =
+  'ok' | 'provider_unsupported' | 'proxy_unsupported' | 'unavailable';
+export type InventoryCompleteness = 'effective' | 'configured' | 'partial' | 'none';
+export type CustomizationActivation =
+  'enabled' | 'disabled' | 'shadowed' | 'pending_trust' | 'invalid' | 'unknown';
+export type CustomizationScopeLevel = 'user' | 'workspace' | 'directory' | 'system' | 'unknown';
+export type CustomizationOriginKind =
+  'builtin' | 'user_file' | 'project_file' | 'plugin' | 'managed' | 'unknown';
+export type CustomizationDiscoveryMethod =
+  'provider_api' | 'provider_cli' | 'config_parse' | 'filesystem_scan';
+export type RuleEffectStatus =
+  'effective' | 'imported' | 'subtree' | 'inactive' | 'unreadable' | 'unknown' | 'configured';
+
+export interface CustomizationDiagnostic {
+  code: string;
+  message: string;
+}
+
+interface CustomizationItemBase {
+  id: string;
+  kind: CustomizationKind;
+  name: string;
+  description?: string;
+  nativeType?: string;
+  nativeStatus?: string;
+  activation: CustomizationActivation;
+  scope: { level: CustomizationScopeLevel; root?: string; native?: string };
+  origin: { kind: CustomizationOriginKind; path?: string; label?: string };
+  discovery: { method: CustomizationDiscoveryMethod };
+  warnings?: CustomizationDiagnostic[];
+}
+
+export interface SkillCustomizationItem extends CustomizationItemBase {
+  kind: 'skill';
+  skill: {
+    format: 'agent-skill' | 'legacy-command' | 'provider-builtin' | 'unknown';
+    entryPath?: string;
+    invocation?: string;
+    userInvocable: boolean | null;
+    modelInvocable: boolean | null;
+  };
+}
+
+export interface McpCustomizationItem extends CustomizationItemBase {
+  kind: 'mcp';
+  mcp: {
+    transport: 'stdio' | 'http' | 'sse' | 'websocket' | 'other' | 'unknown';
+    targetSummary?: string;
+    toolCount?: number;
+  };
+}
+
+export interface HookCustomizationItem extends CustomizationItemBase {
+  kind: 'hook';
+  hook: {
+    nativeEvent: string;
+    matcher?: string;
+    handler: { nativeType: string; targetSummary: string };
+    timeoutMs?: number;
+  };
+}
+
+export interface RuleCustomizationItem extends CustomizationItemBase {
+  kind: 'rule';
+  rule: {
+    appliesTo?: string;
+    lineCount?: number;
+    truncated: boolean;
+    status: RuleEffectStatus;
+  };
+}
+
+export type CustomizationItem =
+  SkillCustomizationItem | McpCustomizationItem | HookCustomizationItem | RuleCustomizationItem;
+
+export interface CustomizationListResult {
+  kind: CustomizationKind;
+  status: CustomizationListStatus;
+  completeness: InventoryCompleteness;
+  observedAt: string;
+  items: CustomizationItem[];
+  truncated: boolean;
+  diagnostics: CustomizationDiagnostic[];
+}
+
+export interface CustomizationInventoryResult {
+  agentId: string;
+  workspaceId: string | null;
+  fetchedAt: string;
+  kinds: Partial<Record<CustomizationKind, CustomizationListResult>>;
+}
+
+export interface CustomizationDetailResult {
+  kind: CustomizationKind;
+  id: string;
+  status: 'ok' | 'unavailable';
+  observedAt: string;
+  text: string;
+  truncated: boolean;
+  diagnostics?: CustomizationDiagnostic[];
+}
+
+function customizationQuery(workspaceId: string | null, refresh: boolean): string {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set('workspaceId', workspaceId);
+  if (refresh) params.set('refresh', '1');
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
+/** One-shot aggregate inventory for one Agent + scope. Per-kind failures are
+ *  facts inside each kind's Result — this only rejects on request-level
+ *  (4xx) or transport/502 failures. */
+export async function loadCustomizationInventory(
+  agentId: string,
+  workspaceId: string | null,
+  options: { refresh?: boolean } = {},
+): Promise<CustomizationInventoryResult> {
+  const response = await fetch(
+    `/api/agents/${encodeURIComponent(agentId)}/customizations${customizationQuery(workspaceId, options.refresh ?? false)}`,
+  );
+  return agentResponse<CustomizationInventoryResult>(response);
+}
+
+/** Lazy detail (entry text / sanitized configuration view) for one item. */
+export async function loadCustomizationDetail(
+  agentId: string,
+  workspaceId: string | null,
+  kind: CustomizationKind,
+  itemId: string,
+  options: { refresh?: boolean } = {},
+): Promise<CustomizationDetailResult> {
+  const response = await fetch(
+    `/api/agents/${encodeURIComponent(agentId)}/customizations/${kind}/items/${encodeURIComponent(itemId)}${customizationQuery(workspaceId, options.refresh ?? false)}`,
+  );
+  return agentResponse<CustomizationDetailResult>(response);
 }

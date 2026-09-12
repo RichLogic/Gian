@@ -42,20 +42,22 @@ describe('subtasksFor', () => {
     ], 'task-unit')).toEqual([]);
   });
 
-  it('keeps open pinned rows above newer unpinned rows, then completed', () => {
+  // 2026-09-06 owner call: no pin concept in the Tasks rail — a pinned row
+  // sorts by the same rules as everything else; open rows follow creation
+  // order (created_at ASC), completed sink to the bottom.
+  it('orders open rows by created_at ASC (pins have no effect), then completed', () => {
     const rows = [
       session({ id: 'done', completed_at: '2026-08-10T00:00:00.000Z', created_at: '2026-08-09T00:00:00.000Z' }),
-      session({ id: 'new-open', created_at: '2026-08-08T00:00:00.000Z' }),
       session({ id: 'old-open', created_at: '2026-08-07T00:00:00.000Z' }),
       session({ id: 'pin', pinned_at: '2026-08-06T12:00:00.000Z', created_at: '2026-08-06T00:00:00.000Z' }),
+      session({ id: 'new-open', created_at: '2026-08-08T00:00:00.000Z' }),
     ];
-    expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'new-open', 'old-open', 'done']);
+    expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'old-open', 'new-open', 'done']);
   });
 
-  // Manual drag order (migration 067): task_order wins among open unpinned
-  // rows; NULL (never dragged) keeps created_at DESC ABOVE the manual range,
-  // so a fresh subtask still lands on top.
-  it('applies task_order within open unpinned rows, NULL first by created_at DESC', () => {
+  // Manual drag order (migration 067): task_order wins among open rows;
+  // NULL (never dragged) keeps created_at ASC ABOVE the manual range.
+  it('applies task_order within open rows, NULL first by created_at ASC', () => {
     const rows = [
       session({ id: 'dragged-2', task_order: 2, created_at: '2026-08-08T00:00:00.000Z' }),
       session({ id: 'older-auto', created_at: '2026-08-07T00:00:00.000Z' }),
@@ -63,27 +65,27 @@ describe('subtasksFor', () => {
       session({ id: 'fresh-auto', created_at: '2026-08-09T00:00:00.000Z' }),
     ];
     expect(subtasksFor(rows, 'task-unit').map(row => row.id))
-      .toEqual(['fresh-auto', 'older-auto', 'dragged-1', 'dragged-2']);
+      .toEqual(['older-auto', 'fresh-auto', 'dragged-1', 'dragged-2']);
   });
 
-  it('pinned and completed rows ignore task_order', () => {
+  it('completed rows ignore task_order and stay at the bottom', () => {
     const rows = [
       session({ id: 'done', completed_at: '2026-08-09T00:00:00.000Z', task_order: 1 }),
       session({ id: 'dragged', task_order: 2 }),
-      session({ id: 'pin', pinned_at: '2026-08-08T00:00:00.000Z', task_order: 3 }),
+      session({ id: 'auto' }),
     ];
-    expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'dragged', 'done']);
+    expect(subtasksFor(rows, 'task-unit').map(row => row.id)).toEqual(['auto', 'dragged', 'done']);
   });
 });
 
 describe('reorderableSubtasks', () => {
-  it('covers exactly the open AND unpinned rows, in display order', () => {
+  it('covers exactly the open rows, in display order (pinned included)', () => {
     const rows = [
       session({ id: 'done', completed_at: '2026-08-09T00:00:00.000Z' }),
       session({ id: 'open-2', created_at: '2026-08-07T00:00:00.000Z' }),
-      session({ id: 'pin', pinned_at: '2026-08-08T00:00:00.000Z' }),
+      session({ id: 'pin', pinned_at: '2026-08-08T00:00:00.000Z', created_at: '2026-08-06T00:00:00.000Z' }),
       session({ id: 'open-1', created_at: '2026-08-08T00:00:00.000Z' }),
     ];
-    expect(reorderableSubtasks(rows, 'task-unit').map(row => row.id)).toEqual(['open-1', 'open-2']);
+    expect(reorderableSubtasks(rows, 'task-unit').map(row => row.id)).toEqual(['pin', 'open-2', 'open-1']);
   });
 });

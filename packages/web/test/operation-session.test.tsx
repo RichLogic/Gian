@@ -161,6 +161,24 @@ describe('session operations (proposal §8, product definitions)', () => {
     expect(store.getEntityOverlays('session:s1')).toHaveLength(0);
   });
 
+  it('releases a subtask to standalone with taskId null (2026-09-06)', () => {
+    const { store, transport, dispatcher } = setup();
+
+    const run = dispatcher.dispatch('session.assignTask', {
+      sessionId: 's1',
+      taskId: null,
+    });
+
+    expect(run.phase).toBe('optimistic');
+    expect(store.getOverlay(entityFieldKey('session:s1', 'type'))?.value).toBe('coding');
+    expect(store.getOverlay(entityFieldKey('session:s1', 'task_id'))?.value).toBeNull();
+    expect(transport.sent[0]).toMatchObject({
+      type: 'session:assign_task',
+      session_id: 's1',
+      task_id: null,
+    });
+  });
+
   it('blocks duplicate pending submissions (stop/delete) while one is in flight', () => {
     const { store, transport, dispatcher } = setup();
 

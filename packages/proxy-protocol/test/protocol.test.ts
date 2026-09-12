@@ -1385,3 +1385,19 @@ test('incremental replay tracks complete changed turns by sourceTurnId', () => {
   }), true);
   assert.match(tracker.replay().streamId, /^replay-1-revision-/);
 });
+
+
+test('idempotent session.create preserves live sequence, active Turns and duplicate fencing', () => {
+  const validator = new HostProtocolValidator({ pluginId: 'codex', processScope: 'shared' });
+  initialize(validator);
+  attach(validator);
+  startTurn(validator);
+  validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
+  attach(validator);
+  assert.doesNotThrow(() => validator.acceptLine(notification('turn.completed', 2, { stopReason: 'completed' }, 't_1')));
+  attach(validator);
+  startTurn(validator, 't_2');
+  assert.doesNotThrow(() => validator.acceptLine(notification('turn.started', 3, {}, 't_2')));
+  assert.doesNotThrow(() => validator.acceptLine(notification('turn.completed', 4, { stopReason: 'completed' }, 't_2')));
+  assert.throws(() => validator.acceptLine(notification('session.updated', 6, { state: 'idle', updatedAt: timestamp })), /expected 5/);
+});

@@ -132,7 +132,14 @@ export function usePanelLayout({
     const body = bodyRef.current;
     const view = directChildWithClass(body, 'view');
     const sidebar = directChildWithClass(view, 'sidebar');
-    const main = directChildWithClass(view, 'main');
+    // Chat mode keeps `.main` as a direct `.view` child; the primary pages
+    // (Agents / Timer / Custom via PageWithSidebar) nest it inside
+    // `.primary-page-surface > *-view`. Both are the same Panel 1 — the
+    // sidebar seam drag must measure either, or it dead-stops on
+    // `mainWidth <= 0` on the primary pages.
+    const main = directChildWithClass(view, 'main')
+      ?? view?.querySelector<HTMLElement>('.primary-page-surface .main')
+      ?? null;
     const sheet = directChildWithClass(body, 'sheet')
       ?? directChildWithClass(body, 'chat-context-panel');
     const inspector = directChildWithClass(body, 'inspector');

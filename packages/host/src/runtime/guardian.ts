@@ -1,11 +1,14 @@
-import type { Executor } from '@gian/shared';
-import type { CliRuntimeManager } from './manager.js';
+import { productExecutorForPluginId } from '@gian/shared';
+
+import type { RuntimeReadinessCache } from './readiness-cache.js';
+import type { RuntimeResolver } from './resolver.js';
 
 export const DEFAULT_RUNTIME_GUARD_INTERVAL_MS = 5 * 60_000;
 
 export interface RuntimeGuardianOptions {
-  runtimes: CliRuntimeManager;
-  closeRuntimeOwner: (cli: Executor) => Promise<void>;
+  resolver: RuntimeResolver;
+  readinessCache?: RuntimeReadinessCache;
+  closeRuntimeOwner: (pluginId: string) => Promise<void>;
   intervalMs?: number;
   log?: (message: string, error?: unknown) => void;
 }
@@ -14,6 +17,9 @@ export interface RuntimeGuardianOptions {
  * Periodically retires a Proxy whose externally managed CLI bytes changed in
  * place. Gian's own installer is serialized by the updater lease; this guard
  * covers manual/npm/vendor mutations that do not participate in that lock.
+ *
+ * Readiness is invalidated before owner shutdown is attempted. A close
+ * failure must not leave Catalog projecting ready.
  */
 export class RuntimeGuardian {
   private timer: NodeJS.Timeout | undefined;
@@ -47,19 +53,19 @@ export class RuntimeGuardian {
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    // Scheduled checks already report their own failure. Shutdown must still
-    // reach ProxyManager.closeAll(), which is the final cleanup barrier.
     await this.running?.catch(() => undefined);
   }
 
   private async run(): Promise<void> {
-    const changed = await this.options.runtimes.detectExternalChanges();
+    const extra = this.options.readinessCache?.observations() ?? [];
+    const changed = await this.options.resolver.detectExternalChanges(extra);
     const failures: unknown[] = [];
-    for (const cli of changed) {
-      this.options.log?.(`[runtime] ${cli} CLI content changed; retiring its active Proxy`);
+    for (const pluginId of [...new Set(changed)]) {
+      this.options.log?.(`[runtime] ${pluginId} Runtime content changed; invalidating readiness`);
+      this.options.readinessCache?.invalidate(pluginId);
+      this.options.resolver.invalidate(pluginId);
       try {
-        await this.options.closeRuntimeOwner(cli);
-        this.options.runtimes.invalidate(cli);
+        await this.options.closeRuntimeOwner(pluginId);
       } catch (error) {
         failures.push(error);
       }
@@ -71,4 +77,22 @@ export class RuntimeGuardian {
       );
     }
   }
+}
+
+export function runtimeOwnerExecutorId(pluginId: string): string | null {
+  return productExecutorForPluginId(pluginId);
+}
+
+/** Official reverse-domain aliases map to the current legacy owner.
+ *  Unknown pluginIds keep their open owner key. */
+export function runtimeOwnerCloseKey(pluginId: string): string {
+  return productExecutorForPluginId(pluginId) ?? pluginId;
+}
+
+export function bindRuntimeOwnerCloser(
+  closeByOwner: (owner: string) => Promise<void>,
+): (pluginId: string) => Promise<void> {
+  return async (pluginId) => {
+    await closeByOwner(runtimeOwnerCloseKey(pluginId));
+  };
 }

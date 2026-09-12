@@ -6,7 +6,14 @@
  * loader while a folder's loadTree is in flight.
  */
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
-import type { GianBrowserApi, Session, Workspace } from '@gian/shared';
+import type {
+  GianBrowserApi,
+  GianBrowserState,
+  GianBrowserTabSnapshot,
+  GianBrowserTabsSnapshot,
+  Session,
+  Workspace,
+} from '@gian/shared';
 import { StrictMode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../src/api.js';
@@ -94,9 +101,10 @@ function deferred<T>() {
 }
 
 function renderWorkbench(strict = false, workingTrees: WorkingTree[] = [tree]) {
-  return renderHook(() => useWorkbench({
+  const dispatch = vi.fn();
+  const hook = renderHook(() => useWorkbench({
     authStatus: 'authenticated',
-    dispatch: vi.fn(),
+    dispatch,
     sessions: [session],
     activeSessionId: 's1',
     activeSession: session,
@@ -107,12 +115,91 @@ function renderWorkbench(strict = false, workingTrees: WorkingTree[] = [tree]) {
     activeSubtaskId: null,
     t: key => key,
   }), strict ? { wrapper: StrictMode } : undefined);
+  return { ...hook, dispatch };
 }
 
 const session2: Session = { ...session, id: 's2', name: 'demo two' };
 const session3: Session = { ...session, id: 's3', name: 'demo three' };
 const session4: Session = { ...session, id: 's4', name: 'demo four' };
 const sessionSet = [session, session2, session3, session4];
+
+const blankBrowserState: GianBrowserState = {
+  url: '',
+  title: '',
+  loading: false,
+  canGoBack: false,
+  canGoForward: false,
+  canOpenExternal: false,
+  inspecting: false,
+  zoomFactor: 1,
+};
+
+function installBrowserRegistry(options: {
+  openProject?: GianBrowserApi['openProject'];
+} = {}) {
+  let sequence = 0;
+  let revision = 0;
+  let snapshots: GianBrowserTabSnapshot[] = [];
+  let tabsListener: ((snapshot: GianBrowserTabsSnapshot) => void) | null = null;
+  let presentationListener: ((tabId: string) => void) | null = null;
+  let stateListener: ((tabId: string, state: GianBrowserState) => void) | null = null;
+  const registrySnapshot = (): GianBrowserTabsSnapshot => ({
+    revision,
+    tabs: snapshots.map(snapshot => ({ ...snapshot })),
+  });
+  const publishTabs = () => {
+    revision += 1;
+    tabsListener?.(registrySnapshot());
+  };
+  const createTab = vi.fn<GianBrowserApi['createTab']>(async input => {
+    const snapshot: GianBrowserTabSnapshot = {
+      id: input?.tabId ?? `browser-main-${++sequence}`,
+      profileId: 'default',
+      sourceSessionId: input?.sourceSessionId ?? null,
+      pageGeneration: 0,
+      lifecycle: 'empty',
+      requestedVisible: false,
+      presented: false,
+      control: 'idle',
+      state: blankBrowserState,
+    };
+    snapshots = [...snapshots, snapshot];
+    publishTabs();
+    if (input?.activate) presentationListener?.(snapshot.id);
+    return snapshot;
+  });
+  const closeTab = vi.fn<GianBrowserApi['closeTab']>(async tabId => {
+    snapshots = snapshots.filter(snapshot => snapshot.id !== tabId);
+    publishTabs();
+    return true;
+  });
+  const openProject = options.openProject ?? vi.fn().mockResolvedValue(blankBrowserState);
+  const browser = {
+    createTab,
+    listTabs: vi.fn(async () => registrySnapshot()),
+    openProject,
+    closeTab,
+    subscribeTabs: vi.fn((listener: typeof tabsListener) => {
+      tabsListener = listener;
+      return () => { tabsListener = null; };
+    }),
+    subscribePresentationRequested: vi.fn((listener: typeof presentationListener) => {
+      presentationListener = listener;
+      return () => { presentationListener = null; };
+    }),
+    subscribe: vi.fn((listener: typeof stateListener) => {
+      stateListener = listener;
+      return () => { stateListener = null; };
+    }),
+  } as unknown as GianBrowserApi;
+  window.gianDesktop = { browser };
+  return {
+    browser,
+    closeTab,
+    createTab,
+    emitState: (tabId: string, state: GianBrowserState) => stateListener?.(tabId, state),
+  };
+}
 
 function renderSwitchableWorkbench(initialSessionId = 's1') {
   return renderHook(({ sessionId, mode = 'sessions' }: { sessionId: string; mode?: Mode }) => {
@@ -249,6 +336,67 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
   });
 
+  it('opens an unregistered attachment without falling back to vscode://', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { result, dispatch } = renderWorkbench();
+    const abs = '/Users/me/.gian/attachments/sess-1/plan.html';
+    const tab = {
+      id: 'tab-file-abs',
+      group: 'files' as const,
+      name: 'plan.html',
+      kind: 'file' as const,
+      icoKind: 'md' as const,
+      ico: '',
+      fullPath: abs,
+    };
+
+    act(() => result.current.handleOpenWith(tab, { kind: 'system', name: 'default' }));
+    expect(dispatch).toHaveBeenCalledWith('files.openExternal', {
+      absolutePath: abs,
+      target: { kind: 'builtin', builtin: 'default' },
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+
+    act(() => result.current.handleOpenWith(tab, { kind: 'system', name: 'browser' }));
+    expect(openSpy).toHaveBeenCalledWith(
+      `/api/files/raw?path=${encodeURIComponent(abs)}`,
+      '_blank',
+      'noopener',
+    );
+    expect(openSpy.mock.calls.some(call => String(call[0]).startsWith('vscode:'))).toBe(false);
+    openSpy.mockRestore();
+  });
+
+  it('opens unregistered HTML in Gian Browser via an absolute project target', async () => {
+    const openProject = vi.fn().mockResolvedValue({
+      url: 'gian-browser://site/plan.html',
+      title: '',
+      loading: true,
+      canGoBack: false,
+      canGoForward: false,
+      canOpenExternal: true,
+      inspecting: false,
+    });
+    installBrowserRegistry({ openProject });
+    const { result } = renderWorkbench();
+    const abs = '/Users/me/.gian/attachments/sess-1/plan.html';
+
+    act(() => result.current.handleOpenWith({
+      id: 'tab-file-abs',
+      group: 'files',
+      name: 'plan.html',
+      kind: 'file',
+      icoKind: 'md',
+      ico: '',
+      fullPath: abs,
+    }, { kind: 'system', name: 'gian-browser' }));
+
+    await waitFor(() => {
+      expect(openProject).toHaveBeenCalledWith(expect.any(String), { absolutePath: abs });
+    });
+    delete window.gianDesktop;
+  });
+
   it('previews an unregistered image through the absolute raw endpoint', async () => {
     const { result } = renderWorkbench();
     const abs = '/Users/me/.gian/attachments/sess-1/shot.png';
@@ -313,7 +461,7 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
     expect(result.current.activeTabByGroup.diffs).toBe('tab-diff-event-s1-1:diff:d1');
 
-    // showChangesDiff (GitBadge / transcript show-changes entries) DOES steal.
+    // showChangesDiff (transcript show-changes entries) DOES steal.
     act(() => result.current.showChangesDiff());
     await waitFor(() => {
       expect(result.current.activeTabByGroup.diffs)
@@ -404,7 +552,7 @@ describe('Sheet tab query timing (§4.5)', () => {
     });
   });
 
-  it('opens each project HTML in a new Browser tab and keeps existing tabs', async () => {
+  it('reuses a blank Browser tab for project previews and only adds tabs once every tab shows content', async () => {
     const openProject = vi.fn().mockResolvedValue({
       url: 'gian-browser://site/index.html',
       title: '',
@@ -414,10 +562,8 @@ describe('Sheet tab query timing (§4.5)', () => {
       canOpenExternal: true,
       inspecting: false,
     });
-    const closeTab = vi.fn().mockResolvedValue(true);
-    window.gianDesktop = {
-      browser: { openProject, closeTab } as unknown as GianBrowserApi,
-    };
+    const registry = installBrowserRegistry({ openProject });
+    const { closeTab } = registry;
     const { result } = renderWorkbench(true);
 
     act(() => result.current.openProjectInBrowser('ws:workspace-1', 'site/index.html'));
@@ -431,14 +577,34 @@ describe('Sheet tab query timing (§4.5)', () => {
       });
     });
 
+    // The tab has not reported a URL yet (still blank): a second preview
+    // reuses it instead of stacking a new tab next to an empty one.
+    const firstTab = result.current.wbTabs.find(tab => tab.kind === 'browser')!;
     act(() => result.current.openProjectInBrowser('ws:workspace-1', 'design/01.html'));
+    await waitFor(() => {
+      expect(result.current.wbTabs.filter(tab => tab.kind === 'browser')).toHaveLength(1);
+      expect(openProject).toHaveBeenCalledTimes(2);
+      expect(openProject).toHaveBeenLastCalledWith(firstTab.id, {
+        workingTreeId: 'ws:workspace-1',
+        path: 'design/01.html',
+      });
+      expect(result.current.activeTabByGroup.browser).toBe(firstTab.id);
+    });
+
+    // Once the native side reports the tab is showing a page, the next
+    // preview mints a second tab and keeps the first one.
+    act(() => registry.emitState(firstTab.id, {
+      ...blankBrowserState,
+      url: 'gian-browser://site/design/01.html',
+    }));
+    act(() => result.current.openProjectInBrowser('ws:workspace-1', 'design/02.html'));
     await waitFor(() => {
       const browserTabs = result.current.wbTabs.filter(tab => tab.kind === 'browser');
       expect(browserTabs).toHaveLength(2);
-      expect(openProject).toHaveBeenCalledTimes(2);
+      expect(openProject).toHaveBeenCalledTimes(3);
       expect(openProject).toHaveBeenLastCalledWith(browserTabs[1]?.id, {
         workingTreeId: 'ws:workspace-1',
-        path: 'design/01.html',
+        path: 'design/02.html',
       });
       expect(result.current.activeTabByGroup.browser).toBe(browserTabs[1]?.id);
     });
@@ -450,6 +616,10 @@ describe('Sheet tab query timing (§4.5)', () => {
       expect(new Set(browserTabs.map(tab => tab.id)).size).toBe(3);
       expect(browserTabs[2]?.name).toBe('Browser #3');
       expect(result.current.activeTabByGroup.browser).toBe(browserTabs[2]?.id);
+    });
+    expect(registry.createTab).toHaveBeenLastCalledWith({
+      sourceSessionId: 's1',
+      activate: true,
     });
 
     const lastTab = result.current.wbTabs.filter(tab => tab.kind === 'browser')[2]!;
@@ -538,6 +708,22 @@ describe('Issue #46 Session-owned workbench state', () => {
     delete window.gianDesktop;
     vi.mocked(api.loadAllFiles).mockResolvedValue([]);
     vi.mocked(api.loadApps).mockResolvedValue([]);
+  });
+
+  it('projects a main-created Browser tab and honors its panel 2 presentation request', async () => {
+    const registry = installBrowserRegistry();
+    const { result } = renderSwitchableWorkbench();
+
+    await act(async () => {
+      await registry.createTab({ sourceSessionId: 's1', activate: true });
+    });
+
+    await waitFor(() => {
+      const tab = result.current.wbTabs.find(candidate => candidate.id === 'browser-main-1');
+      expect(tab?.group).toBe('browser');
+      expect(result.current.activeTabByGroup.browser).toBe(tab?.id);
+      expect(result.current.activeRail).toBe('browser');
+    });
   });
 
   it('restores independent Files, Diffs, History, and explicitly closed states per Session', async () => {
@@ -705,6 +891,7 @@ describe('Issue #46 Session-owned workbench state', () => {
   it.each(['terminal', 'browser', 'workspaces', 'settings'] as const)(
     'keeps the global %s foreground and tabs unchanged while Sessions switch',
     async (globalRail) => {
+      if (globalRail === 'browser') installBrowserRegistry();
       const { result, rerender } = renderSwitchableWorkbench();
       act(() => result.current.activateRail('files'));
       rerender({ sessionId: 's2' });
@@ -717,6 +904,8 @@ describe('Issue #46 Session-owned workbench state', () => {
         else result.current.activateRail(globalRail);
       });
       await waitFor(() => expect(result.current.activeRail).toBe(globalRail));
+      await waitFor(() => expect(result.current.wbTabs.some(tab =>
+        tab.group === (globalRail === 'terminal' ? 'term' : globalRail))).toBe(true));
       const globalTabIds = result.current.wbTabs
         .filter(tab => ['term', 'browser', 'workspaces', 'settings'].includes(tab.group))
         .map(tab => tab.id);
@@ -742,11 +931,13 @@ describe('Issue #46 Session-owned workbench state', () => {
   ] as const)(
     'closing the final %s tab clears its global foreground and restores the Session scene',
     async (globalRail, group) => {
+      if (globalRail === 'browser') installBrowserRegistry();
       const { result } = renderSwitchableWorkbench();
       act(() => result.current.activateRail('files'));
       expect(result.current.activeRail).toBe('files');
 
       act(() => result.current.activateRail(globalRail));
+      await waitFor(() => expect(result.current.wbTabs.some(tab => tab.group === group)).toBe(true));
       const globalTab = result.current.wbTabs.find(tab => tab.group === group);
       expect(globalTab).toBeDefined();
       expect(result.current.activeRail).toBe(globalRail);
@@ -770,10 +961,10 @@ describe('Issue #46 Session-owned workbench state', () => {
     },
   );
 
-  it('keeps the global Workspaces rail open when its new-workspace detail closes', async () => {
+  it('keeps the global Workspaces rail open when its workspace detail closes', async () => {
     const { result, rerender } = renderSwitchableWorkbench();
-    act(() => result.current.openNewWorkspaceInSheet());
-    const formTab = result.current.wbTabs.find(tab => tab.kind === 'new-workspace');
+    act(() => result.current.openWorkspaceInSheet('workspace-1'));
+    const formTab = result.current.wbTabs.find(tab => tab.kind === 'workspace');
     expect(formTab).toBeDefined();
     expect(result.current.activeRail).toBe('workspaces');
 

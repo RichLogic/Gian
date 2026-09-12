@@ -12,6 +12,7 @@ import type {
   ModelCapabilities,
   SandboxMode,
 } from '../core/types.js';
+import { discoverCodexRuntimes, probeCodexRuntime } from '../runtime/discover.js';
 import {
   CodexJsonRpcError,
   CodexProtocolError,
@@ -184,6 +185,26 @@ interface ActivityDescriptor {
   details?: unknown;
 }
 
+function settledActivityDescriptor(
+  descriptor: ActivityDescriptor,
+  status: 'succeeded' | 'failed' | 'cancelled',
+): ActivityDescriptor {
+  const presentation = record(descriptor.presentation);
+  if (presentation.type !== 'agent') return descriptor;
+  return {
+    ...descriptor,
+    presentation: {
+      ...presentation,
+      data: {
+        ...record(presentation.data),
+        state: status === 'succeeded'
+          ? 'completed'
+          : status === 'cancelled' ? 'interrupted' : 'failed',
+      },
+    },
+  };
+}
+
 interface InteractionInput {
   id: string;
   type: 'single_select' | 'text';
@@ -222,7 +243,13 @@ export interface CatalogOption {
 
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.1';
+const PROTOCOL_V22 = '2.2';
+const PROTOCOL_V23 = '2.3';
 const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
+
+const CUSTOMIZATION_CAPABILITIES = {
+  'customization.list': 1,
+} as const;
 
 const CAPABILITIES = {
   'input.localImage': 1,
@@ -1030,6 +1057,7 @@ export class CodexProtocolV2Adapter {
   private readonly openActivitiesByTurn = new Map<string, Map<string, ActivityDescriptor>>();
   private readonly activityOutputByTurn = new Map<string, Map<string, string>>();
   private readonly openContentByTurn = new Map<string, Map<string, OpenContent>>();
+  private readonly planTextByTurn = new Map<string, Map<string, string>>();
   private readonly replayBySession = new Map<string, NativeReplay>();
   private readonly replayTrackers = new Map<string, IncrementalReplayTracker>();
   private readonly replayPager = new ReplayPager();
@@ -1042,6 +1070,10 @@ export class CodexProtocolV2Adapter {
   private readonly terminalOrderBySession = new Map<string, string[]>();
   private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private initialized = false;
+  private protocolVersion:
+    | typeof PROTOCOL_V2
+    | typeof PROTOCOL_V22
+    | typeof PROTOCOL_V23 = PROTOCOL_V2;
   private catalogRevision = 'codex-empty';
 
   constructor(
@@ -1079,6 +1111,33 @@ export class CodexProtocolV2Adapter {
           'CAPABILITY_NOT_SUPPORTED',
           `${request.method} is not advertised by Codex Proxy.`,
         );
+      case 'runtime.discover':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new CodexProtocolError(
+            'CAPABILITY_NOT_SUPPORTED',
+            'runtime.discover requires gian.proxy/2.2.',
+          );
+        }
+        return await discoverCodexRuntimes();
+      case 'runtime.probe':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new CodexProtocolError(
+            'CAPABILITY_NOT_SUPPORTED',
+            'runtime.probe requires gian.proxy/2.2.',
+          );
+        }
+        return await probeCodexRuntime(String(request.params.path ?? ''));
+      case 'customization.list':
+      case 'customization.detail':
+        if (this.protocolVersion !== PROTOCOL_V23) {
+          throw new CodexProtocolError(
+            'CAPABILITY_NOT_SUPPORTED',
+            `${request.method} requires gian.proxy/2.3.`,
+          );
+        }
+        return request.method === 'customization.list'
+          ? await this.service.inspectCustomizations(request.params as never)
+          : await this.service.customizationDetail(request.params as never);
       case 'shutdown': return { ok: true };
       default:
         throw new CodexJsonRpcError(-32601, `Unknown method "${request.method}".`);
@@ -1091,15 +1150,32 @@ export class CodexProtocolV2Adapter {
     }
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
-    if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new CodexProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
+    const selected = versions.includes(PROTOCOL_V23)
+      ? PROTOCOL_V23
+      : versions.includes(PROTOCOL_V22)
+        ? PROTOCOL_V22
+        : versions.includes(PROTOCOL_V2)
+          ? PROTOCOL_V2
+          : null;
+    if (protocol.name !== PROTOCOL_NAME || selected === null) {
+      throw new CodexProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1, 2.2, or 2.3 is required.');
     }
     this.initialized = true;
+    this.protocolVersion = selected;
     return {
-      protocol: { name: PROTOCOL_NAME, version: PROTOCOL_V2 },
+      protocol: { name: PROTOCOL_NAME, version: selected },
       plugin: { id: 'codex', name: 'Codex', version: this.pluginVersion },
       process: { scope: 'shared' as const },
-      capabilities: CAPABILITIES,
+      capabilities: selected === PROTOCOL_V23
+        ? {
+            ...CAPABILITIES,
+            'runtime.discover': 1,
+            'runtime.probe': 1,
+            ...CUSTOMIZATION_CAPABILITIES,
+          }
+        : selected === PROTOCOL_V22
+          ? { ...CAPABILITIES, 'runtime.discover': 1, 'runtime.probe': 1 }
+          : CAPABILITIES,
     };
   }
 
@@ -1720,6 +1796,7 @@ export class CodexProtocolV2Adapter {
     this.openActivitiesByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.activityOutputByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.openContentByTurn.set(this.turnKey(session.id, turnId), new Map());
+    this.planTextByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.pendingInputByTurn.set(this.turnKey(session.id, turnId), input);
     const firstInput = record(input[0]);
     const nativeCommand = firstInput.type === 'text' && typeof firstInput.text === 'string'
@@ -2029,10 +2106,17 @@ export class CodexProtocolV2Adapter {
       case 'output.plan.delta':
       case 'output.plan.final': {
         if (!turnId) return;
-        const text = String(data.text ?? data.delta ?? '');
-        if (!text) return;
+        const fragment = String(data.text ?? data.delta ?? '');
+        if (!fragment) return;
+        const turnKey = this.turnKey(session.id, turnId);
+        const planId = nonEmptyString(data.itemId) ?? `plan:${turnId}`;
+        const plans = this.planTextByTurn.get(turnKey);
+        const text = method === 'output.plan.delta'
+          ? `${plans?.get(planId) ?? ''}${fragment}`
+          : fragment;
+        plans?.set(planId, text);
         this.emitTurnEvent('plan.updated', session, turnId, {
-          planId: nonEmptyString(data.itemId) ?? `plan:${turnId}`,
+          planId,
           title: text,
           steps: [],
         });
@@ -2370,7 +2454,7 @@ export class CodexProtocolV2Adapter {
       for (const [activityId, descriptor] of activities) {
         this.emitTurnEvent('activity.updated', session, turnId, {
           activityId,
-          ...descriptor,
+          ...settledActivityDescriptor(descriptor, status),
           status,
         });
       }
@@ -2482,6 +2566,7 @@ export class CodexProtocolV2Adapter {
     this.openActivitiesByTurn.delete(key);
     this.activityOutputByTurn.delete(key);
     this.openContentByTurn.delete(key);
+    this.planTextByTurn.delete(key);
     this.emittedFactsByTurn.delete(key);
     this.pendingInputByTurn.delete(key);
     this.acceptedInputBatchesByTurn.delete(key);

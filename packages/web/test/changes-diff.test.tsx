@@ -109,7 +109,7 @@ describe('ChangesDiffBody', () => {
 
   it('shows the no-working-tree empty state', () => {
     renderBody(null);
-    expect(screen.getByText('Open a session or workspace to review its changes.')).toBeTruthy();
+    expect(screen.getByText('Open a session or Repo to review its changes.')).toBeTruthy();
     expect(loadChanged).not.toHaveBeenCalled();
   });
 
@@ -258,6 +258,18 @@ describe('ChangesDiffBody', () => {
     fireEvent.click(previous);
     const first = document.querySelector<HTMLElement>('.cs-file[data-path="src/a.ts"]')!;
     expect(first.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
+  });
+
+  it('navigating to a collapsed file expands it and scrolls to its header', async () => {
+    renderBody();
+    await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
+    act(() => toggleChangesDiffCollapsed('ws:demo', 'src/b.ts'));
+    expect(document.querySelector('.cs-file[data-path="src/b.ts"]')).toHaveClass('collapsed');
+
+    fireEvent.click(screen.getByLabelText('Next file'));
+    expect(document.querySelector('.cs-file[data-path="src/b.ts"]')).not.toHaveClass('collapsed');
+    const second = document.querySelector<HTMLElement>('.cs-file[data-path="src/b.ts"]')!;
+    expect(second.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
   });
 
   it('collapse state survives a scope switch while patches are dropped', async () => {

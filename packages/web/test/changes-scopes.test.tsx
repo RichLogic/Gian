@@ -189,7 +189,7 @@ describe('Changes scope picker', () => {
     await waitFor(() => expect(loadChanged).toHaveBeenCalledWith('wt:s1', 'all', null, null, 'session-current', undefined));
   });
 
-  it('an external scope request (GitBadge click) forces All changes and persists it', async () => {
+  it('an external scope request (transcript show-changes entry) forces All changes and persists it', async () => {
     localStorage.setItem(OWNER_SCOPE_KEY, 'branch');
     renderChanges();
     // App writes the use-changes-diff store directly (the inspector's old

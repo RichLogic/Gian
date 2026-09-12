@@ -9,6 +9,7 @@
  * - `ctx.agents` (AgentRegistry): `create/resume/get/roots/list`
  * - `Agent`: `id/status/session`, `send/followup/steer/inject/cancel/whenIdle`
  * - `session/event`, `agent/status`, `agent/error`, `agent/inbox/*`
+ * - `ctx.approval`, `ctx.permissionPresets`, and `ctx.agentPresets`
  * - `ctx.userQuestions.registerProvider/ask`
  * - `ctx.sessionPersistence.list/inspect/prepare/readFrom`
  */
@@ -65,7 +66,7 @@ export function dshVersionFromEntrypoint(entrypoint: string | undefined): string
 
 interface CordisSession {
   id: string;
-  header?: { createdAt?: number };
+  header?: { createdAt?: number; agentPreset?: string };
   events?: readonly CordisSessionEvent[];
 }
 
@@ -88,15 +89,67 @@ interface CordisAgentHandle {
 interface CordisAgentRegistry {
   create(options: {
     sessionId: string;
-    meta: { cwd: string };
+    meta: { cwd: string; agentPreset?: string };
     agentOptions?: { provider?: string; model?: string };
-    setup?: (ctx: AnyContext) => void;
+    setup?: (ctx: AnyContext) => void | Promise<void>;
   }): Promise<CordisAgentHandle>;
   resume(options: {
     resumeSessionId: string;
     agentOptions?: { provider?: string; model?: string };
-    setup?: (ctx: AnyContext) => void;
+    setup?: (ctx: AnyContext) => void | Promise<void>;
   }): Promise<CordisAgentHandle>;
+}
+
+type CordisApprovalPolicy = 'ask' | 'never';
+type CordisApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
+
+interface CordisApprovalRequest {
+  agent: CordisAgent;
+  toolName: string;
+  callId?: string;
+  reason?: string;
+  signal?: AbortSignal;
+}
+
+interface CordisApprovalService {
+  config?: { policy?: CordisApprovalPolicy };
+  setPolicy(agent: CordisAgent, policy: CordisApprovalPolicy): void;
+}
+
+interface CordisPermissionPresetSpec {
+  sandbox: 'read-only' | 'workspace-write' | 'danger-full-access';
+  approval: CordisApprovalPolicy;
+  name?: string;
+  description?: string;
+}
+
+interface CordisPermissionPresetOption {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+interface CordisPermissionPresets {
+  readonly names: readonly string[];
+  readonly defaultPreset: string;
+  resolve(name: string): CordisPermissionPresetSpec;
+  optionOf(name: string): CordisPermissionPresetOption;
+  set(session: CordisSession, name: string): void;
+}
+
+interface CordisAgentPreset {
+  id: string;
+  name?: string;
+  description?: string;
+  trust?: 'system' | 'user';
+  broken?: string;
+}
+
+interface CordisAgentPresets {
+  readonly defaultId: string;
+  list(): Promise<CordisAgentPreset[]>;
+  resolve(id?: string): Promise<CordisAgentPreset>;
+  mount(agentCtx: AnyContext, id?: string): Promise<CordisAgentPreset>;
 }
 
 interface CordisReasoningInfo {
@@ -139,6 +192,7 @@ type AnyContext = {
     callback: () => (() => Promise<void>),
     label?: string,
   ) => unknown;
+  agent?: CordisAgent;
 };
 
 interface CordisHostOptions {
@@ -156,7 +210,7 @@ export function mountBridge(options: CordisHostOptions): () => Promise<void> {
   const writer = new BridgeWriter(options.stdout ?? process.stdout);
   const host = new CordisDshHost(
     options.ctx,
-    options.bridgeVersion ?? '0.1.2',
+    options.bridgeVersion ?? '0.1.3',
     process.env.GIAN_HOST_BINDING_KEY,
   );
   const server = new BridgeServer({ host, writer });
@@ -203,6 +257,11 @@ interface CordisSessionRecord {
   lastStep: number | null;
 }
 
+interface PendingApproval {
+  sessionId: string;
+  settle: (outcome: CordisApprovalOutcome, actionId?: string) => void;
+}
+
 interface DshModelSelection {
   provider: string;
   model: string;
@@ -212,6 +271,26 @@ interface DshModelSelection {
 interface DshModelSelectionRef {
   current: DshModelSelection;
   assembled?: DshModelSelection;
+}
+
+function titleCaseKebab(value: string): string {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) return value;
+  return value
+    .split('-')
+    .map(part => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+function sessionAgentPreset(session: CordisSession): string | undefined {
+  const events = Array.isArray(session.events) ? session.events : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type === 'agent-preset/selected'
+      && typeof event.data.agentPreset === 'string') {
+      return event.data.agentPreset;
+    }
+  }
+  return session.header?.agentPreset;
 }
 
 function installModelSelection(ctx: AnyContext, selection: DshModelSelectionRef): void {
@@ -264,6 +343,7 @@ export class CordisDshHost implements BridgeHost {
   private readonly early: BridgeHostEvent[] = [];
   private readonly sessions = new Map<string, CordisSessionRecord>();
   private readonly byNativeId = new Map<string, CordisSessionRecord>();
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly offSessionEvent: (() => boolean) | null;
   private readonly offCatalogChanged: (() => boolean) | null;
   private catalogChangedAt = Date.now();
@@ -318,6 +398,106 @@ export class CordisDshHost implements BridgeHost {
       throw new Error('RUNTIME_UNAVAILABLE: DSH AgentRegistry is not mounted');
     }
     return registry as CordisAgentRegistry;
+  }
+
+  private approvalRuntime(): CordisApprovalService | null {
+    const service = this.ctx.get?.('approval') ?? this.ctx.approval;
+    return service !== null && typeof service === 'object'
+      && typeof (service as CordisApprovalService).setPolicy === 'function'
+      ? service as CordisApprovalService
+      : null;
+  }
+
+  private permissionPresetsRuntime(): CordisPermissionPresets | null {
+    const service = this.ctx.get?.('permissionPresets') ?? this.ctx.permissionPresets;
+    return service !== null && typeof service === 'object'
+      && Array.isArray((service as CordisPermissionPresets).names)
+      && typeof (service as CordisPermissionPresets).defaultPreset === 'string'
+      && typeof (service as CordisPermissionPresets).resolve === 'function'
+      && typeof (service as CordisPermissionPresets).optionOf === 'function'
+      && typeof (service as CordisPermissionPresets).set === 'function'
+      ? service as CordisPermissionPresets
+      : null;
+  }
+
+  private agentPresetsRuntime(): CordisAgentPresets | null {
+    const service = this.ctx.get?.('agentPresets') ?? this.ctx.agentPresets;
+    return service !== null && typeof service === 'object'
+      && typeof (service as CordisAgentPresets).list === 'function'
+      && typeof (service as CordisAgentPresets).resolve === 'function'
+      && typeof (service as CordisAgentPresets).mount === 'function'
+      && typeof (service as CordisAgentPresets).defaultId === 'string'
+      ? service as CordisAgentPresets
+      : null;
+  }
+
+  private supportsApprovalInteraction(): boolean {
+    return this.approvalRuntime() !== null && typeof this.ctx.on === 'function';
+  }
+
+  private installApprovalInteraction(agentCtx: AnyContext, sessionId: string): void {
+    if (!this.supportsApprovalInteraction()) return;
+    if (typeof agentCtx.on !== 'function') {
+      throw new Error('RUNTIME_UNAVAILABLE: DSH Agent context cannot install approval interaction');
+    }
+    agentCtx.on('approval/request', async (...args: unknown[]) => {
+      const request = args[0] as CordisApprovalRequest | undefined;
+      const next = args[1];
+      if (!request || typeof request.toolName !== 'string') {
+        return typeof next === 'function'
+          ? (next as () => Promise<CordisApprovalOutcome>)()
+          : 'unavailable';
+      }
+      return this.requestApproval(sessionId, request);
+    });
+  }
+
+  private requestApproval(
+    sessionId: string,
+    request: CordisApprovalRequest,
+  ): Promise<CordisApprovalOutcome> {
+    const record = this.session(sessionId);
+    const interactionId = `dsh-approval-${randomUUID()}`;
+    return new Promise<CordisApprovalOutcome>((resolveApproval) => {
+      let settled = false;
+      const onAbort = () => settle('cancelled');
+      const settle = (outcome: CordisApprovalOutcome, actionId?: string) => {
+        if (settled) return;
+        settled = true;
+        request.signal?.removeEventListener('abort', onAbort);
+        this.pendingApprovals.delete(interactionId);
+        this.emit({
+          method: 'interaction.resolved',
+          params: {
+            sessionId,
+            interactionId,
+            outcome: actionId === undefined ? 'cancelled' : 'submitted',
+            ...(actionId === undefined ? {} : { actionId }),
+          },
+        });
+        resolveApproval(outcome);
+      };
+      this.pendingApprovals.set(interactionId, { sessionId, settle });
+      request.signal?.addEventListener('abort', onAbort, { once: true });
+      this.emit({
+        method: 'interaction.requested',
+        params: {
+          sessionId,
+          interactionId,
+          kind: 'approval',
+          title: `Approve ${request.toolName}`,
+          ...(request.reason ? { description: request.reason } : {}),
+          ...(record.lastTurn === null ? {} : { turn: record.lastTurn }),
+          ...(record.lastStep === null ? {} : { step: record.lastStep }),
+          inputs: [],
+          actions: [
+            { id: 'allow-once', label: 'Allow once', style: 'primary' },
+            { id: 'reject', label: 'Reject', style: 'danger' },
+          ],
+        },
+      });
+      if (request.signal?.aborted) settle('cancelled');
+    });
   }
 
   private llmRuntime(): CordisLlmRuntime {
@@ -433,6 +613,7 @@ export class CordisDshHost implements BridgeHost {
         'session.events.read': 1,
         'turn.interrupt': 1,
         'catalog.changed': 1,
+        ...(this.supportsApprovalInteraction() ? { interaction: 1 } : {}),
         'event.step': 1,
         'event.request': 1,
         'event.usage': 1,
@@ -456,6 +637,30 @@ export class CordisDshHost implements BridgeHost {
     const providers = runtime.listProviders();
     const models = await this.catalogModels();
     const defaultSelection = this.defaultSelection(models);
+    const approval = this.approvalRuntime();
+    const permissions = this.permissionPresetsRuntime();
+    const presets = this.agentPresetsRuntime();
+    const agentPresets = presets === null ? [] : await presets.list();
+    const permissionPresets = permissions === null
+      ? []
+      : permissions.names.flatMap((id) => {
+          const spec = permissions.resolve(id);
+          if (spec.approval === 'ask' && !this.supportsApprovalInteraction()) return [];
+          const option = permissions.optionOf(id);
+          return [{
+            id,
+            label: id === 'danger-full-access'
+              ? 'Full access'
+              : titleCaseKebab(option.name),
+            ...(option.description ? { description: option.description } : {}),
+            approvalPolicy: spec.approval,
+          }];
+        });
+    const defaultPermissionPreset = permissions === null
+      ? undefined
+      : (permissionPresets.some(preset => preset.id === permissions.defaultPreset)
+          ? permissions.defaultPreset
+          : undefined);
     return {
       catalogRevision: `cordis-${this.dshVersion}`,
       providers: providers.map((provider) => ({ id: provider.id, label: provider.name ?? provider.id })),
@@ -479,8 +684,30 @@ export class CordisDshHost implements BridgeHost {
           },
         } : {}),
       })),
-      approvalPolicies: [],
-      agentPresets: [],
+      approvalPolicies: approval === null
+        ? []
+        : [
+            ...(this.supportsApprovalInteraction() ? [{ id: 'ask', label: 'Ask' }] : []),
+            { id: 'never', label: 'Never' },
+          ],
+      ...(approval === null
+        ? {}
+        : {
+            defaultApprovalPolicy: approval.config?.policy === 'ask'
+              && this.supportsApprovalInteraction()
+              ? 'ask'
+              : 'never',
+          }),
+      permissionPresets,
+      ...(defaultPermissionPreset === undefined ? {} : { defaultPermissionPreset }),
+      agentPresets: agentPresets.map(preset => ({
+        id: preset.id,
+        label: preset.name ?? preset.id,
+        ...(preset.description ? { description: preset.description } : {}),
+        ...(preset.trust ? { trust: preset.trust } : {}),
+        ...(preset.broken ? { broken: preset.broken } : {}),
+      })),
+      ...(presets === null ? {} : { defaultAgentPreset: presets.defaultId }),
       slashCommands: [],
     };
   }
@@ -518,14 +745,56 @@ export class CordisDshHost implements BridgeHost {
     const provider = typeof params.config.provider === 'string'
       ? params.config.provider
       : defaults.provider;
+    const requestedPreset = typeof params.config.agent_preset === 'string'
+      ? params.config.agent_preset
+      : undefined;
+    const presets = this.agentPresetsRuntime();
+    if (presets === null && requestedPreset !== undefined) {
+      throw new Error('RUNTIME_UNAVAILABLE: DSH AgentPresets is not mounted');
+    }
+    const requestedResolvedPreset = presets === null || requestedPreset === undefined
+      ? null
+      : await presets.resolve(requestedPreset);
+    const freshResolvedPreset = presets === null || params.nativeSessionId !== undefined
+      ? null
+      : (requestedResolvedPreset ?? await presets.resolve());
+    if (freshResolvedPreset?.broken) {
+      throw new Error(`RUNTIME_UNAVAILABLE: DSH Agent preset ${freshResolvedPreset.id} is broken: ${freshResolvedPreset.broken}`);
+    }
+    const presetId = freshResolvedPreset?.id;
     const selection: DshModelSelectionRef = { current: { provider, model } };
-    const setup = (agentCtx: AnyContext) => installModelSelection(agentCtx, selection);
+    const setup = async (agentCtx: AnyContext) => {
+      let setupPresetId = presetId;
+      if (presets !== null && params.nativeSessionId !== undefined) {
+        const scopedAgent = agentCtx.agent;
+        if (!scopedAgent) {
+          throw new Error('RUNTIME_UNAVAILABLE: resumed DSH Agent is unavailable during setup');
+        }
+        const storedPreset = sessionAgentPreset(scopedAgent.session);
+        if (requestedResolvedPreset !== null && requestedResolvedPreset.id !== storedPreset) {
+          throw new Error(
+            `CONFIG_VALUE_INVALID: DSH Agent preset ${requestedResolvedPreset.id} conflicts with persisted preset ${String(storedPreset)}`,
+          );
+        }
+        const persistedPreset = await presets.resolve(storedPreset);
+        if (persistedPreset.broken) {
+          throw new Error(`RUNTIME_UNAVAILABLE: DSH Agent preset ${persistedPreset.id} is broken: ${persistedPreset.broken}`);
+        }
+        setupPresetId = persistedPreset.id;
+      }
+      if (presets !== null) await presets.mount(agentCtx, setupPresetId);
+      installModelSelection(agentCtx, selection);
+      this.installApprovalInteraction(agentCtx, params.sessionId);
+    };
     let handle: CordisAgentHandle;
     try {
       handle = params.nativeSessionId === undefined
         ? await this.agentRegistry().create({
           sessionId: nativeId,
-          meta: { cwd: params.cwd },
+          meta: {
+            cwd: params.cwd,
+            ...(presetId === undefined ? {} : { agentPreset: presetId }),
+          },
           agentOptions: { provider, model },
           setup,
         })
@@ -580,6 +849,7 @@ export class CordisDshHost implements BridgeHost {
 
   async sessionClose(params: { sessionId: string }): Promise<Record<string, unknown>> {
     const record = this.session(params.sessionId);
+    this.cancelPendingApprovals(record.id);
     record.handle.agent.cancel({ kind: 'user' });
     await record.handle.agent.whenIdle();
     await record.handle.dispose();
@@ -630,17 +900,13 @@ export class CordisDshHost implements BridgeHost {
   async turnStart(params: BridgeTurnStartParams): Promise<Record<string, unknown>> {
     const record = this.session(params.sessionId);
     record.selection.current = await this.resolveTurnSelection(record, params.config);
-    const approvalPolicy = params.config.approval_policy;
-    if (approvalPolicy === 'ask' || approvalPolicy === 'never') {
-      const approval = record.handle.agent.ctx.get?.('approval')
-        ?? record.handle.agent.ctx.approval;
-      if (approval !== null && typeof approval === 'object'
-        && typeof (approval as { setPolicy?: unknown }).setPolicy === 'function') {
-        (approval as { setPolicy: (agent: CordisAgent, policy: 'ask' | 'never') => void })
-          .setPolicy(record.handle.agent, approvalPolicy);
-      } else if (approvalPolicy === 'never') {
-          throw new Error('RUNTIME_UNAVAILABLE: DSH ApprovalService is not mounted');
+    const permissionPreset = params.config.permission_preset;
+    if (typeof permissionPreset === 'string') {
+      const permissions = this.permissionPresetsRuntime();
+      if (permissions === null) {
+        throw new Error('RUNTIME_UNAVAILABLE: DSH PermissionPresetService is not mounted');
       }
+      permissions.set(record.handle.agent.session, permissionPreset);
     }
     const text = turnText(params.input);
     if (text.length > 0) {
@@ -664,8 +930,30 @@ export class CordisDshHost implements BridgeHost {
     return { accepted: true };
   }
 
-  async interactionRespond(): Promise<Record<string, unknown>> {
-    throw new Error('cordis host interaction.respond is exercised only inside a live DSH profile');
+  async interactionRespond(params: {
+    sessionId: string;
+    interactionId: string;
+    actionId?: string;
+    values: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    const pending = this.pendingApprovals.get(params.interactionId);
+    if (!pending || pending.sessionId !== params.sessionId) {
+      throw new Error(`interaction ${params.interactionId} is not pending`);
+    }
+    if (params.actionId === 'allow-once') {
+      pending.settle('allowed-once', params.actionId);
+    } else if (params.actionId === 'reject') {
+      pending.settle('rejected', params.actionId);
+    } else {
+      throw new Error(`unsupported approval action ${String(params.actionId)}`);
+    }
+    return { accepted: true };
+  }
+
+  private cancelPendingApprovals(sessionId: string): void {
+    for (const pending of [...this.pendingApprovals.values()]) {
+      if (pending.sessionId === sessionId) pending.settle('cancelled');
+    }
   }
 
   private handleSessionEvent(session: unknown, event: unknown): void {
@@ -725,6 +1013,7 @@ export class CordisDshHost implements BridgeHost {
     const records = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.all(records.map(async (record) => {
+      this.cancelPendingApprovals(record.id);
       record.handle.agent.cancel({ kind: 'disposed' });
       await record.handle.agent.whenIdle().catch(() => undefined);
       await record.handle.dispose().catch(() => undefined);

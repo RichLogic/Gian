@@ -33,6 +33,12 @@ export interface LocalFileInputItem {
 
 export type InputItem = TextInputItem | LocalImageInputItem | LocalFileInputItem;
 
+export interface ClaudeMcpServer {
+  name: string;
+  url: string;
+  headers: Record<string, string>;
+}
+
 export interface SessionRecord {
   id: string;
   cwd: string;
@@ -44,6 +50,8 @@ export interface SessionRecord {
   lastError: string | null;
   /** Whether the Claude Code process is currently alive for this session. */
   processAlive: boolean;
+  /** Host-provided, Session-scoped HTTP MCP servers. Never serialized. */
+  mcpServers: ClaudeMcpServer[];
   /** Runtime-only hint: true when the host supplied a claudeSessionId at
    *  createSession time (adoption / reconnect). The first spawn must use
    *  `--resume <id>` to pick up the existing on-disk JSONL; later spawns
@@ -107,6 +115,7 @@ export interface CreateSessionParams {
   /** A native id may name a freshly prepared zero-turn fork. In that case
    *  the next turn must use --session-id rather than --resume. */
   resumeExisting?: boolean;
+  mcpServers?: ClaudeMcpServer[];
 }
 
 export interface GetSessionParams {

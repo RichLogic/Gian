@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { GIAN_TOOL_METHODS } from '@gian/shared';
 
 async function startFakeHost(dataDir) {
   const calls = [];
@@ -51,7 +52,7 @@ test('stdio MCP lists and calls Gian tools against the Host socket', async t => 
   t.after(() => client.close());
 
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 21);
+  assert.equal(listed.tools.length, GIAN_TOOL_METHODS.length + 1);
   assert.equal(listed.tools[0].name, 'catalog.get_create_options');
 
   const read = await client.callTool({ name: 'task.list', arguments: {} });

@@ -66,6 +66,16 @@ function fakeBridge(
             providers: [{ id: 'deepseek', label: 'DeepSeek' }],
             defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
             models,
+            permissionPresets: [
+              { id: 'workspace-write', label: 'Workspace Write', approvalPolicy: 'ask' },
+              { id: 'danger-full-access', label: 'Full access', approvalPolicy: 'never' },
+            ],
+            defaultPermissionPreset: 'workspace-write',
+            agentPresets: [
+              { id: 'standard', label: 'Standard' },
+              { id: 'code', label: 'PTC' },
+            ],
+            defaultAgentPreset: 'standard',
           };
         case 'catalog.resolve':
           return {
@@ -73,6 +83,16 @@ function fakeBridge(
             providers: [{ id: 'deepseek', label: 'DeepSeek' }],
             defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
             models,
+            permissionPresets: [
+              { id: 'workspace-write', label: 'Workspace Write', approvalPolicy: 'ask' },
+              { id: 'danger-full-access', label: 'Full access', approvalPolicy: 'never' },
+            ],
+            defaultPermissionPreset: 'workspace-write',
+            agentPresets: [
+              { id: 'standard', label: 'Standard' },
+              { id: 'code', label: 'PTC' },
+            ],
+            defaultAgentPreset: 'standard',
             resolvedDefaults: { sessionConfig: {}, turnConfig: (params.turnConfig ?? {}) },
           };
         case 'session.create':
@@ -130,8 +150,8 @@ function fakeBridge(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    push(_method, _params) {
-      /* unused */
+    push(method, params) {
+      for (const listener of listeners) listener({ method, params });
     },
   };
 }
@@ -184,7 +204,7 @@ test('initialize: only accepts gian.proxy 2.1 and returns exact identity', async
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities['input.localFile'], undefined);
   assert.equal(result.capabilities['input.localImage'], undefined);
-  assert.equal(result.capabilities.interaction, undefined);
+  assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['event.diff'], undefined);
   assert.equal(result.capabilities['turn.interrupt'], undefined);
   assert.equal(result.capabilities['event.step'], 1);
@@ -393,7 +413,7 @@ test('turn.start correlates pending Gian turn ids FIFO for native turn ordinals'
   assert.equal(terminal?.params.turnId, 't_user_1');
 });
 
-test('catalog exposes only the real Bridge input and control surface', async () => {
+test('catalog exposes DSH page permission modes and session-bound Agent presets', async () => {
   const bridge = fakeBridge();
   const { adapter } = adapterWith(bridge);
   await call(adapter, 'initialize', {
@@ -401,12 +421,101 @@ test('catalog exposes only the real Bridge input and control surface', async () 
     host: { name: 'Gian', version: '0.5.0' },
   });
   const catalog = await call(adapter, 'catalog.list', {});
-  const result = catalog.result as { input: Array<{ type: string }>; configOptions: Array<{ id: string }> };
+  const result = catalog.result as {
+    input: Array<{ type: string }>;
+    configOptions: Array<{ id: string; binding: string }>;
+    specialCatalogs: Record<string, string>;
+  };
   assert.deepEqual(result.input, [{ type: 'text' }]);
   assert.equal(result.configOptions.some((o) => o.id === 'model'), true);
-  assert.equal(result.configOptions.some((o) => o.id === 'approval_policy'), false);
-  const unsupported = await call(adapter, 'interaction.respond', {});
-  assert.equal(unsupported.error?.data?.domainCode, 'CAPABILITY_NOT_SUPPORTED');
+  assert.equal(result.configOptions.some((o) => o.id === 'permission_preset'), true);
+  assert.equal(
+    result.configOptions.find((o) => o.id === 'agent_preset')?.binding,
+    'session',
+  );
+  assert.equal(result.specialCatalogs.approvalMode, 'permission_preset');
+  const approval = (catalog.result as {
+    configOptions: Array<{ id: string; choices?: Array<{ value: unknown; displayName: string }> }>;
+  }).configOptions.find(option => option.id === 'permission_preset');
+  assert.deepEqual(approval?.choices, [
+    { value: 'workspace-write', displayName: 'Workspace Write' },
+    { value: 'danger-full-access', displayName: 'Full access' },
+  ]);
+});
+
+test('approval-backed modes and interaction.respond stay unavailable without an answerer', async () => {
+  const base = fakeBridge();
+  const bridge: FakeBridge = {
+    ...base,
+    request: async (method, params) => {
+      if (method === 'initialize') {
+        const initialized = await base.request(method, params);
+        return { ...initialized, capabilities: { 'session.events.read': 1 } };
+      }
+      return base.request(method, params);
+    },
+  };
+  const { adapter } = adapterWith(bridge);
+  const initialized = await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  const capabilities = (initialized.result as { capabilities: Record<string, number> }).capabilities;
+  assert.equal(capabilities.interaction, undefined);
+
+  const catalog = await call(adapter, 'catalog.list', {});
+  const approval = (catalog.result as {
+    configOptions: Array<{ id: string; choices?: Array<{ value: unknown }> }>;
+  }).configOptions.find(option => option.id === 'permission_preset');
+  assert.equal(approval, undefined, 'must not silently default to Full access');
+
+  const response = await call(adapter, 'interaction.respond', {});
+  assert.equal(response.error?.data?.domainCode, 'CAPABILITY_NOT_SUPPORTED');
+});
+
+test('interaction.respond forwards one advertised DSH approval decision', async () => {
+  const bridge = fakeBridge();
+  const { adapter, notifications } = adapterWith(bridge);
+  await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  const created = await call(adapter, 'session.create', {
+    sessionId: 's_interaction',
+    workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
+    config: { agent_preset: 'standard' },
+  });
+  const streamId = (created.result as { session: { streamId: string } }).session.streamId;
+  bridge.push('session.event', {
+    sessionId: 's_interaction',
+    nativeSeq: 1,
+    type: 'turn/start',
+    data: { turn: 1 },
+  });
+  bridge.push('interaction.requested', {
+    sessionId: 's_interaction',
+    interactionId: 'approval-1',
+    kind: 'approval',
+    title: 'Approve bash',
+    inputs: [],
+    actions: [
+      { id: 'allow-once', label: 'Allow once', style: 'primary' },
+      { id: 'reject', label: 'Reject', style: 'danger' },
+    ],
+  });
+  assert.ok(notifications.some(notification => notification.method === 'interaction.requested'));
+
+  const response = await call(adapter, 'interaction.respond', {
+    sessionId: 's_interaction',
+    streamId,
+    turnId: 't-1',
+    interactionId: 'approval-1',
+    responseId: 'response-1',
+    actionId: 'allow-once',
+    values: {},
+  });
+  assert.equal(response.error, null);
+  assert.equal((response.result as { accepted: boolean }).accepted, true);
 });
 
 test('catalog.resolve rebuilds effort choices for the selected latest DSH model', async () => {
@@ -435,6 +544,7 @@ test('catalog.resolve rebuilds effort choices for the selected latest DSH model'
     provider: 'deepseek',
     model: 'deepseek-reasoner',
     effort: 'max',
+    permission_preset: 'workspace-write',
   });
 });
 
@@ -452,4 +562,50 @@ test('catalog.list refreshes the revision after a late DSH Provider change', asy
     (before.result as { catalogRevision: string }).catalogRevision,
     (after.result as { catalogRevision: string }).catalogRevision,
   );
+});
+
+
+test('native reattach preserves immutable session identity and rejects changed or foreign bindings', async () => {
+  const key = 'reattach-test-key';
+  const { adapter } = adapterWith(fakeBridge(), key);
+  await call(adapter, 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'test', version: '0.5.5' } });
+  const base = { sessionId: 'reattach', workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] }, config: {} };
+  assert.equal((await call(adapter, 'session.create', base)).error, null);
+  const bound = (id = 'native-1', cwd = '/tmp/p') => ({ id, history: 'none', hostBindingProof: signNativeSessionHostBinding(key, {
+    pluginId: PLUGIN_ID, sessionId: base.sessionId, nativeSessionId: id, cwd,
+  }) });
+  assert.equal((await call(adapter, 'session.create', { ...base, nativeSession: bound() })).error, null);
+  assert.equal((await call(adapter, 'session.create', base)).error, null, 'original create retry remains idempotent');
+  for (const mutation of [
+    { nativeSession: bound('foreign') },
+    { workspace: { cwd: '/tmp/elsewhere', roots: ['/tmp/elsewhere'] }, nativeSession: bound('native-1', '/tmp/elsewhere') },
+    { workspace: { cwd: '/tmp/p', roots: ['/tmp/p', '/tmp/other'] } },
+    { config: { agent_preset: 'standard' } },
+  ]) {
+    const result = await call(adapter, 'session.create', { ...base, ...mutation });
+    assert.ok(result.error, JSON.stringify(mutation));
+    assert.equal(result.error.data?.domainCode, 'CONFLICT');
+  }
+  assert.equal((await call(adapter, 'session.create', { ...base, nativeSession: { ...bound(), hostBindingProof: 'invalid' } })).error?.data?.domainCode, 'RUNTIME_UNAVAILABLE');
+});
+
+test('native terminal evidence survives a late start RPC failure and retains the idempotency receipt', async () => {
+  const base = fakeBridge();
+  let starts = 0;
+  const { adapter, notifications } = adapterWith({ ...base, async request(method, params) {
+    const result = await base.request(method, params);
+    if (method === 'turn.start') { starts += 1; throw new Error('late bridge transport failure'); }
+    return result;
+  } });
+  await call(adapter, 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'test', version: '0.5.5' } });
+  await call(adapter, 'catalog.list', {});
+  const created = await call(adapter, 'session.create', { sessionId: 'late-reply', workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] }, config: {} });
+  const streamId = (created.result as { session: { streamId: string } }).session.streamId;
+  const params = { sessionId: 'late-reply', streamId, turnId: 'turn', input: [{ type: 'text', text: 'hello' }], config: { model: 'deepseek-chat' } };
+  const first = await call(adapter, 'turn.start', params);
+  assert.equal(first.error, null);
+  assert.equal((await call(adapter, 'turn.start', params)).error, null);
+  assert.equal(starts, 1);
+  assert.equal([...first.notifications, ...notifications].filter(n => n.method === 'turn.completed').length, 1);
+  assert.equal(notifications.filter(n => n.method === 'turn.failed').length, 0);
 });

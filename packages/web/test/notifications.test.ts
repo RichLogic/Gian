@@ -97,7 +97,7 @@ describe('browser notifications', () => {
   it('sends a desktop notification for session completion when permission is granted', () => {
     const sent = maybeNotifyForEnvelope(
       envelope('turn_completed', { summary: 'Implemented the parser.' }),
-      { session: { name: 'Parser fix', executor: 'codex' } },
+      { session: { name: 'Parser fix', agent_name: 'Codex' } },
     );
 
     expect(sent).toBe(true);
@@ -117,13 +117,22 @@ describe('browser notifications', () => {
     expect(FakeNotification.instances).toHaveLength(0);
   });
 
-  it('uses a Kimi fallback label for unnamed Kimi sessions', () => {
+  it('uses the saved Agent name for unnamed sessions without provider branches', () => {
     maybeNotifyForEnvelope(
       envelope('turn_completed', {}),
-      { session: { name: null, executor: 'kimi' } },
+      { session: { name: null, agent_name: 'Kimi Assistant' } },
     );
 
-    expect(FakeNotification.instances[0]!.title).toBe('Gian · Kimi session completed');
+    expect(FakeNotification.instances[0]!.title).toBe('Gian · Kimi Assistant completed');
+  });
+
+  it('uses a generic label when neither Session nor Agent has a name', () => {
+    maybeNotifyForEnvelope(
+      envelope('turn_completed', {}),
+      { session: { name: null, agent_name: null } },
+    );
+
+    expect(FakeNotification.instances[0]!.title).toBe('Gian · Session completed');
   });
 
   it('does not notify when browser permission has not been granted', () => {

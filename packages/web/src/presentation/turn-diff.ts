@@ -10,11 +10,10 @@ export interface TurnDiff {
  * Starting a newer turn therefore clears the previous chip immediately; a
  * new chip appears only after that newer turn produces its first diff.
  *
- * Multiple diff items per turn merge by path, LAST ONE WINS. Codex re-emits
- * the turn-cumulative unified diff on every `diff.updated`, so the last
- * event already carries the final per-file numbers (summing would double
- * count); claude/kimi emit one event per edit, where per-path last-wins
- * still surfaces every touched file.
+ * The transcript reducer has already replaced repeated snapshots that share
+ * one activity id (Codex's cumulative turn diff). Distinct remaining items
+ * are separate edit activities, so repeated edits to one path must add their
+ * line counts instead of discarding earlier work.
  */
 export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
   // Optimistic user echoes use turn=0 until the canonical user_message
@@ -28,7 +27,16 @@ export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
   const byPath = new Map<string, DiffFile>();
   for (const it of items) {
     if (it.kind !== 'diff' || it.turn !== turn) continue;
-    for (const f of it.files) byPath.set(f.path, f);
+    for (const file of it.files) {
+      const previous = byPath.get(file.path);
+      byPath.set(file.path, previous
+        ? {
+            ...file,
+            add: previous.add + file.add,
+            del: previous.del + file.del,
+          }
+        : file);
+    }
   }
   const files = [...byPath.values()];
   return files.length > 0 ? { turn, files } : null;

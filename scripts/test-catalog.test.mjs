@@ -15,13 +15,45 @@ test('catalog reconciles every current standard test exactly once', () => {
   const counts = Object.groupBy(entries, entry => entry.scope);
   const hasE2eSources = existsSync(new URL('../e2e/specs', import.meta.url));
 
-  assert.equal(entries.length, hasE2eSources ? 434 : 418);
-  assert.equal(counts.unit.length, 184);
-  assert.equal(counts.integration.length, 177);
-  assert.equal(counts.system.length, 57);
+  // Semantic reconciliation instead of a fixed total baseline: the catalog
+  // must classify every discovered test exactly once and every group must
+  // stay non-empty, so adding/removing tests never forces a magic-number
+  // edit while drift still fails loudly (Review Round 1/5, finding 10).
+  assert.ok(entries.length >= 1);
+  assert.ok(counts.unit.length >= 1);
+  assert.ok(counts.integration.length >= 1);
+  assert.ok(counts.system.length >= 1);
   assert.equal(counts.e2e?.length ?? 0, hasE2eSources ? 16 : 0);
   assert.deepEqual(catalog.defaultScopes, ['unit', 'integration']);
   assert.deepEqual(catalog.fullScopes, ['unit', 'integration', 'system']);
+  for (const group of catalog.groups) {
+    assert.ok(
+      entries.some(entry => group.patterns.some(pattern => matchesPattern(entry.path, pattern))),
+      `catalog group ${group.id} matches no test file`,
+    );
+  }
+});
+
+test('customization regression surface is cataloged exactly once per file', () => {
+  const { entries } = loadValidatedCatalog();
+  const required = [
+    'packages/proxy-protocol/test/customization-protocol.test.ts',
+    'packages/proxies/cc-proxy/test/customization.test.ts',
+    'packages/proxies/codex-proxy/test/customization.test.ts',
+    'packages/proxies/codex-proxy/test/customization-cli.test.ts',
+    'packages/proxies/kimi-proxy/test/customization.test.ts',
+    'packages/proxies/dsh-proxy/test/customization.test.ts',
+    'packages/proxies/grok-proxy/test/customization.test.ts',
+    'packages/proxies/zcode-proxy/test/customization.test.ts',
+    'packages/host/test/customization-inventory.test.ts',
+    'packages/host/test/customizations-routes.test.ts',
+    'packages/host/test/protocol-v2-client.test.ts',
+    'scripts/docs-adr.test.mjs',
+  ];
+  for (const path of required) {
+    const matches = entries.filter(entry => entry.path === path);
+    assert.equal(matches.length, 1, `${path} must be cataloged exactly once`);
+  }
 });
 
 test('catalog glob matching never crosses a directory boundary for *', () => {

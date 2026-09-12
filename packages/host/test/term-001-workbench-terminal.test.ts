@@ -21,6 +21,7 @@ import {
   WorkbenchTerminalManager,
   terminalOptions,
   type PtyFactory,
+  type TerminalTargetResolver,
 } from '../src/term/manager.js';
 
 // ---------------------------------------------------------------------------
@@ -95,17 +96,24 @@ interface Ctx {
   mgr: WorkbenchTerminalManager;
   broadcaster: CapturingBroadcaster;
   handles: Map<string, FakePtyHandle>;
-  spawnCalls: Array<{ shell: string; cwd: string; cols: number; rows: number }>;
+  spawnCalls: Array<{
+    shell: string;
+    args: string[];
+    cwd: string;
+    cols: number;
+    rows: number;
+    env: NodeJS.ProcessEnv;
+  }>;
 }
 
-function setup(): Ctx {
+function setup(targetResolver?: TerminalTargetResolver): Ctx {
   const broadcaster = new CapturingBroadcaster();
   const handles = new Map<string, FakePtyHandle>();
   const spawnCalls: Ctx['spawnCalls'] = [];
 
   const factory: PtyFactory = {
-    spawn(shell, _args, opts) {
-      spawnCalls.push({ shell, cwd: opts.cwd, cols: opts.cols, rows: opts.rows });
+    spawn(shell, args, opts) {
+      spawnCalls.push({ shell, args, cwd: opts.cwd, cols: opts.cols, rows: opts.rows, env: opts.env });
       const fake = new FakePty({ cols: opts.cols, rows: opts.rows });
       const handle: FakePtyHandle = {
         proc: fake as unknown as IPty,
@@ -126,6 +134,7 @@ function setup(): Ctx {
   const mgr = new WorkbenchTerminalManager(
     broadcaster as unknown as WsBroadcaster,
     async () => factory,
+    targetResolver,
   );
 
   return { mgr, broadcaster, handles, spawnCalls };
@@ -179,6 +188,65 @@ test('TERM-001: spawn rejects executable paths that are not discovered login she
   );
   assert.equal(ctx.spawnCalls.length, 0);
   assert.equal(ctx.mgr.size(), 0);
+});
+
+test('Agent CLI target resolves executable and HOME server-side and releases after exit', async () => {
+  const calls: string[] = [];
+  const ctx = setup(async target => {
+    assert.deepEqual(target, { kind: 'agent_cli', agentId: 'agent-1' });
+    return {
+      executable: '/managed/bin/claude',
+      args: [],
+      cwd: '/tmp',
+      env: { CLAUDE_CONFIG_DIR: '/managed/homes/claude/agent-1', DISABLE_UPDATES: '1' },
+      reservation: {
+        register: async groupId => {
+          calls.push(`register:${groupId}`);
+          return 'registered';
+        },
+        cancelBeforeSpawn: async () => { calls.push('cancel'); },
+        releaseUnregistered: async () => { calls.push('release-unregistered'); },
+        release: async () => { calls.push('release-group'); },
+      },
+      release: async () => { calls.push('release-lease'); },
+    };
+  });
+  await ctx.mgr.spawn({
+    termId: 'agent-cli',
+    target: { kind: 'agent_cli', agentId: 'agent-1' },
+    cols: 100,
+    rows: 30,
+  });
+  assert.equal(ctx.spawnCalls[0]!.shell, '/managed/bin/claude');
+  assert.deepEqual(ctx.spawnCalls[0]!.args, []);
+  assert.equal(ctx.spawnCalls[0]!.cwd, '/tmp');
+  assert.equal(ctx.spawnCalls[0]!.env.CLAUDE_CONFIG_DIR, '/managed/homes/claude/agent-1');
+  assert.equal(ctx.spawnCalls[0]!.env.DISABLE_UPDATES, '1');
+  assert.equal(calls[0]?.startsWith('register:'), true);
+
+  handleFor(ctx, 0).fireExit(0);
+  await tick();
+  await tick();
+  assert.deepEqual(calls.slice(1), ['release-group', 'release-lease']);
+});
+
+test('Agent CLI target rejects client shell and cwd overrides before resolving', async () => {
+  let resolved = false;
+  const ctx = setup(async () => {
+    resolved = true;
+    throw new Error('must not resolve');
+  });
+  await assert.rejects(
+    ctx.mgr.spawn({
+      termId: 'agent-cli',
+      target: { kind: 'agent_cli', agentId: 'agent-1' },
+      cwd: '/tmp',
+      cols: 80,
+      rows: 24,
+    }),
+    /cannot accept a client cwd or shell override/,
+  );
+  assert.equal(resolved, false);
 });
 
 test('TERM-001: PTY output broadcasts term:output with base64-encoded chunks', async () => {

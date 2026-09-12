@@ -31,7 +31,7 @@ test('ProtocolV2Client routes responses by request id', async () => {
   const client = new ProtocolV2Client(clientOptions(dir));
   try {
     const init = await client.initialize();
-    assert.equal(init.protocol.version, '2.0');
+    assert.equal(init.protocol.version, '2.2');
     assert.equal(init.plugin.id, 'claude');
 
     const catalog = await client.catalog();

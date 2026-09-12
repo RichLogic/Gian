@@ -1620,6 +1620,7 @@ export class SessionEventCoordinator {
     this.broadcaster.broadcast({
       type: 'queue:updated',
       session_id: sessionId,
+      queue_revision: this.queue.getRevision(sessionId),
       queue: this.queue.list(sessionId).map(e => ({
         id: e.id,
         text: e.text,

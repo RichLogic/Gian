@@ -14,6 +14,7 @@ import { uploadAttachment } from '../src/api.js';
 import { createOperationDispatcher } from '../src/operations/dispatcher.js';
 import { createOperationStore } from '../src/operations/store.js';
 import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
+import { ImageZoomContext } from '../src/transcript/items.js';
 import { typeInlineComposer } from './inline-composer-test-utils.js';
 
 const { pickResourcesMock } = vi.hoisted(() => ({ pickResourcesMock: vi.fn() }));
@@ -132,9 +133,13 @@ describe('Composer file attachments', () => {
       expect.objectContaining({ name: 'notes.txt', type: 'text/plain', size: 5 }),
       'notes.txt',
     ));
-    await user.click(await screen.findByText('notes.txt'));
-    // Clicking the chip opens the attachment popover (no thumbnail for text files).
-    expect(document.querySelector('.ref-pop')).not.toBeNull();
+    const chip = await screen.findByText('notes.txt');
+    // 2026-09-10 owner call: a plain chip click does nothing — hovering
+    // previews the attachment popover (no thumbnail for text files).
+    await user.click(chip);
+    expect(document.querySelector('.ref-pop')).toBeNull();
+    await user.hover(chip);
+    await waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
     expect(document.querySelector('.ref-pop-thumb')).toBeNull();
 
     typeInlineComposer(screen.getByRole('textbox'), 'summarize it');
@@ -167,10 +172,11 @@ describe('Composer file attachments', () => {
     expect(await screen.findByText('paste-1.png')).toBeInTheDocument();
 
     // Switching away unmounts the composer; coming back must restore the chip
-    // from the persisted draft, previewing via the host-served URL.
+    // from the persisted draft. The preview opens on hover (a plain chip
+    // click performs no action, 2026-09-10 owner call).
     first.unmount();
     renderComposer();
-    await userEvent.click(await screen.findByText('paste-1.png'));
+    await userEvent.hover(await screen.findByText('paste-1.png'));
     await waitFor(() => {
       const img = document.querySelector('.ref-pop-thumb');
       expect(img?.getAttribute('src')).toBe('/api/sessions/session-attachment/attachments/uuid.png');
@@ -200,8 +206,46 @@ describe('Composer file attachments', () => {
     })]);
   });
 
-  it('turns a long paste into a persistent inline reference and sends it separately', async () => {
-    const user = userEvent.setup();
+  it('clicking an image chip zooms straight to the lightbox when zoom is wired (2026-09-10 owner call)', async () => {
+    const zoom = vi.fn();
+    const store = createOperationStore();
+    render(
+      <LocaleProvider locale="en">
+        <ImageZoomContext.Provider value={zoom}>
+          <OperationStoreProvider store={store}>
+            <OperationDispatcherProvider dispatcher={createOperationDispatcher({ store })}>
+              <Composer
+                session={SESSION}
+                executor="claude"
+                workspaceId="workspace-1"
+                disabled={false}
+                running={false}
+                onSend={vi.fn()}
+                onSendSkill={vi.fn()}
+                onStop={vi.fn()}
+                onQueueAdd={vi.fn()}
+                onSetMode={vi.fn()}
+                onSetModel={vi.fn()}
+                onSetEffort={vi.fn()}
+              />
+            </OperationDispatcherProvider>
+          </OperationStoreProvider>
+        </ImageZoomContext.Provider>
+      </LocaleProvider>,
+    );
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/captured.png',
+      name: 'screenshot.png',
+      mime: 'image/png',
+      size: 128,
+    }));
+    await userEvent.click(await screen.findByText('screenshot.png'));
+    expect(zoom).toHaveBeenCalled();
+    // No popover detour for images.
+    expect(document.querySelector('.ref-pop')).toBeNull();
+  });
+
+  it('turns a long paste into a persistent inline reference and sends it separately', async () => {    const user = userEvent.setup();
     const { unmount } = renderComposer();
     const pasted = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n');
     fireEvent.paste(screen.getByRole('textbox'), {
@@ -210,8 +254,9 @@ describe('Composer file attachments', () => {
 
     const reference = document.querySelector('.composer-inline-reference[data-reference-type="context"]') as HTMLElement;
     expect(reference).not.toBeNull();
-    await user.click(reference);
-    expect(screen.getByText('Pasted text')).toBeInTheDocument();
+    // 2026-09-10 owner call: hover previews; a plain click does nothing.
+    await user.hover(reference);
+    expect(await screen.findByText('Pasted text')).toBeInTheDocument();
     expect(screen.getByText(/12 lines/)).toBeInTheDocument();
     expect(screen.getByRole('textbox')).toHaveTextContent(reference.textContent ?? '');
 
@@ -230,6 +275,38 @@ describe('Composer file attachments', () => {
         segments: expect.arrayContaining([expect.objectContaining({ referenceType: 'context' })]),
       }),
     }));
+  });
+
+  it('previews a reference chip on hover — delayed open, plain click is a no-op (2026-09-10)', () => {
+    renderComposer();
+    const pasted = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n');
+    fireEvent.paste(screen.getByRole('textbox'), {
+      clipboardData: { items: [], getData: () => pasted },
+    });
+    const chip = document.querySelector('.composer-inline-reference[data-reference-type="context"]') as HTMLElement;
+    expect(chip).not.toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      // Hover opens after the delay, not instantly.
+      fireEvent.mouseOver(chip);
+      expect(screen.queryByText('Pasted text')).toBeNull();
+      act(() => { vi.advanceTimersByTime(350); });
+      expect(screen.getByText('Pasted text')).toBeInTheDocument();
+      // A plain click performs no action (preview stays hover-driven).
+      fireEvent.click(chip);
+      expect(screen.getByText('Pasted text')).toBeInTheDocument();
+      // Leaving the chip closes the hover-opened preview.
+      fireEvent.mouseOut(chip);
+      act(() => { vi.advanceTimersByTime(250); });
+      expect(screen.queryByText('Pasted text')).toBeNull();
+      // Clicking while nothing is open still opens nothing.
+      fireEvent.click(chip);
+      act(() => { vi.advanceTimersByTime(300); });
+      expect(screen.queryByText('Pasted text')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('hydrates a selected-text card into a fixed Side Chat composer without auto-sending', async () => {
@@ -275,9 +352,10 @@ describe('Composer file attachments', () => {
     expect(injectComposerContextItems(SESSION.id, [contextItem])).toBe(true);
 
     const { onSend } = renderComposer();
-    await user.click(screen.getByText('Save'));
-    // The chip opens a floating preview card with the capture details.
-    expect(screen.getByText('Browser element')).toBeInTheDocument();
+    // 2026-09-10 owner call: hovering the chip opens the floating preview
+    // card with the capture details (a plain click is a no-op).
+    await user.hover(screen.getByText('Save'));
+    expect(await screen.findByText('Browser element')).toBeInTheDocument();
     expect(screen.getByText('button[data-testid="save"]')).toBeInTheDocument();
     expect(screen.getByText(/https:\/\/example.com\/settings/)).toBeInTheDocument();
     expect(screen.getByText(/<button data-testid="save">Save<\/button>/)).toBeInTheDocument();
@@ -313,8 +391,9 @@ describe('Composer file attachments', () => {
     }
     await waitFor(() => expect(screen.queryByText('example-folder')).toBeNull());
     act(() => editor?.dispatchCommand(UNDO_COMMAND, undefined));
-    await user.click(await screen.findByText('example-folder'));
-    expect(screen.getByText('/tmp/example-folder')).toBeInTheDocument();
+    // Hover previews the folder chip (a plain click is a no-op, 2026-09-10).
+    await user.hover(await screen.findByText('example-folder'));
+    await waitFor(() => expect(screen.getByText('/tmp/example-folder')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Send' }));
     expect(onSend).toHaveBeenCalledWith('', expect.objectContaining({

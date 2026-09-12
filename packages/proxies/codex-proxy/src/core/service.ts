@@ -25,8 +25,27 @@ import type {
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
 import type { CodexRuntime, RuntimeNotification, RuntimeServerRequest } from '../runtime/types.js';
+import {
+  CodexCustomizationScanner,
+  ScanTimeoutError,
+} from './customization.js';
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
+
+function customizationUnavailable(
+  kind: import('@gian/proxy-protocol').CustomizationKind,
+  diagnostics: import('@gian/proxy-protocol').CustomizationDiagnostic[],
+): import('@gian/proxy-protocol').CustomizationListResult {
+  return {
+    kind,
+    status: 'unavailable',
+    completeness: 'none',
+    observedAt: new Date().toISOString(),
+    items: [],
+    truncated: false,
+    diagnostics,
+  };
+}
 
 const REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
 const MCP_SERVER_ELICITATION_METHOD = 'mcpServer/elicitation/request';
@@ -360,6 +379,60 @@ function currentTurnStatus(params: unknown) {
   return 'completed';
 }
 
+function completedTurnSummary(
+  params: unknown,
+  turnId: string | null,
+  cwd: string,
+): CompletedTurnSummary | null {
+  if (!turnId || !params || typeof params !== 'object') return null;
+  const turn = (params as { turn?: unknown }).turn;
+  if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return null;
+  const record = turn as Record<string, unknown>;
+  if (record.id !== turnId) return null;
+
+  const items = Array.isArray(record.items) ? record.items : [];
+  const assistantText = items
+    .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'agentMessage')
+    .map((item) => typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : '')
+    .join('');
+
+  const commands: CommandExecutionSummary[] = items
+    .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'commandExecution')
+    .map((item) => ({
+      id: typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : randomId('cmd'),
+      command: typeof (item as { command?: unknown }).command === 'string' ? (item as { command: string }).command : '',
+      cwd: typeof (item as { cwd?: unknown }).cwd === 'string' ? (item as { cwd: string }).cwd : cwd,
+      status: typeof (item as { status?: unknown }).status === 'string' ? (item as { status: string }).status : 'completed',
+      exitCode: typeof (item as { exitCode?: unknown }).exitCode === 'number' ? (item as { exitCode: number }).exitCode : null,
+      aggregatedOutput: typeof (item as { aggregatedOutput?: unknown }).aggregatedOutput === 'string'
+        ? (item as { aggregatedOutput: string }).aggregatedOutput
+        : null,
+    }));
+
+  const fileChanges: FileChangeSummary[] = items
+    .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'fileChange')
+    .map((item) => ({
+      id: typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : randomId('file'),
+      status: typeof (item as { status?: unknown }).status === 'string' ? (item as { status: string }).status : 'completed',
+      changes: Array.isArray((item as { changes?: unknown }).changes)
+        ? ((item as { changes: Array<{ path?: unknown; kind?: { type?: unknown }; diff?: unknown }> }).changes).map((change) => ({
+          path: typeof change.path === 'string' ? change.path : 'unknown',
+          kind: typeof change.kind?.type === 'string' ? change.kind.type : 'update',
+          diff: typeof change.diff === 'string' ? change.diff : null,
+        }))
+        : [],
+    }));
+
+  return {
+    turnId,
+    status: typeof record.status === 'string' ? record.status : 'completed',
+    assistantText,
+    commands,
+    fileChanges,
+    threadPreview: null,
+  };
+}
+
 function singleTextInput(input: InputItem[]): string | null {
   return input.length === 1 && input[0]?.type === 'text' ? input[0].text.trim() : null;
 }
@@ -476,8 +549,9 @@ function codexAgentUpdates(params: unknown): CodexAgentUpdate[] {
     return [{
       agentId,
       description: path || 'Agent',
-      status: record.kind === 'interrupted' ? 'error' : 'running',
+      status: codexAgentStatus(record.status ?? record.kind, record.status),
       ...(path ? { agentType: path } : {}),
+      ...(typeof record.message === 'string' && record.message ? { output: record.message } : {}),
     }];
   }
 
@@ -531,6 +605,7 @@ function codexPlanText(params: unknown): string {
 
 export class CodexProxyService {
   private readonly runtime: CodexRuntime;
+  private readonly customization: CodexCustomizationScanner;
   private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
   private readonly sessionsByThreadId = new Map<string, SessionRecord>();
@@ -547,6 +622,7 @@ export class CodexProxyService {
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
     this.emitEvent = options.emitEvent ?? (() => undefined);
+    this.customization = new CodexCustomizationScanner(options.runtime);
   }
 
   async initialize() {
@@ -579,6 +655,46 @@ export class CodexProxyService {
 
   setEventSink(handler: ProxyEventSink) {
     this.emitEvent = handler;
+  }
+
+  async inspectCustomizations(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationListResult> {
+    try {
+      return await this.customization.list(params.kind, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return customizationUnavailable(params.kind, [{
+          code: 'PROVIDER_INSPECTION_FAILED',
+          message: `Codex ${params.kind} scan exceeded its inspection bound.`,
+        }]);
+      }
+      throw error;
+    }
+  }
+
+  async customizationDetail(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    id: string;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationDetailResult> {
+    try {
+      return await this.customization.detail(params.kind, params.id, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return {
+          kind: params.kind,
+          id: params.id,
+          status: 'unavailable',
+          observedAt: new Date().toISOString(),
+          text: '',
+          truncated: false,
+          diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message: 'Codex detail scan exceeded its inspection bound.' }],
+        };
+      }
+      throw error;
+    }
   }
 
   async close() {
@@ -1676,7 +1792,10 @@ export class CodexProxyService {
       if (!context) return;
       const completedTurnId = turnId ?? context?.turnId ?? session.activeTurnId;
       this.activeTurnsByThreadId.delete(threadId);
-      const summary = await this.buildCompletedTurnSummary(session, completedTurnId);
+      // `thread/compacted` has no bounded current-turn payload. Do not recover
+      // one by reading the complete native history: large rollouts can exceed
+      // the shared app-server's JSONL frame and stop unrelated Codex turns.
+      const summary = completedTurnSummary(message.params, completedTurnId, session.cwd);
       const updatedSession = this.updateSession(session, {
         activeTurnId: null,
         status: 'idle',
@@ -1714,7 +1833,11 @@ export class CodexProxyService {
 
     const status = currentTurnStatus(message.params);
     this.activeTurnsByThreadId.delete(threadId);
-    const summary = await this.buildCompletedTurnSummary(session, turnId ?? session.activeTurnId);
+    // `turn/completed` already carries the current Turn. Reading the whole
+    // thread here made ordinary completion scale with all historical turns
+    // and could tear down the shared app-server once that response crossed
+    // the bounded JSONL frame.
+    const summary = completedTurnSummary(message.params, turnId ?? session.activeTurnId, session.cwd);
     const nextStatus = status === 'failed' ? 'error' : 'idle';
     const updatedSession = this.updateSession(session, {
       activeTurnId: null,
@@ -1823,70 +1946,4 @@ export class CodexProxyService {
     });
   }
 
-  private async buildCompletedTurnSummary(session: SessionRecord, turnId: string | null): Promise<CompletedTurnSummary | null> {
-    if (!turnId) {
-      return null;
-    }
-
-    try {
-      const snapshot = await this.runtime.readThread(session.threadId);
-      const thread = snapshot.thread as {
-        preview?: unknown;
-        turns?: Array<{
-          id?: unknown;
-          status?: unknown;
-          items?: unknown[];
-        }>;
-      };
-      const turns = Array.isArray(thread.turns) ? thread.turns : [];
-      const turn = turns.find((entry) => entry && entry.id === turnId);
-      if (!turn) {
-        return null;
-      }
-
-      const items = Array.isArray(turn.items) ? turn.items : [];
-      const assistantText = items
-        .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'agentMessage')
-        .map((item) => typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : '')
-        .join('');
-
-      const commands: CommandExecutionSummary[] = items
-        .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'commandExecution')
-        .map((item) => ({
-          id: typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : randomId('cmd'),
-          command: typeof (item as { command?: unknown }).command === 'string' ? (item as { command: string }).command : '',
-          cwd: typeof (item as { cwd?: unknown }).cwd === 'string' ? (item as { cwd: string }).cwd : session.cwd,
-          status: typeof (item as { status?: unknown }).status === 'string' ? (item as { status: string }).status : 'completed',
-          exitCode: typeof (item as { exitCode?: unknown }).exitCode === 'number' ? (item as { exitCode: number }).exitCode : null,
-          aggregatedOutput: typeof (item as { aggregatedOutput?: unknown }).aggregatedOutput === 'string'
-            ? (item as { aggregatedOutput: string }).aggregatedOutput
-            : null,
-        }));
-
-      const fileChanges: FileChangeSummary[] = items
-        .filter((item) => item && typeof item === 'object' && (item as { type?: unknown }).type === 'fileChange')
-        .map((item) => ({
-          id: typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : randomId('file'),
-          status: typeof (item as { status?: unknown }).status === 'string' ? (item as { status: string }).status : 'completed',
-          changes: Array.isArray((item as { changes?: unknown }).changes)
-            ? ((item as { changes: Array<{ path?: unknown; kind?: { type?: unknown }; diff?: unknown }> }).changes).map((change) => ({
-              path: typeof change.path === 'string' ? change.path : 'unknown',
-              kind: typeof change.kind?.type === 'string' ? change.kind.type : 'update',
-              diff: typeof change.diff === 'string' ? change.diff : null,
-            }))
-            : [],
-        }));
-
-      return {
-        turnId,
-        status: typeof turn.status === 'string' ? turn.status : 'completed',
-        assistantText,
-        commands,
-        fileChanges,
-        threadPreview: typeof thread.preview === 'string' ? thread.preview : null,
-      };
-    } catch {
-      return null;
-    }
-  }
 }

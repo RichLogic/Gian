@@ -4,6 +4,7 @@ import type {
   NativeConfigOption,
   Session,
 } from '@gian/shared';
+import { isSessionRuntimeProfile, parseSessionProxyBinding, pluginIdForExecutorId } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 const EMPTY_EXECUTOR_CONFIG: ExecutorConfigState = {
@@ -27,39 +28,75 @@ type SessionRow = Omit<
   origin_anchor_type?: 'head' | 'turn' | null;
   available_actions_json?: string | null;
   runtime_profile_json?: string | null;
+  proxy_plugin_id?: string | null;
+  proxy_binding_json?: string | null;
 };
+
+function hydrateProxyBinding(
+  value: string | null | undefined,
+  proxyPluginId: string | null | undefined,
+): {
+  proxy_binding: Session['proxy_binding'];
+  proxy_binding_error: string | null;
+  authoritative: boolean;
+} {
+  if (!value) {
+    return { proxy_binding: null, proxy_binding_error: null, authoritative: false };
+  }
+  const parsed = parseSessionProxyBinding(value);
+  if (!parsed.ok) {
+    return {
+      proxy_binding: null,
+      proxy_binding_error: parsed.error,
+      authoritative: true,
+    };
+  }
+  if (proxyPluginId && parsed.binding.pluginId !== proxyPluginId) {
+    return {
+      proxy_binding: null,
+      proxy_binding_error: 'PROXY_BINDING_IDENTITY_MISMATCH',
+      authoritative: true,
+    };
+  }
+  return {
+    proxy_binding: parsed.binding,
+    proxy_binding_error: null,
+    authoritative: true,
+  };
+}
 
 function parseRuntimeProfile(
   value: string | null | undefined,
 ): Session['runtime_profile'] | undefined {
   if (!value) return undefined;
   try {
-    const profile = JSON.parse(value) as Record<string, unknown>;
-    const skill = profile.skill as Record<string, unknown> | undefined;
-    if (
-      typeof profile.id === 'string'
-      && typeof profile.agentId === 'string'
-      && (profile.proxy === 'codex' || profile.proxy === 'claude'
-        || profile.proxy === 'kimi' || profile.proxy === 'dsh')
-      && typeof profile.cliPath === 'string'
-      && typeof profile.cliVersion === 'string'
-      && (profile.configHome === null || typeof profile.configHome === 'string')
-      && (profile.cliFingerprint === null || typeof profile.cliFingerprint === 'string')
-      && typeof profile.proxyVersion === 'string'
-      && Array.isArray(profile.verifiedCliVersions)
-      && profile.verifiedCliVersions.every(item => typeof item === 'string')
-      && (profile.verification === 'verified' || profile.verification === 'unverified')
-      && skill?.name === 'gian-session'
-      && typeof skill.version === 'string'
-      && (skill.state === 'ready' || skill.state === 'missing'
-        || skill.state === 'conflict' || skill.state === 'invalid')
-    ) {
-      return profile as unknown as NonNullable<Session['runtime_profile']>;
-    }
+    const migrated = migrateLegacyRuntimeProfile(JSON.parse(value));
+    if (isSessionRuntimeProfile(migrated)) return migrated;
   } catch {
-    // Malformed snapshots fail closed to the legacy Agent resolver.
+    // Present but malformed snapshots fail closed. Do not invent an Agent profile.
   }
-  return undefined;
+  return null;
+}
+
+function migrateLegacyRuntimeProfile(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  if (typeof value.pluginId === 'string' && value.pluginId.length > 0) return value;
+  if (
+    (value.proxy === 'codex' || value.proxy === 'claude' || value.proxy === 'kimi'
+      || value.proxy === 'dsh' || value.proxy === 'zcode')
+    && typeof value.cliPath === 'string'
+    && typeof value.proxyVersion === 'string'
+  ) {
+    return {
+      ...value,
+      pluginId: pluginIdForExecutorId(value.proxy),
+    };
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseExecutorConfig(value: string | null | undefined): ExecutorConfigState {
@@ -156,10 +193,14 @@ export class SessionRepository {
     return row ? this.hydrate(row) : null;
   }
 
-  list(opts: { includeArchived?: boolean; archivedOnly?: boolean } = {}): Session[] {
-    let where = 'archived = 0';
-    if (opts.archivedOnly) where = 'archived = 1';
-    else if (opts.includeArchived) where = '1=1';
+  list(opts: { includeArchived?: boolean; archivedOnly?: boolean; includeHidden?: boolean } = {}): Session[] {
+    // Hidden schedule Fork Sessions are excluded from every default listing:
+    // rail, state sync, and management surfaces (contract G). Single-row
+    // lookups (`find`/`get`) still resolve them so transcripts and recovery
+    // keep working.
+    let where = 'archived = 0 AND hidden = 0';
+    if (opts.archivedOnly) where = opts.includeHidden ? 'archived = 1' : 'archived = 1 AND hidden = 0';
+    else if (opts.includeArchived) where = opts.includeHidden ? '1=1' : 'hidden = 0';
     const rows = this.db
       .prepare(`SELECT * FROM sessions WHERE ${where} ORDER BY updated_at DESC`)
       .all() as SessionRow[];
@@ -188,6 +229,7 @@ export class SessionRepository {
       origin_anchor_type: _originAnchorType,
       available_actions_json: availableActionsJson,
       runtime_profile_json: runtimeProfileJson,
+      proxy_binding_json: proxyBindingJson,
       created_by_actor_kind: createdByActorKind,
       created_by_actor_id: createdByActorId,
       created_by_session_id: createdBySessionId,
@@ -196,15 +238,19 @@ export class SessionRepository {
     } = row;
     const turnConfigOptions = parseTurnConfigOptions(turnConfigOptionsJson);
     const availableActions = parseAvailableActions(availableActionsJson);
+    const binding = hydrateProxyBinding(proxyBindingJson, stored.proxy_plugin_id);
+    const runtimeProfile = binding.authoritative
+      ? binding.proxy_binding?.runtimeProfile ?? null
+      : parseRuntimeProfile(runtimeProfileJson);
     return {
       ...stored,
+      proxy_binding: binding.proxy_binding,
+      proxy_binding_error: binding.proxy_binding_error,
       native_session_id: nativeSessionId || null,
       executor_config: parseExecutorConfig(executorConfigJson),
       turn_config: parseTurnConfig(turnConfigJson),
       ...(turnConfigOptions !== undefined ? { turn_config_options: turnConfigOptions } : {}),
-      ...(parseRuntimeProfile(runtimeProfileJson) !== undefined
-        ? { runtime_profile: parseRuntimeProfile(runtimeProfileJson) }
-        : {}),
+      ...(runtimeProfile !== undefined ? { runtime_profile: runtimeProfile } : {}),
       native_config_options: this.nativeOptions.get(row.id) ?? [],
       ...(createdByActorKind && createdByActorId
         ? {

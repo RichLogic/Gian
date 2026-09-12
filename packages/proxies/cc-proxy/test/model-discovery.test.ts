@@ -495,7 +495,7 @@ test('buildClaudeCliArgs maps bypassPermissions to skip-permissions and still is
   );
   assert.ok(args.includes('--dangerously-skip-permissions'));
   assert.ok(args.includes('--strict-mcp-config'));
-  assert.ok(!args.includes('--mcp-config'));
+  assert.ok(args.includes('--mcp-config'));
   assert.ok(!args.includes('--permission-mode'));
   assert.ok(!args.includes('--permission-prompt-tool'));
 });

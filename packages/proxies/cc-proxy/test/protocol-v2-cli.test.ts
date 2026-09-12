@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { initializeResultSchema, proxyErrorResponseSchema } from '@gian/proxy-protocol';
 
@@ -58,7 +61,7 @@ test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime versio
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'claude');
-  assert.equal(result.plugin.version, '0.2.3');
+  assert.equal(result.plugin.version, '0.2.4');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);
@@ -69,7 +72,7 @@ test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime versio
   assert.equal(result.capabilities['slash.list'], undefined);
   assert.equal(result.capabilities['turn.steer'], undefined);
   assert.equal(result.capabilities['session.native.delete'], undefined);
-  assert.equal(result.capabilities['integration.mcp.streamableHttp'], undefined);
+  assert.equal(result.capabilities['integration.mcp.streamableHttp'], 1);
 
   proxy.send({ jsonrpc: '2.0', id: 'req-3', method: 'does.not.exist', params: {} });
   const missing = proxyErrorResponseSchema.parse(await proxy.next());
@@ -219,5 +222,219 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
     if (proxy.child.exitCode === null && proxy.child.signalCode === null) {
       proxy.child.kill('SIGTERM');
     }
+  }
+});
+
+function makeDeepTree(prefix: string): string {
+  const ws = mkdtempSync(join(tmpdir(), prefix));
+  let dir = ws;
+  for (let depth = 0; depth < 160; depth += 1) {
+    mkdirSync(join(dir, 'd'), { recursive: true });
+    dir = join(dir, 'd');
+    writeFileSync(join(dir, 'AGENTS.md'), `# deep ${depth}\n`);
+  }
+  return ws;
+}
+
+test('a slow rule scan never queues the remaining kinds behind it on the Claude inspection process', async () => {
+  const proxy = startV2Proxy();
+  const ws = makeDeepTree('gian-cc-scan-isolation-');
+  try {
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['2.3', '2.1'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    const initialized = await proxy.next() as { id: string; result: unknown };
+    assert.equal(initialized.id, 'req-1');
+    assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.3');
+
+    proxy.send({ jsonrpc: '2.0', id: 'rule', method: 'customization.list', params: { kind: 'rule', cwd: ws } });
+    // The fast kind is sent second but must be answered first: kinds are
+    // pipelined, so the slow kind cannot queue this request past its own
+    // bound (which would push it into the Host per-request timeout).
+    proxy.send({ jsonrpc: '2.0', id: 'skill', method: 'customization.list', params: { kind: 'skill' } });
+    const first = await proxy.next() as { id?: string };
+    assert.equal(first.id, 'skill', `fast kind must not be queued behind the slow one, got ${JSON.stringify(first).slice(0, 200)}`);
+    const second = await proxy.next() as { id?: string };
+    assert.equal(second.id, 'rule', 'slow kind must still answer');
+
+    proxy.send({ jsonrpc: '2.0', id: 'req-4', method: 'shutdown', params: {} });
+    await proxy.next();
+    assert.equal(await waitForExit(proxy.child), 0);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
+  }
+});
+
+test('EOF while a rule scan is in flight still delivers the scan Response before exit', async () => {
+  const proxy = startV2Proxy();
+  const ws = makeDeepTree('gian-cc-eof-scan-');
+  try {
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['2.3', '2.1'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    await proxy.next();
+    proxy.send({ jsonrpc: '2.0', id: 'scan', method: 'customization.list', params: { kind: 'rule', cwd: ws } });
+    proxy.child.stdin.end();
+    const scan = await Promise.race([
+      proxy.next(),
+      new Promise<unknown>(resolve => setTimeout(() => resolve(null), 10_000)),
+    ]) as { id?: string } | null;
+    assert.ok(scan && scan.id === 'scan', 'scan Response was orphaned by EOF');
+    assert.equal(await waitForExit(proxy.child), 0);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
+  }
+});
+
+test('two overlapping normal requests are strictly serialized: the second starts only after the first ends', async () => {
+  const fakeRuntime = resolve('test/fixtures/fake-claude-runtime.mjs');
+  // The fake delays the capability probe ONLY, so the first catalog.list
+  // (cold catalog → runtime probe) stays open for 400ms while the
+  // does.not.exist sent right after it deliberately overlaps: with
+  // normal-request serialization restored, the fast request must not start
+  // until the catalog probe has fully ended.
+  const proxy = startV2Proxy({ GIAN_RUNTIME_BIN: fakeRuntime, FAKE_CLAUDE_HELP_DELAY_MS: '400' });
+  try {
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['2.1'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    const initialized = await proxy.next() as { id: string; result: unknown };
+    assert.equal(initialized.id, 'req-1');
+    assert.equal(initializeResultSchema.parse(initialized.result).protocol.version, '2.1');
+
+    proxy.send({ jsonrpc: '2.0', id: 'req-catalog', method: 'catalog.list', params: {} });
+    // Second normal request arrives while the first is still in flight; it
+    // is answered synchronously and needs no session.
+    proxy.send({ jsonrpc: '2.0', id: 'req-unknown', method: 'does.not.exist', params: {} });
+
+    const order: string[] = [];
+    let gotCatalog = false;
+    let gotUnknown = false;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const message = await proxy.next() as { id?: string };
+      if (message.id === 'req-catalog') {
+        gotCatalog = true;
+        order.push('catalog-response');
+        continue;
+      }
+      if (message.id === 'req-unknown') {
+        gotUnknown = true;
+        order.push('unknown-response');
+        break;
+      }
+    }
+    assert.equal(gotCatalog, true, 'catalog.list response missing');
+    assert.equal(gotUnknown, true, 'does.not.exist response missing');
+    // The second normal request must only start after the first has fully
+    // ended: its Response cannot arrive inside the catalog probe window.
+    assert.ok(order.indexOf('unknown-response') > order.indexOf('catalog-response'),
+      `does.not.exist must not overlap the catalog probe: ${order.join(',')}`);
+
+    // Response-before-Notification and notification completeness are
+    // unchanged under serialization: a turn's deferred notifications still
+    // arrive only AFTER the turn Response.
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-create',
+      method: 'session.create',
+      params: {
+        sessionId: 'serial-session',
+        workspace: { cwd: '/tmp', roots: ['/tmp'] },
+        config: {},
+      },
+    });
+    const created = await proxy.next() as { id: string; result: { session: { streamId: string } } };
+    assert.equal(created.id, 'req-create');
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-turn',
+      method: 'turn.start',
+      params: {
+        sessionId: 'serial-session',
+        streamId: created.result.session.streamId,
+        turnId: 'serial-turn',
+        input: [{ type: 'text', text: 'serialize me' }],
+        config: {},
+      },
+    });
+    const turnOrder: string[] = [];
+    let gotTurnResponse = false;
+    let gotStarted = false;
+    const turnDeadline = Date.now() + 10_000;
+    while (Date.now() < turnDeadline) {
+      const message = await proxy.next() as { id?: string; method?: string };
+      if (message.id === 'req-turn') {
+        gotTurnResponse = true;
+        turnOrder.push('turn-response');
+        continue;
+      }
+      if (message.method === 'turn.started') {
+        gotStarted = true;
+        turnOrder.push('notif:turn.started');
+        break;
+      }
+    }
+    assert.equal(gotTurnResponse, true, 'turn response missing');
+    assert.equal(gotStarted, true, 'turn.started missing');
+    assert.ok(turnOrder.indexOf('notif:turn.started') > turnOrder.indexOf('turn-response'),
+      `turn.started leaked before the turn Response: ${turnOrder.join(',')}`);
+  } finally {
+    if (proxy.child.exitCode === null && proxy.child.signalCode === null) {
+      proxy.child.kill('SIGTERM');
+    }
+  }
+});
+
+test('a shutdown request never orphans an in-flight scan on the Claude inspection process', async () => {
+  const proxy = startV2Proxy();
+  const ws = makeDeepTree('gian-cc-shutdown-scan-');
+  try {
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-1',
+      method: 'initialize',
+      params: {
+        protocol: { name: 'gian.proxy', versions: ['2.3', '2.1'] },
+        host: { name: 'Gian', version: '9.9.9' },
+      },
+    });
+    await proxy.next();
+    proxy.send({ jsonrpc: '2.0', id: 'scan', method: 'customization.list', params: { kind: 'rule', cwd: ws } });
+    proxy.send({ jsonrpc: '2.0', id: 'bye', method: 'shutdown', params: {} });
+    const ids = new Set<string>();
+    for (let i = 0; i < 2; i += 1) {
+      const message = await Promise.race([
+        proxy.next(),
+        new Promise<unknown>(resolve => setTimeout(() => resolve(null), 10_000)),
+      ]) as { id?: string } | null;
+      if (message?.id) ids.add(message.id);
+    }
+    assert.equal(ids.has('scan'), true, 'scan Response was orphaned by shutdown');
+    assert.equal(ids.has('bye'), true, 'shutdown Response missing');
+    assert.equal(await waitForExit(proxy.child), 0);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    if (proxy.child.exitCode === null) proxy.child.kill('SIGKILL');
   }
 });

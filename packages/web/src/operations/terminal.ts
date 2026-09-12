@@ -41,6 +41,7 @@ export interface TermSpawnInput {
   rows: number;
   cwd?: string;
   shell?: string;
+  target?: { kind: 'agent_cli'; agent_id: string };
 }
 
 const termSpawn: OperationDefinition<TermSpawnInput> = {
@@ -53,6 +54,7 @@ const termSpawn: OperationDefinition<TermSpawnInput> = {
     rows: input.rows,
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.shell ? { shell: input.shell } : {}),
+    ...(input.target ? { target: input.target } : {}),
   }),
   timeoutMs: WS_TIMEOUT_MS,
 };

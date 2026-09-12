@@ -15,7 +15,7 @@
     {
       "id": "agent-runtime",
       "prefixes": ["FT-AGENT"],
-      "evidence": ["packages/host/test/agent-*.test.ts", "packages/host/test/*runtime*.test.ts", "packages/host/test/kimi-proxy-manager.test.ts", "packages/host/test/compare-kimi-versions.test.ts", "packages/host/test/proxy-shutdown-state.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts"]
+      "evidence": ["packages/host/test/agent-*.test.ts", "packages/host/test/*runtime*.test.ts", "packages/host/test/catalog-plugin-store.test.ts", "packages/host/test/proxy-shutdown-state.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts", "packages/proxies/dsh-bridge/test/*.test.ts", "packages/proxies/dsh-proxy/test/*.test.ts", "packages/proxies/zcode-proxy/test/*.test.ts"]
     },
     {
       "id": "workspace",
@@ -30,7 +30,7 @@
     {
       "id": "sessions",
       "prefixes": ["FT-SES"],
-      "evidence": ["packages/host/test/session-*.test.ts", "packages/host/test/auto-title.test.ts", "packages/host/test/title-sanitize.test.ts", "packages/host/test/fork-inherit-config.test.ts", "packages/host/test/executor-config.test.ts", "packages/host/test/queue-and-busy.test.ts", "packages/host/test/turn-runtime.test.ts", "packages/web/test/*session*.test.ts*", "packages/web/test/fork-presentation.test.ts", "e2e/specs/02-workspace-and-session.spec.ts"]
+      "evidence": ["packages/host/test/session-*.test.ts", "packages/host/test/auto-title.test.ts", "packages/host/test/title-sanitize.test.ts", "packages/host/test/fork-inherit-config.test.ts", "packages/host/test/executor-config.test.ts", "packages/host/test/queue-and-busy.test.ts", "packages/host/test/turn-runtime.test.ts", "packages/web/test/*session*.test.ts*", "packages/web/test/fork-controls.test.tsx", "e2e/specs/02-workspace-and-session.spec.ts"]
     },
     {
       "id": "composer-queue-approval-question",
@@ -45,7 +45,7 @@
     {
       "id": "provider-protocol",
       "prefixes": ["FT-PROTO", "FT-CC", "FT-CODEX", "FT-KIMI", "FT-PROVIDER"],
-      "evidence": ["packages/proxy-protocol/test/*.test.ts", "packages/host/test/normalize-protocol-v1.test.ts", "packages/host/test/parse-codex-jsonl.test.ts", "packages/host/test/protocol-*.test.ts", "packages/host/test/sidechat-fork-*.test.ts", "packages/host/test/sidechat-state-machine.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts", "scripts/run-*-canary.test.mjs"]
+      "evidence": ["packages/proxy-protocol/test/*.test.ts", "packages/proxy-catalog-contract/test/*.test.ts", "packages/host/test/normalize-protocol-v1.test.ts", "packages/host/test/parse-codex-jsonl.test.ts", "packages/host/test/protocol-*.test.ts", "packages/host/test/sidechat-fork-*.test.ts", "packages/host/test/sidechat-state-machine.test.ts", "packages/proxies/cc-proxy/test/*.test.ts", "packages/proxies/codex-proxy/test/*.test.ts", "packages/proxies/kimi-proxy/test/*.test.ts", "packages/proxies/dsh-bridge/test/*.test.ts", "packages/proxies/dsh-proxy/test/*.test.ts", "packages/proxies/zcode-proxy/test/*.test.ts", "scripts/run-*-canary.test.mjs"]
     },
     {
       "id": "websocket-operations",
@@ -96,6 +96,11 @@
       "id": "quality-release-canary",
       "prefixes": ["FT-QA", "FT-UPDATE", "FT-CANARY"],
       "evidence": ["scripts/*quality*.test.mjs", "scripts/run-e2e.test.mjs", "scripts/e2e-janitor.test.mjs", "scripts/run-*-canary.test.mjs", "scripts/verify-update-artifacts.test.mjs", "packages/desktop/test/app-updater.test.ts", "packages/desktop/test/managed-host-shutdown.test.ts", "packages/desktop/test/electron-smoke.mjs", "scripts/run-packaged-app-smoke.mjs"]
+    },
+    {
+      "id": "conversation-schedules",
+      "prefixes": ["FT-SCHED"],
+      "evidence": ["packages/shared/test/schedule-contract.test.mjs", "packages/shared/test/tool-contract.test.mjs", "packages/host/test/schedule-*.test.ts", "packages/host/test/gian-tool-schedule.test.ts", "packages/web/test/schedule-*.test.ts*", "packages/web/test/timer-view.test.tsx", "packages/web/test/app-socket-schedule.test.tsx", "packages/web/test/scheduled-task-badge.test.tsx"]
     }
   ]
 }

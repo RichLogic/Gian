@@ -659,10 +659,19 @@ async function completePackagedOnboarding({
   const cliPath = claude.locator('.onboarding-cli-path input');
   await cliPath.fill(fakeClaude);
   await claude.locator('.onboarding-cli-path button').click();
-  await claude.locator('.onboarding-agent-components .ready', { hasText: fakeClaude })
-    .waitFor({ timeout: 30_000 });
-  assert.match(await claude.innerText(), /9\.8\.7/);
-
+  try {
+    await claude.locator('.onboarding-agent-components .ready', { hasText: fakeClaude })
+      .waitFor({ timeout: 30_000 });
+  } catch (error) {
+    const hostLog = await readFile(join(dataDir, 'logs', 'desktop-host.log'), 'utf8')
+      .catch(() => '<unavailable>');
+    const onboardingState = await onboarding.innerText().catch(() => '<unavailable>');
+    throw new Error([
+      `Packaged Claude Runtime path did not become ready: ${error}`,
+      `Onboarding state:\n${onboardingState}`,
+      `Host log tail:\n${hostLog.slice(-8_000)}`,
+    ].join('\n\n'));
+  }
   // This intentionally uses the public GitHub release channel, not a routed
   // fixture. AgentManager verifies API asset digests, the exact .sha256 file,
   // archive bytes, self-test and compatibility before the atomic activation.
@@ -700,6 +709,18 @@ async function completePackagedOnboarding({
     assertFile(join(activatedProxy, 'manifest.json')),
     assertFile(join(activatedProxy, 'proxy.mjs')),
   ]);
+  const activatedManifest = JSON.parse(await readFile(join(activatedProxy, 'manifest.json'), 'utf8'));
+  const expectedClaudeManifest = JSON.parse(await readFile(
+    join(rootDir, 'packages', 'proxies', 'cc-proxy', 'manifest.json'),
+    'utf8',
+  ));
+  assert.equal(
+    activatedManifest.pluginVersion,
+    expectedClaudeManifest.pluginVersion,
+    `publish stable proxy-claude-v${expectedClaudeManifest.pluginVersion} before packaged verification`,
+  );
+  assert.equal(activatedManifest.schemaVersion, 4);
+  assert.match(agentText, /9\.8\.7/);
   const configuredHostPid = Number((await readFile(fakeClaudeProbePid, 'utf8')
     .catch(() => '')).trim());
   assert.ok(

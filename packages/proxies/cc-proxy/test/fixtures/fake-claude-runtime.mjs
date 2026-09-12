@@ -8,6 +8,15 @@
 const args = process.argv.slice(2);
 
 if (args.includes('--help')) {
+  // Test seam: FAKE_CLAUDE_HELP_DELAY_MS delays the capability probe ONLY
+  // (never the turn stream), so tests can hold a normal Proxy request open
+  // deterministically (e.g. a cold catalog.list probe) while a queued
+  // request overlaps it.
+  const rawHelpDelay = Number(process.env.FAKE_CLAUDE_HELP_DELAY_MS ?? '0');
+  const helpDelayMs = Number.isFinite(rawHelpDelay) && rawHelpDelay > 0 ? rawHelpDelay : 0;
+  if (helpDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, helpDelayMs));
+  }
   process.stdout.write(`Usage: claude [options]\n
   --permission-mode <mode>  Permission mode to use for the session (choices: "acceptEdits", "bypassPermissions", "default", "plan")\n
   --effort <level>          Reasoning effort (choices: "low", "medium", "high", "max")\n`);
@@ -17,6 +26,11 @@ if (args.includes('--help')) {
 if (args.includes('-p') && args.includes('--output-format')) {
   const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
   write({ type: 'system', subtype: 'init', model: 'claude-sonnet-4-6' });
+  // Test seam: FAKE_CLAUDE_TURN_DELAY_MS delays the whole turn stream so
+  // concurrency tests can overlap a slow turn with a queued request
+  // deterministically. The default keeps the historical 30ms cadence.
+  const rawDelay = Number(process.env.FAKE_CLAUDE_TURN_DELAY_MS ?? '0');
+  const delayMs = Number.isFinite(rawDelay) && rawDelay > 0 ? rawDelay : 0;
   const timer = setTimeout(() => {
     write({
       type: 'assistant',
@@ -37,11 +51,11 @@ if (args.includes('-p') && args.includes('--output-format')) {
       result: 'hello from fake claude',
       usage: { input_tokens: 10, output_tokens: 4 },
     });
-  }, 30);
+  }, 30 + delayMs);
   timer.unref();
   // Exit after the timer has written the turn. The unref'd timer would not
   // keep the process alive by itself, but stream writes need a tick to flush.
-  setTimeout(() => process.exit(0), 80);
+  setTimeout(() => process.exit(0), 80 + delayMs);
 } else {
   process.exit(0);
 }

@@ -11,6 +11,8 @@ import type { WsBroadcaster } from '../web/ws-broadcast.js';
 export interface ApprovalRequest {
   sessionId: string;
   turnId: string;
+  /** Canonical Gian turn ordinal for Host-local interaction projection. */
+  turnNumber?: number;
   category: ApprovalCategory;
   risk: 'low' | 'medium' | 'high';
   description: string;
@@ -81,8 +83,11 @@ export class ApprovalManager {
     // an auto allow_once would short-circuit the question and ship an empty
     // `answers` payload to cc-proxy, dropping the user's selection on the
     // floor. Always register these as pending regardless of mode/risk.
+    const browserCaptureApproved = req.category === 'browser_capture'
+      && this.wasAllowedForSession(req.sessionId, req.category);
     const requiresUser = req.category === 'question'
       || req.category === 'exit_plan_mode'
+      || (req.category === 'browser_capture' && !browserCaptureApproved)
       || (req.nativeOptions?.length ?? 0) > 0;
 
     if (
@@ -117,13 +122,16 @@ export class ApprovalManager {
         category: record.category,
         description: record.description,
         status: 'auto-approved',
+        ...(record.turnNumber !== undefined ? { turn_number: record.turnNumber } : {}),
         ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
 
     // Respond to the proxy immediately.
     try {
-      await this.respondFn?.(req.sessionId, record.id, 'allow_once');
+      if (req.payload?.['localOnly'] !== true) {
+        await this.respondFn?.(req.sessionId, record.id, 'allow_once');
+      }
     } catch (err) {
       console.error('[approval] auto-approve respondFn failed', err);
     }
@@ -149,6 +157,7 @@ export class ApprovalManager {
         category: record.category,
         description: record.description,
         status: 'pending',
+        ...(record.turnNumber !== undefined ? { turn_number: record.turnNumber } : {}),
         ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
@@ -189,6 +198,11 @@ export class ApprovalManager {
       approval: {
         id: approvalId,
         status,
+        ...(record.payload?.['localOnly'] === true ? {
+          session_id: record.sessionId,
+          ...(record.turnNumber !== undefined ? { turn_number: record.turnNumber } : {}),
+          decision,
+        } : {}),
         resolved_by: by,
         resolved_at: new Date(record.resolvedAt!).toISOString(),
       },
@@ -254,6 +268,11 @@ export class ApprovalManager {
           status: 'declined',
           resolved_by: 'auto',
           resolved_at: new Date(now).toISOString(),
+          ...(record.payload?.['localOnly'] === true ? {
+            session_id: record.sessionId,
+            ...(record.turnNumber !== undefined ? { turn_number: record.turnNumber } : {}),
+            decision: 'decline' as const,
+          } : {}),
         },
       });
     }

@@ -88,32 +88,46 @@ describe('useWorkbenchLayout panel-3 gating', () => {
     expect(result.current.layout.inspectorVisible).toBe(true);
   });
 
-  it('history rail: inspector maps to history and panel 2 stays visible with zero tabs', () => {
-    // The history rail's empty state is designed content (design/git-history
-    // §3.1): with no commit tabs open, panel 2 must stay mounted+visible
-    // instead of disappearing like the other rails' empty groups.
-    function useHistoryHarness() {
-      const [p3Collapsed, setP3Collapsed] = useState(false);
-      const layout = useWorkbenchLayout({
+  it('history rail: first activation shows only the inspector; panel 2 opens once a commit tab exists', () => {
+    // With no commit tabs open the history rail shows panel 3 only — panel 2
+    // stays hidden like every other empty group. Selecting a commit creates
+    // the tab and panel 2 opens naturally.
+    function useHistoryHarness(withCommitTab: boolean) {
+      const commitTab: SheetTab = {
+        id: 'tab-commit-1',
+        group: 'history',
+        name: 'c0ffee1 · commit',
+        kind: 'commit',
+        icoKind: 'commit',
+        ico: '',
+      } as SheetTab;
+      return useWorkbenchLayout({
         mode: 'sessions',
         subtaskActive: false,
         activeRail: 'history',
-        tabs: [],
-        activeTabByGroup: {},
-        viewState: 'both',
+        tabs: withCommitTab ? [commitTab] : [],
+        activeTabByGroup: withCommitTab ? { history: 'tab-commit-1' } : {},
+        viewState: withCommitTab ? 'both' : 'main',
         chatPanel: null,
         filesInspectorSuppressed: false,
-        p3Collapsed,
+        p3Collapsed: false,
         groupOfRail: GROUP_OF_RAIL,
       });
-      return layout;
     }
-    const { result } = renderHook(() => useHistoryHarness());
+    const { result, rerender } = renderHook(
+      ({ withCommitTab }) => useHistoryHarness(withCommitTab),
+      { initialProps: { withCommitTab: false } },
+    );
     expect(result.current.inspectorKind).toBe('history');
     expect(result.current.inspectorAvailable).toBe(true);
+    expect(result.current.inspectorVisible).toBe(true);
+    expect(result.current.activeGroup).toBe('history');
+    expect(result.current.sheetMounted).toBe(false);
+    expect(result.current.sheetVisible).toBe(false);
+
+    rerender({ withCommitTab: true });
     expect(result.current.sheetMounted).toBe(true);
     expect(result.current.sheetVisible).toBe(true);
-    expect(result.current.activeGroup).toBe('history');
   });
 
   it('Settings owns Panel 2 and never allocates Panel 3', () => {

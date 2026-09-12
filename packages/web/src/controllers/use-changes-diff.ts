@@ -342,9 +342,10 @@ export function setChangesDiffBase(
   void reloadChangesDiffFiles(workingTreeId, ownerSessionId);
 }
 
-/** External scope request (GitBadge click → All changes, transcript entries →
- *  Last turn with its exact session+turn). Replaces the inspector's old
- *  `scopeRequest` prop: App writes the store directly. */
+/** External scope request (transcript entries → Last turn with its exact
+ *  session+turn). Replaces the inspector's old `scopeRequest` prop: App
+ *  writes the store directly. (The top-right GitBadge was removed
+ *  2026-09-09.) */
 export function applyChangesScopeRequest(
   workingTreeId: string,
   scope: ChangeScope,

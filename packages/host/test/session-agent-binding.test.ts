@@ -12,10 +12,19 @@ import { randomUUID } from 'node:crypto';
 import type {
   Executor,
   AgentRuntimeProfile,
+  OpenRuntimeProfile,
   ProxyNotification,
   ServerToClientMessage,
+  SessionProxyBinding,
   UserAgent,
 } from '@gian/shared';
+import {
+  parseProxyPluginId,
+  pluginIdForExecutorId,
+  sessionAllowsLegacyRuntimeFallback,
+  sessionBoundRuntimeCliPath,
+} from '@gian/shared';
+import { SessionRepository } from '../src/session/repository.js';
 import type { WSContext } from 'hono/ws';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager, type SessionAgentResolver } from '../src/session/manager.js';
@@ -35,10 +44,12 @@ const { makeWsHandlers } = await import('../src/web/ws-handler.js');
 const { WsBroadcaster: RealWsBroadcaster } = await import('../src/web/ws-broadcast.js');
 
 function makeAgent(overrides: Partial<UserAgent> = {}): UserAgent {
+  const proxy = overrides.proxy ?? 'codex';
   return {
     id: overrides.id ?? randomUUID(),
     name: overrides.name ?? 'Codex Prime',
-    proxy: overrides.proxy ?? 'codex',
+    pluginId: overrides.pluginId ?? pluginIdForExecutorId(proxy),
+    proxy,
     cliPath: overrides.cliPath ?? null,
     defaults: overrides.defaults ?? { model: '', thinking: '', mode: '' },
   };
@@ -152,6 +163,13 @@ class FakeProxyManager {
     private readonly failCreate = false,
   ) {}
 
+  async acquireWithBinding(sessionId: string, binding: { pluginId: string }, options?: {
+    cliPath?: string | null;
+    proxyVersion?: string | null;
+  }) {
+    return this.getOrCreate(sessionId, binding.pluginId as Executor, options);
+  }
+
   async getOrCreate(sessionId: string, executor: Executor, options?: {
     cliPath?: string | null;
     proxyVersion?: string | null;
@@ -211,20 +229,30 @@ function setup(options?: {
   const agents = options?.agents ?? [];
   const cliPaths = options?.cliPaths ?? {};
   const deleted = options?.deletedAgentIds ?? new Set<string>();
+  const resolution = { kind: 0, session: 0, requireSession: 0, runtime: 0 };
   const kindPath = (executor: Executor): string | null => {
     const first = agents.find(agent => agent.proxy === executor);
     return first ? cliPaths[first.id] ?? first.cliPath : null;
   };
   const resolver: SessionAgentResolver = {
-    cliPathForKind: kindPath,
+    cliPathForKind: executor => {
+      resolution.kind += 1;
+      return kindPath(executor);
+    },
     cliPathForSession: session => {
+      resolution.session += 1;
+      const bound = sessionBoundRuntimeCliPath(session);
+      if (!sessionAllowsLegacyRuntimeFallback(session)) return bound;
       if (session.agent_id) {
         if (deleted.has(session.agent_id)) return null;
-        return cliPaths[session.agent_id] ?? null;
+        return bound ?? cliPaths[session.agent_id] ?? null;
       }
-      return kindPath(session.executor);
+      return bound ?? kindPath(session.executor);
     },
     requireCliPathForSession: session => {
+      resolution.requireSession += 1;
+      const bound = sessionBoundRuntimeCliPath(session);
+      if (!sessionAllowsLegacyRuntimeFallback(session)) return bound;
       if (session.agent_id) {
         if (deleted.has(session.agent_id)) {
           throw Object.assign(
@@ -232,11 +260,12 @@ function setup(options?: {
             { code: 'AGENT_DELETED' },
           );
         }
-        return cliPaths[session.agent_id] ?? null;
+        return bound ?? cliPaths[session.agent_id] ?? null;
       }
-      return kindPath(session.executor);
+      return bound ?? kindPath(session.executor);
     },
     agentRuntime: agentId => {
+      resolution.runtime += 1;
       const agent = agents.find(candidate => candidate.id === agentId);
       if (!agent || deleted.has(agentId)) throw new Error(`agent not found: ${agentId}`);
       return { agent, cliPath: cliPaths[agentId] ?? agent.cliPath };
@@ -269,7 +298,7 @@ function setup(options?: {
     resolver,
     hostServices,
   );
-  return { dir, db, wsId, proxyMgr, broadcaster, sessions, credentials };
+  return { dir, db, wsId, proxyMgr, broadcaster, sessions, credentials, resolution };
 }
 
 test('session:create binds the Agent: kind, defaults, CLI path, snapshots', async () => {
@@ -288,6 +317,8 @@ test('session:create binds the Agent: kind, defaults, CLI path, snapshots', asyn
       agent_id: agent.id,
     });
     assert.equal(session.executor, 'codex');
+    assert.equal(session.proxy_plugin_id, 'codex');
+    assert.equal(session.proxy_binding, null);
     assert.equal(session.agent_id, agent.id);
     assert.equal(session.agent_name, 'Codex Prime');
     assert.equal(session.model, 'gpt-5-codex');
@@ -395,6 +426,7 @@ test('Session snapshots an immutable Runtime Profile and reuses its exact pair',
   const profile: AgentRuntimeProfile = {
     id: 'profile-old',
     agentId: agent.id,
+    pluginId: 'codex',
     proxy: 'codex',
     cliPath: '/agents/codex-verified',
     cliVersion: '0.146.0',
@@ -569,12 +601,11 @@ test('native adopt binds one Agent explicitly and never silently picks the first
       },
     );
     const binding = await sessions.resolveAdoptAgent('kimi', kindAgents[1]!.id);
-    assert.deepEqual(binding, {
-      agentId: kindAgents[1]!.id,
-      agentName: 'Kimi B',
-      cliPath: null,
-      runtimeProfile: null,
-    });
+    assert.equal(binding.agentId, kindAgents[1]!.id);
+    assert.equal(binding.agentName, 'Kimi B');
+    assert.equal(binding.cliPath, null);
+    assert.equal(binding.runtimeProfile, null);
+    assert.equal(binding.agent?.id, kindAgents[1]!.id);
     await assert.rejects(
       sessions.resolveAdoptAgent('claude', kindAgents[0]!.id),
       /is a kimi Agent, not claude/,
@@ -657,4 +688,222 @@ test('ws session:create without agent_id and executor fails AGENT_REQUIRED', asy
     | undefined;
   assert.equal(error?.code, 'AGENT_REQUIRED');
   assert.equal(error?.request_type, 'session:create');
+});
+
+test('open Runtime Profile hydrates byte-for-byte and launch uses binding plugin version', async () => {
+  const agent = makeAgent({ proxy: 'codex', cliPath: '/agents/codex-current' });
+  const { dir, db, wsId, proxyMgr, sessions } = setup({
+    agents: [agent],
+    cliPaths: { [agent.id]: '/agents/codex-current' },
+  });
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });
+    const openProfile: OpenRuntimeProfile = {
+      id: 'profile-open',
+      agentId: agent.id,
+      pluginId: parseProxyPluginId('io.gian.unknown.plugin'),
+      runtimeId: 'unknown-runtime',
+      path: '/opt/foo../bin',
+      version: '9.9.9',
+      configHome: '/tmp/unknown',
+      contentFingerprint: null,
+      verifiedVersions: ['1.2.3'],
+      verification: 'unverified',
+    };
+    const binding: SessionProxyBinding = {
+      schemaVersion: 1,
+      pluginId: parseProxyPluginId('io.gian.unknown.plugin'),
+      pluginVersion: '0.4.0',
+      manifestSha256: 'a'.repeat(64),
+      protocolVersion: '2.1',
+      processScope: 'session',
+      runtimeProfile: openProfile,
+    };
+    db.prepare('UPDATE sessions SET runtime_profile_json = ?, proxy_binding_json = ?, proxy_plugin_id = ? WHERE id = ?')
+      .run(JSON.stringify(openProfile), JSON.stringify(binding), 'io.gian.unknown.plugin', session.id);
+    const hydrated = new SessionRepository(db).get(session.id);
+    assert.deepEqual(hydrated?.runtime_profile, openProfile);
+    assert.equal(hydrated?.proxy_binding?.pluginVersion, '0.4.0');
+
+    session.runtime_profile = openProfile;
+    session.proxy_binding = binding;
+    session.proxy_plugin_id = 'io.gian.unknown.plugin';
+    db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES ('t-open', ?, 1, 'completed', '2026-08-27T00:00:00.000Z', '2026-08-27T00:00:00.000Z')`,
+    ).run(session.id);
+    db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES (?, 'src-open', 't-open')`,
+    ).run(session.id);
+    await proxyMgr.dispose(session.id);
+    await sessions.sendMessage(session.id, 'resume');
+    assert.deepEqual(proxyMgr.acquires.at(-1), {
+      sessionId: session.id,
+      executor: 'codex',
+      cliPath: openProfile.path,
+      proxyVersion: '0.4.0',
+    });
+    assert.notEqual(proxyMgr.acquires.at(-1)?.proxyVersion, openProfile.version);
+
+    db.prepare('UPDATE sessions SET runtime_profile_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...openProfile, extra: true }), session.id);
+    assert.deepEqual(new SessionRepository(db).get(session.id)?.runtime_profile, openProfile);
+
+    db.prepare('UPDATE sessions SET proxy_binding_json = NULL, runtime_profile_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...openProfile, extra: true }), session.id);
+    assert.equal(new SessionRepository(db).get(session.id)?.runtime_profile, null);
+
+    db.prepare('UPDATE sessions SET runtime_profile_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...openProfile, path: '/opt/foo/../bin' }), session.id);
+    assert.equal(new SessionRepository(db).get(session.id)?.runtime_profile, null);
+
+    const legacyMissingPluginId = {
+      id: 'profile-legacy',
+      agentId: agent.id,
+      proxy: 'codex',
+      cliPath: '/agents/codex-verified',
+      cliVersion: '0.146.0',
+      configHome: '/agents/.codex',
+      cliFingerprint: 'content-old',
+      proxyVersion: '0.2.8',
+      verifiedCliVersions: ['0.146.0'],
+      verification: 'verified',
+      skill: { name: 'gian-session', version: '0.2.8', state: 'ready' },
+    };
+    db.prepare('UPDATE sessions SET proxy_binding_json = NULL, runtime_profile_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacyMissingPluginId), session.id);
+    assert.deepEqual(new SessionRepository(db).get(session.id)?.runtime_profile, {
+      ...legacyMissingPluginId,
+      pluginId: 'codex',
+    });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('exact binding wins over a conflicting runtime_profile column and identity mismatch fails closed', async () => {
+  const agent = makeAgent({ proxy: 'codex', cliPath: '/agents/codex-current' });
+  const { dir, db, wsId, proxyMgr, sessions, resolution } = setup({
+    agents: [agent],
+    cliPaths: { [agent.id]: '/agents/codex-current' },
+  });
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });
+    const bindingProfile: OpenRuntimeProfile = {
+      id: 'profile-binding',
+      agentId: agent.id,
+      pluginId: parseProxyPluginId('io.gian.unknown.plugin'),
+      runtimeId: 'unknown-runtime',
+      path: '/opt/binding/bin',
+      version: '9.9.9',
+      configHome: '/tmp/binding',
+      contentFingerprint: null,
+      verifiedVersions: ['1.2.3'],
+      verification: 'unverified',
+    };
+    const columnProfile: OpenRuntimeProfile = {
+      ...bindingProfile,
+      id: 'profile-column',
+      path: '/opt/column/bin',
+      version: '8.8.8',
+    };
+    const binding: SessionProxyBinding = {
+      schemaVersion: 1,
+      pluginId: parseProxyPluginId('io.gian.unknown.plugin'),
+      pluginVersion: '0.4.0',
+      manifestSha256: 'a'.repeat(64),
+      protocolVersion: '2.1',
+      processScope: 'session',
+      runtimeProfile: bindingProfile,
+    };
+    db.prepare('UPDATE sessions SET runtime_profile_json = ?, proxy_binding_json = ?, proxy_plugin_id = ? WHERE id = ?')
+      .run(JSON.stringify(columnProfile), JSON.stringify(binding), 'io.gian.unknown.plugin', session.id);
+    const hydrated = new SessionRepository(db).get(session.id);
+    assert.deepEqual(hydrated?.runtime_profile, bindingProfile);
+    assert.equal(hydrated?.proxy_binding_error, null);
+    assert.equal(sessionBoundRuntimeCliPath(hydrated), '/opt/binding/bin');
+    assert.equal(sessionAllowsLegacyRuntimeFallback(hydrated), false);
+
+    db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES ('t-bind', ?, 1, 'completed', '2026-08-27T00:00:00.000Z', '2026-08-27T00:00:00.000Z')`,
+    ).run(session.id);
+    db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES (?, 'src-bind', 't-bind')`,
+    ).run(session.id);
+    await proxyMgr.dispose(session.id);
+    await sessions.sendMessage(session.id, 'resume');
+    assert.deepEqual(proxyMgr.acquires.at(-1), {
+      sessionId: session.id,
+      executor: 'codex',
+      cliPath: '/opt/binding/bin',
+      proxyVersion: '0.4.0',
+    });
+
+    const other = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });
+    db.prepare('UPDATE sessions SET runtime_profile_json = ?, proxy_binding_json = ?, proxy_plugin_id = ? WHERE id = ?')
+      .run(JSON.stringify(columnProfile), JSON.stringify(binding), 'codex', other.id);
+    const mismatched = new SessionRepository(db).get(other.id);
+    assert.equal(mismatched.proxy_binding, null);
+    assert.equal(mismatched.proxy_binding_error, 'PROXY_BINDING_IDENTITY_MISMATCH');
+    assert.equal(mismatched.runtime_profile, null);
+    assert.equal(sessionBoundRuntimeCliPath(mismatched), null);
+    assert.equal(sessionAllowsLegacyRuntimeFallback(mismatched), false);
+    db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES ('t-mis', ?, 1, 'completed', '2026-08-27T00:00:00.000Z', '2026-08-27T00:00:00.000Z')`,
+    ).run(other.id);
+    db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES (?, 'src-mis', 't-mis')`,
+    ).run(other.id);
+    await proxyMgr.dispose(other.id);
+    const acquiresBeforeMismatch = proxyMgr.acquires.length;
+    const resolutionBeforeMismatch = { ...resolution };
+    await assert.rejects(
+      () => sessions.sendMessage(other.id, 'resume-mismatch'),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, 'PROXY_BINDING_UNUSABLE');
+        assert.match(String(error), /PROXY_BINDING_IDENTITY_MISMATCH/);
+        return true;
+      },
+    );
+    assert.equal(proxyMgr.acquires.length, acquiresBeforeMismatch);
+    assert.deepEqual(resolution, resolutionBeforeMismatch);
+
+    const broken = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });
+    db.prepare('UPDATE sessions SET proxy_binding_json = ?, proxy_plugin_id = ? WHERE id = ?')
+      .run('{"schemaVersion":1}', 'codex', broken.id);
+    const malformed = new SessionRepository(db).get(broken.id);
+    assert.equal(malformed.proxy_binding, null);
+    assert.equal(malformed.proxy_binding_error, 'PROXY_BINDING_INVALID');
+    assert.equal(sessionAllowsLegacyRuntimeFallback(malformed), false);
+    db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at, completed_at)
+       VALUES ('t-inv', ?, 1, 'completed', '2026-08-27T00:00:00.000Z', '2026-08-27T00:00:00.000Z')`,
+    ).run(broken.id);
+    db.prepare(
+      `INSERT INTO proxy_replay_turns (session_id, provider_turn_id, turn_id)
+       VALUES (?, 'src-inv', 't-inv')`,
+    ).run(broken.id);
+    await proxyMgr.dispose(broken.id);
+    const acquiresBeforeInvalid = proxyMgr.acquires.length;
+    const resolutionBeforeInvalid = { ...resolution };
+    await assert.rejects(
+      () => sessions.sendMessage(broken.id, 'resume-invalid'),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, 'PROXY_BINDING_UNUSABLE');
+        assert.match(String(error), /PROXY_BINDING_INVALID/);
+        return true;
+      },
+    );
+    assert.equal(proxyMgr.acquires.length, acquiresBeforeInvalid);
+    assert.deepEqual(resolution, resolutionBeforeInvalid);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

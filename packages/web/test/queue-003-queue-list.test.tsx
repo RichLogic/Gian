@@ -6,10 +6,12 @@
 //               in queue-and-busy.test.ts.
 
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { QueueEntry } from '../src/types.js';
 import { QueueList } from '../src/components/QueueList.js';
+import { ImageZoomContext } from '../src/transcript/items.js';
 
 function entry(id: string, text: string, extra?: Partial<QueueEntry>): QueueEntry {
   return { id, text, ...extra };
@@ -76,6 +78,17 @@ describe('QUEUE-003: QueueList rendering', () => {
     expect(document.querySelector('.qd-att-file')?.textContent).toContain('notes.txt');
   });
 
+  it('QUEUE-003: thumbnails fit inside the box with the image aspect ratio preserved (no square crop)', () => {
+    // Regression (2026-09-07): thumbs were 32x32 with object-fit: cover, hard
+    // cropping wide screenshots into squares.
+    const css = readFileSync('src/styles/coding.css', 'utf8');
+    const thumb = css.match(/\.qd-att-thumb img\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(thumb).toMatch(/max-width:\s*64px/);
+    expect(thumb).toMatch(/max-height:\s*32px/);
+    expect(thumb).not.toMatch(/object-fit:\s*cover/);
+    expect(thumb).not.toMatch(/(^|;)\s*width:\s*32px/);
+  });
+
   it('renders queued references inline and keeps the structured row atomic', () => {
     renderQueue({
       queue: [entry('a', 'Before  after', {
@@ -94,6 +107,32 @@ describe('QUEUE-003: QueueList rendering', () => {
     expect(document.querySelector('[data-reference-id="file-1"]')).toBeInTheDocument();
     expect(screen.queryByLabelText('Edit')).toBeNull();
     expect(document.querySelector('.qd-att-file')).toBeNull();
+  });
+
+  it('queued image chip click opens the lightbox directly (2026-09-10 owner call)', async () => {
+    const user = userEvent.setup();
+    const zoom = vi.fn();
+    render(
+      <ImageZoomContext.Provider value={zoom}>
+        <QueueList
+          sessionId="sess-1"
+          queue={[entry('a', '', {
+            composer_document: {
+              version: 1,
+              segments: [{ type: 'reference', id: 'img-1', referenceType: 'attachment', label: 'shot.png' }],
+            },
+            items: [{ type: 'localImage', path: '/data/attachments/sess-1/shot.png', name: 'shot.png', mime: 'image/png', size: 2048 }],
+          })]}
+          onRemove={vi.fn()}
+          onUpdate={vi.fn()}
+          onClear={vi.fn()}
+        />
+      </ImageZoomContext.Provider>,
+    );
+    // Image chips: click → lightbox, no popover detour.
+    await user.click(screen.getByText('shot.png'));
+    expect(zoom).toHaveBeenCalledWith('/api/sessions/sess-1/attachments/shot.png', 'shot.png');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
 

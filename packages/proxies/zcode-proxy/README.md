@@ -7,7 +7,7 @@ bundle types leak into Host/Web.
 
 ## Status: shipping
 
-ZCode Proxy 0.1.0 is part of the default shipping set. WP7 passed real
+ZCode Proxy 0.1.1 is part of the default shipping set. WP7 passed real
 GLM-5.3-Flash text, reasoning, tool, 25-second permission, interrupt,
 same-workspace concurrency, native discovery, detach/reattach, and Replay
 identity canaries.
@@ -38,7 +38,8 @@ identity canaries.
 - Declared: `catalog.resolve`, `session.native.list`, `session.replay`,
   `interaction`, `event.reasoning`, `event.usage` (plus core). Catalog comes
   from the side-effect-free `workspace/readState`; the bootstrap catalog only
-  covers the unconfigured vocabulary.
+  covers the unconfigured vocabulary. Provider is an independent turn-bound
+  selector; changing it resolves the matching Model and Thinking choices.
 - **Not declared**: `input.localImage`, `input.localFile`, `session.rename`,
   `session.native.delete`, `session.fork`,
   `sidechat`, `turn.steer`, `integration.mcp.*` (frozen D10).
@@ -60,7 +61,7 @@ calls inner close, and provider history is never deleted on Gian's behalf
 
 - Official MCP auth (`interaction/requestOfficialMcpAuthHeaders`) is answered
   with a structured `official_auth_unavailable`; ZCode degrades gracefully.
-- File and image inputs are not advertised in 0.1.0. The public Protocol/1
+- File and image inputs are not advertised in 0.1.1. The public Protocol/1
   `session/send` surface used here accepts text; Gian rejects attachments
   before a turn instead of dropping them silently.
 - `interaction/requestUserInput` is not exposed by this verified runtime

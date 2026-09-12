@@ -13,6 +13,7 @@
   },
   "include": ["src/**/*", "vite.config.ts"],
   "references": [
-    { "path": "../shared" }
+    { "path": "../shared" },
+    { "path": "../chat-ui" }
   ]
 }

@@ -73,10 +73,6 @@ interface Props {
   renderTab?: (tab: SheetTab) => React.ReactNode | null;
   /** Called when the user clicks the trailing "+" in the terminal tab strip. */
   onAddTab?: (group: SheetGroup) => void;
-  /** Content for the active group when it has no tabs yet. Rendered inside
-   *  the normal `.sheet-group` so the panel keeps
-   *  its width (`--sheet-w`) and stays resizable in the empty state too. */
-  renderEmpty?: (group: SheetGroup) => React.ReactNode;
   /** Whole-sheet display:none — element stays in the DOM so child
    *  terminals stay mounted across visibility flips. */
   hidden?: boolean;
@@ -560,7 +556,7 @@ function FileActions({
   );
 }
 
-export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, renderEmpty, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
+export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, onAddTab, hidden, externalEditors, openApps, onOpenWith, onConfigureEditors }: Props) {
   const tr = useT();
   // Word-wrap preference for file bodies. Wrap is the historical default
   // (`.txt { white-space: pre-wrap }`); toggling off switches to `pre` +
@@ -581,18 +577,11 @@ export function Sheet({ tabs, activeByGroup, activeGroup, actions, renderTab, on
   });
   // One section per group. Only the active rail's group is visible; the rest
   // stay mounted under display:none so xterm sessions (and later iframes)
-  // keep running across rail switches. An active group with no tabs renders
-  // its `renderEmpty` content in the same slot (keeps the panel resizable).
-  const emptyActive = !!renderEmpty && !!activeGroup && !byGroup.has(activeGroup);
-  if (byGroup.size === 0 && !emptyActive) return null;
+  // keep running across rail switches.
+  if (byGroup.size === 0) return null;
 
   return (
     <section className="sheet" data-testid="workbench-sheet" style={hidden ? { display: 'none' } : undefined}>
-      {emptyActive && (
-        <div className="sheet-group" key="__empty">
-          {renderEmpty!(activeGroup!)}
-        </div>
-      )}
       {SHEET_GROUP_ORDER.filter(g => byGroup.has(g)).map(g => {
         const gTabs = byGroup.get(g)!;
         const activeId = activeByGroup[g] || gTabs[0]?.id || null;

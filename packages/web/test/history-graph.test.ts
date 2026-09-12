@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { assignHistoryLanes } from '../src/presentation/history-graph.js';
+import {
+  assignHistoryLanes,
+  graphRowWidth,
+  graphWidthFor,
+} from '../src/presentation/history-graph.js';
 
 const C = (sha: string, parents: string[] = []) => ({ sha, parents });
 
@@ -30,10 +34,10 @@ describe('assignHistoryLanes', () => {
     const [a, m, b, f, c] = rows;
     expect(a!.lane).toBe(0);
     expect(m!.lane).toBe(0);
-    expect(m!.curves).toEqual([{ fromLane: 0, toLane: 1, dir: 'down', dashed: false, color: 1 }]);
+    expect(m!.curves).toEqual([{ fromLane: 0, toLane: 1, dir: 'down', color: 1 }]);
     expect(b!.linesTop.map(l => l.lane).sort()).toEqual([0, 1]); // lane 1 passes through
     expect(f!.lane).toBe(1);
-    expect(f!.curves).toEqual([{ fromLane: 1, toLane: 0, dir: 'down', dashed: false, color: 0 }]);
+    expect(f!.curves).toEqual([{ fromLane: 1, toLane: 0, dir: 'down', color: 0 }]);
     expect(c!.linesTop.map(l => l.lane)).toEqual([0]); // lane 1 freed after F
   });
 
@@ -63,25 +67,26 @@ describe('assignHistoryLanes', () => {
     expect(rows2[1]!.color).toBe(1);
   });
 
-  it('overflow: a fifth concurrent parent collapses onto the last lane, dashed', () => {
-    // T → M1(M2, X, Y, Z, W) → M2(A) → A → X → Y → Z → W — W needs a 5th lane
+  it('unlimited lanes: a fifth and sixth concurrent chain each get their own lane', () => {
+    // T → M1(M2, X, Y, Z, W, V) → M2(A) → A → X → Y → Z → W → V — W needs a
+    // 5th lane and V a 6th; both grow the gutter instead of collapsing.
     const rows = assignHistoryLanes([
       C('T', ['M1']),
-      C('M1', ['M2', 'X', 'Y', 'Z', 'W']),
+      C('M1', ['M2', 'X', 'Y', 'Z', 'W', 'V']),
       C('M2', ['A']),
       C('A', []),
       C('X', []),
       C('Y', []),
       C('Z', []),
       C('W', []),
+      C('V', []),
     ]);
     const m1 = rows[1]!;
-    // X/Y/Z claim lanes 1/2/3 with solid curves; W overflows dashed onto lane 3
-    expect(m1.curves.filter(c => !c.dashed)).toHaveLength(3);
-    expect(m1.curves.some(c => c.dashed && c.toLane === 3)).toBe(true);
-    const w = rows[7]!;
-    expect(w.overflow).toBe(true);
-    expect(w.lane).toBe(3);
+    expect(m1.curves.map(c => c.toLane)).toEqual([1, 2, 3, 4, 5]);
+    expect(m1.curves.every(c => c.dir === 'down')).toBe(true);
+    expect(rows[4]!.lane).toBe(1); // X
+    expect(rows[7]!.lane).toBe(4); // W
+    expect(rows[8]!.lane).toBe(5); // V
   });
 
   it('a commit expected on two lanes collapses the duplicate into its node', () => {
@@ -99,5 +104,35 @@ describe('assignHistoryLanes', () => {
     const rows = assignHistoryLanes([C('x', ['y']), C('y', ['z'])]);
     expect(rows[0]!.linesTop).toEqual([]);
     expect(rows[1]!.linesBottom.map(l => l.lane)).toEqual([0]); // z expected below
+  });
+});
+
+describe('graphRowWidth', () => {
+  it('hugs the row\'s own rightmost lane — node, segment, or curve endpoint', () => {
+    // A → B → M(merge: C, X, Y, Z) → C → X → Y → Z: the linear rows above the
+    // 4-way merge use only lane 0 and stay narrow; only the merge row and the
+    // rows where the extra lanes are still alive widen.
+    const rows = assignHistoryLanes([
+      C('A', ['B']),
+      C('B', ['M']),
+      C('M', ['C', 'X', 'Y', 'Z']),
+      C('C', []),
+      C('X', []),
+      C('Y', []),
+      C('Z', []),
+    ]);
+    expect(graphWidthFor(0)).toBe(14); // laneX(0) + 7
+    expect(graphRowWidth(rows[0]!)).toBe(graphWidthFor(0)); // A: lane 0 only
+    expect(graphRowWidth(rows[1]!)).toBe(graphWidthFor(0)); // B: lane 0 only, directly above the merge
+    expect(graphRowWidth(rows[2]!)).toBe(graphWidthFor(3)); // M: merge curves reach lane 3
+    expect(graphRowWidth(rows[6]!)).toBe(graphWidthFor(3)); // Z sits on lane 3
+  });
+
+  it('a lane-0-only row keeps width graphWidthFor(0) regardless of other rows', () => {
+    const rows = assignHistoryLanes([
+      C('a', ['b']),
+      C('b', []),
+    ]);
+    expect(rows.map(graphRowWidth)).toEqual([graphWidthFor(0), graphWidthFor(0)]);
   });
 });

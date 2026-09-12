@@ -1,5 +1,6 @@
 import type { DisplayEvent, FileChangeSummary } from '@gian/shared';
 import { INTERACTION_KINDS, PRESENTATION_TONES, type ProxyNotification } from '@gian/proxy-protocol';
+import { parseUnifiedDiffSummary } from './unified-diff.js';
 
 /** ACP PermissionOption.kind closed set carried by the proxy inside
  *  `interaction.requested.context.permissionOptionKinds`. */
@@ -53,18 +54,21 @@ function diffFiles(
   diff: string,
 ): FileChangeSummary[] {
   if (files) {
+    const parsed = new Map(parseUnifiedDiffSummary(diff).map(file => [file.path, file]));
     return files.map((file) => ({
       path: file.path,
       kind: file.status === 'added'
         ? 'create'
         : file.status === 'deleted' ? 'delete' : 'update',
+      ...(parsed.get(file.path)?.added !== undefined
+        ? { added: parsed.get(file.path)!.added }
+        : {}),
+      ...(parsed.get(file.path)?.removed !== undefined
+        ? { removed: parsed.get(file.path)!.removed }
+        : {}),
     }));
   }
-  const paths = new Set<string>();
-  for (const match of diff.matchAll(/^\+\+\+\s+(?:b\/)?(.+)$/gm)) {
-    if (match[1] && match[1] !== '/dev/null') paths.add(match[1]);
-  }
-  return [...paths].map((path) => ({ path, kind: 'update' as const }));
+  return parseUnifiedDiffSummary(diff);
 }
 
 function projectActivity(
@@ -120,6 +124,12 @@ function projectActivity(
         files: [{
           path: String(presentationData.path ?? ''),
           kind: operation === 'delete' ? 'delete' : 'update',
+          ...(typeof presentationData.added === 'number'
+            ? { added: presentationData.added }
+            : {}),
+          ...(typeof presentationData.removed === 'number'
+            ? { removed: presentationData.removed }
+            : {}),
         }],
       },
     }];

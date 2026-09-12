@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { SessionConfigOption, SessionNotification } from '@agentclientprotocol/sdk';
+import type { McpServer, SessionConfigOption, SessionNotification } from '@agentclientprotocol/sdk';
 import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
 import { KimiProxyError } from '../core/errors.js';
 import { KimiProxyService } from '../core/service.js';
+import { discoverKimiRuntimes, probeKimiRuntime } from '../runtime/discover.js';
 import { KimiProtocolError, type DomainCode } from '../transport/protocol.js';
 
 type JsonValue =
@@ -176,6 +177,12 @@ interface ServiceSessionShape {
 
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.1';
+const PROTOCOL_V22 = '2.2';
+const PROTOCOL_V23 = '2.3';
+
+const CUSTOMIZATION_CAPABILITIES = {
+  'customization.list': 1,
+} as const;
 
 const CAPABILITIES = {
   'input.localFile': 1,
@@ -192,11 +199,43 @@ const CAPABILITIES = {
   'event.usage': 1,
 } as const;
 
+export function kimiHostServiceMcpServers(value: unknown): McpServer[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const servers: McpServer[] = [];
+  for (const raw of value) {
+    const service = record(raw);
+    const id = nonEmptyString(service.id);
+    const transport = record(service.transport);
+    const url = nonEmptyString(transport.url);
+    if (!id || service.protocol !== 'mcp' || transport.type !== 'streamable-http' || !url) {
+      throw new KimiProtocolError(
+        'INVALID_PARAMS',
+        'hostServices contains an invalid Streamable HTTP MCP descriptor.',
+      );
+    }
+    const headers = Object.entries(record(transport.headers)).map(([name, headerValue]) => {
+      if (typeof headerValue !== 'string') {
+        throw new KimiProtocolError('INVALID_PARAMS', 'hostServices transport headers must be strings.');
+      }
+      return { name, value: headerValue };
+    });
+    servers.push({ type: 'http', name: id, url, headers });
+  }
+  return servers;
+}
+
 interface CatalogModelCapability {
   model: string;
   isDefault: boolean;
   defaultThinking: string | null;
   supportedThinking: string[];
+}
+
+interface ActivityDescriptor {
+  kind: string;
+  title: string;
+  presentation: Record<string, unknown>;
+  details?: JsonValue;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -419,6 +458,143 @@ function activityStatus(value: unknown): 'running' | 'succeeded' | 'failed' {
   return 'running';
 }
 
+function activityState(status: 'running' | 'succeeded' | 'failed' | 'cancelled') {
+  if (status === 'succeeded') return 'completed' as const;
+  if (status === 'failed') return 'failed' as const;
+  if (status === 'cancelled') return 'interrupted' as const;
+  return 'running' as const;
+}
+
+function toolPath(update: Record<string, unknown>): string | null {
+  const input = record(update.rawInput);
+  const direct = nonEmptyString(input.path) ?? nonEmptyString(input.file_path);
+  if (direct) return direct;
+  if (!Array.isArray(update.locations)) return null;
+  for (const raw of update.locations) {
+    const path = nonEmptyString(record(raw).path);
+    if (path) return path;
+  }
+  return null;
+}
+
+function editedLineCount(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.length === 0 ? 0 : value.split('\n').length;
+}
+
+function toolOutput(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value.slice(0, 8_192);
+  const output = record(value);
+  for (const key of ['output', 'text', 'message', 'summary']) {
+    const candidate = output[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.slice(0, 8_192);
+  }
+  return null;
+}
+
+function activityDescriptor(
+  update: Record<string, unknown>,
+  activityId: string,
+  status: 'running' | 'succeeded' | 'failed',
+  previous?: ActivityDescriptor,
+): ActivityDescriptor {
+  const previousPresentation = record(previous?.presentation);
+  const previousData = record(previousPresentation.data);
+  const title = nonEmptyString(update.title) ?? previous?.title ?? 'Tool';
+  const normalizedTitle = title.toLowerCase().replace(/\s+/g, ' ').trim();
+  const input = record(update.rawInput);
+  const details = update.rawOutput !== undefined || update.rawInput !== undefined
+    ? boundedDetails(update.rawOutput ?? update.rawInput)
+    : previous?.details;
+
+  if (normalizedTitle === 'agent' || previousPresentation.type === 'agent') {
+    const previousTitle = previous?.title && previous.title.toLowerCase() !== 'agent'
+      ? previous.title
+      : null;
+    const description = nonEmptyString(input.description)
+      ?? nonEmptyString(input.prompt)
+      ?? previousTitle
+      ?? 'Agent';
+    const output = toolOutput(update.rawOutput) ?? nonEmptyString(previousData.output);
+    return {
+      kind: 'agent',
+      title: description,
+      presentation: {
+        type: 'agent',
+        data: {
+          ...previousData,
+          agentId: activityId,
+          state: activityState(status),
+          ...(output ? { output } : {}),
+        },
+      },
+      ...(details !== undefined ? { details } : {}),
+    };
+  }
+
+  const path = toolPath(update)
+    ?? (previousPresentation.type === 'file' ? nonEmptyString(previousData.path) : null);
+  const nativeKind = (nonEmptyString(update.kind)
+    ?? nonEmptyString(previousData.name)
+    ?? 'tool').toLowerCase();
+  const fileTool = path !== null && (
+    previousPresentation.type === 'file'
+    || nativeKind === 'read'
+    || nativeKind === 'edit'
+    || /^(read|write|edit|delete)(?:\s|$)/.test(normalizedTitle)
+  );
+  if (fileTool) {
+    const operation = nativeKind === 'read' || normalizedTitle.startsWith('read')
+      ? 'read'
+      : nativeKind === 'delete' || normalizedTitle.startsWith('delete') ? 'delete' : 'write';
+    const added = editedLineCount(input.new_string);
+    const removed = editedLineCount(input.old_string);
+    return {
+      kind: 'file',
+      title,
+      presentation: {
+        type: 'file',
+        data: {
+          ...previousData,
+          path,
+          operation,
+          ...(added !== undefined ? { added } : {}),
+          ...(removed !== undefined ? { removed } : {}),
+        },
+      },
+      ...(details !== undefined ? { details } : {}),
+    };
+  }
+
+  return {
+    kind: 'tool',
+    title,
+    presentation: {
+      type: 'tool',
+      data: { name: nonEmptyString(update.kind) ?? nonEmptyString(previousData.name) ?? 'tool' },
+    },
+    ...(details !== undefined ? { details } : {}),
+  };
+}
+
+function settledActivityDescriptor(
+  descriptor: ActivityDescriptor,
+  status: 'succeeded' | 'failed' | 'cancelled',
+): ActivityDescriptor {
+  const presentation = record(descriptor.presentation);
+  if (presentation.type !== 'agent') return descriptor;
+  return {
+    ...descriptor,
+    presentation: {
+      ...presentation,
+      data: {
+        ...record(presentation.data),
+        state: activityState(status),
+      },
+    },
+  };
+}
+
 function planUpdatedData(update: Record<string, unknown>, sourceTurnId: string) {
   const entries = Array.isArray(update.entries) ? update.entries : [];
   return {
@@ -476,6 +652,20 @@ function todoListPlanData(
   }, sourceTurnId);
 }
 
+function kimiPlanFileData(
+  update: Record<string, unknown>,
+  sourceTurnId: string,
+): ReturnType<typeof planUpdatedData> | null {
+  const input = record(update.rawInput);
+  const path = toolPath(update)?.replaceAll('\\', '/');
+  const content = typeof input.content === 'string' ? input.content.trim() : '';
+  if (!path || !content) return null;
+  if (!/(^|\/)\.kimi-code\/sessions\/[^/]+\/session_[^/]+\/agents\/[^/]+\/(?:plans\/[^/]+\.md|plan\/[^/]+\/v\d+\.md)$/.test(path)) {
+    return null;
+  }
+  return planUpdatedData({ text: content, entries: [] }, sourceTurnId);
+}
+
 /** ACP PermissionOption.kind closed set (gian.proxy/2.1 §2.2). */
 const ACP_PERMISSION_KINDS = new Set(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
 
@@ -508,7 +698,7 @@ export class KimiProtocolV2Adapter {
     actionId: string;
     values: Record<string, unknown>;
   }>();
-  private readonly openActivitiesByTurn = new Map<string, Set<string>>();
+  private readonly openActivitiesByTurn = new Map<string, Map<string, ActivityDescriptor>>();
   private readonly openContentByTurn = new Map<string, Map<string, 'text' | 'reasoning' | 'status'>>();
   private readonly eventOccurrences = new Map<string, number>();
   private readonly degradedUpdateCounts = new Map<string, number>();
@@ -524,6 +714,10 @@ export class KimiProtocolV2Adapter {
   private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private notificationQueue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
   private initialized = false;
+  private protocolVersion:
+    | typeof PROTOCOL_V2
+    | typeof PROTOCOL_V22
+    | typeof PROTOCOL_V23 = PROTOCOL_V2;
   private catalogRevision = 'kimi-empty';
 
   constructor(
@@ -547,21 +741,30 @@ export class KimiProtocolV2Adapter {
    * handled are queued, so the caller can write the JSON-RPC Response first
    * and flush the queued Notifications afterwards (contract §16: a mutating
    * request's success Response precedes the Notifications it produced).
+   *
+   * The queue is request-scoped: customization scans produce no notifications
+   * and NEVER install a queue, so a scan running concurrently with a session
+   * dispatch cannot swallow or reorder that session's notifications (the
+   * session's own queue stays installed while the scan runs).
    */
   async dispatch(request: WireRequest): Promise<
     | { ok: true; result: unknown; notifications: Array<{ method: string; params: Record<string, unknown> }> }
     | { ok: false; error: unknown; notifications: Array<{ method: string; params: Record<string, unknown> }> }
   > {
-    const queue: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const capturesNotifications = request.method !== 'customization.list'
+      && request.method !== 'customization.detail';
+    const queue = capturesNotifications
+      ? [] as Array<{ method: string; params: Record<string, unknown> }>
+      : null;
     const previous = this.notificationQueue;
-    this.notificationQueue = queue;
+    if (queue) this.notificationQueue = queue;
     try {
       const result = await this.route(request);
-      return { ok: true, result, notifications: queue };
+      return { ok: true, result, notifications: queue ?? [] };
     } catch (error) {
-      return { ok: false, error, notifications: queue };
+      return { ok: false, error, notifications: queue ?? [] };
     } finally {
-      this.notificationQueue = previous;
+      if (queue) this.notificationQueue = previous;
     }
   }
 
@@ -601,6 +804,27 @@ export class KimiProtocolV2Adapter {
           'CAPABILITY_NOT_SUPPORTED',
           `${request.method} is not advertised by Kimi Proxy.`,
         );
+      case 'runtime.discover':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new KimiProtocolError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
+        }
+        return await discoverKimiRuntimes();
+      case 'runtime.probe':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new KimiProtocolError('METHOD_NOT_FOUND', 'runtime.probe requires gian.proxy/2.2.');
+        }
+        return await probeKimiRuntime(String(request.params.path ?? ''));
+      case 'customization.list':
+      case 'customization.detail':
+        if (this.protocolVersion !== PROTOCOL_V23) {
+          throw new KimiProtocolError(
+            'CAPABILITY_NOT_SUPPORTED',
+            `${request.method} requires gian.proxy/2.3.`,
+          );
+        }
+        return request.method === 'customization.list'
+          ? await this.service.inspectCustomizations(request.params as never)
+          : await this.service.customizationDetail(request.params as never);
       case 'shutdown': return { ok: true };
       default:
         throw new KimiProtocolError('METHOD_NOT_FOUND', `Unknown method "${request.method}".`);
@@ -613,15 +837,41 @@ export class KimiProtocolV2Adapter {
     }
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
-    if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new KimiProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
+    const selected = versions.includes(PROTOCOL_V23)
+      ? PROTOCOL_V23
+      : versions.includes(PROTOCOL_V22)
+        ? PROTOCOL_V22
+        : versions.includes(PROTOCOL_V2)
+          ? PROTOCOL_V2
+          : null;
+    if (protocol.name !== PROTOCOL_NAME || selected === null) {
+      throw new KimiProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1, 2.2, or 2.3 is required.');
     }
     this.initialized = true;
+    this.protocolVersion = selected;
     return {
-      protocol: { name: PROTOCOL_NAME, version: PROTOCOL_V2 },
+      protocol: { name: PROTOCOL_NAME, version: selected },
       plugin: { id: 'kimi', name: 'Kimi Code', version: this.pluginVersion },
       process: { scope: 'shared' as const },
-      capabilities: CAPABILITIES,
+      capabilities: selected === PROTOCOL_V23
+        ? {
+            ...CAPABILITIES,
+            ...(this.service.supportsHttpMcp() ? { 'integration.mcp.streamableHttp': 1 as const } : {}),
+            'runtime.discover': 1,
+            'runtime.probe': 1,
+            ...CUSTOMIZATION_CAPABILITIES,
+          }
+        : selected === PROTOCOL_V22
+          ? {
+              ...CAPABILITIES,
+              ...(this.service.supportsHttpMcp() ? { 'integration.mcp.streamableHttp': 1 as const } : {}),
+              'runtime.discover': 1,
+              'runtime.probe': 1,
+            }
+          : {
+              ...CAPABILITIES,
+              ...(this.service.supportsHttpMcp() ? { 'integration.mcp.streamableHttp': 1 as const } : {}),
+            },
     };
   }
 
@@ -874,12 +1124,13 @@ export class KimiProtocolV2Adapter {
     if (roots.length === 0) {
       throw new KimiProtocolError('INVALID_PARAMS', 'workspace.roots must contain at least one path.');
     }
-    if (params.hostServices !== undefined) {
+    if (params.hostServices !== undefined && !this.service.supportsHttpMcp()) {
       throw new KimiProtocolError(
         'CAPABILITY_NOT_SUPPORTED',
         'Kimi Proxy does not advertise integration.mcp.streamableHttp.',
       );
     }
+    const mcpServers = kimiHostServiceMcpServers(params.hostServices);
     const native = record(params.nativeSession);
     const nativeSessionId = nonEmptyString(native.id);
     const historyValue = native.history;
@@ -904,7 +1155,7 @@ export class KimiProtocolV2Adapter {
         'Kimi config options are turn-bound; send them in turn.start config, not session.create.',
       );
     }
-    const fingerprint = JSON.stringify({ cwd, roots, nativeSessionId, history });
+    const fingerprint = JSON.stringify({ cwd, roots, nativeSessionId, history, hostServices: params.hostServices });
     const existing = this.sessions.get(sessionId);
     if (existing) {
       if (this.sidechats.has(sessionId)) {
@@ -924,7 +1175,7 @@ export class KimiProtocolV2Adapter {
       ...(nativeSessionId
         ? { resumeMode: history === 'replay' ? 'load' as const : 'resume' as const }
         : {}),
-      mcpServers: [],
+      mcpServers: mcpServers ?? [],
     });
     const serviceSession = result.session;
     const replay = this.buildReplay(
@@ -1032,7 +1283,7 @@ export class KimiProtocolV2Adapter {
       cwd: parent.cwd,
       nativeSessionId: payload.nativeSessionId,
       resumeMode: 'resume',
-      mcpServers: [],
+      mcpServers: this.service.mcpServers(parent.serviceSessionId),
     });
     const session = this.attachForkedSession(
       sidechatId,
@@ -1100,7 +1351,12 @@ export class KimiProtocolV2Adapter {
         anchor.type === 'turn' ? 'Kimi ACP does not support exact turn forks.' : 'A head fork anchor is required.',
       );
     }
-    const fingerprint = JSON.stringify({ sourceSessionId, sourceStreamId, anchor });
+    const fingerprint = JSON.stringify({
+      sourceSessionId,
+      sourceStreamId,
+      anchor,
+      hostServices: params.hostServices,
+    });
     const previous = this.forkResults.get(sessionId);
     if (previous) {
       if (previous.fingerprint !== fingerprint) {
@@ -1113,7 +1369,10 @@ export class KimiProtocolV2Adapter {
     }
     const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
     const boundary = this.forkBoundary(source);
-    const forked = await this.service.forkSession({ sessionId: source.serviceSessionId });
+    const forked = await this.service.forkSession({
+      sessionId: source.serviceSessionId,
+      mcpServers: kimiHostServiceMcpServers(params.hostServices) ?? [],
+    });
     const child = this.attachForkedSession(sessionId, source, forked.session as ServiceSessionShape);
     this.replayBySession.set(child.id, this.cloneReplay(source, child));
     const result = {
@@ -1282,7 +1541,7 @@ export class KimiProtocolV2Adapter {
     this.turnsByRequest.set(requestId, { sessionId: session.id, turnId });
     this.requestByTurn.set(key, requestId);
     this.activeTurnBySession.set(session.id, turnId);
-    this.openActivitiesByTurn.set(key, new Set());
+    this.openActivitiesByTurn.set(key, new Map());
     this.openContentByTurn.set(key, new Map());
     try {
       const advertised = this.advertisedOptionIds(session.configOptions);
@@ -1752,6 +2011,8 @@ export class KimiProtocolV2Adapter {
         return;
       }
       if (todoListToolData(update).todoTool) return;
+      const filePlan = kimiPlanFileData(update, this.sourceTurnIdFor(session, turnId));
+      if (filePlan) this.emitPlanUpdate(session, turnId, filePlan);
       this.translateTool(session, turnId, update, kind === 'tool_call');
       return;
     }
@@ -1782,24 +2043,15 @@ export class KimiProtocolV2Adapter {
     if (!activityId) return;
     const open = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
     if (!open) return;
-    const name = nonEmptyString(update.kind) ?? 'tool';
-    const title = String(update.title ?? 'Tool');
     const status = activityStatus(update.status);
-    open.add(activityId);
+    const descriptor = activityDescriptor(update, activityId, status, open.get(activityId));
+    if (status === 'running') open.set(activityId, descriptor);
+    else open.delete(activityId);
     this.emitTurnEvent('activity.updated', session, turnId, {
       activityId,
-      kind: 'tool',
-      title,
+      ...descriptor,
       status: initial && status === 'running' ? 'running' : status,
-      presentation: {
-        type: 'tool',
-        data: { name },
-      },
-      ...(update.rawOutput !== undefined || update.rawInput !== undefined
-        ? { details: jsonValue(update.rawOutput ?? update.rawInput) }
-        : {}),
     }, this.nextFactUpdateIdentity(session, turnId, 'activity', activityId));
-    if (status !== 'running') open.delete(activityId);
   }
 
   private emitPlanUpdate(
@@ -1893,13 +2145,11 @@ export class KimiProtocolV2Adapter {
     }
     const activities = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
     if (activities) {
-      for (const activityId of activities) {
+      for (const [activityId, descriptor] of activities) {
         this.emitTurnEvent('activity.updated', session, turnId, {
           activityId,
-          kind: 'tool',
-          title: 'Tool',
+          ...settledActivityDescriptor(descriptor, status),
           status,
-          presentation: { type: 'tool', data: { name: 'tool' } },
         }, this.nextFactUpdateIdentity(session, turnId, 'activity', activityId));
       }
       activities.clear();
@@ -2016,7 +2266,7 @@ export class KimiProtocolV2Adapter {
           identity: 'input',
         }));
       }
-      const openTools = new Set<string>();
+      const openTools = new Map<string, ActivityDescriptor>();
       const openContent = new Map<string, { kind: 'text' | 'reasoning'; deltaCount: number }>();
       const activityUpdateCounts = new Map<string, number>();
       const planUpdateCounts = new Map<string, number>();
@@ -2060,26 +2310,29 @@ export class KimiProtocolV2Adapter {
             continue;
           }
           if (todoListToolData(update).todoTool) continue;
+          const filePlan = kimiPlanFileData(update, sourceTurnId);
+          if (filePlan) {
+            const fingerprint = JSON.stringify(filePlan);
+            if (fingerprint !== lastPlanFingerprint) {
+              lastPlanFingerprint = fingerprint;
+              const count = (planUpdateCounts.get(filePlan.planId) ?? 0) + 1;
+              planUpdateCounts.set(filePlan.planId, count);
+              appendTurn('plan.updated', filePlan, `${filePlan.planId}:update:${count}`);
+            }
+          }
           const activityId = nonEmptyString(update.toolCallId);
           if (!activityId) continue;
           const status = activityStatus(update.status);
           const count = (activityUpdateCounts.get(activityId) ?? 0) + 1;
           activityUpdateCounts.set(activityId, count);
-          openTools.add(activityId);
+          const descriptor = activityDescriptor(update, activityId, status, openTools.get(activityId));
+          if (status === 'running') openTools.set(activityId, descriptor);
+          else openTools.delete(activityId);
           appendTurn('activity.updated', {
             activityId,
-            kind: 'tool',
-            title: String(update.title ?? 'Tool'),
+            ...descriptor,
             status,
-            presentation: {
-              type: 'tool',
-              data: { name: nonEmptyString(update.kind) ?? 'tool' },
-            },
-            ...(update.rawOutput !== undefined || update.rawInput !== undefined
-              ? { details: jsonValue(update.rawOutput ?? update.rawInput) }
-              : {}),
           }, `${activityId}:update:${count}`);
-          if (status !== 'running') openTools.delete(activityId);
         }
       }
       for (const [contentId, open] of openContent) {
@@ -2093,15 +2346,13 @@ export class KimiProtocolV2Adapter {
           `${contentId}:completed`,
         );
       }
-      for (const activityId of openTools) {
+      for (const [activityId, descriptor] of openTools) {
         const count = (activityUpdateCounts.get(activityId) ?? 0) + 1;
         activityUpdateCounts.set(activityId, count);
         appendTurn('activity.updated', {
           activityId,
-          kind: 'tool',
-          title: 'Tool',
+          ...settledActivityDescriptor(descriptor, 'succeeded'),
           status: 'succeeded',
-          presentation: { type: 'tool', data: { name: 'tool' } },
         }, `${activityId}:update:${count}`);
       }
       appendTurn('turn.completed', { stopReason: 'completed' }, 'lifecycle');

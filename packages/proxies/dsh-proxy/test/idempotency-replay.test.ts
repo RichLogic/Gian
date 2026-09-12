@@ -8,7 +8,12 @@ function fakeBridge(counter: { turns: number } = { turns: 0 }) {
   return {
     request: async (method: string, params: Record<string, unknown>) => {
       if (method === 'initialize') return { protocol: { name: 'gian.dsh.bridge', version: '1.0' } };
-      if (method === 'catalog.list') return { catalogRevision: 'fake-1', models: [{ id: 'deepseek-chat', provider: 'deepseek', label: 'DeepSeek Chat' }] };
+      if (method === 'catalog.list' || method === 'catalog.resolve') return {
+        catalogRevision: 'fake-1',
+        providers: [{ id: 'deepseek', label: 'DeepSeek' }],
+        defaultSelection: { provider: 'deepseek', model: 'deepseek-chat' },
+        models: [{ id: 'deepseek-chat', provider: 'deepseek', label: 'DeepSeek Chat' }],
+      };
       if (method === 'session.create') return {};
       if (method === 'turn.start') {
         counter.turns += 1;

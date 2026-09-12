@@ -389,9 +389,10 @@ describe('SideChatDock create affordance', () => {
     const cta = screen.getByTestId('sidechat-create-empty');
     expect(cta).toBeDisabled();
     expect(cta).toHaveAttribute('title', EN['sidechat.unavailable']);
-    // The strip "+" is equally gated.
+    // The strip "+" is equally gated — and styled like the Browser/Terminal
+    // tab-strip "+", without the prominent accent fill.
     expect(screen.getByTestId('sidechat-create')).toBeDisabled();
-    expect(screen.getByTestId('sidechat-create')).toHaveClass('prominent');
+    expect(screen.getByTestId('sidechat-create')).not.toHaveClass('prominent');
 
     view.rerender(
       <Providers harness={harness}>
@@ -898,5 +899,29 @@ describe('parent session delete confirm cascade', () => {
     expect(confirm.message).toContain(EN['coding.session.deleteConfirmSuffix']!);
     await act(async () => resolveConfirm(confirm.id, true));
     expect(ops.dispatch).toHaveBeenCalledWith('session.delete', { sessionId: 's-parent' });
+  });
+});
+
+// ─── Dock Settings button (2026-09-06 owner report) ─────────────────────────
+
+describe('Dock Settings button', () => {
+  it('stays enabled when the workbench is inactive (primary pages)', () => {
+    render(
+      <LocaleProvider locale="en">
+        <Dock
+          activeRail={null}
+          onToggleRail={() => {}}
+          sessionRailsDisabled
+          workbenchDisabled
+          wsState="open"
+          wsAttempt={0}
+          authed
+          runner={null}
+        />
+      </LocaleProvider>,
+    );
+    // Settings is mode-independent; the session/workbench rails stay gated.
+    expect(screen.getByTestId('dock-settings')).toBeEnabled();
+    expect(screen.getByTestId('dock-terminal')).toBeDisabled();
   });
 });

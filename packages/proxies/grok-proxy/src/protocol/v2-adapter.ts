@@ -18,6 +18,7 @@ import { parseGrokPermissionMode } from '../core/permissions.js';
 import { filterAdvertisedCommands } from '../core/slash-policy.js';
 import { GrokProxyService } from '../core/service.js';
 import { NativeTurnIdentityStore } from './replay-identity.js';
+import { discoverGrokRuntimes, probeGrokRuntime } from '../runtime/discover.js';
 import { GrokJsonRpcError, GrokProtocolError, type DomainCode } from '../transport/protocol.js';
 
 type ConfigValue = string | boolean | number | null;
@@ -178,6 +179,8 @@ interface ServiceSessionShape {
 
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.1';
+const PROTOCOL_V22 = '2.2';
+const PROTOCOL_V23 = '2.3';
 const REPLAYABLE = new Set([
   'turn.started',
   'input.recorded',
@@ -211,6 +214,30 @@ const CAPABILITIES = {
 } as const;
 
 const CONFIG_APPLY_ORDER = ['permission_mode', 'model', 'reasoning_effort'] as const;
+
+function customizationUnsupportedList(kind: string, status: 'proxy_unsupported' | 'provider_unsupported', message?: string) {
+  return {
+    kind,
+    status,
+    completeness: 'none',
+    observedAt: new Date().toISOString(),
+    items: [],
+    truncated: false,
+    diagnostics: message ? [{ code: 'SOURCE_NOT_ENUMERABLE', message }] : [],
+  };
+}
+
+function customizationUnavailableDetail(kind: string, id: string, message: string) {
+  return {
+    kind,
+    id,
+    status: 'unavailable',
+    observedAt: new Date().toISOString(),
+    text: '',
+    truncated: false,
+    diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message }],
+  };
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -346,6 +373,10 @@ export class GrokProtocolV2Adapter {
   private readonly replayPager = new ReplayPager();
   private readonly ledger = new TurnLedger();
   private initialized = false;
+  private protocolVersion:
+    | typeof PROTOCOL_V2
+    | typeof PROTOCOL_V22
+    | typeof PROTOCOL_V23 = PROTOCOL_V2;
   private catalogRevision = 'grok-empty';
   private readonly resumeStore = new OpaqueSidechatResumeStore();
   private readonly sidechats = new Map<string, SidechatRecord>();
@@ -406,6 +437,32 @@ export class GrokProtocolV2Adapter {
           'CAPABILITY_NOT_SUPPORTED',
           'catalog.resolve is not advertised by Grok Proxy.',
         );
+      case 'runtime.discover':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new GrokProtocolError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
+        }
+        return await discoverGrokRuntimes();
+      case 'runtime.probe':
+        if (this.protocolVersion === PROTOCOL_V2) {
+          throw new GrokProtocolError('METHOD_NOT_FOUND', 'runtime.probe requires gian.proxy/2.2.');
+        }
+        return await probeGrokRuntime(String(request.params.path ?? ''));
+      case 'customization.list':
+      case 'customization.detail':
+        if (this.protocolVersion !== PROTOCOL_V23) {
+          throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', `${request.method} requires gian.proxy/2.3.`);
+        }
+        return request.method === 'customization.list'
+          ? customizationUnsupportedList(
+              String(request.params.kind ?? ''),
+              'proxy_unsupported',
+              'Grok customization sources are not safely enumerable by this Proxy version.',
+            )
+          : customizationUnavailableDetail(
+              String(request.params.kind ?? ''),
+              String(request.params.id ?? ''),
+              'Grok customization detail is not supported.',
+            );
       case 'shutdown': return { ok: true };
       default:
         throw new GrokJsonRpcError(-32601, `Unknown method "${request.method}".`);
@@ -418,15 +475,32 @@ export class GrokProtocolV2Adapter {
     }
     const protocol = record(params.protocol);
     const versions = Array.isArray(protocol.versions) ? protocol.versions.map(String) : [];
-    if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new GrokProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
+    const selected = versions.includes(PROTOCOL_V23)
+      ? PROTOCOL_V23
+      : versions.includes(PROTOCOL_V22)
+        ? PROTOCOL_V22
+        : versions.includes(PROTOCOL_V2)
+          ? PROTOCOL_V2
+          : null;
+    if (protocol.name !== PROTOCOL_NAME || selected === null) {
+      throw new GrokProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1, 2.2, or 2.3 is required.');
     }
     this.initialized = true;
+    this.protocolVersion = selected;
     return {
-      protocol: { name: PROTOCOL_NAME, version: PROTOCOL_V2 },
+      protocol: { name: PROTOCOL_NAME, version: selected },
       plugin: { id: 'grok', name: 'Grok Build', version: this.pluginVersion },
       process: { scope: 'session' as const },
-      capabilities: CAPABILITIES,
+      capabilities: selected === PROTOCOL_V23
+        ? {
+            ...CAPABILITIES,
+            'runtime.discover': 1,
+            'runtime.probe': 1,
+            'customization.list': 1,
+          }
+        : selected === PROTOCOL_V22
+          ? { ...CAPABILITIES, 'runtime.discover': 1, 'runtime.probe': 1 }
+          : CAPABILITIES,
     };
   }
 

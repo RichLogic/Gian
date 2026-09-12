@@ -1,0 +1,19 @@
+{
+  "permissions": { "defaultMode": "acceptEdits" },
+  "model": "sonnet",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash(git *)",
+        "hooks": [
+          { "type": "command", "command": "./scripts/guard.sh --token home-canary-tok", "timeout": 10 },
+          { "type": "command", "command": "./scripts/audit.sh" }
+        ]
+      },
+      { "hooks": [ { "type": "http", "url": "https://hooks.example.com/notify?token=home-url-canary", "timeout": 5 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "say done" } ] }
+    ]
+  }
+}

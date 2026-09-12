@@ -780,44 +780,9 @@
   .gico.unread, .gico.unread .gfill, .gico.ring .gring { animation: none !important; }
 }
 
-/* ---------- User-message position reset ----------
-   V2's `.msg.user` is `position: sticky` by default for the pin feature. We
-   removed the pin entirely — users found it more confusing than useful — so
-   override that back to `relative` and strip the gradient/shadow backdrop
-   that only existed to mask scrolling content beneath a stuck bubble. */
-.msg.user { position: relative !important; top: auto !important; }
-.msg.user::before { display: none !important; }
-
-/* ---------- Message footer: time + copy button ----------
-   `.msg-foot` is a flex row holding `.msg-time` plus a small `.msg-copy`
-   button. For user msgs the parent `.msg-body` is `flex-direction: column;
-   align-items: flex-end`, so the foot sits flush-right under the bubble. */
-.msg-foot {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 5px;
-}
-.msg-foot .msg-time { margin-top: 0; }
-.msg.user .msg-foot { flex-direction: row-reverse; padding-right: 4px; }
-.msg-copy {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  border-radius: var(--r-1);
-  cursor: pointer;
-  /* Always visible at full strength — no hover reveal or hover darkening. */
-  opacity: 1;
-  transition: background 120ms var(--ease);
-}
-.msg-copy:hover { background: var(--surface-2); }
-.msg-copy.copied { color: var(--ok); }
+/* ---------- User-message position reset + message footer ----------
+   `.msg.user` pin reset, `.msg-foot` and `.msg-copy` moved to @gian/chat-ui
+   (packages/chat-ui/styles/chat-ui.css). */
 
 /* ---------- Motion (phase 6) ----------
    Soft, short UI animation built on the tokens in tokens.css
@@ -851,7 +816,6 @@
 /* Chrome buttons — soft hover/active instead of instant color flips. */
 .dock-btn,
 .tb-toggle,
-.sb-iconbtn,
 .sb-mode,
 
 /* Sidebar collapse — the rail stays mounted (state preserved) and its width

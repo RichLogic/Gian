@@ -462,6 +462,41 @@ test('kimi: native title applies when the session is still unnamed', async () =>
   }
 });
 
+test('exact binding error skips proxy lookup and falls back without acquire', async () => {
+  const fixture = makeFixture();
+  try {
+    const sessionId = seedSession(fixture.db, {
+      workspaceId: fixture.workspaceId,
+      executor: 'codex',
+      nativeSessionId: 'native-codex-binding-error',
+    });
+    fixture.db.prepare('UPDATE sessions SET proxy_binding_json = ?, proxy_plugin_id = ? WHERE id = ?')
+      .run('{"schemaVersion":1}', 'codex', sessionId);
+    seedUserMessage(fixture.db, sessionId, '  keep going without proxy  ');
+    const renamed: string[] = [];
+    class CountingUnusedProxy {
+      acquires = 0;
+      async getOrCreate(): Promise<never> {
+        this.acquires += 1;
+        throw new Error('auto-title must not acquire a proxy for an unusable binding');
+      }
+      async dispose(): Promise<void> {}
+    }
+    const proxy = new CountingUnusedProxy();
+    const service = makeService(
+      fixture.db,
+      proxy as unknown as ProxyManager,
+      (_id, name) => renamed.push(name),
+      { nativePollDelaysMs: [0] },
+    );
+    await service.maybeAutoTitle(sessionId);
+    assert.equal(proxy.acquires, 0);
+    assert.deepEqual(renamed, ['keep going without proxy']);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 // --- End-to-end through SessionManager.completeTurn -------------------------
 
 class RecordingProxyClient implements ProxyClient {

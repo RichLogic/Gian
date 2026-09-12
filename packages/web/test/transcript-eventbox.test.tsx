@@ -116,7 +116,7 @@ describe('turn work boundary: live grouping and terminal handoff', () => {
   });
 
   it('aligns preview rows with the Working label without a nested guide-rail indent', () => {
-    const css = readFileSync('src/styles/events.css', 'utf8');
+    const css = readFileSync('../chat-ui/styles/chat-ui.css', 'utf8');
     const rule = css.match(/\.turn-work-preview\s*\{([^}]*)\}/);
     expect(rule).not.toBeNull();
     expect(rule![1]).toContain('margin-left: 0');

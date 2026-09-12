@@ -74,6 +74,3 @@
   min-width: 240px;
   max-width: 60%;
 }
-
-/* New-workspace form hosted inside a Workbench tab (not a jump to spaces mode) */
-.ws-new-panel { padding: 18px 22px 28px; overflow-y: auto; height: 100%; }

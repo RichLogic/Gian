@@ -294,6 +294,10 @@ export const PROXY_METHODS = [
   'turn.interrupt',
   'turn.steer',
   'interaction.respond',
+  'runtime.discover',
+  'runtime.probe',
+  'customization.list',
+  'customization.detail',
   'session.close',
   'shutdown',
 ] as const;

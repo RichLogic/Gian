@@ -79,9 +79,10 @@ test('credential roles have closed default Tool catalogs', () => {
   assert.equal(standard.includes('interaction.list'), true);
   assert.equal(standard.includes('interaction.respond'), true);
   assert.equal(standard.includes('worktree.create_and_bind'), true);
+  assert.equal(standard.includes('browser.snapshot'), true);
   assert.equal(standard.includes('task.create'), false);
   assert.equal(standard.includes('task.update'), false);
-  assert.equal(defaultGianToolGrants('admin').length, 20);
+  assert.equal(defaultGianToolGrants('admin').length, 45);
 });
 
 test('provisional internal identity permits discovery but denies calls until atomic activation', async () => {
@@ -222,10 +223,17 @@ test('Gian Tool credentials distinguish external callers and revoke without expo
       ttlMs: 60_000,
     });
     assert.equal(externalDefaults.actor.grants.includes('worktree.create_and_bind'), false);
+    assert.equal(externalDefaults.actor.grants.includes('browser.snapshot'), false);
     assert.throws(() => manager.issueExternalController({
       clientId: 'external-self-context',
       role: 'admin',
       grants: ['worktree.create_and_bind'],
+      ttlMs: 60_000,
+    }), /requires an internal Session credential/);
+    assert.throws(() => manager.issueExternalController({
+      clientId: 'external-browser',
+      role: 'admin',
+      grants: ['browser.snapshot'],
       ttlMs: 60_000,
     }), /requires an internal Session credential/);
   } finally {

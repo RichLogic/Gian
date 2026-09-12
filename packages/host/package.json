@@ -14,14 +14,18 @@
     "postinstall": "node scripts/fix-node-pty-permissions.cjs"
   },
   "dependencies": {
+    "@gian/proxy-catalog-contract": "workspace:*",
     "@gian/proxy-protocol": "workspace:*",
+    "@gian/remote-protocol": "workspace:*",
     "@gian/shared": "workspace:*",
     "@gian/tool-mcp": "workspace:*",
     "@hono/node-server": "^1.13.7",
     "@hono/node-ws": "^1.0.5",
-    "better-sqlite3": "^11.5.0",
+    "better-sqlite3": "13.0.3",
+    "croner": "10.0.1",
     "hono": "^4.12.34",
-    "node-pty": "^1.1.0-beta40"
+    "node-pty": "^1.1.0-beta40",
+    "semver": "7.7.2"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -32,6 +36,7 @@
     "@gian/kimi-proxy": "workspace:*",
     "@gian/grok-proxy": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/semver": "7.7.1",
     "tsx": "^4.19.2"
   }
 }

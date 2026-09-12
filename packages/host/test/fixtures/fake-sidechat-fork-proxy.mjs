@@ -7,6 +7,7 @@ mkdirSync(dataDir, { recursive: true });
 const statePath = join(dataDir, 'sidechat-fork-state.json');
 const controlPath = join(dataDir, 'fake-control.json');
 const timestamp = '2026-08-20T00:00:00.000Z';
+let negotiatedProtocol = '2.0';
 
 const REJECT_ON_SIDECHAT = new Set([
   'session.get',
@@ -265,8 +266,13 @@ for await (const line of rl) {
   const params = req.params ?? {};
 
   if (method === 'initialize') {
+    const offered = params.protocol?.versions ?? [];
+    const version = offered.includes('2.2') ? '2.2'
+      : offered.includes('2.1') ? '2.1'
+      : offered[0] || '2.0';
+    negotiatedProtocol = version;
     result(req.id, {
-      protocol: { name: 'gian.proxy', version: '2.0' },
+      protocol: { name: 'gian.proxy', version },
       plugin: {
         id: process.env.GIAN_PLUGIN_ID ?? 'claude',
         name: 'Side Chat Fork Fake',
@@ -309,6 +315,7 @@ for await (const line of rl) {
         { id: 'session.fork.atTurn', supported: true },
       ],
       slashCommands: [],
+      ...(negotiatedProtocol === '2.0' ? {} : { specialCatalogs: {} }),
     });
     continue;
   }
@@ -329,6 +336,7 @@ for await (const line of rl) {
         { id: 'session.fork.atTurn', supported: true },
       ],
       slashCommands: [],
+      ...(negotiatedProtocol === '2.0' ? {} : { specialCatalogs: {} }),
       resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
     });
     continue;

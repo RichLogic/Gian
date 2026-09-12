@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { act, screen, fireEvent, waitFor } from '@testing-library/react';
 import { HistoryInspector } from '../src/components/HistoryInspector.js';
 import { renderWithOperations } from './operation-test-utils.js';
@@ -116,13 +117,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('history row CSS', () => {
+  it('subject grows into free space; ref pills shrink with it (no early truncation)', () => {
+    // Regression (2026-09-06): subject was flex 0 1 auto and refs flex none,
+    // so wide branch badges truncated the commit subject even when the row
+    // had free width.
+    const css = readFileSync('src/styles/gian-v2.css', 'utf8');
+    const subject = css.match(/\.h-row \.subject\s*\{([^}]*)\}/)?.[1] ?? '';
+    const refs = css.match(/\.h-row \.refs\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(subject).toMatch(/flex:\s*1 1 auto/);
+    expect(refs).toMatch(/flex:\s*0 1 auto/);
+  });
+});
+
 describe('HistoryInspector', () => {
-  it('renders the single-line timeline with graph and trailing refs chips', async () => {
+  it('renders the single-line timeline with graph, inline lane-colored refs pills, and body preview', async () => {
     const wt = nextTree();
     loadGitHistory.mockResolvedValue(page({
       headSha: 'aaa111',
       items: [
-        commit({ sha: 'aaa111', subject: 'tip commit', refs: [{ name: 'refs/heads/main', shortName: 'main', kind: 'local', target: 'aaa111' }], parents: ['bbb222'] }),
+        commit({ sha: 'aaa111', subject: 'tip commit', bodyPreview: 'more detail here', refs: [{ name: 'refs/heads/main', shortName: 'main', kind: 'local', target: 'aaa111' }], parents: ['bbb222'] }),
         commit({ sha: 'bbb222', subject: 'merge commit', isMerge: true, parents: ['ccc333', 'ddd444'] }),
         commit({ sha: 'ccc333', subject: 'older', isRoot: true }),
       ],
@@ -131,13 +145,87 @@ describe('HistoryInspector', () => {
     await screen.findByText('tip commit');
     expect(document.querySelectorAll('.h-row').length).toBe(3);
     expect(document.querySelector('.h-row .g svg')).toBeTruthy();
-    // refs trail the subject at the row end; author/sha/time stay on the tooltip
+    // Air-style: solid lane-colored refs pills sit inline after the subject
+    // and the dimmed body preview; author/sha/time stay on the tooltip
     const tipRow = screen.getByText('tip commit').closest('.h-row')!;
-    expect(tipRow.querySelector('.refs .h-ref.local')?.textContent).toContain('main');
-    expect(tipRow.querySelector('.refs .h-ref.head')?.textContent).toContain('HEAD');
-    expect(tipRow.querySelector('.refs')).toBe(tipRow.lastElementChild);
+    const line = tipRow.querySelector('.l1')!;
+    expect(line.querySelector('.refs .h-ref.lane-1')?.textContent).toContain('main');
+    expect(line.querySelector('.refs .h-ref.head')?.textContent).toContain('HEAD');
+    expect(line.querySelector('.desc')?.textContent).toBe('more detail here');
+    // rows without a body preview render no description span
+    expect(screen.getByText('merge commit').closest('.h-row')!.querySelector('.desc')).toBeNull();
     expect(tipRow.getAttribute('title')).toContain('aaa111 · Rich');
     expect(screen.queryByText('MERGE')).toBeNull();
+  });
+
+  it('each row\'s graph hugs its own dots — a merge-heavy section does not widen calm rows', async () => {
+    // Regression: the gutter width used to be the max lane across ALL loaded
+    // rows, so a deep 4-way merge pushed every row's subject text far right.
+    const wt = nextTree();
+    loadGitHistory.mockResolvedValue(page({
+      headSha: 'aaa111',
+      items: [
+        commit({ sha: 'aaa111', subject: 'tip', parents: ['bbb222'] }),
+        commit({ sha: 'bbb222', subject: 'linear above merge', parents: ['mmm111'] }),
+        commit({ sha: 'mmm111', subject: 'four-way merge', isMerge: true, parents: ['ccc333', 'xxx111', 'yyy111', 'zzz111'] }),
+        commit({ sha: 'ccc333', subject: 'first parent', parents: [] }),
+        commit({ sha: 'xxx111', subject: 'extra one', parents: [] }),
+        commit({ sha: 'yyy111', subject: 'extra two', parents: [] }),
+        commit({ sha: 'zzz111', subject: 'extra three', parents: [] }),
+      ],
+    }));
+    renderInspector(wt);
+    await screen.findByText('tip');
+    const svgWidth = (subject: string) =>
+      Number(screen.getByText(subject).closest('.h-row')!.querySelector('.g svg')!.getAttribute('width'));
+    // laneX(i) = 7 + i*8, row width = laneX(maxLane) + 7.
+    expect(svgWidth('tip')).toBe(14);                // lane 0 only
+    expect(svgWidth('linear above merge')).toBe(14); // lane 0 only, despite the merge below
+    expect(svgWidth('four-way merge')).toBe(38);     // curves reach lane 3
+    expect(svgWidth('extra three')).toBe(38);        // node sits on lane 3
+  });
+
+  it('draws Air-style nodes: filled dots for ordinary commits, hollow rings for merge and HEAD', async () => {
+    const wt = nextTree();
+    loadGitHistory.mockResolvedValue(page({
+      headSha: 'aaa111',
+      items: [
+        commit({ sha: 'aaa111', subject: 'tip', parents: ['bbb222'] }),
+        commit({ sha: 'bbb222', subject: 'merge', isMerge: true, parents: ['ccc333', 'ddd444'] }),
+        commit({ sha: 'ccc333', subject: 'plain', parents: [], isRoot: true }),
+      ],
+    }));
+    renderInspector(wt);
+    await screen.findByText('tip');
+    const headRow = screen.getByText('tip').closest('.h-row')!;
+    expect(headRow.querySelector('.h-node.head-ring')).toBeTruthy();
+    expect(headRow.querySelector('.h-node.hollow')).toBeTruthy();
+    expect(headRow.querySelector('.h-node.fill')).toBeNull();
+    const mergeRow = screen.getByText('merge').closest('.h-row')!;
+    expect(mergeRow.querySelector('.h-node.hollow')).toBeTruthy();
+    expect(mergeRow.querySelector('.h-node.fill')).toBeNull();
+    expect(mergeRow.querySelector('.h-node.head-ring')).toBeNull();
+    const plainRow = screen.getByText('plain').closest('.h-row')!;
+    expect(plainRow.querySelector('.h-node.fill')).toBeTruthy();
+    expect(plainRow.querySelector('.h-node.hollow')).toBeNull();
+  });
+
+  it('fills the selected node even when it is a merge or HEAD', async () => {
+    const wt = nextTree();
+    loadGitHistory.mockResolvedValue(page({
+      headSha: 'aaa111',
+      items: [
+        commit({ sha: 'aaa111', subject: 'tip', parents: ['bbb222'] }),
+        commit({ sha: 'bbb222', subject: 'merge', isMerge: true, parents: ['ccc333'] }),
+      ],
+    }));
+    renderWithOperations(
+      <HistoryInspector workingTreeId={wt} selectedSha="bbb222" onOpenCommit={vi.fn()} />,
+    );
+    await screen.findByText('merge');
+    const selRow = screen.getByText('merge').closest('.h-row')!;
+    expect(selRow.querySelector('.h-node.fill')).toBeTruthy();
+    expect(selRow.querySelector('.h-node.hollow')).toBeNull();
   });
 
   it('clicking a commit row opens it (singleton tab — no preview/pin split)', async () => {

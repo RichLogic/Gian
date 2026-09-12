@@ -5,10 +5,12 @@
 
 import { createInterface } from 'node:readline';
 import { isAbsolute } from 'node:path';
+import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
 import { BridgeClient, BridgeClientError } from '../runtime/bridge-client.js';
+import { discoverDshRuntimes, probeDshRuntime } from '../runtime/discover.js';
 
-const PLUGIN_VERSION = '0.1.5';
+const PLUGIN_VERSION = '0.1.6';
 
 function bridgeArgs(argv: string[], explicit: string | undefined): string[] {
   const configured = process.env.GIAN_DSH_HOST_ARGS;
@@ -46,11 +48,22 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) {
     process.stdout.write(`${JSON.stringify({
-      schemaVersion: 3,
+      schemaVersion: 4,
       id: 'ai.deepseek.harness',
       pluginVersion: PLUGIN_VERSION,
       ok: true,
     })}\n`);
+    return;
+  }
+  if (isRuntimeBootstrapOffer()) {
+    await serveRuntimeBootstrap({
+      pluginId: process.env.GIAN_PLUGIN_ID ?? 'ai.deepseek.harness',
+      pluginName: 'DeepSeek Harness',
+      pluginVersion: PLUGIN_VERSION,
+      processScope: 'shared',
+      discover: discoverDshRuntimes,
+      probe: probeDshRuntime,
+    });
     return;
   }
   const options = parseArgs(argv);

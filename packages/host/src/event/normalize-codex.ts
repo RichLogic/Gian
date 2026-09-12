@@ -3,9 +3,9 @@ import type {
   AgentSpawnData,
   ApprovalRequestedData,
   ApprovalResolvedData,
-  FileChangeSummary,
   DisplayEvent,
 } from '@gian/shared';
+import { parseUnifiedDiffSummary } from './unified-diff.js';
 
 /**
  * Project a raw codex-proxy notification into 0..N UI display records.
@@ -374,39 +374,4 @@ function isRetryable(msg: string): boolean {
     lower.includes('econnreset') ||
     lower.includes('socket')
   );
-}
-
-/**
- * Parse a unified diff string into FileChangeSummary records.
- * Mirrors the idea in packages/web/src/transcript/apply.ts#parseUnifiedDiff
- * but only returns what FileChangeData.files requires.
- */
-function parseUnifiedDiffSummary(text: string): FileChangeSummary[] {
-  const chunks = text.split(/^diff --git .*$/m).map(c => c.trim()).filter(Boolean);
-  if (chunks.length === 0 && text.trim()) chunks.push(text.trim());
-
-  return chunks.map(chunk => {
-    const lines = chunk.split('\n');
-    let path = '';
-    let isNew = false;
-    let isDelete = false;
-    let added = 0;
-    let removed = 0;
-
-    for (const line of lines) {
-      if (line.startsWith('+++ b/')) path = line.slice(6);
-      else if (line.startsWith('+++ /dev/null')) isDelete = true;
-      else if (line.startsWith('--- /dev/null')) isNew = true;
-      else if (!path && line.startsWith('--- a/')) path = line.slice(6);
-      else if (line.startsWith('+') && !line.startsWith('+++')) added++;
-      else if (line.startsWith('-') && !line.startsWith('---')) removed++;
-    }
-
-    let kind: 'create' | 'update' | 'delete';
-    if (isDelete) kind = 'delete';
-    else if (isNew) kind = 'create';
-    else kind = 'update';
-
-    return { path: path || '(unknown)', kind, added, removed };
-  });
 }

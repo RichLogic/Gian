@@ -695,21 +695,48 @@ test('Claude gian.proxy/2 drops late events from a completed turn generation', a
   }
 });
 
-test('Claude gian.proxy/2 rejects hostServices and wrong-bound config keys', async () => {
-  const { service, adapter, streamId } = await setup();
+test('Claude gian.proxy/2 maps HTTP hostServices and rejects malformed/config-bound input', async () => {
+  const { runtime, service, adapter, streamId } = await setup();
   try {
+    const created = await adapter.handle(request('3', 'session.create', {
+      sessionId: 'browser-session',
+      workspace: { cwd: '/tmp', roots: ['/tmp'] },
+      config: {},
+      hostServices: [{
+        id: 'gian',
+        protocol: 'mcp',
+        transport: {
+          type: 'streamable-http',
+          url: 'http://127.0.0.1:8991/internal/mcp',
+          headers: { Authorization: 'Bearer private' },
+        },
+      }],
+    })) as { session: { streamId: string } };
+    assert.equal(JSON.stringify(created).includes('Bearer private'), false);
+    await adapter.handle(request('4', 'turn.start', {
+      sessionId: 'browser-session',
+      streamId: created.session.streamId,
+      turnId: 'browser-turn',
+      input: [{ type: 'text', text: 'use browser' }],
+      config: {},
+    }));
+    assert.deepEqual(runtime.spawns.at(-1)?.mcpServers, [{
+      name: 'gian',
+      url: 'http://127.0.0.1:8991/internal/mcp',
+      headers: { Authorization: 'Bearer private' },
+    }]);
     await assert.rejects(
-      adapter.handle(request('3', 'session.create', {
+      adapter.handle(request('5', 'session.create', {
         sessionId: 'other-session',
         workspace: { cwd: '/tmp', roots: ['/tmp'] },
         config: {},
         hostServices: [{ id: 'gian', protocol: 'mcp' }],
       })),
       (error: unknown) => error instanceof ClaudeProtocolError
-        && error.domainCode === 'CAPABILITY_NOT_SUPPORTED',
+        && error.domainCode === 'INVALID_PARAMS',
     );
     await assert.rejects(
-      adapter.handle(request('4', 'turn.start', {
+      adapter.handle(request('6', 'turn.start', {
         sessionId: 'host-session',
         streamId,
         turnId: 'turn',
@@ -720,7 +747,7 @@ test('Claude gian.proxy/2 rejects hostServices and wrong-bound config keys', asy
         && error.domainCode === 'CONFIG_VALUE_INVALID',
     );
     await assert.rejects(
-      adapter.handle(request('5', 'turn.start', {
+      adapter.handle(request('7', 'turn.start', {
         sessionId: 'host-session',
         streamId,
         turnId: 'turn-2',

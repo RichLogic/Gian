@@ -6,6 +6,7 @@ import test from 'node:test';
 import type { ProxyNotification } from '@gian/proxy-protocol';
 import { projectNotification } from '../src/event/project-notification.js';
 import { ProxyManager } from '../src/proxy/manager.js';
+import { legacyProxyManagerConfig } from './helpers/legacy-proxy-manager.js';
 
 const timestamp = '2026-08-10T00:00:00.000Z';
 
@@ -128,12 +129,12 @@ test('ProxyManager routes a Codex session through the generic gian.proxy/2 clien
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
   await writeFile(entry, jsonRpcSource('codex', 'shared'));
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(root, 'data'),
     ccProxyEntry: entry,
     codexProxyEntry: entry,
     codexProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
-  });
+  }));
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-session-1', 'codex');
@@ -186,12 +187,12 @@ test('ProxyManager routes a Claude session through a session-scoped generic clie
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
   await writeFile(entry, jsonRpcSource('claude', 'session'));
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(root, 'data'),
     hostVersion: '4.5.6',
     ccProxyEntry: entry,
     claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
-  });
+  }));
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-claude-session', 'claude');
@@ -233,24 +234,13 @@ test('ProxyManager routes a Kimi session through the shared generic client', asy
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
   await writeFile(entry, jsonRpcSource('kimi', 'shared'));
-  const runtimeManager = {
-    acquire: async () => ({
-      cli: 'kimi',
-      binaryPath: '/unused/kimi',
-      version: 'fixture',
-      source: 'override',
-      env: {},
-      release: async () => undefined,
-    }),
-  } as never;
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(root, 'data'),
     hostVersion: '4.5.6',
     ccProxyEntry: entry,
     kimiProxyEntry: entry,
     kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' },
-    runtimeManager,
-  });
+  }));
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-kimi-session', 'kimi');
@@ -296,24 +286,13 @@ test('ProxyManager routes a Grok session through the session-scoped generic clie
   t.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'proxy.mjs');
   await writeFile(entry, jsonRpcSource('grok', 'session'));
-  const runtimeManager = {
-    acquire: async () => ({
-      cli: 'grok',
-      binaryPath: '/unused/grok',
-      version: 'fixture',
-      source: 'override',
-      env: {},
-      release: async () => undefined,
-    }),
-  } as never;
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(root, 'data'),
     hostVersion: '4.5.6',
     ccProxyEntry: entry,
     grokProxyEntry: entry,
     grokProxy: { pluginVersion: '0.2.0', processScope: 'session' },
-    runtimeManager,
-  });
+  }));
   t.after(() => manager.closeAll().catch(() => undefined));
 
   const client = await manager.getOrCreate('host-grok-session', 'grok');

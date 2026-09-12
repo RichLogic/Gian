@@ -38,7 +38,7 @@ function assignmentLifecycle(db: ReturnType<typeof openDatabase>) {
   return { lifecycle, messages };
 }
 
-test('Task done archives owned sessions and reopening restores them without changing completion', () => {
+test('Task done marks owned sessions completed then archives; reopening unarchives but keeps completion', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-task-archive-'));
   const db = openDatabase(dir);
   try {
@@ -72,8 +72,11 @@ test('Task done archives owned sessions and reopening restores them without chan
       'SELECT * FROM sessions WHERE task_id = ? ORDER BY id',
     ).all(task.id) as Session[];
     assert.deepEqual(rows.map(session => session.archived), [1, 1]);
+    // T1 (2026-09-06): completion is stamped first — a previously completed
+    // session keeps its own timestamp, the open one gets the close time.
     assert.equal(rows[0]?.completed_at, completedAt);
-    assert.equal(rows[1]?.completed_at, null);
+    assert.ok(rows[1]?.completed_at !== null);
+    const stampedAt = rows[1]?.completed_at;
     assert.equal(notifications.length, 1);
     assert.ok(notifications[0]?.every(session => session.workspace_id === 'ws-1'));
 
@@ -82,8 +85,9 @@ test('Task done archives owned sessions and reopening restores them without chan
       'SELECT * FROM sessions WHERE task_id = ? ORDER BY id',
     ).all(task.id) as Session[];
     assert.deepEqual(rows.map(session => session.archived), [0, 0]);
+    // Reopen restores visibility only — completion is NOT cleared.
     assert.equal(rows[0]?.completed_at, completedAt);
-    assert.equal(rows[1]?.completed_at, null);
+    assert.equal(rows[1]?.completed_at, stampedAt);
     assert.equal(notifications.length, 2);
   } finally {
     db.close();
@@ -161,7 +165,7 @@ test('an active standalone Session can be atomically filed under an open Task', 
   }
 });
 
-test('Session assignment rejects closed Tasks and ineligible Sessions without partial writes', () => {
+test('Session assignment: moves and releases are legal; closed targets and archived sessions reject', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-session-assign-reject-'));
   const db = openDatabase(dir);
   try {
@@ -190,20 +194,39 @@ test('Session assignment rejects closed Tasks and ineligible Sessions without pa
       () => lifecycle.assignTask('archived', openTask.id),
       /session is archived/,
     );
-    assert.throws(
-      () => lifecycle.assignTask('owned', openTask.id),
-      /session is not an independent coding session/,
-    );
+
+    // Cross-task moves and release-to-standalone are legal (2026-09-06):
+    // 'owned' moves to the open task, then releases back to standalone.
+    lifecycle.assignTask('owned', openTask.id);
+    let owned = db.prepare('SELECT type, task_id FROM sessions WHERE id = ?')
+      .get('owned') as Pick<Session, 'type' | 'task_id'>;
+    assert.deepEqual(owned, { type: 'subtask', task_id: openTask.id });
+
+    lifecycle.assignTask('owned', null);
+    owned = db.prepare('SELECT type, task_id FROM sessions WHERE id = ?')
+      .get('owned') as Pick<Session, 'type' | 'task_id'>;
+    assert.deepEqual(owned, { type: 'coding', task_id: null });
+
+    // Releasing an already-standalone session is an idempotent no-op.
+    lifecycle.assignTask('owned', null);
+    owned = db.prepare('SELECT type, task_id FROM sessions WHERE id = ?')
+      .get('owned') as Pick<Session, 'type' | 'task_id'>;
+    assert.deepEqual(owned, { type: 'coding', task_id: null });
 
     const rows = db.prepare(
       'SELECT id, type, task_id, archived FROM sessions ORDER BY id',
     ).all() as Array<Pick<Session, 'id' | 'type' | 'task_id' | 'archived'>>;
     assert.deepEqual(rows, [
       { id: 'archived', type: 'coding', task_id: null, archived: 1 },
-      { id: 'owned', type: 'subtask', task_id: otherTask.id, archived: 0 },
+      { id: 'owned', type: 'coding', task_id: null, archived: 0 },
       { id: 'standalone', type: 'coding', task_id: null, archived: 0 },
     ]);
-    assert.deepEqual(messages, []);
+    // The legal move + release broadcast twice (plus one idempotent re-broadcast);
+    // the rejected assigns never wrote, so no broadcast carries them.
+    assert.deepEqual(
+      messages.map(m => (m as { session?: { id?: string } }).session?.id),
+      ['owned', 'owned', 'owned'],
+    );
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

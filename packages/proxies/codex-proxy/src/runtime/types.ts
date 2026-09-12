@@ -101,6 +101,9 @@ export interface CodexRuntime extends RuntimeEventSource {
   respond(id: number | string, result: unknown): Promise<unknown>;
   listAllModels(): Promise<unknown[]>;
   listSkills(cwd?: string): Promise<SkillsListResponse>;
+  /** Native effective Hook inventory (app-server `hooks/list`). Read-only:
+   *  never runs a hook, never modifies trust. */
+  listHooks?(cwd?: string): Promise<HooksListResponse>;
   unsubscribeThread?(threadId: string): Promise<unknown>;
   stop(): Promise<void>;
 }
@@ -136,4 +139,35 @@ export interface SkillInterface {
   brandColor?: string | null;
   iconLarge?: string | null;
   iconSmall?: string | null;
+}
+
+/** Subset of codex `hooks/list` v2 RPC response we consume (P0 evidence:
+ *  `generate-json-schema` → HooksListResponse). */
+export interface HooksListResponse {
+  data: HooksListEntry[];
+}
+
+export interface HooksListEntry {
+  cwd: string;
+  errors: Array<{ message: string; path: string }>;
+  hooks: HookMetadata[];
+  warnings: string[];
+}
+
+export interface HookMetadata {
+  key: string;
+  eventName: string;
+  matcher?: string | null;
+  handlerType: 'command' | 'prompt' | 'agent';
+  command?: string | null;
+  pluginId?: string | null;
+  sourcePath?: string | null;
+  source?: string | null;
+  isManaged?: boolean | null;
+  enabled: boolean;
+  timeoutSec?: number | null;
+  trustStatus?: 'managed' | 'untrusted' | 'trusted' | 'modified' | null;
+  currentHash?: string | null;
+  displayOrder?: number | null;
+  statusMessage?: string | null;
 }

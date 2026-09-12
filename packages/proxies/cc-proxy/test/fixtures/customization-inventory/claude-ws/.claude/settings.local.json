@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "./scripts/local-guard.sh" } ] }
+    ]
+  }
+}

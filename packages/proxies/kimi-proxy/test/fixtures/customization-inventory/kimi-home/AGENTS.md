@@ -1,0 +1,1 @@
+# Kimi global instructions (fixture)

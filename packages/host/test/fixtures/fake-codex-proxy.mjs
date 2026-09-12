@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const emittedAt = '2026-04-26T00:00:00.000Z';
+let negotiatedProtocol = '2.0';
 let seq = 0;
 const sessions = new Map();
 
@@ -24,9 +25,14 @@ for await (const line of rl) {
   }
 
   switch (req.method) {
-    case 'initialize':
+    case 'initialize': {
+      const offered = req.params?.protocol?.versions ?? [];
+      const version = offered.includes('2.2') ? '2.2'
+        : offered.includes('2.1') ? '2.1'
+        : offered[0] || '2.0';
+      negotiatedProtocol = version;
       result(req.id, {
-        protocol: { name: 'gian.proxy', version: '2.0' },
+        protocol: { name: 'gian.proxy', version },
         plugin: {
           id: process.env.GIAN_PLUGIN_ID ?? 'codex',
           name: 'Codex',
@@ -36,12 +42,14 @@ for await (const line of rl) {
         capabilities: { 'session.replay': 1, interaction: 1 },
       });
       break;
+    }
     case 'catalog.list':
       result(req.id, {
         catalogRevision: 'codex-fixture-1',
         input: [{ type: 'text' }],
         configOptions: [],
         slashCommands: [],
+        ...(negotiatedProtocol === '2.0' ? {} : { specialCatalogs: {} }),
       });
       break;
     case 'session.create': {

@@ -41,7 +41,7 @@
   transform: translateY(-50%);
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fz-10);
   pointer-events: none;
 }
 .rail-item.active .ri-age { color: var(--text-2); }

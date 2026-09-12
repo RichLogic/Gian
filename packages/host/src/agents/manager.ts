@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
   access,
@@ -13,20 +13,20 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
-import { once } from 'node:events';
 import { promisify } from 'node:util';
 import {
   HostProtocolValidator,
   PROTOCOL_NAME,
   PROTOCOL_V2,
+  PROTOCOL_V22,
   SUPPORTED_PROTOCOL_VERSIONS,
   manifestSchema,
   protocolRangeIncludes,
-  readNdjsonLines,
   type ManifestV2,
   type ManifestV3,
+  type ManifestV4,
 } from '@gian/proxy-protocol';
 import type {
   AgentCliStatus,
@@ -35,27 +35,44 @@ import type {
   AgentProxyDefaults,
   AgentProxyStatus,
   AgentProxyUpdateCheck,
-  AgentRuntimeProfile,
+  AgentHomeBinding,
   Executor,
   ProductExecutor,
   ProxyCatalogEntry,
+  OpenRuntimeProfile,
   UserAgent,
   UserAgentStatus,
+  LegacyExecutorId,
 } from '@gian/shared';
 import {
-  EXECUTOR_DEFS,
-  EXECUTOR_IDS,
+  isExecutorId,
   isProductExecutor,
   migrateLegacyGrokProxyDefaults,
+  parseProxyPluginId,
+  pluginIdForExecutorId,
   PRODUCT_EXECUTORS,
+  productExecutorForPluginId,
+  resolvePluginIdInput,
 } from '@gian/shared';
-import { CommandRuntimeProvider } from '../runtime/command-provider.js';
-import { ZCODE_CLI_CONFIG_READINESS_ISSUE, ZcodeRuntimeProvider } from '../runtime/zcode-provider.js';
-import { DshRuntimeProvider } from '../runtime/dsh-provider.js';
-import { DshRuntimeInstaller } from '../runtime/dsh-installer.js';
-import { KimiSessionStoreRuntimeProvider } from '../runtime/kimi-session-store.js';
-import { runProtectedCommand } from '../runtime/protected-command.js';
-import type { CliRuntimeProvider, RuntimeProbe } from '../runtime/types.js';
+import type { CatalogService } from '../catalog/service.js';
+import { runNoRuntimeActivationHandshake } from '../plugin-store/initialize.js';
+import { PluginStoreError } from '../plugin-store/errors.js';
+import { isGenericRuntimeProtocol } from '../runtime/launch-mode.js';
+import { openRuntimeIdentity, RuntimeResolver, RuntimeResolverError } from '../runtime/resolver.js';
+import type { PluginStore } from '../plugin-store/store.js';
+import { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
+import { ManagedRuntimeGenerationStore } from '../runtime/generation-store.js';
+import { assertSavedAbsoluteRuntimePath } from '../runtime/saved-path.js';
+import {
+  launchFromPluginStore,
+  loadDevelopmentTrustedLaunch,
+  toOfficialPresence,
+  TrustedLaunchError,
+  validateStaticProxyPackage,
+  type OfficialPresence,
+  type TrustedLaunch,
+} from '../runtime/trusted-launch.js';
+import { runProtectedProxyChild, writeJsonRpc } from '../proxy/protected-handshake.js';
 import { shutdownProxyProcess } from '../proxy/process-shutdown.js';
 import {
   inspectManagedGianSkill,
@@ -69,12 +86,12 @@ import {
   acquireAgentUpdateLock,
   type AgentUpdateLease,
 } from './update-lock.js';
+import { AgentHomeError, AgentHomeManager, providerRuntimeEnvironment } from './home.js';
 
 const execFileAsync = promisify(execFile);
 const CONFIG_FILE = 'agents.json';
 const CONFIG_LOCK_AGENT_ID = '__agent-config__';
 const PROXY_ENTRY = 'proxy.mjs';
-const MAX_INSTALLER_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 64 * 1024 * 1024;
 const MAX_PROXY_MANIFEST_BYTES = 64 * 1024;
 const MAX_PROXY_LOGO_BYTES = 512 * 1024;
@@ -82,7 +99,25 @@ const MAX_PROXY_SKILL_BYTES = 512 * 1024;
 const PROXY_SELF_TEST_TIMEOUT_MS = 5_000;
 const PROXY_COMPATIBILITY_TIMEOUT_MS = 30_000;
 const STATUS_CACHE_TTL_MS = 30_000;
-const VERIFIED_CLI_VERSIONS: Record<Executor, string[]> = {
+const OFFICIAL_RUNTIME_IDS: Record<LegacyExecutorId, string> = {
+  claude: 'claude',
+  codex: 'codex',
+  kimi: 'kimi',
+  grok: 'grok',
+  dsh: 'dsh',
+  zcode: 'zcode',
+};
+
+const OFFICIAL_RUNTIME_DISPLAY: Record<LegacyExecutorId, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  kimi: 'Kimi Code',
+  grok: 'Grok CLI',
+  dsh: 'DeepSeek Harness',
+  zcode: 'ZCode CLI',
+};
+
+const VERIFIED_CLI_VERSIONS: Record<LegacyExecutorId, string[]> = {
   claude: ['2.1.159'],
   codex: ['0.146.0'],
   // Only the CLI version with a completed real regression of the ACP
@@ -96,13 +131,8 @@ const VERIFIED_CLI_VERSIONS: Record<Executor, string[]> = {
   zcode: ['0.16.5'],
 };
 
-const DEVELOPMENT_PROCESS_SCOPE: Record<Executor, 'shared' | 'session'> =
-  Object.fromEntries(
-    EXECUTOR_IDS.map((id) => [id, EXECUTOR_DEFS[id].processScope]),
-  ) as Record<Executor, 'shared' | 'session'>;
-
 interface AgentDefinition {
-  id: Executor;
+  id: LegacyExecutorId;
   name: string;
   command: string;
   installerUrl: string;
@@ -112,35 +142,48 @@ interface AgentDefinition {
 
 interface AgentConfigFileV1 {
   schemaVersion: 1;
-  cliPaths: Partial<Record<Executor, string>>;
-  proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>>;
+  cliPaths: Partial<Record<LegacyExecutorId, string>>;
+  proxyDefaults: Partial<Record<LegacyExecutorId, AgentProxyDefaults>>;
 }
 
-/** agents.json schema v3: Agents are user entities keyed by uuid. The Proxy
- *  kind catalog is NOT persisted here — it lives in the AGENTS definitions. */
+/** agents.json schema v5: Agents are user entities keyed by uuid with an
+ *  open pluginId. Official kind catalog metadata is not persisted here. */
 interface AgentConfigFile {
-  schemaVersion: 3;
+  schemaVersion: 5;
   agents: UserAgent[];
 }
 
 interface LegacyProxyManifest {
   schemaVersion: 1;
-  id: Executor;
+  id: LegacyExecutorId;
   version: string;
   entry: typeof PROXY_ENTRY;
 }
 
-type ManagedProxyManifestV2 = Omit<ManifestV2, 'id'> & { id: Executor };
-type ManagedProxyManifestV3 = Omit<ManifestV3, 'id'> & { id: Executor };
-type ManagedProxyManifest = ManagedProxyManifestV2 | ManagedProxyManifestV3;
+type ManagedProxyManifestV2 = Omit<ManifestV2, 'id'> & { id: LegacyExecutorId };
+type ManagedProxyManifestV3 = Omit<ManifestV3, 'id'> & { id: LegacyExecutorId };
+type ManagedProxyManifestV4 = Omit<ManifestV4, 'id'> & { id: LegacyExecutorId };
+type ManagedProxyManifest = ManagedProxyManifestV2 | ManagedProxyManifestV3 | ManagedProxyManifestV4;
 type ProxyManifest = LegacyProxyManifest | ManagedProxyManifest;
 type ProxyWireProtocol = 'legacy' | typeof PROTOCOL_NAME;
+
+interface LegacyRuntimeProbe {
+  cli: Executor;
+  binaryPath: string;
+  version: string;
+  source: 'override';
+  env: Readonly<Record<string, string>>;
+}
 
 export interface ProxyLaunchDescriptor {
   entryPath: string;
   protocol?: {
     pluginVersion: string;
     processScope: ManagedProxyManifestV2['process']['scope'];
+    schemaVersion?: 2 | 3 | 4;
+    runtimeBootstrap?: boolean;
+    runtimeId?: string;
+    runtimeDisplayName?: string;
   };
 }
 
@@ -152,16 +195,18 @@ export interface AgentManagerOptions {
   /** Production release channel for independently tagged Proxy plugins.
    * Kept opt-in so older release fixtures can still exercise schema v1. */
   independentProxyReleases?: boolean;
-  developmentProxyEntries?: Partial<Record<Executor, string>>;
-  environmentCliPaths?: Partial<Record<Executor, string>>;
+  /** GianDev-only trusted entries keyed by canonical pluginId (legacy aliases
+   * are accepted during migration). Production packages come from PluginStore. */
+  developmentProxyEntries?: Readonly<Record<string, string>>;
+  environmentCliPaths?: Partial<Record<LegacyExecutorId, string>>;
   homeDir?: string;
   kimiCodeHome?: string;
   pathEnv?: string;
   fetchImpl?: typeof fetch;
   /** Test/release-audit override for the reviewed official installer pin. */
-  officialInstallerSha256?: Partial<Record<Executor, string>>;
+  officialInstallerSha256?: Partial<Record<LegacyExecutorId, string>>;
   /** One-time migration source for defaults previously stored in SystemConfig. */
-  legacyProxyDefaults?: Partial<Record<Executor, Partial<AgentProxyDefaults>>>;
+  legacyProxyDefaults?: Partial<Record<LegacyExecutorId, Partial<AgentProxyDefaults>>>;
   /** v2 migration source: executors that appear in existing sessions. A kind
    *  with no configured path, no installed Proxy, and no session history does
    *  NOT get an auto-created Agent. */
@@ -170,11 +215,12 @@ export interface AgentManagerOptions {
    * Omitted in production so the candidate process and resolved vendor CLI
    * must complete the real stdio protocol before activation. */
   proxyActivationProbe?: (input: {
-    id: Executor;
+    id: LegacyExecutorId;
     version: string;
     entryPath: string;
     protocol: ProxyWireProtocol;
     processScope?: ManagedProxyManifestV2['process']['scope'];
+    schemaVersion?: 2 | 3 | 4;
   }) => Promise<void>;
   /** Test seam for the single atomic activation commit. Production always
    * uses fs.rename; a rejection proves the prior pointer remains untouched. */
@@ -190,9 +236,22 @@ export interface AgentManagerOptions {
   npmPath?: string;
   /** npm registry URL override (test seam for the DSH runtime installer). */
   dshRegistry?: string;
+  /** Generic RuntimeResolver. Official status/selection prefers this path. */
+  runtimeResolver?: RuntimeResolver;
+  /** Trusted Catalog packages for open pluginId Agents. */
+  pluginStore?: PluginStore;
+  /** Last explicit probe snapshot used by Catalog projection. */
+  readinessCache?: RuntimeReadinessCache;
+  /** Host Catalog authorization for create_agent. */
+  catalogService?: CatalogService;
+  /** Test seam. Production v4 create requires CatalogService. */
+  allowCreateWithoutCatalog?: boolean;
+  /** Certified global Runtime generations. Production constructs one store
+   * below dataDir; tests may inject an initialized store. */
+  generationStore?: ManagedRuntimeGenerationStore;
 }
 
-const AGENTS: Record<Executor, AgentDefinition> = {
+const AGENTS: Record<LegacyExecutorId, AgentDefinition> = {
   claude: {
     id: 'claude',
     name: 'Claude Code',
@@ -256,7 +315,7 @@ const AGENTS: Record<Executor, AgentDefinition> = {
     command: 'dsh',
     // DSH has no shell installer; it resolves from the official npm registry
     // (plan §3.1). The URL documents the package entry for the settings
-    // surface while actual install goes through DshRuntimeProvider.
+    // surface while Runtime setup is owned by the Proxy Manifest contract.
     installerUrl: 'https://www.npmjs.com/package/@deepseek-ai/dsh',
     installerSha256: '',
     officialPaths: home => [
@@ -283,7 +342,19 @@ const AGENTS: Record<Executor, AgentDefinition> = {
 };
 
 function emptyConfig(): AgentConfigFile {
-  return { schemaVersion: 3, agents: [] };
+  return { schemaVersion: 5, agents: [] };
+}
+
+function officialKinds(...values: Array<ProductExecutor | null | undefined>): ProductExecutor[] {
+  return [...new Set(values.filter((value): value is ProductExecutor => isProductExecutor(value)))];
+}
+
+export class PluginIdImmutableError extends Error {
+  readonly code = 'PLUGIN_ID_IMMUTABLE';
+  constructor() {
+    super("A saved Agent's pluginId cannot change");
+    this.name = 'PluginIdImmutableError';
+  }
 }
 
 /** A missing/unreadable agents.json migrates from "empty v1" so the
@@ -322,6 +393,18 @@ export class AgentNameTakenError extends Error {
   }
 }
 
+export class AgentCreateError extends Error {
+  readonly code: string;
+  readonly status: 400 | 404 | 409;
+
+  constructor(code: string, message: string, status: 400 | 404 | 409) {
+    super(message);
+    this.name = 'AgentCreateError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
 function normalizeCliPathInput(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const trimmed = value.trim();
@@ -349,25 +432,47 @@ const PROXY_TAGLINES: Record<ProductExecutor, string> = {
   zcode: 'Z.ai ZCode coding agent',
 };
 
+function persistableAgent(agent: UserAgent): UserAgent {
+  return {
+    id: agent.id,
+    name: agent.name,
+    pluginId: agent.pluginId,
+    proxy: agent.proxy,
+    home: agent.home ? { ...agent.home } : null,
+    cliPath: agent.cliPath,
+    defaults: { ...agent.defaults },
+  };
+}
+
 /** Lenient read-side normalization of one persisted Agent. Returns null for
- *  entries that cannot identify a usable Agent at all (bad id/name/kind). */
+ *  entries that cannot identify a usable Agent at all (bad id/name/pluginId). */
 function normalizeUserAgent(value: unknown): UserAgent | null {
   const record = objectRecord(value);
   if (!record) return null;
   const id = typeof record['id'] === 'string' ? record['id'].trim() : '';
   const name = normalizeAgentName(record['name']);
-  const proxy = record['proxy'];
-  if (!id || !name || !isProductExecutor(proxy)) return null;
+  const pluginId = resolvePluginIdInput(record['pluginId'])
+    ?? resolvePluginIdInput(record['proxy']);
+  if (!id || !name || !pluginId) return null;
   const cliPath = typeof record['cliPath'] === 'string' && isAbsolute(record['cliPath'])
     ? record['cliPath']
     : null;
-  return {
+  const rawHome = objectRecord(record['home']);
+  const home = rawHome
+    && (rawHome['kind'] === 'managed' || rawHome['kind'] === 'custom')
+    && typeof rawHome['path'] === 'string'
+    && isAbsolute(rawHome['path'])
+    ? { kind: rawHome['kind'], path: rawHome['path'] } as AgentHomeBinding
+    : null;
+  return persistableAgent({
     id,
     name,
-    proxy,
+    pluginId,
+    proxy: productExecutorForPluginId(pluginId),
+    home,
     cliPath,
     defaults: normalizeProxyDefaults(record['defaults']),
-  };
+  });
 }
 
 function parseConfigV2(parsed: { agents?: unknown }): AgentConfigFile {
@@ -383,13 +488,13 @@ function parseConfigV2(parsed: { agents?: unknown }): AgentConfigFile {
     seenNames.add(nameKey);
     agents.push(agent);
   }
-  return { schemaVersion: 3, agents };
+  return { schemaVersion: 5, agents };
 }
 
 function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
-  const cliPaths: Partial<Record<Executor, string>> = {};
-  const proxyDefaults: Partial<Record<Executor, AgentProxyDefaults>> = {};
-  for (const id of Object.keys(AGENTS) as Executor[]) {
+  const cliPaths: Partial<Record<LegacyExecutorId, string>> = {};
+  const proxyDefaults: Partial<Record<LegacyExecutorId, AgentProxyDefaults>> = {};
+  for (const id of Object.keys(AGENTS) as LegacyExecutorId[]) {
     const path = parsed.cliPaths?.[id];
     if (typeof path === 'string' && isAbsolute(path)) cliPaths[id] = path;
     if (parsed.proxyDefaults?.[id]) {
@@ -402,6 +507,7 @@ function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
 function parseConfig(raw: string): AgentConfigFile | AgentConfigFileV1 {
   const parsed = JSON.parse(raw) as { schemaVersion?: unknown };
   return parsed?.schemaVersion === 2 || parsed?.schemaVersion === 3
+    || parsed?.schemaVersion === 4 || parsed?.schemaVersion === 5
     ? parseConfigV2(parsed as { agents?: unknown })
     : parseConfigV1(parsed as Partial<AgentConfigFileV1>);
 }
@@ -424,26 +530,28 @@ function proxyManifestVersion(manifest: ProxyManifest): string {
 
 export function verifiedCliVersionsFromManifest(
   manifest: ProxyManifest | null | undefined,
-  id: Executor,
+  id: LegacyExecutorId,
 ): string[] {
-  if (manifest && !isLegacyProxyManifest(manifest)) {
-    const verified = manifest.runtime?.verifiedCliVersions;
-    if (verified && verified.length > 0) return [...verified];
-    const recommended = manifest.runtime?.recommendedCliVersion;
-    if (typeof recommended === 'string' && recommended.length > 0) return [recommended];
+  if (manifest && !isLegacyProxyManifest(manifest) && manifest.runtime) {
+    if (manifest.schemaVersion === 4) {
+      if (manifest.runtime.kind === 'external' && manifest.runtime.verifiedVersions.length > 0) {
+        return [...manifest.runtime.verifiedVersions];
+      }
+    } else {
+      const verified = manifest.runtime.verifiedCliVersions;
+      if (verified && verified.length > 0) return [...verified];
+      const recommended = manifest.runtime.recommendedCliVersion;
+      if (typeof recommended === 'string' && recommended.length > 0) return [recommended];
+    }
   }
-  return [...VERIFIED_CLI_VERSIONS[id]];
+  return isExecutorId(id) ? [...VERIFIED_CLI_VERSIONS[id]] : [];
 }
 
 export function recommendedCliVersionFromManifest(
   manifest: ProxyManifest | null | undefined,
-  id: Executor,
+  id: LegacyExecutorId,
 ): string {
   return verifiedCliVersionsFromManifest(manifest, id)[0]!;
-}
-
-function runtimeProfileId(input: Omit<AgentRuntimeProfile, 'id'>): string {
-  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
 }
 
 function proxyManifestProtocol(manifest: ProxyManifest): ProxyWireProtocol {
@@ -454,10 +562,14 @@ function isCompatibleProxyManifest(
   manifest: ProxyManifest,
   _releaseVersion: string,
 ): boolean {
-  return !isLegacyProxyManifest(manifest)
-    && SUPPORTED_PROTOCOL_VERSIONS.some(version => (
-      protocolRangeIncludes(manifest.protocol.range, version)
-    ));
+  if (isLegacyProxyManifest(manifest)) return false;
+  if (SUPPORTED_PROTOCOL_VERSIONS.some(version => (
+    protocolRangeIncludes(manifest.protocol.range, version)
+  ))) {
+    return true;
+  }
+  return manifest.schemaVersion === 4
+    && protocolRangeIncludes(manifest.protocol.range, PROTOCOL_V22);
 }
 
 function normalizeRepository(value: string): string {
@@ -468,27 +580,6 @@ function normalizeRepository(value: string): string {
   return trimmed;
 }
 
-function managedRuntimeEnvironment(id: Executor): Readonly<Record<string, string>> {
-  if (id === 'claude') {
-    return { DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1' };
-  }
-  if (id === 'kimi') return { KIMI_CODE_NO_AUTO_UPDATE: '1' };
-  if (id === 'grok') {
-    return {
-      GROK_DISABLE_AUTOUPDATER: '1',
-      GROK_SANDBOX: 'workspace',
-    };
-  }
-  if (id === 'dsh') {
-    return {
-      // Telemetry stays opt-out and stdout stays bridge-pure.
-      DSH_TELEMETRY_DISABLED: '1',
-      NO_COLOR: '1',
-      FORCE_COLOR: '0',
-    };
-  }
-  return {};
-}
 
 async function pluginVersionFromEntry(entryPath: string): Promise<string> {
   let dir = dirname(entryPath);
@@ -654,7 +745,7 @@ function compareSemver(left: ParsedSemver, right: ParsedSemver): number {
 
 function parseIndependentProxyReleaseCandidates(
   value: unknown,
-  id: Executor,
+  id: LegacyExecutorId,
 ): ProxyReleaseCandidate[] {
   if (!Array.isArray(value)) {
     throw new Error('GitHub Proxy release listing is invalid.');
@@ -685,7 +776,7 @@ function parseIndependentProxyReleaseCandidates(
 
 export function parseIndependentProxyRelease(
   value: unknown,
-  id: Executor,
+  id: LegacyExecutorId,
 ): ProxyRelease {
   const selected = parseIndependentProxyReleaseCandidates(value, id)[0]!;
   return { tag: selected.tag, version: selected.version };
@@ -702,11 +793,12 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
  * `ai.deepseek.harness` required by the integration plan; every other executor
  * keeps its short id. Managed Manifest identity must match initialize.
  */
-export function pluginIdFor(id: Executor): string {
-  return EXECUTOR_DEFS[id].pluginId;
+export function pluginIdFor(id: LegacyExecutorId): string {
+  if (!isExecutorId(id)) throw new Error(`unsupported legacy executor: ${id}`);
+  return pluginIdForExecutorId(id);
 }
 
-function validateProxyInitialize(id: Executor, value: unknown): void {
+function validateProxyInitialize(id: LegacyExecutorId, value: unknown): void {
   const result = objectRecord(value);
   const protocol = objectRecord(result?.['protocol']);
   const plugin = objectRecord(result?.['plugin']);
@@ -736,11 +828,11 @@ async function existsReadable(path: string): Promise<boolean> {
 export class AgentManager {
   private readonly configPath: string;
   private readonly homeDir: string;
+  private readonly agentHomes: AgentHomeManager;
   private readonly kimiCodeHome: string;
   private readonly fetchImpl: typeof fetch;
   private readonly releaseVersion: string;
   private readonly releaseRepository: string;
-  private readonly providers = new Map<Executor, CliRuntimeProvider>();
   private readonly operations = new Map<string, Promise<AgentInstallResult>>();
   private readonly statusCache = new Map<Executor, { value: AgentInstallStatus; expiresAt: number }>();
   private readonly statusProbes = new Map<Executor, {
@@ -754,12 +846,14 @@ export class AgentManager {
     promise: Promise<UserAgentStatus>;
   }>();
   private readonly agentStatusGenerations = new Map<string, number>();
+  private readonly lastOpenRuntimeProfiles = new Map<string, OpenRuntimeProfile>();
   private configMutationTail: Promise<void> = Promise.resolve();
   private config: AgentConfigFile = emptyConfig();
 
   private constructor(private readonly options: AgentManagerOptions) {
     this.configPath = join(options.dataDir, CONFIG_FILE);
     this.homeDir = options.homeDir ?? homedir();
+    this.agentHomes = new AgentHomeManager(options.dataDir);
     this.kimiCodeHome = options.kimiCodeHome
       ?? process.env.KIMI_CODE_HOME
       ?? join(this.homeDir, '.kimi-code');
@@ -771,102 +865,86 @@ export class AgentManager {
     this.releaseRepository = normalizeRepository(
       options.releaseRepository ?? 'RichLogic/Gian',
     );
-    for (const definition of Object.values(AGENTS)) {
-      const defaultKimiBinary = join(this.kimiCodeHome, 'bin', 'kimi');
-      const officialPaths = () => definition.id === 'kimi'
-        ? [
-          defaultKimiBinary,
-          ...definition.officialPaths(this.homeDir).filter(path => path !== defaultKimiBinary),
-        ]
-        : definition.officialPaths(this.homeDir);
-      const commandProvider = new CommandRuntimeProvider({
-        id: definition.id,
-        command: definition.command,
-        // The closure only consults the environment override. A saved Agent's
-        // explicit path reaches the provider through inspectInstalled(path) /
-        // CliRuntimeManager.acquire(kind, path), never through this global.
-        configuredPath: () => this.options.environmentCliPaths?.[definition.id],
-        officialPaths,
-        pathEnv: () => options.pathEnv ?? process.env.PATH,
-        env: {
-          ...managedRuntimeEnvironment(definition.id),
-          ...(definition.id === 'kimi' ? { KIMI_CODE_HOME: this.kimiCodeHome } : {}),
-        },
-      });
-      this.providers.set(
-        definition.id,
-        definition.id === 'kimi'
-          ? new KimiSessionStoreRuntimeProvider(commandProvider, this.kimiCodeHome)
-          : definition.id === 'dsh'
-            ? new DshRuntimeProvider({
-                dataDir: join(options.dataDir, 'runtimes', 'deepseek-harness'),
-                overridePath: options.environmentCliPaths?.dsh,
-                pathEnv: options.pathEnv,
-              })
-            : definition.id === 'zcode'
-              ? new ZcodeRuntimeProvider({
-                  overridePath: options.environmentCliPaths?.zcode,
-                  ...(options.pathEnv !== undefined ? { pathEnv: options.pathEnv } : {}),
-                  // Keep the config-readiness check inside the manager's HOME
-                  // boundary so tests (and packaged runs) stay hermetic.
-                  ...(options.homeDir !== undefined ? { home: options.homeDir } : {}),
-                })
-              : commandProvider,
-      );
-    }
   }
 
   static async create(options: AgentManagerOptions): Promise<AgentManager> {
-    const manager = new AgentManager(options);
+    const generationStore = options.generationStore
+      ?? new ManagedRuntimeGenerationStore(options.dataDir);
+    await generationStore.initialize();
+    const manager = new AgentManager({
+      ...options,
+      generationStore,
+      readinessCache: options.readinessCache
+        ?? (options.runtimeResolver ? new RuntimeReadinessCache() : undefined),
+    });
     await mkdir(options.dataDir, { recursive: true });
     let persisted: AgentConfigFile | AgentConfigFileV1;
     let needsSave = false;
     try {
       const raw = await readFile(manager.configPath, 'utf8');
       const source = JSON.parse(raw) as { schemaVersion?: unknown };
-      needsSave = source.schemaVersion !== 3;
+      needsSave = source.schemaVersion !== 5;
       persisted = parseConfig(raw);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
       persisted = emptyConfigV1();
     }
-    if (persisted.schemaVersion === 3) {
+    if (persisted.schemaVersion === 5) {
       manager.config = persisted;
       if (needsSave) await manager.saveConfig();
     } else {
       manager.config = await manager.migrateV1(persisted);
       await manager.saveConfig();
     }
-    await manager.reconcileDshProfile();
+    await manager.ensureAgentHomes();
+    await manager.migrateDshManagedPath();
     return manager;
   }
 
-  private dshInstaller(): DshRuntimeInstaller {
-    const dshHome = this.options.dshHome
-      ?? process.env.DSH_HOME
-      ?? join(homedir(), '.dsh');
-    if (typeof this.options.dshBridgePackageDir !== 'string') {
-      throw new Error(
-        'dshBridgePackageDir is required to install the @gian/dsh-bridge bundle into the gian profile.',
-      );
+  private async ensureAgentHomes(): Promise<void> {
+    let changed = false;
+    const agents: UserAgent[] = [];
+    const used: Array<{ agentId: string; path: string }> = [];
+    for (const current of this.config.agents) {
+      let home: AgentHomeBinding | null;
+      if (!this.agentHomes.supports(current.pluginId)) {
+        home = null;
+      } else if (current.home?.kind === 'custom') {
+        home = await this.agentHomes.validateCustom(current.home.path, used, current.id);
+      } else {
+        home = await this.agentHomes.createManaged(current.pluginId, current.id);
+      }
+      if (JSON.stringify(home) !== JSON.stringify(current.home ?? null)) changed = true;
+      if (home) used.push({ agentId: current.id, path: home.path });
+      agents.push(persistableAgent({ ...current, home }));
     }
-    return new DshRuntimeInstaller({
-      runtimesRoot: join(this.options.dataDir, 'runtimes', 'deepseek-harness'),
-      dshHome,
-      bridgePackageDir: this.options.dshBridgePackageDir,
-      ...(this.options.npmPath ? { npmPath: this.options.npmPath } : {}),
-      ...(this.options.dshRegistry ? { registry: this.options.dshRegistry } : {}),
-    });
+    if (!changed) return;
+    await this.saveConfig({ schemaVersion: 5, agents });
+    this.config = { schemaVersion: 5, agents };
   }
 
-  private async reconcileDshProfile(): Promise<void> {
-    if (!this.config.agents.some(agent => agent.proxy === 'dsh')) return;
+  /** One-time migration of a former Gian-managed DSH current path onto Agent.cliPath. */
+  private async migrateDshManagedPath(): Promise<void> {
+    if (this.options.managedProxies) return;
+    const current = join(this.options.dataDir, 'runtimes', 'deepseek-harness', 'current');
+    let migrated: string | null = null;
     try {
-      await this.dshInstaller().ensureGianProfile();
-    } catch (error) {
-      console.warn(`[dsh] could not reconcile the Gian profile Bridge: ${error instanceof Error ? error.message : String(error)}`);
+      const target = await realpath(current);
+      const binary = join(target, 'node_modules', '.bin', 'dsh');
+      await assertSavedAbsoluteRuntimePath(binary);
+      migrated = binary;
+    } catch {
+      return;
     }
+    const next = this.config.agents.map((agent) => (
+      agent.proxy === 'dsh' && agent.cliPath === null
+        ? persistableAgent({ ...agent, cliPath: migrated })
+        : agent
+    ));
+    if (next.every((agent, index) => agent.cliPath === this.config.agents[index]?.cliPath)) return;
+    await this.saveConfig({ schemaVersion: 5, agents: next });
+    this.config = { schemaVersion: 5, agents: next };
   }
 
   /** v1 → v2 migration. Each PRODUCT kind gets at most one default Agent,
@@ -882,13 +960,16 @@ export class AgentManager {
     const agents: UserAgent[] = [];
     for (const kind of PRODUCT_EXECUTORS) {
       const envPath = this.options.environmentCliPaths?.[kind];
-      const cliPath = v1.cliPaths[kind]
-        ?? (typeof envPath === 'string' && isAbsolute(envPath) ? envPath : null)
+      const legacyPath = v1.cliPaths[kind]
+        ?? (!this.options.managedProxies && typeof envPath === 'string' && isAbsolute(envPath)
+          ? envPath
+          : null)
         ?? null;
+      const cliPath = this.options.managedProxies ? null : legacyPath;
       const legacy = this.options.legacyProxyDefaults?.[kind];
       const defaults = v1.proxyDefaults[kind]
         ?? (legacy ? normalizeProxyDefaults(legacy) : emptyProxyDefaults());
-      const configured = cliPath !== null
+      const configured = legacyPath !== null
         || defaults.model !== '' || defaults.thinking !== '' || defaults.mode !== '';
       if (
         !configured
@@ -900,12 +981,13 @@ export class AgentManager {
       agents.push({
         id: randomUUID(),
         name: AGENTS[kind].name,
+        pluginId: pluginIdForExecutorId(kind),
         proxy: kind,
         cliPath,
         defaults,
       });
     }
-    return { schemaVersion: 3, agents };
+    return { schemaVersion: 5, agents };
   }
 
   private async hasInstalledProxy(id: ProductExecutor): Promise<boolean> {
@@ -920,37 +1002,210 @@ export class AgentManager {
     }
   }
 
-  runtimeProviders(): CliRuntimeProvider[] {
-    return Array.from(this.providers.values());
+  setRuntimeResolver(resolver: RuntimeResolver): void {
+    this.options.runtimeResolver = resolver;
+  }
+
+  setPluginStore(store: PluginStore): void {
+    this.options.pluginStore = store;
+  }
+
+  setReadinessCache(cache: RuntimeReadinessCache): void {
+    this.options.readinessCache = cache;
+  }
+
+  setCatalogService(service: CatalogService): void {
+    this.options.catalogService = service;
+  }
+
+  async officialPresence(pluginId: string): Promise<OfficialPresence | null> {
+    if (this.options.managedProxies && this.options.pluginStore) {
+      const installed = await this.options.pluginStore.inspect(pluginId);
+      const current = installed.versions.find(item => item.version === installed.currentVersion);
+      // Receipt-owned packages are Catalog installations. A validated
+      // pre-PluginStore official directory stays on the bounded legacy path;
+      // never fabricate a receipt or let Catalog overwrite it in place.
+      if (current?.state !== 'legacy') return null;
+    }
+    const launch = await this.trustedLaunch(pluginId);
+    return launch ? toOfficialPresence(launch) : null;
+  }
+
+  async trustedLaunch(pluginId: string): Promise<TrustedLaunch | null> {
+    const installed = await this.options.pluginStore?.currentLaunch(pluginId);
+    if (installed) return launchFromPluginStore(installed);
+    const official = productExecutorForPluginId(pluginId) ?? (
+      isProductExecutor(pluginId) ? pluginId : null
+    );
+    if (!official) {
+      return null;
+    }
+    return this.trustedOfficialLaunch(official);
+  }
+
+  /** Resolve a version named only by pre-binding Session data. New exact
+   * Sessions use resolveExactTrustedLaunch with a required Manifest digest. */
+  async trustedLaunchVersion(
+    pluginId: string,
+    pluginVersion: string | null,
+  ): Promise<TrustedLaunch | null> {
+    if (!pluginVersion) return this.trustedLaunch(pluginId);
+    const installed = await this.options.pluginStore?.inspect(pluginId);
+    const receipt = installed?.versions.find(item => (
+      item.version === pluginVersion && item.state === 'valid'
+    ))?.receipt;
+    if (receipt) {
+      const exact = await this.options.pluginStore!.resolveExactLaunch({
+        pluginId,
+        pluginVersion,
+        expectedManifestSha256: receipt.manifestSha256,
+      });
+      return launchFromPluginStore(exact);
+    }
+    const official = productExecutorForPluginId(pluginId) ?? (
+      isProductExecutor(pluginId) ? pluginId : null
+    );
+    if (!official) return null;
+    if (this.options.managedProxies) {
+      try {
+        return await validateStaticProxyPackage({
+          directory: join(this.options.dataDir, 'plugins', official, pluginVersion),
+          expectedId: pluginIdForExecutorId(official),
+          expectedVersion: pluginVersion,
+          source: 'official-managed',
+        });
+      } catch {
+        return null;
+      }
+    }
+    const current = await this.trustedOfficialLaunch(official);
+    return current?.pluginVersion === pluginVersion ? current : null;
+  }
+
+  async resolveExactTrustedLaunch(input: {
+    pluginId: string;
+    pluginVersion: string;
+    expectedManifestSha256: string;
+  }): Promise<TrustedLaunch> {
+    const official = productExecutorForPluginId(input.pluginId) ?? (
+      isProductExecutor(input.pluginId) ? input.pluginId : null
+    );
+    if (!official) {
+      const exact = await this.options.pluginStore?.resolveExactLaunch(input);
+      if (!exact) {
+        throw new TrustedLaunchError(
+          'TRUSTED_LAUNCH_PACKAGE',
+          `Exact package ${input.pluginId}@${input.pluginVersion} is not installed.`,
+        );
+      }
+      return {
+        pluginId: exact.pluginId,
+        pluginVersion: exact.pluginVersion,
+        manifestSha256: exact.manifestSha256,
+        protocolRange: exact.protocolRange,
+        entryPath: exact.entryPath,
+        processScope: exact.processScope,
+        schemaVersion: 4,
+        runtime: exact.runtime.kind === 'none'
+          ? { kind: 'none' }
+          : {
+            kind: 'external',
+            id: exact.runtime.id,
+            displayName: exact.runtime.displayName,
+            verifiedVersions: exact.runtime.verifiedVersions,
+          },
+        source: 'plugin-store',
+      };
+    }
+    if (this.options.managedProxies) {
+      try {
+        const directory = join(this.options.dataDir, 'plugins', official, input.pluginVersion);
+        const launch = await validateStaticProxyPackage({
+          directory,
+          expectedId: pluginIdForExecutorId(official),
+          expectedVersion: input.pluginVersion,
+          source: 'official-managed',
+        });
+        if (launch.manifestSha256 !== input.expectedManifestSha256) {
+          throw new TrustedLaunchError(
+            'TRUSTED_LAUNCH_DIGEST',
+            'Retained official package digest does not match the Session binding.',
+          );
+        }
+        return launch;
+      } catch (error) {
+        if (error instanceof TrustedLaunchError) throw error;
+        throw new TrustedLaunchError(
+          'TRUSTED_LAUNCH_PACKAGE',
+          `Retained official package ${input.pluginId}@${input.pluginVersion} is unavailable.`,
+        );
+      }
+    }
+    const current = await this.trustedOfficialLaunch(official);
+    if (
+      !current
+      || current.pluginVersion !== input.pluginVersion
+      || current.manifestSha256 !== input.expectedManifestSha256
+    ) {
+      throw new TrustedLaunchError(
+        'DEVELOPMENT_BINDING_UNAVAILABLE',
+        'GianDev can only reattach the current in-tree Manifest generation.',
+      );
+    }
+    return current;
+  }
+
+  private async trustedOfficialLaunch(id: LegacyExecutorId): Promise<TrustedLaunch | null> {
+    const expectedId = pluginIdForExecutorId(id);
+    if (this.options.managedProxies) {
+      try {
+        const agentRoot = join(this.options.dataDir, 'plugins', id);
+        const current = await realpath(join(agentRoot, 'current'));
+        const contained = await this.assertDirectProxyDirectory(agentRoot, current);
+        return await validateStaticProxyPackage({
+          directory: contained,
+          expectedId,
+          expectedVersion: basename(contained),
+          source: 'official-managed',
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return null;
+        }
+      }
+    }
+    const entry = this.options.developmentProxyEntries?.[expectedId]
+      ?? this.options.developmentProxyEntries?.[id];
+    if (!entry) return null;
+    try {
+      return await loadDevelopmentTrustedLaunch(entry, expectedId);
+    } catch {
+      return null;
+    }
   }
 
   updateLockDataDir(): string {
-    return join(this.homeDir, '.gian');
+    return this.options.dataDir;
   }
 
-  proxyEntry(id: Executor): string {
+  proxyEntry(id: LegacyExecutorId): string {
     if (!this.options.managedProxies) {
-      const entry = this.options.developmentProxyEntries?.[id];
+      const entry = this.options.developmentProxyEntries?.[pluginIdFor(id)]
+        ?? this.options.developmentProxyEntries?.[id];
       if (!entry) throw new Error(`development proxy entry is not configured: ${id}`);
       return entry;
     }
     return join(this.options.dataDir, 'plugins', id, 'current', PROXY_ENTRY);
   }
 
-  async proxyLaunchDescriptor(id: Executor, version?: string | null): Promise<ProxyLaunchDescriptor> {
+  async proxyLaunchDescriptor(id: LegacyExecutorId, version?: string | null): Promise<ProxyLaunchDescriptor> {
     if (!this.options.managedProxies) {
-      const entryPath = this.proxyEntry(id);
-      const pluginVersion = await pluginVersionFromEntry(entryPath);
-      if (version && version !== pluginVersion) {
-        throw new Error(`${id} development Proxy ${version} is not available (current ${pluginVersion})`);
+      const launch = await this.trustedOfficialLaunch(id);
+      if (!launch) throw new Error(`development proxy entry is not configured: ${id}`);
+      if (version && version !== launch.pluginVersion) {
+        throw new Error(`${id} development Proxy ${version} is not available (current ${launch.pluginVersion})`);
       }
-      return {
-        entryPath,
-        protocol: {
-          pluginVersion,
-          processScope: DEVELOPMENT_PROCESS_SCOPE[id],
-        },
-      };
+      return this.descriptorFromTrustedLaunch(launch);
     }
     const agentRoot = join(this.options.dataDir, 'plugins', id);
     let current: string;
@@ -975,16 +1230,51 @@ export class AgentManager {
     }
     const contained = await this.assertDirectProxyDirectory(agentRoot, current);
     const manifest = await this.validateProxyDirectory(contained, id);
+    return this.descriptorFromValidatedManifest(id, contained, manifest);
+  }
+
+  private descriptorFromTrustedLaunch(launch: TrustedLaunch): ProxyLaunchDescriptor {
     return {
-      entryPath: join(contained, manifest.entry),
-      ...(!isLegacyProxyManifest(manifest)
-        ? {
-            protocol: {
-              pluginVersion: manifest.pluginVersion,
-              processScope: manifest.process.scope,
-            },
-          }
-        : {}),
+      entryPath: launch.entryPath,
+      protocol: {
+        pluginVersion: launch.pluginVersion,
+        processScope: launch.processScope,
+        schemaVersion: launch.schemaVersion,
+        runtimeBootstrap: launch.schemaVersion === 4,
+        ...(launch.runtime.id ? { runtimeId: launch.runtime.id } : {}),
+        ...(launch.runtime.displayName ? { runtimeDisplayName: launch.runtime.displayName } : {}),
+      },
+    };
+  }
+
+  private descriptorFromValidatedManifest(
+    id: LegacyExecutorId,
+    directory: string,
+    manifest: ProxyManifest,
+  ): ProxyLaunchDescriptor {
+    if (isLegacyProxyManifest(manifest)) {
+      return { entryPath: join(directory, manifest.entry) };
+    }
+    const runtime = manifest.schemaVersion === 4 && manifest.runtime.kind === 'external'
+      ? {
+        runtimeId: manifest.runtime.id,
+        runtimeDisplayName: manifest.runtime.displayName,
+      }
+      : manifest.schemaVersion === 4
+        ? {}
+        : {
+          runtimeId: OFFICIAL_RUNTIME_IDS[id],
+          runtimeDisplayName: OFFICIAL_RUNTIME_DISPLAY[id],
+        };
+    return {
+      entryPath: join(directory, manifest.entry),
+      protocol: {
+        pluginVersion: manifest.pluginVersion,
+        processScope: manifest.process.scope,
+        schemaVersion: manifest.schemaVersion === 4 ? 4 : 3,
+        runtimeBootstrap: manifest.schemaVersion === 4,
+        ...runtime,
+      },
     };
   }
 
@@ -994,19 +1284,12 @@ export class AgentManager {
     return Promise.all(PRODUCT_EXECUTORS.map(id => this.status(id, refresh)));
   }
 
-  async status(id: Executor, refresh = false): Promise<AgentInstallStatus> {
+  async status(id: LegacyExecutorId, refresh = false): Promise<AgentInstallStatus> {
     return this.statusInternal(id, refresh);
   }
 
-  private async statusUnderUpdateLock(
-    id: Executor,
-    owner: AgentUpdateLease,
-  ): Promise<AgentInstallStatus> {
-    return this.statusInternal(id, true, owner);
-  }
-
   private async statusInternal(
-    id: Executor,
+    id: LegacyExecutorId,
     refresh: boolean,
     updateOwner?: AgentUpdateLease,
   ): Promise<AgentInstallStatus> {
@@ -1043,7 +1326,7 @@ export class AgentManager {
   /** Kind-level configured CLI override (environment only). A saved Agent's
    *  own path is resolved per Agent and reaches the runtime through
    *  `CliRuntimeManager.acquire(kind, path)` — never through this global. */
-  configuredPath(id: Executor): string | null {
+  configuredPath(id: LegacyExecutorId): string | null {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
     return this.options.environmentCliPaths?.[id] ?? null;
   }
@@ -1051,7 +1334,7 @@ export class AgentManager {
   /** Kind-level defaults view used by legacy callers (session creation until
    *  it resolves the Session's own Agent, and the kind status payload): the
    *  first saved Agent of the kind wins. */
-  proxyDefaults(id: Executor): AgentProxyDefaults {
+  proxyDefaults(id: LegacyExecutorId): AgentProxyDefaults {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
     const agent = isProductExecutor(id)
       ? this.config.agents.find(candidate => candidate.proxy === id)
@@ -1060,57 +1343,159 @@ export class AgentManager {
     return id === 'grok' ? migrateLegacyGrokProxyDefaults(defaults) : defaults;
   }
 
+  legacyProxyDefaults(id: string): AgentProxyDefaults | undefined {
+    return isExecutorId(id) ? this.proxyDefaults(id) : undefined;
+  }
+
   // ------------------------------------------------------------------
-  // User Agents (agents.json schema v3)
+  // User Agents (agents.json schema v5)
   // ------------------------------------------------------------------
 
   listAgents(): UserAgent[] {
-    return this.config.agents.map(agent => ({ ...agent, defaults: { ...agent.defaults } }));
+    return this.config.agents.map(agent => ({
+      ...agent,
+      home: agent.home ? { ...agent.home } : null,
+      // Production never projects a historical user-selected executable as
+      // active configuration. The path survives only in agents.json during
+      // the bounded migration window.
+      cliPath: this.options.managedProxies ? null : agent.cliPath,
+      defaults: { ...agent.defaults },
+    }));
   }
 
   getAgent(id: string): UserAgent {
     const agent = this.config.agents.find(candidate => candidate.id === id);
     if (!agent) throw new Error(`agent not found: ${id}`);
-    return { ...agent, defaults: { ...agent.defaults } };
+    return {
+      ...agent,
+      home: agent.home ? { ...agent.home } : null,
+      cliPath: this.options.managedProxies ? null : agent.cliPath,
+      defaults: { ...agent.defaults },
+    };
   }
 
   agentDefaults(id: string): AgentProxyDefaults {
     return { ...this.getAgent(id).defaults };
   }
 
-  /** Resolved runtime CLI path for one saved Agent: its own path, then the
-   *  kind's environment override, then null (provider auto-scan). */
-  agentRuntimePath(id: string): { proxy: ProductExecutor; cliPath: string | null } {
+  /** Resolved runtime CLI path for one saved Agent. Production reads only the
+   * globally active certified generation; GianDev retains the legacy path
+   * seam for isolated fixtures and migration verification. */
+  agentRuntimePath(id: string): {
+    pluginId: string;
+    proxy: ProductExecutor | null;
+    cliPath: string | null;
+  } {
     const agent = this.getAgent(id);
     return {
+      pluginId: agent.pluginId,
       proxy: agent.proxy,
-      cliPath: agent.cliPath ?? this.options.environmentCliPaths?.[agent.proxy] ?? null,
+      cliPath: this.options.managedProxies
+        ? this.options.generationStore?.activeCached(agent.pluginId)?.runtime?.entryPath ?? null
+        : agent.cliPath
+          ?? (agent.proxy ? this.options.environmentCliPaths?.[agent.proxy] ?? null : null),
     };
   }
 
-  /** First locally detected CLI candidate for a kind (PATH then official
-   *  install locations). Filesystem scan only — never spawns a probe. Used
-   *  to prefill a draft Agent's Path. */
-  async scannedCliPath(id: Executor): Promise<string | null> {
-    const provider = this.providers.get(id);
-    if (!provider) return null;
-    try {
-      const installed = await provider.inspectInstalled();
-      return installed[0]?.binaryPath ?? null;
-    } catch {
-      return null;
+  agentHome(id: string): AgentHomeBinding | null {
+    const home = this.config.agents.find(agent => agent.id === id)?.home ?? null;
+    if (!home) return null;
+    return { ...home };
+  }
+
+  managesRuntimePaths(): boolean {
+    return this.options.managedProxies;
+  }
+
+  async managedRuntimeStatus(pluginId: string): Promise<import('@gian/shared').ManagedRuntimeStatus> {
+    const id = parseProxyPluginId(pluginId);
+    const generations = await this.options.generationStore?.list(id) ?? [];
+    return {
+      pluginId: id,
+      active: this.options.generationStore?.activeCached(id) ?? null,
+      staged: generations.filter(generation => generation.state === 'staged'),
+    };
+  }
+
+  async prepareAgentCliTerminal(agentId: string): Promise<{
+    executable: string;
+    args: string[];
+    cwd: string;
+    env: Readonly<Record<string, string>>;
+    reservation: import('./update-lock.js').AgentProcessGroupReservation;
+    release: () => Promise<void>;
+  }> {
+    const agent = this.getAgent(agentId);
+    const home = agent.home;
+    if (!home) {
+      throw new AgentHomeError(
+        'AGENT_HOME_UNSUPPORTED',
+        'This Agent does not expose a Gian-managed CLI HOME.',
+      );
     }
+    const executable = this.agentRuntimePath(agentId).cliPath;
+    if (!executable) {
+      throw new AgentCreateError(
+        'RUNTIME_NOT_INSTALLED',
+        'The certified Runtime is not installed.',
+        409,
+      );
+    }
+    await access(executable, constants.X_OK);
+    const lease = await acquireAgentRuntimeUseLock(
+      this.updateLockDataDir(),
+      agent.pluginId,
+      `${agent.pluginId} Agent CLI terminal`,
+    );
+    try {
+      return {
+        executable,
+        args: [],
+        cwd: home.path,
+        env: providerRuntimeEnvironment(agent.pluginId, home.path),
+        reservation: await lease.reserveProcessGroup(),
+        release: () => lease.release(),
+      };
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
+  }
+
+  /** Draft prefill only: a saved Agent path, readiness-cache path, or
+   *  environment override. Never PATH-scans or runs `--version`. */
+  async scannedCliPath(id: ProductExecutor): Promise<string | null> {
+    if (this.options.managedProxies) {
+      return this.options.generationStore?.activeCached(pluginIdForExecutorId(id))?.runtime?.entryPath ?? null;
+    }
+    const existing = this.config.agents.find((agent) => agent.proxy === id && agent.cliPath);
+    if (existing?.cliPath) return existing.cliPath;
+    const launch = await this.trustedOfficialLaunch(id);
+    if (launch && isGenericRuntimeProtocol({
+      schemaVersion: launch.schemaVersion,
+      runtimeBootstrap: launch.schemaVersion === 4,
+    })) {
+      return this.options.readinessCache?.get(pluginIdForExecutorId(id), launch.pluginVersion)?.profile?.path
+        ?? null;
+    }
+    return this.options.environmentCliPaths?.[id] ?? null;
   }
 
   /** The kind's default runtime path — its first saved Agent's resolved
    *  path, or the environment override when the kind has no Agent. */
   firstAgentPath(id: Executor): string | null {
-    if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
-    if (isProductExecutor(id)) {
-      const agent = this.config.agents.find(candidate => candidate.proxy === id);
-      if (agent) return this.agentRuntimePath(agent.id).cliPath;
+    if (this.options.managedProxies) {
+      const pluginId = resolvePluginIdInput(id);
+      return pluginId
+        ? this.options.generationStore?.activeCached(pluginId)?.runtime?.entryPath ?? null
+        : null;
     }
-    return this.options.environmentCliPaths?.[id] ?? null;
+    const legacy = isExecutorId(id) ? id : productExecutorForPluginId(id);
+    const agent = this.config.agents.find(candidate => (
+      candidate.pluginId === id || (legacy !== null && candidate.proxy === legacy)
+    ));
+    if (agent) return this.agentRuntimePath(agent.id).cliPath;
+    return legacy ? this.options.environmentCliPaths?.[legacy] ?? null : null;
   }
 
   /** Static Proxy-kind catalog. Pure metadata — never spawns or probes. */
@@ -1151,7 +1536,7 @@ export class AgentManager {
       const current = await realpath(join(agentRoot, 'current'));
       const contained = await this.assertDirectProxyDirectory(agentRoot, current);
       const manifest = await this.validateProxyDirectory(contained, id, undefined, false);
-      if (manifest.schemaVersion !== 3) return null;
+      if (manifest.schemaVersion !== 3 && manifest.schemaVersion !== 4) return null;
       const descriptor = variant === 'dark'
         ? manifest.branding.logo.dark ?? manifest.branding.logo.light
         : manifest.branding.logo.light;
@@ -1175,37 +1560,143 @@ export class AgentManager {
 
   async createAgent(input: {
     name: string;
-    proxy: ProductExecutor;
+    pluginId?: string;
+    proxy?: ProductExecutor;
     cliPath?: string | null;
+    home?: { kind: 'managed' } | { kind: 'custom'; path: string };
     defaults?: Partial<AgentProxyDefaults>;
   }): Promise<UserAgent> {
-    if (!isProductExecutor(input.proxy)) {
+    const fromPlugin = input.pluginId !== undefined ? resolvePluginIdInput(input.pluginId) : null;
+    const fromProxy = input.proxy !== undefined ? resolvePluginIdInput(input.proxy) : null;
+    if (input.pluginId !== undefined && !fromPlugin) {
+      throw new Error(`unsupported pluginId: ${String(input.pluginId)}`);
+    }
+    if (input.proxy !== undefined && !fromProxy) {
       throw new Error(`unsupported proxy: ${String(input.proxy)}`);
     }
-    const proxy = input.proxy;
+    if (fromPlugin && fromProxy && fromPlugin !== fromProxy) {
+      throw new Error('pluginId does not match proxy');
+    }
+    const pluginId = fromPlugin ?? fromProxy;
+    if (!pluginId) throw new Error('pluginId or proxy is required');
+    const proxy = productExecutorForPluginId(pluginId);
     const name = normalizeAgentName(input.name);
     if (!name) throw new Error('Agent name must not be empty');
-    const cliPath = normalizeCliPathInput(input.cliPath);
+    if (this.options.managedProxies && input.cliPath !== undefined) {
+      throw new AgentCreateError(
+        'CLI_PATH_MANAGED',
+        'CLI path is managed globally by Gian and cannot be configured per Agent.',
+        400,
+      );
+    }
+    let cliPath = this.options.managedProxies ? null : normalizeCliPathInput(input.cliPath);
+    if (!this.options.managedProxies && cliPath === null && proxy) {
+      // GianDev keeps CLI paths out of the product form too, but may reuse its
+      // explicit development environment path or another saved Agent's path.
+      cliPath = await this.scannedCliPath(proxy);
+    }
+    const agentId = randomUUID();
+    const launch = await this.trustedLaunch(pluginId);
+    if (!launch) {
+      const catalogItem = await this.options.catalogService?.get(pluginId) ?? null;
+      const mayInstall = this.options.managedProxies
+        && catalogItem?.compatibility.state === 'compatible'
+        && catalogItem.availableActions.some(action => (
+          action === 'install_proxy' || action === 'update_proxy'
+        ));
+      if (!mayInstall) {
+        throw new AgentCreateError(
+          'PLUGIN_NOT_FOUND',
+          `No trusted compatible package is available for ${pluginId}.`,
+          404,
+        );
+      }
+    }
+    const generic = launch ? isGenericRuntimeProtocol({
+      schemaVersion: launch.schemaVersion,
+      runtimeBootstrap: launch.schemaVersion === 4,
+    }) : false;
+    if (generic && !this.options.catalogService && !this.options.allowCreateWithoutCatalog) {
+      throw new AgentCreateError(
+        'CATALOG_UNAVAILABLE',
+        `CatalogService is required to create a v4 Agent for ${pluginId}.`,
+        409,
+      );
+    }
+    if (this.options.catalogService) {
+      const item = await this.options.catalogService.get(pluginId);
+      const mayCreate = item?.availableActions.includes('create_agent')
+        || (!this.options.managedProxies && launch !== null && item === null)
+        || (this.options.managedProxies && item?.availableActions.some(action => (
+          action === 'install_proxy' || action === 'update_proxy'
+        )));
+      if (!mayCreate) {
+        throw new AgentCreateError(
+          'CATALOG_CREATE_FORBIDDEN',
+          `Catalog does not authorize create_agent for ${pluginId}.`,
+          409,
+        );
+      }
+    }
+    if (generic && launch?.runtime.kind === 'none' && cliPath !== null) {
+      throw new AgentCreateError(
+        'RUNTIME_NONE_HAS_PATH',
+        'A none Runtime cannot carry an external path.',
+        400,
+      );
+    }
+    if (!this.options.managedProxies && generic && launch?.runtime.kind === 'external' && cliPath === null) {
+      throw new AgentCreateError(
+        'RUNTIME_PATH_REQUIRED',
+        'An external Runtime requires a selected path.',
+        400,
+      );
+    }
     // The per-kind claim excludes updater/path writers while the candidate
     // path is being probed; a path-less create only needs the config claim.
-    const kinds = cliPath !== null ? [proxy] : [];
-    const agent = await this.withAgentConfigLock(kinds, 'Agent create', async (current, leases) => {
+    const kinds = cliPath !== null && proxy ? [proxy] : [];
+    const agent = await this.withAgentConfigLock(kinds, 'Agent create', async (current) => {
       assertAgentNameAvailable(current.agents, name);
-      if (cliPath !== null) {
-        await this.probeAgentCliPath(proxy, cliPath, leases.get(proxy)!);
+      let home: AgentHomeBinding | null;
+      if (!this.agentHomes.supports(pluginId)) {
+        if (input.home?.kind === 'custom') {
+          throw new AgentCreateError(
+            'AGENT_HOME_UNSUPPORTED',
+            'This external application owns its state directory.',
+            400,
+          );
+        }
+        home = null;
+      } else if (input.home?.kind === 'custom') {
+        home = await this.agentHomes.validateCustom(
+          input.home.path,
+          current.agents.flatMap(agent => agent.home
+            ? [{ agentId: agent.id, path: agent.home.path }]
+            : []),
+        );
+      } else {
+        home = await this.agentHomes.createManaged(pluginId, agentId);
+      }
+      if (generic && launch?.runtime.kind === 'none') {
+        await this.publishNoneRuntime(pluginId, launch, agentId);
+      } else if (cliPath !== null) {
+        await this.probeAgentRuntimePath(pluginId, cliPath);
       }
       const agent: UserAgent = {
-        id: randomUUID(),
+        id: agentId,
         name,
+        pluginId,
         proxy,
+        home,
         cliPath,
         defaults: normalizeProxyDefaults(input.defaults),
       };
       await this.commitConfig(
-        { schemaVersion: 3, agents: [...current.agents, agent] },
+        { schemaVersion: 5, agents: [...current.agents, persistableAgent(agent)] },
         [agent.id],
-        [proxy],
+        officialKinds(proxy),
       );
+      if (launch) this.rewritePublishedAgentId(pluginId, launch.pluginVersion, cliPath, agent.id);
       return agent;
     });
     if (agent.proxy === 'codex') await this.reconcileManagedSkills();
@@ -1215,53 +1706,105 @@ export class AgentManager {
   async updateAgent(id: string, patch: {
     name?: string;
     cliPath?: string | null;
+    home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+    pluginId?: string;
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
   }): Promise<UserAgent> {
     const existing = this.getAgent(id);
-    const nextProxy = patch.proxy ?? existing.proxy;
-    if (!isProductExecutor(nextProxy)) {
-      throw new Error(`unsupported proxy: ${String(patch.proxy)}`);
+    if (patch.pluginId !== undefined) {
+      const nextPluginId = resolvePluginIdInput(patch.pluginId);
+      if (nextPluginId !== existing.pluginId) throw new PluginIdImmutableError();
+    }
+    if (patch.proxy !== undefined) {
+      const nextPluginId = resolvePluginIdInput(patch.proxy);
+      if (nextPluginId !== existing.pluginId) throw new PluginIdImmutableError();
     }
     const name = patch.name !== undefined ? normalizeAgentName(patch.name) : existing.name;
     if (!name) throw new Error('Agent name must not be empty');
+    if (this.options.managedProxies && patch.cliPath !== undefined) {
+      throw new AgentCreateError(
+        'CLI_PATH_MANAGED',
+        'CLI path is managed globally by Gian and cannot be configured per Agent.',
+        400,
+      );
+    }
     const cliPath = patch.cliPath !== undefined
       ? normalizeCliPathInput(patch.cliPath)
       : existing.cliPath;
-    const pathOrProxyChanged = patch.cliPath !== undefined || patch.proxy !== undefined;
+    const pathChanged = !this.options.managedProxies && patch.cliPath !== undefined;
+    const official = existing.proxy;
     // Name/defaults stay write-through under the config claim only —
     // they never touch the runtime load set, so they must not queue behind
-    // a kind updater. Path/Proxy changes take the kind claim for the probe.
-    const claimKinds = pathOrProxyChanged
-      ? [...new Set<Executor>([existing.proxy, nextProxy])]
-      : [];
-    const agent = await this.withAgentConfigLock(claimKinds, 'Agent update', async (current, leases) => {
+    // a kind updater. Path changes take the kind claim for the probe.
+    const claimKinds = pathChanged && official ? [official] : [];
+    const agent = await this.withAgentConfigLock(claimKinds, 'Agent update', async (current) => {
       assertAgentNameAvailable(current.agents, name, id);
       const index = current.agents.findIndex(candidate => candidate.id === id);
       if (index === -1) throw new Error(`agent not found: ${id}`);
       const previous = current.agents[index]!;
-      if (pathOrProxyChanged && cliPath !== null) {
-        await this.probeAgentCliPath(nextProxy, cliPath, leases.get(nextProxy)!);
+      let home = previous.home ?? null;
+      if (patch.home) {
+        if (!this.agentHomes.supports(previous.pluginId)) {
+          throw new AgentHomeError(
+            'AGENT_HOME_UNSUPPORTED',
+            'This external application owns its state directory.',
+          );
+        }
+        home = patch.home.kind === 'custom'
+          ? await this.agentHomes.validateCustom(
+            patch.home.path,
+            current.agents.flatMap(candidate => candidate.home
+              ? [{ agentId: candidate.id, path: candidate.home.path }]
+              : []),
+            id,
+          )
+          : await this.agentHomes.createManaged(previous.pluginId, previous.id);
       }
-      const agent: UserAgent = {
+      if (pathChanged && previous.cliPath && previous.cliPath !== cliPath) {
+        const previousLaunch = await this.trustedLaunch(previous.pluginId);
+        if (previousLaunch) {
+          this.options.readinessCache?.invalidate(
+            previous.pluginId,
+            previousLaunch.pluginVersion,
+            previous.cliPath,
+          );
+        }
+        this.options.runtimeResolver?.invalidate(previous.pluginId, previous.cliPath);
+      }
+      if (pathChanged && cliPath !== null) {
+        await this.probeAgentRuntimePath(previous.pluginId, cliPath);
+      }
+      const agent: UserAgent = persistableAgent({
         ...previous,
         name,
-        proxy: nextProxy,
+        home,
         cliPath,
         defaults: patch.defaults
           ? normalizeProxyDefaults({ ...previous.defaults, ...patch.defaults })
           : previous.defaults,
-      };
+      });
       const agents = [...current.agents];
       agents[index] = agent;
       // The kind-level status view carries the first-Agent defaults/path, so
       // every committed update invalidates both touched kinds — even a
       // write-through defaults rename.
       await this.commitConfig(
-        { schemaVersion: 3, agents },
+        { schemaVersion: 5, agents },
         [id],
-        [...new Set<Executor>([existing.proxy, nextProxy])],
+        officialKinds(official),
       );
+      if (pathChanged) {
+        const launch = await this.trustedLaunch(previous.pluginId);
+        if (launch) {
+          this.rewritePublishedAgentId(
+            previous.pluginId,
+            launch.pluginVersion,
+            cliPath,
+            agent.id,
+          );
+        }
+      }
       return agent;
     });
     if (agent.proxy === 'codex') await this.reconcileManagedSkills();
@@ -1273,7 +1816,7 @@ export class AgentManager {
     await this.withAgentConfigLock([], 'Agent delete', async current => {
       const agents = current.agents.filter(candidate => candidate.id !== id);
       if (agents.length === current.agents.length) throw new Error(`agent not found: ${id}`);
-      await this.commitConfig({ schemaVersion: 3, agents }, [id], [existing.proxy]);
+      await this.commitConfig({ schemaVersion: 5, agents }, [id], officialKinds(existing.proxy));
     });
   }
 
@@ -1289,48 +1832,78 @@ export class AgentManager {
     if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.agentStatusProbes.get(id);
     if (!refresh && pending?.generation === generation) return pending.promise;
+    if (this.options.managedProxies && this.agentHomes.supports(agent.pluginId)) {
+      const value = await this.managedGenerationAgentStatus(agent);
+      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      return value;
+    }
+    const trusted = await this.trustedLaunch(agent.pluginId);
+    if (!agent.proxy || trusted?.schemaVersion === 4) {
+      const value = await this.catalogOnlyAgentStatus(agent);
+      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      return value;
+    }
+    const kind = agent.proxy;
     const probe = Promise.all([
-      this.cliStatus(agent.proxy, undefined, agent.cliPath ?? undefined),
-      this.proxyStatus(agent.proxy),
+      this.cliStatus(kind, undefined, agent.cliPath ?? undefined),
+      this.proxyStatus(kind),
     ]).then(async ([cli, plugin]) => {
-      const skill = agent.proxy === 'codex' && plugin.state === 'ready' && plugin.version
+      const skill = kind === 'codex' && plugin.state === 'ready' && plugin.version
         ? await inspectManagedGianSkill(this.homeDir, plugin.version)
         : null;
-      const runtimeProfile = agent.proxy === 'codex'
-        && cli.state === 'ready'
-        && cli.path && cli.version
-        && plugin.state === 'ready' && plugin.version
-        ? (() => {
-            const verifiedCliVersions = plugin.verifiedCliVersions ?? [];
-            const profile: Omit<AgentRuntimeProfile, 'id'> = {
+      const launch = await this.trustedOfficialLaunch(kind);
+      const cached = this.lastOpenRuntimeProfiles.get(`${kind}\0${cli.path ?? ''}`)
+        ?? this.lastOpenRuntimeProfiles.get(`${agent.pluginId}\0${cli.path ?? ''}`)
+        ?? this.lastOpenRuntimeProfiles.get(`${kind}\0`)
+        ?? this.lastOpenRuntimeProfiles.get(`${agent.pluginId}\0`)
+        ?? null;
+      const runtimeProfile = cached
+        ? { ...cached, agentId: agent.id }
+        : launch?.runtime.kind === 'none'
+          ? null
+          : cli.state === 'ready' && cli.path && cli.version
+            ? {
+              id: openRuntimeIdentity(agent.pluginId, cli.path, cli.contentFingerprint ?? null),
               agentId: agent.id,
-              proxy: agent.proxy,
-              cliPath: cli.path,
-              cliVersion: cli.version,
-              configHome: process.env.CODEX_HOME && isAbsolute(process.env.CODEX_HOME)
-                ? process.env.CODEX_HOME
-                : cli.source === 'override' ? null : join(this.homeDir, '.codex'),
-              cliFingerprint: cli.contentFingerprint ?? null,
-              proxyVersion: plugin.version,
-              verifiedCliVersions,
-              verification: verifiedCliVersions.includes(cli.version) ? 'verified' : 'unverified',
-              skill: {
-                name: 'gian-session',
-                version: plugin.version,
-                state: skill?.state ?? 'missing',
-              },
-            };
-            return { id: runtimeProfileId(profile), ...profile };
-          })()
-        : null;
+              pluginId: agent.pluginId,
+              runtimeId: OFFICIAL_RUNTIME_IDS[kind],
+              path: cli.path,
+              version: cli.version,
+              configHome: null,
+              contentFingerprint: cli.contentFingerprint ?? null,
+              verifiedVersions: cli.verifiedVersions ?? plugin.verifiedCliVersions ?? [],
+              verification: (cli.verifiedVersions ?? plugin.verifiedCliVersions ?? []).includes(cli.version)
+                ? 'verified' as const
+                : 'unverified' as const,
+            }
+            : null;
+      const generic = Boolean(launch && isGenericRuntimeProtocol({
+        schemaVersion: launch.schemaVersion,
+        runtimeBootstrap: launch.schemaVersion === 4,
+      }));
       const value: UserAgentStatus = {
         ...agent,
-        proxyName: AGENTS[agent.proxy].name,
-        ready: cli.state === 'ready' && plugin.state === 'ready',
+        proxyName: AGENTS[kind].name,
+        ready: cli.state === 'ready'
+          && plugin.state === 'ready'
+          && (
+            !generic
+            || (
+              runtimeProfile !== null
+              && (launch!.runtime.kind === 'none' || cli.version !== null)
+            )
+          ),
         cli,
         plugin: { ...plugin, defaults: { ...agent.defaults } },
         runtimeProfile,
-        officialInstallUrl: AGENTS[agent.proxy].installerUrl,
+        skill: kind === 'codex'
+          ? {
+            name: 'gian-session',
+            version: plugin.version ?? 'unknown',
+            state: skill?.state ?? 'missing',
+          }
+          : null,
+        officialInstallUrl: AGENTS[kind].installerUrl,
       };
       if ((this.agentStatusGenerations.get(id) ?? 0) === generation) {
         this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
@@ -1341,6 +1914,101 @@ export class AgentManager {
     });
     this.agentStatusProbes.set(id, { generation, promise: probe });
     return probe;
+  }
+
+  private async managedGenerationAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
+    const active = this.options.generationStore?.activeCached(agent.pluginId) ?? null;
+    const trusted = await this.trustedLaunch(agent.pluginId);
+    const fallbackPlugin: Omit<AgentProxyStatus, 'defaults'> = trusted
+      ? {
+        state: 'ready',
+        path: trusted.entryPath,
+        version: trusted.pluginVersion,
+        verifiedCliVersions: [...(trusted.runtime.verifiedVersions ?? [])],
+        source: trusted.source === 'official-development' ? 'development' : 'github-release',
+      }
+      : agent.proxy ? await this.proxyStatus(agent.proxy) : {
+        state: 'missing',
+        path: null,
+        version: null,
+        source: null,
+      };
+    if (!active) {
+      return {
+        ...agent,
+        cliPath: null,
+        proxyName: agent.proxy ? AGENTS[agent.proxy].name : agent.pluginId,
+        ready: false,
+        cli: {
+          state: 'missing',
+          path: null,
+          version: null,
+          source: null,
+          readinessIssue: {
+            code: 'RUNTIME_NOT_INSTALLED',
+            message: 'The certified CLI and Proxy combination is not installed.',
+            repairable: true,
+          },
+        },
+        plugin: { ...fallbackPlugin, defaults: { ...agent.defaults } },
+        runtimeProfile: null,
+        skill: null,
+        officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
+      };
+    }
+
+    const proxyReady = await existsReadable(active.proxy.entryPath);
+    const runtimeReady = active.runtime === null || await existsReadable(active.runtime.entryPath);
+    const home = agent.home ?? null;
+    const profile: OpenRuntimeProfile = {
+      id: createHash('sha256').update(JSON.stringify([
+        active.generationId,
+        home?.path ?? null,
+      ])).digest('hex'),
+      agentId: agent.id,
+      pluginId: agent.pluginId,
+      runtimeId: active.runtime?.runtimeId ?? null,
+      path: active.runtime?.entryPath ?? null,
+      version: active.runtime?.version ?? null,
+      configHome: home?.path ?? null,
+      contentFingerprint: active.runtime?.artifactSha256 ?? null,
+      verifiedVersions: active.runtime ? [active.runtime.version] : [],
+      verification: 'verified',
+    };
+    return {
+      ...agent,
+      cliPath: null,
+      proxyName: agent.proxy ? AGENTS[agent.proxy].name : agent.pluginId,
+      ready: proxyReady && runtimeReady,
+      cli: runtimeReady
+        ? {
+          state: 'ready',
+          path: active.runtime?.entryPath ?? null,
+          version: active.runtime?.version ?? null,
+          verifiedVersions: active.runtime ? [active.runtime.version] : [],
+          contentFingerprint: active.runtime?.artifactSha256 ?? null,
+          source: 'managed',
+        }
+        : {
+          state: 'invalid',
+          path: active.runtime?.entryPath ?? null,
+          version: active.runtime?.version ?? null,
+          source: 'managed',
+          error: 'The active Runtime entry is missing.',
+        },
+      plugin: {
+        state: proxyReady ? 'ready' : 'invalid',
+        path: active.proxy.entryPath,
+        version: active.proxy.pluginVersion,
+        verifiedCliVersions: active.runtime ? [active.runtime.version] : [],
+        source: 'github-release',
+        defaults: { ...agent.defaults },
+        ...(!proxyReady ? { error: 'The active Proxy entry is missing.' } : {}),
+      },
+      runtimeProfile: profile,
+      skill: null,
+      officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
+    };
   }
 
   async listAgentStatuses(refresh = false): Promise<UserAgentStatus[]> {
@@ -1403,41 +2071,132 @@ export class AgentManager {
     }
   }
 
-  private async probeAgentCliPath(
-    kind: ProductExecutor,
-    path: string,
-    claim: AgentUpdateLease,
-  ): Promise<void> {
-    const provider = this.providers.get(kind);
-    if (!provider) throw new Error(`CLI runtime provider is not configured: ${kind}`);
-    const runtime = await provider.probe({ cli: kind, binaryPath: path, source: 'override' }, claim);
-    if (kind !== 'codex' || !this.options.managedProxies) return;
-    try {
-      const descriptor = await this.proxyLaunchDescriptor(kind);
-      if (!descriptor.protocol) return;
-      await this.runProxyCompatibilityProbe({
-        id: kind,
-        version: descriptor.protocol.pluginVersion,
-        entryPath: descriptor.entryPath,
-        protocol: PROTOCOL_NAME,
-        processScope: descriptor.protocol.processScope,
-      }, claim, runtime);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
+  private async probeAgentRuntimePath(pluginId: string, path: string): Promise<void> {
+    const launch = await this.trustedLaunch(pluginId);
+    if (!launch) {
+      // Onboarding may select an already-installed Runtime before its Proxy
+      // package is installed. Persist only a regular absolute file here;
+      // nothing is executed until the trusted Manifest is available and the
+      // RuntimeResolver can apply its version and fingerprint policy.
+      await assertSavedAbsoluteRuntimePath(path);
+      return;
     }
+    if (!isGenericRuntimeProtocol({
+      schemaVersion: launch.schemaVersion,
+      runtimeBootstrap: launch.schemaVersion === 4,
+    })) {
+      await assertSavedAbsoluteRuntimePath(path);
+      return;
+    }
+    if (!this.options.runtimeResolver) {
+      throw new Error('RuntimeResolver is required for this v4/2.2 package.');
+    }
+    if (launch.runtime.kind !== 'external' || !launch.runtime.id || !launch.runtime.displayName) {
+      throw new Error('Trusted Manifest Runtime facts are incomplete.');
+    }
+    const resolved = await this.options.runtimeResolver.resolve({
+      pluginId: parseProxyPluginId(launch.pluginId),
+      pluginVersion: launch.pluginVersion,
+      agentId: launch.pluginId,
+      entryPath: launch.entryPath,
+      processScope: launch.processScope,
+      runtime: {
+        kind: 'external',
+        id: launch.runtime.id,
+        displayName: launch.runtime.displayName,
+        verifiedVersions: [...(launch.runtime.verifiedVersions ?? [])],
+      },
+      selectedPath: path,
+    });
+    await resolved.lease?.release();
+    this.lastOpenRuntimeProfiles.set(`${pluginId}\0${path}`, resolved.profile);
+    this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0${path}`, resolved.profile);
+    this.options.readinessCache?.publish({
+      pluginId: launch.pluginId,
+      pluginVersion: launch.pluginVersion,
+      selectedPath: path,
+      profileIdentity: resolved.profile.id,
+      state: resolved.readinessIssue
+        ? 'invalid'
+        : resolved.profile.verification === 'incompatible'
+          ? 'invalid'
+          : resolved.profile.verification === 'unverified'
+            ? 'unverified'
+            : 'ready',
+      displayName: launch.runtime.displayName ?? null,
+      ...(resolved.readinessIssue ? { readinessIssue: resolved.readinessIssue } : {}),
+      profile: resolved.profile,
+      ...(resolved.observation ? { observation: resolved.observation } : {}),
+    });
+    if (resolved.readinessIssue) {
+      throw new Error(resolved.readinessIssue.message);
+    }
+    if (resolved.profile.verification === 'incompatible') {
+      throw new Error('Selected Runtime is incompatible with the trusted Manifest.');
+    }
+  }
+
+  private async publishNoneRuntime(
+    pluginId: string,
+    launch: TrustedLaunch,
+    agentId: string,
+  ): Promise<void> {
+    if (!this.options.runtimeResolver) {
+      throw new AgentCreateError(
+        'RUNTIME_RESOLVER_REQUIRED',
+        'RuntimeResolver is required for this v4/2.2 package.',
+        400,
+      );
+    }
+    const resolved = await this.options.runtimeResolver.resolve({
+      pluginId: parseProxyPluginId(launch.pluginId),
+      pluginVersion: launch.pluginVersion,
+      agentId,
+      entryPath: launch.entryPath,
+      processScope: launch.processScope,
+      runtime: { kind: 'none' },
+      selectedPath: null,
+    });
+    this.lastOpenRuntimeProfiles.set(`${pluginId}\0`, resolved.profile);
+    this.options.readinessCache?.publish({
+      pluginId: launch.pluginId,
+      pluginVersion: launch.pluginVersion,
+      selectedPath: null,
+      profileIdentity: resolved.profile.id,
+      state: 'not_required',
+      displayName: launch.runtime.displayName ?? null,
+      profile: resolved.profile,
+    });
+  }
+
+  private rewritePublishedAgentId(
+    pluginId: string,
+    pluginVersion: string,
+    selectedPath: string | null,
+    agentId: string,
+  ): void {
+    const cached = this.options.readinessCache?.get(pluginId, pluginVersion, selectedPath);
+    if (!cached?.profile) return;
+    const profile = { ...cached.profile, agentId };
+    this.options.readinessCache?.publish({
+      ...cached,
+      profile,
+    });
+    this.lastOpenRuntimeProfiles.set(`${pluginId}\0${selectedPath ?? ''}`, profile);
   }
 
   private async commitConfig(
     next: AgentConfigFile,
     invalidateAgentIds: readonly string[] = [],
-    invalidateKinds: readonly Executor[] = [],
+    invalidateKinds: readonly LegacyExecutorId[] = [],
   ): Promise<void> {
     // Persistence is the commit point. Invalidate immediately so a later
     // claim-retirement failure cannot leave stale statuses cached.
     await this.saveConfig(next);
     this.config = next;
-    for (const id of invalidateAgentIds) this.invalidateAgentStatus(id);
+    for (const id of invalidateAgentIds) {
+      this.invalidateAgentStatus(id);
+    }
     for (const kind of invalidateKinds) this.invalidateStatus(kind);
   }
 
@@ -1446,7 +2205,7 @@ export class AgentManager {
    *  writers while a CLI path is being validated. The callback re-reads the
    *  persisted config so an older snapshot can never overwrite a newer one. */
   private async withAgentConfigLock<T>(
-    kinds: readonly Executor[],
+    kinds: readonly LegacyExecutorId[],
     operation: string,
     run: (
       current: AgentConfigFile,
@@ -1502,79 +2261,20 @@ export class AgentManager {
     }
   }
 
-  installOfficialCli(id: Executor): Promise<AgentInstallResult> {
-    return this.runOperation(`cli:${id}`, () => this.withAgentUpdateLock(
-      id,
-      'official CLI install',
-      async updateOwner => {
-      const definition = AGENTS[id];
-      if (!definition) throw new Error(`unsupported agent: ${id}`);
-      if (id === 'dsh') {
-        return this.installDshRuntime(id, updateOwner);
-      }
-      if (id === 'zcode') {
-        // Unmanaged runtime: direct the user to the official channel instead
-        // of downloading anything (Revision 2 §4.1 / frozen D3).
-        throw new Error(
-          'ZCode is not installed through Gian. Download ZCode.app from https://zcode.z.ai, then configure an explicit model provider for the ZCode CLI (Gian will not create or modify ~/.zcode) and retry.',
-        );
-      }
-      const script = await this.download(definition.installerUrl, MAX_INSTALLER_BYTES);
-      assertOfficialInstallerIntegrity(
-        script,
-        this.options.officialInstallerSha256?.[id] ?? definition.installerSha256,
-      );
-      const directory = join(tmpdir(), `gian-${id}-installer-${randomUUID()}`);
-      const scriptPath = join(directory, 'install.sh');
-      await mkdir(directory, { recursive: true });
-      try {
-        await writeFile(scriptPath, script, { mode: 0o700 });
-        const result = await this.runOfficialInstaller(id, scriptPath, updateOwner);
-        this.invalidateStatus(id);
-        // This private path reuses the already-owned cli-update claim. Calling
-        // public status() here would correctly conflict with our own writer.
-        const agent = await this.statusUnderUpdateLock(id, updateOwner);
-        if (agent.cli.state !== 'ready') {
-          throw new Error(
-            `The official installer finished, but ${definition.command} was not found. Configure its path manually.`,
-          );
-        }
-        return {
-          agent,
-          output: `${result.stdout}\n${result.stderr}`.trim().slice(-12_000),
-        };
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-      },
+  installOfficialCli(_id: LegacyExecutorId): Promise<AgentInstallResult> {
+    return Promise.reject(Object.assign(
+      new Error(
+        'Runtime setup uses Proxy documentation and typed open/select actions; Host no longer executes installers.',
+      ),
+      { code: 'HOST_RUNTIME_INSTALLER_REMOVED' },
     ));
-  }
-
-  private async installDshRuntime(
-    id: Executor,
-    updateOwner: AgentUpdateLease,
-  ): Promise<AgentInstallResult> {
-    const installer = this.dshInstaller();
-    const result = await installer.installLatest();
-    await installer.recordUpdateCheck();
-    this.invalidateStatus(id);
-    const agent = await this.statusUnderUpdateLock(id, updateOwner);
-    if (agent.cli.state !== 'ready') {
-      throw new Error(
-        `DSH runtime installed, but @deepseek-ai/dsh was not usable. ${agent.cli.error ?? ''}`,
-      );
-    }
-    return {
-      agent,
-      output: `resolved @deepseek-ai/dsh@${result.resolvedVersion}\n${result.output}`.trim().slice(-12_000),
-    };
   }
 
     /** Read-only "is a newer compatible Proxy release available?" check (issue
    *  #86). No update lock, no filesystem or process side effects: the current
    *  version comes from the status probe and the latest compatible release
    *  from the same resolution the installer uses. */
-  async checkProxyUpdate(id: Executor): Promise<AgentProxyUpdateCheck> {
+  async checkProxyUpdate(id: LegacyExecutorId): Promise<AgentProxyUpdateCheck> {
     if (!AGENTS[id]) throw new Error(`unsupported agent: ${id}`);
     if (!this.options.managedProxies) {
       return {
@@ -1604,7 +2304,7 @@ export class AgentManager {
     };
   }
 
-  installProxy(id: Executor): Promise<AgentInstallResult> {
+  installProxy(id: LegacyExecutorId): Promise<AgentInstallResult> {
     return this.runOperation(`proxy:${id}`, () => this.withAgentUpdateLock(
       id,
       'Proxy install',
@@ -1692,7 +2392,7 @@ export class AgentManager {
   }
 
   private async cliStatus(
-    id: Executor,
+    id: LegacyExecutorId,
     updateOwner?: AgentUpdateLease,
     overridePath?: string,
   ): Promise<AgentCliStatus> {
@@ -1730,92 +2430,493 @@ export class AgentManager {
   }
 
   private async cliStatusWithClaim(
-    id: Executor,
-    claim: AgentUpdateLease,
+    id: LegacyExecutorId,
+    _claim: AgentUpdateLease,
     overridePath?: string,
   ): Promise<AgentCliStatus> {
-    const provider = this.providers.get(id)!;
-    const configured = overridePath ?? this.configuredPath(id) ?? undefined;
-    let installed;
+    const resolved = await this.tryGenericCliStatus(id, overridePath);
+    if (resolved) return resolved;
+    const configured = overridePath ?? this.configuredPath(id);
+    if (!configured) {
+      return { state: 'missing', path: null, version: null, source: null };
+    }
     try {
-      installed = await provider.inspectInstalled(configured);
+      await assertSavedAbsoluteRuntimePath(configured);
+      return {
+        state: 'ready',
+        path: configured,
+        version: null,
+        source: 'override',
+      };
     } catch (error) {
       return {
         state: 'invalid',
-        path: configured ?? null,
+        path: configured,
         version: null,
-        source: configured ? 'override' : null,
+        source: 'override',
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    if (installed.length === 0) {
-      return {
+  }
+
+  private async catalogOnlyAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
+    const unavailable = (readinessIssue: { code: string; message: string; repairable: boolean }): UserAgentStatus => ({
+      ...agent,
+      proxyName: agent.pluginId,
+      ready: false,
+      cli: {
+        state: 'missing',
+        path: agent.cliPath,
+        version: null,
+        source: null,
+        readinessIssue,
+      },
+      plugin: {
         state: 'missing',
         path: null,
         version: null,
         source: null,
+        defaults: { ...agent.defaults },
+      },
+      runtimeProfile: null,
+      officialInstallUrl: '',
+    });
+    const launch = await this.trustedLaunch(agent.pluginId);
+    if (!launch) {
+      return unavailable({
+        code: 'CATALOG_PLUGIN_UNVERIFIED',
+        message: 'Catalog, package, and Runtime readiness are not available for this pluginId.',
+        repairable: false,
+      });
+    }
+    const pluginSource = launch.source === 'official-development'
+      ? 'development' as const
+      : 'github-release' as const;
+    if (!isGenericRuntimeProtocol({ schemaVersion: launch.schemaVersion, runtimeBootstrap: launch.schemaVersion === 4 })) {
+      return unavailable({
+        code: 'CATALOG_PLUGIN_LEGACY',
+        message: 'This installed package is not a v4/2.2 Runtime package.',
+        repairable: false,
+      });
+    }
+    try {
+      const cached = this.options.readinessCache?.get(
+        launch.pluginId,
+        launch.pluginVersion,
+        agent.cliPath,
+      );
+      if (this.options.readinessCache?.isInvalidated(launch.pluginId, launch.pluginVersion, agent.cliPath)) {
+        return unavailable({
+          code: 'RUNTIME_MUTATED',
+          message: 'Runtime content changed after the last trusted probe.',
+          repairable: true,
+        });
+      }
+      if (cached?.profile && !cached.invalidated) {
+        this.lastOpenRuntimeProfiles.set(`${agent.pluginId}\0${cached.profile.path ?? ''}`, cached.profile);
+        const cli: AgentCliStatus = cached.readinessIssue
+          ? {
+            state: 'invalid',
+            path: cached.profile.path,
+            version: cached.profile.version,
+            source: null,
+            readinessIssue: cached.readinessIssue,
+          }
+          : launch.runtime.kind === 'none'
+            ? {
+              state: 'ready',
+              path: null,
+              version: cached.profile.version,
+              verifiedVersions: cached.profile.verifiedVersions,
+              contentFingerprint: cached.profile.contentFingerprint,
+              source: null,
+            }
+            : !cached.profile.path || !cached.profile.version
+              ? {
+                state: 'missing',
+                path: agent.cliPath,
+                version: null,
+                source: null,
+                readinessIssue: {
+                  code: 'setup_required',
+                  message: 'Select or install a Runtime, then retry.',
+                  repairable: true,
+                },
+              }
+              : {
+                state: cached.profile.verification === 'incompatible' ? 'invalid' : 'ready',
+                path: cached.profile.path,
+                version: cached.profile.version,
+                verifiedVersions: cached.profile.verifiedVersions,
+                contentFingerprint: cached.profile.contentFingerprint,
+                source: agent.cliPath ? 'override' : 'path',
+              };
+        const ready = cli.state === 'ready'
+          && cached.profile !== undefined
+          && (launch.runtime.kind === 'none' || (cli.version !== null && cached.profile !== null));
+        return {
+          ...agent,
+          proxyName: launch.displayName ?? agent.pluginId,
+          ready,
+          cli,
+          plugin: {
+            state: 'ready',
+            path: launch.entryPath,
+            version: launch.pluginVersion,
+            source: pluginSource,
+            defaults: { ...agent.defaults },
+          },
+          runtimeProfile: { ...cached.profile, agentId: agent.id },
+          officialInstallUrl: '',
+        };
+      }
+      const probed = await this.resolveSavedAgentStatus(agent.pluginId, launch, agent.id, agent.cliPath);
+      return {
+        ...agent,
+        proxyName: launch.displayName ?? agent.pluginId,
+        ready: probed.ready,
+        cli: probed.cli,
+        plugin: {
+          state: 'ready',
+          path: launch.entryPath,
+          version: launch.pluginVersion,
+          source: pluginSource,
+          defaults: { ...agent.defaults },
+        },
+        runtimeProfile: probed.runtimeProfile,
+        officialInstallUrl: '',
+      };
+    } catch (error) {
+      return {
+        ...unavailable({
+          code: error instanceof RuntimeResolverError ? error.code : 'RUNTIME_RESOLVE_FAILED',
+          message: error instanceof Error ? error.message : String(error),
+          repairable: true,
+        }),
+        cli: {
+          state: 'invalid',
+          path: agent.cliPath,
+          version: null,
+          source: null,
+          error: error instanceof Error ? error.message : String(error),
+        },
       };
     }
-    const failures: string[] = [];
-    for (const candidate of installed) {
-      try {
-        const probe = await provider.probe(candidate, claim);
-        const contentFingerprint = provider.snapshot
-          ? await provider.snapshot(probe)
-          : null;
-        // WP0 G1 (frozen O2): the ZCode CLI needs its own model-provider
-        // config; Gian reports generic repair guidance, never writes ~/.zcode.
-        if (
-          id === 'zcode'
-          && provider instanceof ZcodeRuntimeProvider
-          && (await provider.configReady()) === false
-        ) {
-          return {
-            state: 'invalid',
-            path: probe.binaryPath,
-            version: probe.version,
-            contentFingerprint,
-            source: probe.source,
-            readinessIssue: { ...ZCODE_CLI_CONFIG_READINESS_ISSUE },
-          };
-        }
-        return {
-          state: 'ready',
-          path: probe.binaryPath,
-          version: probe.version,
-          contentFingerprint,
-          source: probe.source,
-        };
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : String(error));
-        if (candidate.source === 'override') break;
-      }
-    }
-    return {
-      state: 'invalid',
-      path: installed[0]?.binaryPath ?? null,
-      version: null,
-      source: installed[0]?.source === 'managed'
-        ? 'official-user'
-        : installed[0]?.source ?? null,
-      error: failures.join(' | '),
-    };
   }
 
-  private async verifiedCliVersions(id: Executor): Promise<string[]> {
+  private async tryGenericCliStatus(
+    id: LegacyExecutorId,
+    overridePath?: string,
+  ): Promise<AgentCliStatus | null> {
+    const launch = await this.trustedOfficialLaunch(id);
+    if (!launch || !isGenericRuntimeProtocol({
+      schemaVersion: launch.schemaVersion,
+      runtimeBootstrap: launch.schemaVersion === 4,
+    })) {
+      return null;
+    }
+    const configured = overridePath ?? this.configuredPath(id) ?? null;
+    if (launch.runtime.kind === 'none') {
+      if (configured !== null) {
+        return {
+          state: 'invalid',
+          path: configured,
+          version: null,
+          source: 'override',
+          error: 'A none Runtime cannot carry an external path.',
+        };
+      }
+      if (this.options.readinessCache?.isInvalidated(launch.pluginId, launch.pluginVersion, null)) {
+        return {
+          state: 'invalid',
+          path: null,
+          version: null,
+          source: null,
+          readinessIssue: {
+            code: 'RUNTIME_MUTATED',
+            message: 'Runtime content changed after the last trusted probe.',
+            repairable: true,
+          },
+        };
+      }
+      const noneCached = this.options.readinessCache?.get(launch.pluginId, launch.pluginVersion, null) ?? null;
+      if (noneCached?.profile && !noneCached.invalidated) {
+        this.lastOpenRuntimeProfiles.set(`${id}\0`, noneCached.profile);
+        this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0`, noneCached.profile);
+        return {
+          state: 'ready',
+          path: null,
+          version: noneCached.profile.version,
+          verifiedVersions: noneCached.profile.verifiedVersions,
+          contentFingerprint: noneCached.profile.contentFingerprint,
+          source: null,
+        };
+      }
+      const probed = await this.resolveSavedAgentStatus(launch.pluginId, launch, id, null);
+      if (probed.runtimeProfile) {
+        this.lastOpenRuntimeProfiles.set(`${id}\0`, probed.runtimeProfile);
+        this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0`, probed.runtimeProfile);
+      }
+      return probed.cli;
+    }
+    if (launch.runtime.kind !== 'external' || !launch.runtime.id || !launch.runtime.displayName) {
+      return {
+        state: 'invalid',
+        path: configured,
+        version: null,
+        source: null,
+        error: 'Trusted Manifest Runtime facts are incomplete.',
+      };
+    }
+    if (this.options.readinessCache?.isInvalidated(launch.pluginId, launch.pluginVersion, configured)) {
+      return {
+        state: 'invalid',
+        path: configured,
+        version: null,
+        source: configured ? 'override' : null,
+        readinessIssue: {
+          code: 'RUNTIME_MUTATED',
+          message: 'Runtime content changed after the last trusted probe.',
+          repairable: true,
+        },
+      };
+    }
+    const cached = this.options.readinessCache?.get(
+      launch.pluginId,
+      launch.pluginVersion,
+      configured,
+    ) ?? null;
+    if (cached?.profile && !cached.invalidated) {
+      this.lastOpenRuntimeProfiles.set(`${id}\0${cached.profile.path ?? ''}`, cached.profile);
+      if (cached.readinessIssue) {
+        return {
+          state: 'invalid',
+          path: cached.profile.path,
+          version: cached.profile.version,
+          verifiedVersions: cached.profile.verifiedVersions,
+          contentFingerprint: cached.profile.contentFingerprint,
+          source: configured ? 'override' : 'path',
+          readinessIssue: cached.readinessIssue,
+        };
+      }
+      if (!cached.profile.path || !cached.profile.version) {
+        return {
+          state: 'missing',
+          path: configured,
+          version: null,
+          source: null,
+          readinessIssue: {
+            code: 'setup_required',
+            message: 'Select or install a Runtime, then retry.',
+            repairable: true,
+          },
+        };
+      }
+      return {
+        state: cached.profile.verification === 'incompatible' ? 'invalid' : 'ready',
+        path: cached.profile.path,
+        version: cached.profile.version,
+        verifiedVersions: cached.profile.verifiedVersions,
+        contentFingerprint: cached.profile.contentFingerprint,
+        source: configured ? 'override' : 'path',
+      };
+    }
+    const probed = await this.resolveSavedAgentStatus(launch.pluginId, launch, id, configured);
+    return probed.cli;
+  }
+
+  private async resolveSavedAgentStatus(
+    pluginId: string,
+    launch: TrustedLaunch,
+    agentId: string,
+    selectedPath: string | null,
+  ): Promise<{ ready: boolean; cli: AgentCliStatus; runtimeProfile: OpenRuntimeProfile | null }> {
+    if (!this.options.runtimeResolver) {
+      return {
+        ready: false,
+        cli: {
+          state: 'missing',
+          path: selectedPath,
+          version: null,
+          source: null,
+          readinessIssue: {
+            code: 'RUNTIME_RESOLVER_REQUIRED',
+            message: 'RuntimeResolver is required for this v4/2.2 package.',
+            repairable: false,
+          },
+        },
+        runtimeProfile: null,
+      };
+    }
+    if (launch.runtime.kind === 'none') {
+      if (selectedPath) {
+        return {
+          ready: false,
+          cli: {
+            state: 'invalid',
+            path: selectedPath,
+            version: null,
+            source: 'override',
+            error: 'A none Runtime cannot carry an external path.',
+          },
+          runtimeProfile: null,
+        };
+      }
+      const resolved = await this.options.runtimeResolver.resolve({
+        pluginId: parseProxyPluginId(launch.pluginId),
+        pluginVersion: launch.pluginVersion,
+        agentId,
+        entryPath: launch.entryPath,
+        processScope: launch.processScope,
+        runtime: { kind: 'none' },
+        selectedPath: null,
+      });
+      const profile = { ...resolved.profile, agentId };
+      this.lastOpenRuntimeProfiles.set(`${pluginId}\0`, profile);
+      this.lastOpenRuntimeProfiles.set(`${launch.pluginId}\0`, profile);
+      this.options.readinessCache?.publish({
+        pluginId: launch.pluginId,
+        pluginVersion: launch.pluginVersion,
+        selectedPath: null,
+        profileIdentity: resolved.profile.id,
+        state: 'not_required',
+        displayName: launch.runtime.displayName ?? null,
+        profile,
+      });
+      return {
+        ready: true,
+        cli: {
+          state: 'ready',
+          path: null,
+          version: resolved.profile.version,
+          verifiedVersions: resolved.profile.verifiedVersions,
+          contentFingerprint: resolved.profile.contentFingerprint,
+          source: null,
+        },
+        runtimeProfile: profile,
+      };
+    }
+    if (!selectedPath) {
+      return {
+        ready: false,
+        cli: {
+          state: 'missing',
+          path: null,
+          version: null,
+          source: null,
+          readinessIssue: {
+            code: 'setup_required',
+            message: 'Select or install a Runtime, then retry.',
+            repairable: true,
+          },
+        },
+        runtimeProfile: null,
+      };
+    }
+    if (launch.runtime.kind !== 'external' || !launch.runtime.id || !launch.runtime.displayName) {
+      return {
+        ready: false,
+        cli: {
+          state: 'invalid',
+          path: selectedPath,
+          version: null,
+          source: 'override',
+          error: 'Trusted Manifest Runtime facts are incomplete.',
+        },
+        runtimeProfile: null,
+      };
+    }
+    try {
+      const resolved = await this.options.runtimeResolver.resolve({
+        pluginId: parseProxyPluginId(launch.pluginId),
+        pluginVersion: launch.pluginVersion,
+        agentId,
+        entryPath: launch.entryPath,
+        processScope: launch.processScope,
+        runtime: {
+          kind: 'external',
+          id: launch.runtime.id,
+          displayName: launch.runtime.displayName,
+          verifiedVersions: [...(launch.runtime.verifiedVersions ?? [])],
+        },
+        selectedPath,
+      });
+      await resolved.lease?.release();
+      const profile = { ...resolved.profile, agentId };
+      this.lastOpenRuntimeProfiles.set(`${pluginId}\0${selectedPath}`, profile);
+      this.options.readinessCache?.publish({
+        pluginId: launch.pluginId,
+        pluginVersion: launch.pluginVersion,
+        selectedPath,
+        profileIdentity: profile.id,
+        state: resolved.readinessIssue
+          ? 'invalid'
+          : profile.verification === 'incompatible'
+            ? 'invalid'
+            : profile.verification === 'unverified'
+              ? 'unverified'
+              : 'ready',
+        displayName: launch.runtime.displayName,
+        ...(resolved.readinessIssue ? { readinessIssue: resolved.readinessIssue } : {}),
+        profile,
+        ...(resolved.observation ? { observation: resolved.observation } : {}),
+      });
+      if (resolved.readinessIssue || profile.verification === 'incompatible' || !profile.path || !profile.version) {
+        return {
+          ready: false,
+          cli: {
+            state: 'invalid',
+            path: profile.path,
+            version: profile.version,
+            verifiedVersions: profile.verifiedVersions,
+            contentFingerprint: profile.contentFingerprint,
+            source: 'override',
+            ...(resolved.readinessIssue ? { readinessIssue: resolved.readinessIssue } : {}),
+          },
+          runtimeProfile: profile,
+        };
+      }
+      return {
+        ready: true,
+        cli: {
+          state: 'ready',
+          path: profile.path,
+          version: profile.version,
+          verifiedVersions: profile.verifiedVersions,
+          contentFingerprint: profile.contentFingerprint,
+          source: 'override',
+        },
+        runtimeProfile: profile,
+      };
+    } catch (error) {
+      return {
+        ready: false,
+        cli: {
+          state: 'invalid',
+          path: selectedPath,
+          version: null,
+          source: 'override',
+          error: error instanceof Error ? error.message : String(error),
+        },
+        runtimeProfile: null,
+      };
+    }
+  }
+
+  private async verifiedCliVersions(id: LegacyExecutorId): Promise<string[]> {
     if (!this.options.managedProxies) return [...VERIFIED_CLI_VERSIONS[id]];
     try {
       const agentRoot = join(this.options.dataDir, 'plugins', id);
       const current = await realpath(join(agentRoot, 'current'));
       const contained = await this.assertDirectProxyDirectory(agentRoot, current);
-      const manifest = await this.validateProxyDirectory(contained, id);
+      const manifest = await this.validateProxyDirectory(contained, id, undefined, false);
       return verifiedCliVersionsFromManifest(manifest, id);
     } catch {
       return [...VERIFIED_CLI_VERSIONS[id]];
     }
   }
 
-  private async proxyStatus(id: Executor): Promise<Omit<AgentProxyStatus, 'defaults'>> {
+  private async proxyStatus(id: LegacyExecutorId): Promise<Omit<AgentProxyStatus, 'defaults'>> {
     const path = this.proxyEntry(id);
     if (!this.options.managedProxies) {
       if (!(await existsReadable(path))) {
@@ -1847,7 +2948,7 @@ export class AgentManager {
       const agentRoot = join(this.options.dataDir, 'plugins', id);
       const current = await realpath(join(agentRoot, 'current'));
       const contained = await this.assertDirectProxyDirectory(agentRoot, current);
-      const manifest = await this.validateProxyDirectory(contained, id);
+      const manifest = await this.validateProxyDirectory(contained, id, undefined, false);
       const version = proxyManifestVersion(manifest);
       return {
         state: isCompatibleProxyManifest(manifest, this.releaseVersion)
@@ -1874,7 +2975,7 @@ export class AgentManager {
 
   private async validateProxyDirectory(
     directory: string,
-    id: Executor,
+    id: LegacyExecutorId,
     expectedVersion?: string,
     selfTest = true,
   ): Promise<ProxyManifest> {
@@ -1917,7 +3018,7 @@ export class AgentManager {
       throw new Error(`Unsafe ${id} proxy entry.`);
     }
     await access(resolvedEntry, constants.R_OK);
-    if (validated.schemaVersion === 3) {
+    if (validated.schemaVersion === 3 || validated.schemaVersion === 4) {
       await this.readProxyLogoAsset(resolvedDirectory, validated.branding.logo.light);
       if (validated.branding.logo.dark) {
         await this.readProxyLogoAsset(resolvedDirectory, validated.branding.logo.dark);
@@ -1981,12 +3082,14 @@ export class AgentManager {
         encoding: 'utf8',
         env: {
           ...process.env,
-          ...(!isLegacyProxyManifest(manifest)
-            ? {
+            ...(!isLegacyProxyManifest(manifest)
+              ? {
                 GIAN_PLUGIN_ID: manifest.id,
-                GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
+                GIAN_PROTOCOL_VERSIONS: manifest.schemaVersion === 4
+                  ? PROTOCOL_V22
+                  : SUPPORTED_PROTOCOL_VERSIONS.join(','),
               }
-            : {}),
+              : {}),
         },
       });
       stdout = String(result.stdout).trim();
@@ -2021,7 +3124,7 @@ export class AgentManager {
 
   private async activateProxy(
     agentRoot: string,
-    id: Executor,
+    id: LegacyExecutorId,
     version: string,
     updateOwner: AgentUpdateLease,
   ): Promise<void> {
@@ -2045,7 +3148,7 @@ export class AgentManager {
       entryPath: join(resolvedCandidate, manifest.entry),
       protocol: proxyManifestProtocol(manifest),
       ...(!isLegacyProxyManifest(manifest)
-        ? { processScope: manifest.process.scope }
+        ? { processScope: manifest.process.scope, schemaVersion: manifest.schemaVersion }
         : {}),
     };
     await activationProbe(probeInput);
@@ -2057,6 +3160,7 @@ export class AgentManager {
       // validated immutable version or the new validated version, never a
       // missing path or a version whose compatibility probe is still pending.
       await (this.options.proxyActivationSwap ?? rename)(temporary, current);
+      this.options.readinessCache?.invalidate(pluginIdForExecutorId(id));
     } catch (error) {
       throw new Error(
         `${id} Proxy activation failed; ${previousVersion
@@ -2072,7 +3176,7 @@ export class AgentManager {
   private async previousValidatedProxyVersion(
     agentRoot: string,
     current: string,
-    id: Executor,
+    id: LegacyExecutorId,
   ): Promise<string | null> {
     try {
       const info = await lstat(current);
@@ -2126,35 +3230,57 @@ export class AgentManager {
   }
 
   private async resolveCompatibilityRuntime(
-    id: Executor,
-    updateOwner: AgentUpdateLease,
-  ): Promise<RuntimeProbe> {
-    const provider = this.providers.get(id);
-    if (!provider) throw new Error(`CLI runtime provider is not configured: ${id}`);
-    const installed = await provider.inspectInstalled();
-    if (installed.length === 0) {
-      throw new Error(`${id} CLI must be installed before its Proxy can be activated.`);
+    id: LegacyExecutorId,
+    _updateOwner: AgentUpdateLease,
+  ): Promise<LegacyRuntimeProbe> {
+    const path = this.firstAgentPath(id) ?? this.configuredPath(id);
+    if (!path) {
+      throw new Error(`${id} CLI must be selected before its Proxy can be activated.`);
     }
-    const failures: string[] = [];
-    for (const candidate of installed) {
-      try {
-        return await provider.probe(candidate, updateOwner);
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : String(error));
-        // An explicit override is a contract, never a fallback hint.
-        if (candidate.source === 'override') break;
-      }
-    }
-    throw new Error(`No compatible ${id} CLI is available. ${failures.join(' | ')}`);
+    await assertSavedAbsoluteRuntimePath(path);
+    return {
+      cli: id,
+      binaryPath: path,
+      version: '0.0.0',
+      source: 'override',
+      env: Object.freeze({}),
+    };
   }
 
   private async runProxyCompatibilityProbe(input: {
-    id: Executor;
+    id: LegacyExecutorId;
     version: string;
     entryPath: string;
     protocol: ProxyWireProtocol;
     processScope?: ManagedProxyManifestV2['process']['scope'];
-  }, updateOwner: AgentUpdateLease, exactRuntime?: RuntimeProbe): Promise<void> {
+    schemaVersion?: 2 | 3 | 4;
+  }, updateOwner: AgentUpdateLease, exactRuntime?: LegacyRuntimeProbe): Promise<void> {
+    const generic = input.schemaVersion === 4;
+    if (generic) {
+      try {
+        await runNoRuntimeActivationHandshake({
+          pluginId: pluginIdFor(input.id),
+          pluginVersion: input.version,
+          processScope: input.processScope ?? 'session',
+          entryPath: input.entryPath,
+          dataDir: this.options.dataDir,
+          hostVersion: this.releaseVersion,
+          protector: updateOwner,
+          label: `${input.id} Proxy compatibility process`,
+          timeoutMs: PROXY_COMPATIBILITY_TIMEOUT_MS,
+          ...(this.options.shutdownProxyProcessImpl
+            ? { shutdownProcess: this.options.shutdownProxyProcessImpl }
+            : {}),
+        });
+      } catch (error) {
+        if (error instanceof PluginStoreError) {
+          throw new Error(error.message);
+        }
+        throw error;
+      }
+      return;
+    }
+    const offered = [...SUPPORTED_PROTOCOL_VERSIONS];
     const runtime = exactRuntime ?? await this.resolveCompatibilityRuntime(input.id, updateOwner);
     const probeDirectory = join(
       this.options.dataDir,
@@ -2165,182 +3291,70 @@ export class AgentManager {
     if (input.protocol !== PROTOCOL_NAME) {
       throw new Error(`${input.id} Proxy must speak ${PROTOCOL_NAME}/${PROTOCOL_V2}.`);
     }
-    const args = [input.entryPath];
-    let reservation: Awaited<ReturnType<AgentUpdateLease['reserveProcessGroup']>>;
-    try {
-      reservation = await updateOwner.reserveProcessGroup();
-    } catch (error) {
-      try {
-        await rm(probeDirectory, { recursive: true, force: true });
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          `${input.id} Proxy compatibility reservation cleanup failed.`,
-        );
-      }
-      throw error;
-    }
-    let child;
-    try {
-      child = spawn(process.execPath, args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: true,
-        env: {
-          ...process.env,
-          ...runtime.env,
-          GIAN_PLUGIN_ID: pluginIdFor(input.id),
-          GIAN_PLUGIN_DATA_DIR: probeDirectory,
-          GIAN_RUNTIME_BIN: runtime.binaryPath,
-          GIAN_PROTOCOL_VERSIONS: SUPPORTED_PROTOCOL_VERSIONS.join(','),
-        },
-      });
-    } catch (error) {
-      await reservation.cancelBeforeSpawn();
-      await rm(probeDirectory, { recursive: true, force: true });
-      throw error;
-    }
-    const groupId = child.pid;
-    let registered = false;
-    let registrationAlreadyEmpty = false;
-    let exited = false;
-    let spawnFailed = false;
-    let spawnError: Error | null = null;
-    let stdinError: Error | null = null;
-    let stderr = '';
-    child.once('error', error => {
-      spawnFailed = true;
-      spawnError = error;
-      exited = true;
-    });
-    child.stdin.on('error', error => { stdinError = error; });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
-      stderr = `${stderr}${chunk}`.slice(-8_192);
-    });
-    child.once('exit', () => {
-      exited = true;
-    });
-    const iterator = readNdjsonLines(child.stdout)[Symbol.asyncIterator]();
-    let timeout!: ReturnType<typeof setTimeout>;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => reject(new Error(
-        `${input.id} Proxy compatibility handshake timed out.`,
-      )), PROXY_COMPATIBILITY_TIMEOUT_MS);
-    });
-    const processFailureDetail = (): string => {
-      const spawnFailure = spawnError as Error | null;
-      const pipeFailure = stdinError as Error | null;
-      return spawnFailure?.message || pipeFailure?.message || stderr.trim() || 'process exited';
-    };
     const validator = new HostProtocolValidator({
       pluginId: pluginIdFor(input.id),
       pluginVersion: input.version,
       ...(input.processScope ? { processScope: input.processScope } : {}),
     });
-
-    const request = async (
-      id: string,
-      method: string,
-      params: Record<string, unknown> = {},
-    ): Promise<unknown> => {
-      const payload = { jsonrpc: '2.0', id, method, params };
-      validator.registerRequest(payload);
-      const frame = `${JSON.stringify(payload)}\n`;
-      if (exited || spawnError || stdinError) {
-        throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
-      }
-      if (!child.stdin.write(frame)) {
-        await Promise.race([once(child.stdin, 'drain').then(() => undefined), deadline]);
-      }
-      while (true) {
-        const next = await Promise.race([iterator.next(), deadline]);
-        if (next.done) {
-          throw new Error(`${input.id} Proxy compatibility process stopped: ${processFailureDetail()}`);
-        }
-        const accepted = validator.acceptLine(next.value);
-        if (accepted === null || !('id' in accepted)) continue;
-        if (accepted.id !== id) continue;
-        if (accepted.error !== undefined) {
-          const error = objectRecord(accepted.error);
-          throw new Error(
-            `${input.id} Proxy ${method} failed: ${String(error?.['message'] ?? error?.['code'])}`,
-          );
-        }
-        return accepted.result;
-      }
-    };
-
-    let operationFailed = false;
-    let operationError: unknown;
-    try {
-      if (groupId === undefined || groupId <= 0) {
-        throw new Error(`${input.id} Proxy compatibility process group is unavailable.`);
-      }
-      const registration = await reservation.register(groupId);
-      registered = registration === 'registered';
-      registrationAlreadyEmpty = registration === 'already-empty';
-      if (registration === 'already-empty') {
-        throw new Error(`${input.id} Proxy compatibility process exited before registration.`);
-      }
-      const initialized = await request('req-1', 'initialize', {
-        protocol: {
-          name: PROTOCOL_NAME,
-          versions: [...SUPPORTED_PROTOCOL_VERSIONS],
-        },
-        host: { name: 'Gian', version: this.releaseVersion },
-      });
-      validateProxyInitialize(input.id, initialized);
-      if (validator.initializeResult?.plugin.version !== input.version) {
-        throw new Error(`${input.id} Proxy handshake version does not match its manifest.`);
-      }
-      await request('req-2', 'catalog.list');
-      await request('req-3', 'shutdown');
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-    }
-
-    clearTimeout(timeout);
-    await iterator.return?.(undefined);
-    try { child.stdin.end(); } catch { /* pipe already closed */ }
-    const cleanupErrors: unknown[] = [];
-    let groupConfirmedEmpty = registrationAlreadyEmpty;
-    if (!groupConfirmedEmpty) {
-      try {
-        await (this.options.shutdownProxyProcessImpl ?? shutdownProxyProcess)({
-          child,
-          isExited: () => exited,
-          label: `${input.id} Proxy compatibility process`,
+    await runProtectedProxyChild({
+      label: `${input.id} Proxy compatibility process`,
+      args: [input.entryPath],
+      env: {
+        ...process.env,
+        ...(runtime?.env ?? {}),
+        GIAN_PLUGIN_ID: pluginIdFor(input.id),
+        GIAN_PLUGIN_DATA_DIR: probeDirectory,
+        ...(runtime ? { GIAN_RUNTIME_BIN: runtime.binaryPath } : {}),
+        GIAN_PROTOCOL_VERSIONS: offered.join(','),
+      },
+      protector: updateOwner,
+      timeoutMs: PROXY_COMPATIBILITY_TIMEOUT_MS,
+      probeDirectory,
+      shutdownProcess: this.options.shutdownProxyProcessImpl,
+      work: async (context) => {
+        const request = async (
+          id: string,
+          method: string,
+          params: Record<string, unknown> = {},
+        ): Promise<unknown> => {
+          const payload = { jsonrpc: '2.0', id, method, params };
+          validator.registerRequest(payload);
+          if (context.isExited()) {
+            throw new Error(`${input.id} Proxy compatibility process stopped: ${context.processFailureDetail()}`);
+          }
+          await writeJsonRpc(context.child, payload, context.deadline);
+          while (true) {
+            const next = await Promise.race([context.iterator.next(), context.deadline]);
+            if (next.done) {
+              throw new Error(`${input.id} Proxy compatibility process stopped: ${context.processFailureDetail()}`);
+            }
+            const accepted = validator.acceptLine(next.value);
+            if (accepted === null || !('id' in accepted)) continue;
+            if (accepted.id !== id) continue;
+            if (accepted.error !== undefined) {
+              const error = objectRecord(accepted.error);
+              throw new Error(
+                `${input.id} Proxy ${method} failed: ${String(error?.['message'] ?? error?.['code'])}`,
+              );
+            }
+            return accepted.result;
+          }
+        };
+        const initialized = await request('req-1', 'initialize', {
+          protocol: {
+            name: PROTOCOL_NAME,
+            versions: [...offered],
+          },
+          host: { name: 'Gian', version: this.releaseVersion },
         });
-        groupConfirmedEmpty = true;
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    if (groupConfirmedEmpty) {
-      try {
-        if (registered) await reservation.release();
-        else if (groupId !== undefined) await reservation.releaseUnregistered(groupId);
-        else if (spawnFailed) await reservation.cancelBeforeSpawn();
-        else throw new Error(
-          `${input.id} Proxy compatibility child has no verifiable process group; retaining its pending reservation.`,
-        );
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    try {
-      await rm(probeDirectory, { recursive: true, force: true });
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    if (operationFailed || cleanupErrors.length > 0) {
-      if (cleanupErrors.length === 0) throw operationError;
-      throw new AggregateError(
-        operationFailed ? [operationError, ...cleanupErrors] : cleanupErrors,
-        `${input.id} Proxy compatibility cleanup failed.`,
-      );
-    }
+        validateProxyInitialize(input.id, initialized);
+        if (validator.initializeResult?.plugin.version !== input.version) {
+          throw new Error(`${input.id} Proxy handshake version does not match its manifest.`);
+        }
+        await request('req-2', 'catalog.list');
+        await request('req-3', 'shutdown');
+      },
+    });
   }
 
   private async download(url: string, maxBytes: number): Promise<Buffer> {
@@ -2361,32 +3375,7 @@ export class AgentManager {
     return buffer;
   }
 
-  private async runOfficialInstaller(
-    id: Executor,
-    scriptPath: string,
-    updateOwner: AgentUpdateLease,
-  ): Promise<{ stdout: string; stderr: string }> {
-    return runProtectedCommand({
-      command: '/bin/bash',
-      args: [scriptPath],
-      timeoutMs: 5 * 60_000,
-      maxBuffer: 8 * 1024 * 1024,
-      label: `Official ${id} installer`,
-      protector: updateOwner,
-      env: {
-        ...process.env,
-        ...managedRuntimeEnvironment(id),
-        // Install into the same home whose official paths AgentManager probes.
-        // This is normally process HOME, while packaged/acceptance harnesses
-        // deliberately supply an isolated home so vendor installers cannot
-        // leak files into the invoking user's profile.
-        HOME: this.homeDir,
-        NON_INTERACTIVE: '1',
-      },
-    });
-  }
-
-  private async resolveProxyRelease(id: Executor): Promise<ProxyRelease> {
+  private async resolveProxyRelease(id: LegacyExecutorId): Promise<ProxyRelease> {
     if (!this.options.independentProxyReleases) {
       return { tag: `v${this.releaseVersion}`, version: this.releaseVersion };
     }
@@ -2488,8 +3477,8 @@ export class AgentManager {
       const parsed = parseConfig(await readFile(this.configPath, 'utf8'));
       // A v1 file can still appear here when an older Host wrote it after
       // this Host migrated in memory. Migrate it again on the fly; the next
-      // successful commit persists v3.
-      return parsed.schemaVersion === 3 ? parsed : await this.migrateV1(parsed);
+      // successful commit persists v5.
+      return parsed.schemaVersion === 5 ? parsed : await this.migrateV1(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyConfig();
       throw error;
@@ -2507,8 +3496,14 @@ export class AgentManager {
 
   private async saveConfig(config: AgentConfigFile = this.config): Promise<void> {
     const temporary = `${this.configPath}.${randomUUID()}.tmp`;
+    const persisted = this.options.managedProxies
+      ? {
+        ...config,
+        agents: config.agents.map(({ cliPath: _legacyCliPath, ...agent }) => agent),
+      }
+      : config;
     try {
-      await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, {
+      await writeFile(temporary, `${JSON.stringify(persisted, null, 2)}\n`, {
         mode: 0o600,
       });
       await rename(temporary, this.configPath);
@@ -2526,7 +3521,7 @@ export class AgentManager {
   }
 
   private async withAgentUpdateLock<T>(
-    id: Executor,
+    id: LegacyExecutorId,
     operation: string,
     run: (owner: AgentUpdateLease) => Promise<T>,
     scope: 'cli-update' | 'proxy-update' = 'cli-update',
@@ -2559,7 +3554,7 @@ export class AgentManager {
     return pending;
   }
 
-  private invalidateStatus(id: Executor): void {
+  private invalidateStatus(id: LegacyExecutorId): void {
     this.statusCache.delete(id);
     this.statusGenerations.set(id, (this.statusGenerations.get(id) ?? 0) + 1);
   }

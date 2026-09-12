@@ -55,6 +55,12 @@ export interface SessionForkFromInput {
   sessionId?: string;
   anchor: SessionForkFromAnchor;
   turnConfig?: Record<string, ConfigValue>;
+  /** Host-only: schedule Fork Sessions are durable but excluded from the
+   *  Session rail, management lists, and Task/Subtask listings. Never sent
+   *  by the Web WS contract. */
+  hidden?: boolean;
+  /** Explicit name override (used by hidden schedule Forks). */
+  name?: string;
 }
 
 export interface SessionForkFromResult {

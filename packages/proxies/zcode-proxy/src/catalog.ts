@@ -116,22 +116,92 @@ export function revisionFor(runtimeFingerprint: string, state: InnerReadState): 
   return `zcode:${Buffer.from(runtimeFingerprint).toString('base64url').slice(0, 12)}:${catalogFingerprint(state)}`;
 }
 
-export function projectCatalog(runtimeFingerprint: string, state: InnerReadState): ProjectedCatalog {
+type ModelWithRef = InnerModelInfo & {
+  ref: { providerId: string; modelId: string };
+};
+
+interface CatalogSelection {
+  providerId?: string;
+  modelValue?: string;
+}
+
+function availableModels(settings: InnerSettings | undefined): ModelWithRef[] {
+  return (settings?.model?.available ?? []).filter((model): model is ModelWithRef => (
+    typeof model.ref?.providerId === 'string'
+    && model.ref.providerId.length > 0
+    && typeof model.ref.modelId === 'string'
+    && model.ref.modelId.length > 0
+  ));
+}
+
+function selectCatalogModel(
+  settings: InnerSettings | undefined,
+  selection: CatalogSelection,
+): { providerId: string; model: ModelWithRef } {
+  const models = availableModels(settings);
+  const requestedRef = selection.modelValue === undefined
+    ? undefined
+    : decodeModelValue(selection.modelValue);
+  const requestedModel = requestedRef === undefined
+    ? undefined
+    : models.find(model => (
+        model.ref.providerId === requestedRef.providerId
+        && model.ref.modelId === requestedRef.modelId
+      ));
+  if (requestedRef !== undefined && requestedModel === undefined) {
+    throw new ConfigValueInvalidError('Model config value was not advertised.');
+  }
+  const current = settings?.model?.current ?? settings?.model?.lastUsed;
+  const providerId = selection.providerId
+    ?? requestedRef?.providerId
+    ?? current?.providerId
+    ?? models[0]?.ref.providerId;
+  if (providerId === undefined || models.some(model => model.ref.providerId === providerId) === false) {
+    throw new ConfigValueInvalidError('Provider config value was not advertised.');
+  }
+  const model = requestedModel?.ref.providerId === providerId
+    ? requestedModel
+    : models.find(candidate => (
+        candidate.ref.providerId === providerId
+        && candidate.ref.modelId === current?.modelId
+      ))
+      ?? models.find(candidate => candidate.ref.providerId === providerId);
+  if (model === undefined) {
+    throw new ConfigValueInvalidError(`Provider ${providerId} exposes no selectable model.`);
+  }
+  return { providerId, model };
+}
+
+export function projectCatalog(
+  runtimeFingerprint: string,
+  state: InnerReadState,
+  selection: CatalogSelection = {},
+): ProjectedCatalog {
   const settings = state.settings;
   if (isUnconfigured(settings)) {
     return bootstrapCatalog(runtimeFingerprint);
   }
   const revision = revisionFor(runtimeFingerprint, state);
-  const models = settings?.model?.available ?? [];
-  const current = settings?.model?.current
-    ?? settings?.model?.lastUsed
-    ?? models[0]?.ref;
-
-  const defaultModel = current?.providerId !== undefined && current?.modelId !== undefined
-    ? encodeModelValue({ providerId: current.providerId, modelId: current.modelId })
-    : models[0]?.ref?.providerId !== undefined && models[0]?.ref?.modelId !== undefined
-      ? encodeModelValue({ providerId: models[0].ref.providerId, modelId: models[0].ref.modelId })
-      : null;
+  const models = availableModels(settings);
+  const selected = selectCatalogModel(settings, selection);
+  const providerChoices = new Map<string, string>();
+  for (const model of models) {
+    if (!providerChoices.has(model.ref.providerId)) {
+      providerChoices.set(model.ref.providerId, model.providerLabel ?? model.ref.providerId);
+    }
+  }
+  const providerOption: CatalogConfigOption = {
+    id: 'provider',
+    displayName: 'Provider',
+    description: 'ZCode model provider for the next turn.',
+    binding: 'turn',
+    control: 'select',
+    required: true,
+    defaultValue: selected.providerId,
+    choices: [...providerChoices].map(([value, displayName]) => ({ value, displayName })),
+  };
+  const visibleModels = models.filter(model => model.ref.providerId === selected.providerId);
+  const defaultModel = encodeModelValue(selected.model.ref);
 
   const modelOption: CatalogConfigOption = {
     id: 'model',
@@ -141,10 +211,9 @@ export function projectCatalog(runtimeFingerprint: string, state: InnerReadState
     control: 'select',
     required: true,
     defaultValue: defaultModel,
-    choices: models
-      .filter((model) => model.ref?.providerId !== undefined && model.ref?.modelId !== undefined)
+    choices: visibleModels
       .map((model) => {
-        const ref = model.ref as { providerId: string; modelId: string };
+        const ref = model.ref;
         return {
           value: encodeModelValue(ref),
           displayName: model.label ?? ref.modelId,
@@ -170,11 +239,12 @@ export function projectCatalog(runtimeFingerprint: string, state: InnerReadState
     ],
   };
 
-  const configOptions: CatalogConfigOption[] = [modelOption];
-  const currentModel = models.find((model) => model.ref?.providerId === current?.providerId
-    && model.ref?.modelId === current?.modelId);
-  const reasoning = currentModel?.reasoning;
+  const configOptions: CatalogConfigOption[] = [providerOption, modelOption];
+  const reasoning = selected.model.reasoning;
   if (reasoning?.enabled === true) {
+    const current = settings?.model?.current ?? settings?.model?.lastUsed;
+    const selectedIsCurrent = current?.providerId === selected.model.ref.providerId
+      && current.modelId === selected.model.ref.modelId;
     const thinkingOption: CatalogConfigOption = {
       id: 'thinking',
       displayName: 'Thinking',
@@ -182,7 +252,7 @@ export function projectCatalog(runtimeFingerprint: string, state: InnerReadState
       binding: 'turn',
       control: 'select',
       required: true,
-      defaultValue: settings?.thoughtLevel?.current
+      defaultValue: (selectedIsCurrent ? settings?.thoughtLevel?.current : undefined)
         ?? reasoning.defaultLevel
         ?? reasoning.levels?.[0]?.value
         ?? null,
@@ -238,40 +308,58 @@ export interface ResolvedCatalog {
   resolvedDefaults: { sessionConfig: Record<string, string | number | boolean | null>; turnConfig: Record<string, string | number | boolean | null> };
 }
 
-/** `catalog.resolve`: fill defaults ONLY for missing keys; an explicit value
- *  that is invalid must fail with CONFIG_VALUE_INVALID (§7.2). */
+/** `catalog.resolve`: reject invalid explicit values except stale model or
+ *  Thinking values made obsolete by an explicit Provider/model change. */
 export function resolveCatalog(
-  catalog: ProjectedCatalog,
+  runtimeFingerprint: string,
+  state: InnerReadState,
   input: { sessionConfig: Record<string, unknown>; turnConfig: Record<string, unknown> },
-): ResolvedCatalog {
-  const resolved: Record<string, string | number | boolean | null> = {};
-  for (const option of catalog.configOptions) {
-    if (option.binding !== 'turn') continue;
-    const provided = input.turnConfig[option.id];
-    if (provided !== undefined) {
-      if (option.control === 'select') {
-        const valid = (option.choices ?? []).some((choice) => Object.is(choice.value, provided));
-        if (!valid) throw new ConfigValueInvalidError(`Config option ${option.id} value was not advertised.`);
-      } else if (option.control === 'boolean' && typeof provided !== 'boolean') {
-        throw new ConfigValueInvalidError(`Config option ${option.id} must be boolean.`);
-      } else if (option.control === 'number' && typeof provided !== 'number') {
-        throw new ConfigValueInvalidError(`Config option ${option.id} must be number.`);
-      } else if (option.control === 'text' && typeof provided !== 'string') {
-        throw new ConfigValueInvalidError(`Config option ${option.id} must be text.`);
-      }
-      resolved[option.id] = provided as string | number | boolean | null;
-      continue;
-    }
-    if (option.defaultValue !== null && option.defaultValue !== undefined) {
-      resolved[option.id] = option.defaultValue;
-    }
+): ResolvedCatalog & ProjectedCatalog {
+  if (Object.keys(input.sessionConfig).length > 0) {
+    throw new ConfigValueInvalidError('ZCode v1 has no session-bound config options.');
   }
+  const allowed = new Set(['provider', 'model', 'thinking', 'approval_mode']);
   for (const [key, value] of Object.entries(input.turnConfig)) {
-    if (catalog.configOptions.some((option) => option.id === key) === false) {
+    void value;
+    if (!allowed.has(key)) {
       throw new ConfigValueInvalidError(`Unknown turn config option ${key}.`);
     }
   }
+  const providerId = typeof input.turnConfig.provider === 'string'
+    ? input.turnConfig.provider
+    : undefined;
+  const modelValue = typeof input.turnConfig.model === 'string'
+    ? input.turnConfig.model
+    : undefined;
+  const catalog = projectCatalog(runtimeFingerprint, state, {
+    ...(providerId === undefined ? {} : { providerId }),
+    ...(modelValue === undefined ? {} : { modelValue }),
+  });
+  const resolved: Record<string, string | number | boolean | null> = {};
+  const baseline = projectCatalog(runtimeFingerprint, state);
+  const baselineProvider = baseline.configOptions.find(option => option.id === 'provider')?.defaultValue;
+  const baselineModel = baseline.configOptions.find(option => option.id === 'model')?.defaultValue;
+  const dependencyChanged = (providerId !== undefined && providerId !== baselineProvider)
+    || (modelValue !== undefined && modelValue !== baselineModel);
+  const providerChangedModel = providerId !== undefined
+    && modelValue !== undefined
+    && decodeModelValue(modelValue).providerId !== providerId;
+  for (const option of catalog.configOptions) {
+    const provided = input.turnConfig[option.id];
+    const valid = provided !== undefined
+      && (option.choices ?? []).some((choice) => Object.is(choice.value, provided));
+    const dependentStaleValue = (dependencyChanged && option.id === 'thinking')
+      || (providerChangedModel && option.id === 'model');
+    if (provided !== undefined && !valid && !dependentStaleValue) {
+      throw new ConfigValueInvalidError(`Config option ${option.id} value was not advertised.`);
+    }
+    const value = valid ? provided : option.defaultValue;
+    if (value !== null && value !== undefined) {
+      resolved[option.id] = value as string | number | boolean | null;
+    }
+  }
   return {
+    ...catalog,
     catalogRevision: catalog.catalogRevision,
     resolvedDefaults: {
       sessionConfig: {},

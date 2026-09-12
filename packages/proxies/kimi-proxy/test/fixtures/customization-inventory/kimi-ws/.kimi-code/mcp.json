@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "project-db": {
+      "command": "/usr/local/bin/db-tool",
+      "args": ["--password", "kimi-ws-pass-canary"],
+      "env": { "DB_PASSWORD": "kimi-ws-pw-canary" }
+    }
+  }
+}

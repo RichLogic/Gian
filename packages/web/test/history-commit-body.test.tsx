@@ -133,6 +133,18 @@ describe('HistoryCommitBody', () => {
     expect(next).toBeDisabled();
   });
 
+  it('navigating to a collapsed file expands it and scrolls to its header', async () => {
+    render(<HistoryCommitBody tab={tab()} />);
+    await screen.findByText('feat: wire history rail');
+    fireEvent.click(document.querySelector('.cs-file[data-path="assets/logo.icns"] .cs-file-head')!);
+    expect(document.querySelector('.cs-file[data-path="assets/logo.icns"]')).toHaveClass('collapsed');
+
+    fireEvent.click(screen.getByLabelText('Next file'));
+    expect(document.querySelector('.cs-file[data-path="assets/logo.icns"]')).not.toHaveClass('collapsed');
+    expect(document.querySelector<HTMLElement>('.cs-file[data-path="assets/logo.icns"]')!.scrollIntoView)
+      .toHaveBeenCalledWith({ block: 'start' });
+  });
+
   it('file patches load lazily — only after the block intersects', async () => {
     render(<HistoryCommitBody tab={tab()} />);
     await waitFor(() => expect(document.querySelector('.cs-subject')?.textContent).toBe('feat: wire history rail'));

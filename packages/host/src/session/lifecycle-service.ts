@@ -1,6 +1,6 @@
 import type {
   AgentProxyDefaults,
-  AgentRuntimeProfile,
+  SessionRuntimeProfile,
   ApprovalMode,
   ConfigOption,
   ConfigValue,
@@ -12,7 +12,18 @@ import type {
   UserAgent,
   WorktreeOutcome,
 } from '@gian/shared';
-import { migrateLegacyGrokProxyDefaults, usesNativeExecutorConfig } from '@gian/shared';
+import {
+  migrateLegacyGrokProxyDefaults,
+  sessionRuntimeCliPath,
+  sessionRuntimeProxyVersion,
+  usesNativeExecutorConfig,
+} from '@gian/shared';
+import {
+  compatibilityExecutorColumn,
+  officialKindForSession,
+  pluginIdForSessionIdentity,
+} from './compatibility-executor.js';
+import type { PreparedSessionLaunch, SessionBindingPlanner } from './binding-planner.js';
 import { randomUUID } from 'node:crypto';
 import type { ApprovalManager } from '../approval/index.js';
 import type { Db } from '../storage/db.js';
@@ -58,6 +69,7 @@ interface BringUpInput {
   /** Owning Agent's resolved CLI path (injected by SessionManager). */
   cliPath?: string | null;
   proxyVersion?: string | null;
+  preparedLaunch?: PreparedSessionLaunch;
   executorDefaults?: AgentProxyDefaults;
   sessionConfig?: Record<string, ConfigValue>;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
@@ -141,8 +153,9 @@ export class SessionLifecycleService {
     private agentRuntime?: (agentId: string) => Promise<{
       agent: UserAgent;
       cliPath: string | null;
-      runtimeProfile: AgentRuntimeProfile | null;
+      runtimeProfile: SessionRuntimeProfile | null;
     }>,
+    private bindingPlanner?: SessionBindingPlanner,
   ) {}
 
   async create(input: CreateSessionInput): Promise<Session> {
@@ -157,13 +170,31 @@ export class SessionLifecycleService {
     if (input.agent_id !== undefined && !resolvedAgent) {
       throw new Error(`agent not found: ${input.agent_id}`);
     }
-    const executor = resolvedAgent?.agent.proxy ?? input.executor;
+    const executor = resolvedAgent
+      ? compatibilityExecutorColumn({
+        pluginId: resolvedAgent.agent.pluginId,
+        proxy: resolvedAgent.agent.proxy,
+      })
+      : input.executor;
     if (!executor) throw new Error('session requires an agent_id or an executor');
-    if (resolvedAgent && input.executor && input.executor !== resolvedAgent.agent.proxy) {
+    if (
+      resolvedAgent
+      && input.executor
+      && input.executor !== resolvedAgent.agent.proxy
+      && input.executor !== resolvedAgent.agent.pluginId
+    ) {
       throw new Error(
-        `agent ${input.agent_id} is a ${resolvedAgent.agent.proxy} Agent, not ${input.executor}`,
+        `agent ${input.agent_id} is a ${resolvedAgent.agent.proxy ?? resolvedAgent.agent.pluginId} Agent, not ${input.executor}`,
       );
     }
+    const officialKind = officialKindForSession({
+      proxy: resolvedAgent?.agent.proxy ?? null,
+      executor,
+    });
+    const pluginId = pluginIdForSessionIdentity({
+      pluginId: resolvedAgent?.agent.pluginId,
+      executor,
+    });
 
     if (input.task_id !== undefined && input.task_id !== null) {
       const task = this.db.prepare('SELECT status FROM tasks WHERE id = ?').get(input.task_id) as
@@ -187,12 +218,12 @@ export class SessionLifecycleService {
       && input.service_tier !== 'fast') {
       throw new Error(`unsupported service tier: ${String(input.service_tier)}`);
     }
-    if (executor !== 'codex' && input.service_tier != null) {
+    if (officialKind !== 'codex' && input.service_tier != null) {
       throw new Error('service_tier is codex-only');
     }
-    const serviceTier = executor === 'codex' ? input.service_tier ?? null : null;
-    if (usesNativeExecutorConfig(executor) && input.approval_mode !== undefined) {
-      throw new Error(`${executor} uses executor-native mode; approval_mode must be omitted`);
+    const serviceTier = officialKind === 'codex' ? input.service_tier ?? null : null;
+    if (officialKind && usesNativeExecutorConfig(officialKind) && input.approval_mode !== undefined) {
+      throw new Error(`${officialKind} uses executor-native mode; approval_mode must be omitted`);
     }
     const managedDefaults = resolvedAgent
       ? resolvedAgent.agent.defaults
@@ -205,10 +236,10 @@ export class SessionLifecycleService {
         : this.proxyDefaults?.(executor);
     const configuredMode = managedDefaults?.mode.trim() ?? '';
     const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
-    const approvalMode: ApprovalMode | null = usesNativeExecutorConfig(executor)
+    const approvalMode: ApprovalMode | null = officialKind && usesNativeExecutorConfig(officialKind)
       ? null
       : (input.approval_mode ?? (configuredMode || fallbackMode) as ApprovalMode);
-    if (approvalMode) assertApprovalModeAllowed(executor, approvalMode);
+    if (approvalMode) assertApprovalModeAllowed(officialKind ?? executor, approvalMode);
 
     const cfg = loadConfig(this.db);
     const defaultModel = managedDefaults
@@ -236,6 +267,20 @@ export class SessionLifecycleService {
         ? defaultEffort as ThinkingEffort
         : null;
 
+    const proxyVersion = sessionRuntimeProxyVersion(resolvedAgent?.runtimeProfile);
+    const selectedPath = resolvedAgent
+      ? sessionRuntimeCliPath(resolvedAgent.runtimeProfile) ?? resolvedAgent.cliPath
+      : null;
+    const preparedLaunch = this.bindingPlanner && resolvedAgent
+      ? await this.bindingPlanner.prepareCurrent({
+        agent: resolvedAgent.agent,
+        selectedPath,
+        runtimeProfile: resolvedAgent.runtimeProfile,
+      })
+      : undefined;
+    if (resolvedAgent && !resolvedAgent.agent.proxy && !preparedLaunch) {
+      throw new Error(`agent ${input.agent_id} requires an exact Session binding planner`);
+    }
     let proxyResult: BringUpResult;
     try {
       proxyResult = await this.runtime.bringUpProxySession({
@@ -244,12 +289,9 @@ export class SessionLifecycleService {
         cwd: workspace.path,
         model: effectiveModel,
         displayName: name,
-        ...(resolvedAgent
-          ? { cliPath: resolvedAgent.runtimeProfile?.cliPath ?? resolvedAgent.cliPath }
-          : {}),
-        ...(resolvedAgent?.runtimeProfile
-          ? { proxyVersion: resolvedAgent.runtimeProfile.proxyVersion }
-          : {}),
+        ...(selectedPath !== null ? { cliPath: selectedPath } : {}),
+        ...(proxyVersion ? { proxyVersion } : {}),
+        ...(preparedLaunch ? { preparedLaunch } : {}),
         // Semantic roles owned by Gian Settings. The coordinator resolves
         // each role against this session's catalog before sending config.
         ...(managedDefaults
@@ -262,7 +304,7 @@ export class SessionLifecycleService {
             }
           : {}),
         ...(input.session_config ? { sessionConfig: input.session_config } : {}),
-        ...(executor === 'codex'
+        ...(officialKind === 'codex'
           ? {
               hostServiceIdentity: {
                 agentId: resolvedAgent?.agent.id ?? null,
@@ -284,7 +326,7 @@ export class SessionLifecycleService {
       {
         model: effectiveModel,
         effort: effectiveEffort,
-        mode: usesNativeExecutorConfig(executor)
+        mode: officialKind && usesNativeExecutorConfig(officialKind)
           ? configuredMode || null
           : approvalMode,
         serviceTier,
@@ -296,7 +338,8 @@ export class SessionLifecycleService {
           `INSERT INTO sessions
             (id, name, type, task_id, workspace_id,
              created_by_actor_kind, created_by_actor_id, created_by_session_id,
-             executor, agent_id, agent_name, runtime_profile_json,
+             executor, proxy_plugin_id, proxy_binding_json,
+             agent_id, agent_name, runtime_profile_json,
              model, approval_mode,
              executor_config_json, thinking_effort, service_tier, active_channel, status,
              archived, worktree_path, branch, base_branch, worktree_outcome,
@@ -306,7 +349,8 @@ export class SessionLifecycleService {
            VALUES
             (@id, @name, @type, @task_id, @workspace_id,
              @created_by_actor_kind, @created_by_actor_id, @created_by_session_id,
-             @executor, @agent_id, @agent_name, @runtime_profile_json,
+             @executor, @proxy_plugin_id, @proxy_binding_json,
+             @agent_id, @agent_name, @runtime_profile_json,
              @model,
              @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
              0, NULL, NULL, NULL, NULL, @native_session_id,
@@ -324,11 +368,17 @@ export class SessionLifecycleService {
           created_by_actor_id: input.created_by_actor_id ?? null,
           created_by_session_id: input.created_by_session_id ?? null,
           executor,
+          proxy_plugin_id: pluginId,
+          proxy_binding_json: preparedLaunch
+            ? JSON.stringify(preparedLaunch.sessionBinding)
+            : null,
           agent_id: resolvedAgent?.agent.id ?? null,
           agent_name: resolvedAgent?.agent.name ?? null,
-          runtime_profile_json: resolvedAgent?.runtimeProfile
-            ? JSON.stringify(resolvedAgent.runtimeProfile)
-            : null,
+          runtime_profile_json: preparedLaunch?.sessionBinding.runtimeProfile
+            ? JSON.stringify(preparedLaunch.sessionBinding.runtimeProfile)
+            : resolvedAgent?.runtimeProfile
+              ? JSON.stringify(resolvedAgent.runtimeProfile)
+              : null,
           model: effectiveModel,
           approval_mode: approvalMode,
           executor_config_json: JSON.stringify(executorConfigFromOptions(proxyResult.configOptions)),
@@ -418,19 +468,15 @@ export class SessionLifecycleService {
   }
 
   /**
-   * File an existing standalone Session under an open Task. The checks and
-   * write are one synchronous SQLite transaction so no caller can observe a
-   * Task/session eligibility check that no longer matches the committed row.
+   * File a standalone Session under an open Task, move a Subtask to another
+   * open Task, or (taskId null) release a Subtask back to standalone. The
+   * checks and write are one synchronous SQLite transaction so no caller can
+   * observe a Task/session eligibility check that no longer matches the
+   * committed row.
    */
-  assignTask(sessionId: string, taskId: string): void {
+  assignTask(sessionId: string, taskId: string | null): void {
     const now = new Date().toISOString();
-    const assign = this.db.transaction((): string => {
-      const task = this.db
-        .prepare('SELECT status FROM tasks WHERE id = ?')
-        .get(taskId) as { status: string } | undefined;
-      if (!task) throw new Error(`task not found: ${taskId}`);
-      if (task.status !== 'open') throw new Error(`task is not open: ${taskId}`);
-
+    const assign = this.db.transaction((): { updatedAt: string; type: SessionType } => {
       const session = this.db
         .prepare('SELECT type, task_id, archived, updated_at FROM sessions WHERE id = ?')
         .get(sessionId) as {
@@ -441,31 +487,63 @@ export class SessionLifecycleService {
         } | undefined;
       if (!session) throw new Error(`session not found: ${sessionId}`);
       if (session.archived !== 0) throw new Error(`session is archived: ${sessionId}`);
+      if (session.type === 'manager') throw new Error(`session is a task manager: ${sessionId}`);
+
+      if (taskId === null) {
+        // Release back to standalone. A retry after a lost result is a
+        // successful no-op (already standalone), re-broadcast below.
+        if (session.type === 'coding' && session.task_id === null) {
+          return { updatedAt: session.updated_at, type: 'coding' };
+        }
+        if (session.type !== 'subtask') {
+          throw new Error(`session is not a subtask: ${sessionId}`);
+        }
+        const result = this.db
+          .prepare(
+            `UPDATE sessions
+             SET type = 'coding', task_id = NULL, updated_at = ?
+             WHERE id = ? AND archived = 0 AND type = 'subtask'`,
+          )
+          .run(now, sessionId);
+        if (result.changes !== 1) {
+          throw new Error(`session is not releasable: ${sessionId}`);
+        }
+        return { updatedAt: now, type: 'coding' };
+      }
+
+      const task = this.db
+        .prepare('SELECT status FROM tasks WHERE id = ?')
+        .get(taskId) as { status: string } | undefined;
+      if (!task) throw new Error(`task not found: ${taskId}`);
+      if (task.status !== 'open') throw new Error(`task is not open: ${taskId}`);
+
       // A retry after a lost result is a successful no-op. Re-broadcast the
       // stored state below so a reconnecting client can still converge.
       if (session.type === 'subtask' && session.task_id === taskId) {
-        return session.updated_at;
+        return { updatedAt: session.updated_at, type: 'subtask' };
       }
-      if (session.type !== 'coding' || session.task_id !== null) {
-        throw new Error(`session is not an independent coding session: ${sessionId}`);
+      const assignable = session.type === 'coding' && session.task_id === null;
+      const movable = session.type === 'subtask' && session.task_id !== null;
+      if (!assignable && !movable) {
+        throw new Error(`session is not assignable: ${sessionId}`);
       }
 
       const result = this.db
         .prepare(
           `UPDATE sessions
            SET type = 'subtask', task_id = ?, updated_at = ?
-           WHERE id = ? AND archived = 0 AND type = 'coding' AND task_id IS NULL`,
+           WHERE id = ? AND archived = 0 AND type IN ('coding', 'subtask')`,
         )
         .run(taskId, now, sessionId);
       if (result.changes !== 1) {
         throw new Error(`session is not assignable: ${sessionId}`);
       }
-      return now;
+      return { updatedAt: now, type: 'subtask' };
     });
 
-    const updatedAt = assign();
+    const { updatedAt, type } = assign();
     this.broadcastSessionUpdated(sessionId, {
-      type: 'subtask',
+      type,
       task_id: taskId,
       updated_at: updatedAt,
     });

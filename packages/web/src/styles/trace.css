@@ -1,7 +1,7 @@
 /* ============================================================
    Trace view (Trace view rework, 2026-08-19)
    Three-lane sequence timeline on top + turn-grouped event list.
-   Rows reuse the transcript's .trow grammar (events.css); this file
+   Rows reuse the transcript's .trow grammar (@gian/chat-ui styles); this file
    carries only trace-specific chrome on the same theme tokens.
    ============================================================ */
 
@@ -51,6 +51,11 @@
   z-index: 6;
   padding-top: 4px;
   background: var(--surface);
+  /* .main-scroll has an 18px top padding; a sticky child sticks below that
+     padding band while scrolling rows pass through it, painting above the
+     pinned header. Extend the opaque surface upward to cover the band.
+     Keep the offset in sync with .main-scroll's padding-top (gian-v2.css). */
+  box-shadow: 0 -18px 0 0 var(--surface);
 }
 
 .trace-toolbar-controls {

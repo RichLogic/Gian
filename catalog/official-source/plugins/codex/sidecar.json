@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 4,
+  "id": "codex",
+  "displayName": "Codex",
+  "pluginVersion": "0.2.15",
+  "entry": "proxy.mjs",
+  "protocol": {
+    "name": "gian.proxy",
+    "range": ">=2.2 <3.0"
+  },
+  "process": {
+    "scope": "shared"
+  },
+  "runtime": {
+    "kind": "external",
+    "id": "codex",
+    "displayName": "Codex CLI",
+    "verifiedVersions": [
+      "0.146.0"
+    ]
+  },
+  "branding": {
+    "logo": {
+      "light": {
+        "path": "assets/logo-light.png",
+        "mediaType": "image/png",
+        "sha256": "434e4bf19f8dcb0358f4ec8ccc3fcd9f25b1967dfc7cd3eb885f6e51722dc5a0"
+      },
+      "dark": {
+        "path": "assets/logo-dark.png",
+        "mediaType": "image/png",
+        "sha256": "91b9fb986d2623f746433928a5395e258bfec013b695a534132f9785df82d24b"
+      }
+    }
+  }
+}

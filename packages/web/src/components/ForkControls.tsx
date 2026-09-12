@@ -15,16 +15,12 @@
  *   — never derived from rendered text, never an adjacent turn, never a
  *   silent fallback to `head` (§10.6). When the ids are absent the control
  *   greys with the generic unavailable reason.
- * - `ForkOriginBanner` — the lineage line at the top of a forked session's
- *   view (parent session + boundary).
  *
  * Each dispatch mints the target Session id and records a tab-local navigation
  * intent. The initiating window opens that id only after canonical
  * `session:created` / `state_sync`; other windows keep their current Session.
  */
 import { useEffect, useRef, useState } from 'react';
-import type { SessionOrigin } from '@gian/shared';
-
 import { useT } from '../i18n/index.js';
 import { toast } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
@@ -34,7 +30,6 @@ import {
   usePendingOperations,
 } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
-import { forkOriginText } from '../presentation/fork.js';
 import {
   clearForkNavigationForRun,
   rememberForkNavigation,
@@ -183,25 +178,5 @@ export function ForkFromTurnControl({
     >
       <SvgIcon d={ICON.fork} size={12} />
     </button>
-  );
-}
-
-// ─── Origin banner (forked session view) ───────────────────────────────────
-
-export function ForkOriginBanner({
-  origin,
-  parentName,
-}: {
-  origin: SessionOrigin;
-  /** Parent session's current name, resolved by the caller from the sessions
-   *  list; undefined falls back to a short id. */
-  parentName?: string;
-}) {
-  const t = useT();
-  return (
-    <div className="session-banner origin" data-testid="fork-origin-banner">
-      <SvgIcon d={ICON.fork} size={12} />
-      <span>{forkOriginText(t, origin, parentName)}</span>
-    </div>
   );
 }

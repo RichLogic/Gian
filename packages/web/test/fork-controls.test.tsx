@@ -13,9 +13,9 @@
  *   dispatched anchor carries the item's exact turn_id + source_turn_id
  *   verbatim (no derivation, no head fallback); missing Host-flowed identity
  *   greys the control with the generic reason;
- * - origin display: banner names the parent session + boundary, falls back
- *   to a short id, and the fork copy never uses rewind/git/worktree/rollback
- *   vocabulary (asserted against the i18n values themselves, §10.6/§23);
+ * - forked sessions do not render an origin banner; remaining fork copy
+ *   never uses rewind/git/worktree/rollback vocabulary (asserted against
+ *   the i18n values themselves, §10.6/§23);
  * - the initiating tab records the client-minted target for canonical
  *   session:created/state_sync navigation; the legacy "Fork as <executor>"
  *   operation (`session.fork` → session:create) is untouched.
@@ -33,7 +33,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   dispatchHeadFork,
   ForkFromTurnControl,
-  ForkOriginBanner,
   useForkRunSettledToast,
 } from '../src/components/ForkControls.js';
 import { PathBreadcrumb } from '../src/components/PathBreadcrumb.js';
@@ -601,31 +600,6 @@ describe('ForkFromTurnControl (transcript boundaries)', () => {
 // ─── Origin display (§10.6) ────────────────────────────────────────────────
 
 describe('fork origin display', () => {
-  it('banner names the parent session and the boundary turn reference', () => {
-    render(
-      <LocaleProvider locale="en">
-        <ForkOriginBanner
-          origin={{ kind: 'fork', session_id: 's-parent', turn_id: 't_2', source_turn_id: 'provider-turn-2' }}
-          parentName="Parent session"
-        />
-      </LocaleProvider>,
-    );
-    const banner = screen.getByTestId('fork-origin-banner');
-    expect(banner).toHaveTextContent('Forked from Parent session');
-    expect(banner).toHaveTextContent('t_2');
-  });
-
-  it('head fork shows no boundary; unknown parent falls back to a short id', () => {
-    render(
-      <LocaleProvider locale="en">
-        <ForkOriginBanner origin={{ kind: 'fork', session_id: 's-parent-abcdef' }} />
-      </LocaleProvider>,
-    );
-    const banner = screen.getByTestId('fork-origin-banner');
-    expect(banner).toHaveTextContent('Forked from s-parent');
-    expect(banner.textContent).not.toContain('turn');
-  });
-
   it('fork copy never uses rewind / git / worktree / rollback vocabulary (§10.6/§23)', () => {
     const bannedEn = /rewind|worktree|rollback|roll back|\bgit\b|\bbranch|snapshot|isolat/iu;
     const bannedZh = /回滚|分支|工作树|快照|隔离|还原/u;
@@ -643,7 +617,7 @@ describe('fork origin display', () => {
     }
   });
 
-  it('SessionMain renders the origin banner and the per-turn control — the header pill is gone (head fork lives in the session menu)', () => {
+  it('SessionMain renders the per-turn control without an origin banner — the header pill is gone (head fork lives in the session menu)', () => {
     const harness = makeHarness();
     const session = {
       id: 's-fork',
@@ -699,7 +673,6 @@ describe('fork origin display', () => {
           onShowChanges={() => {}}
           onShowLastTurnChanges={() => {}}
           forkAtTurnControl={atTurnState(FORK_SUPPORTED, FORK_ENABLED)}
-          originParentName="Parent session"
         />
       </Providers>,
     );
@@ -708,8 +681,8 @@ describe('fork origin display', () => {
     expect(screen.queryByTestId('fork-head')).toBeNull();
     expect(screen.queryByTestId('sidechat-create')).toBeNull();
     expect(screen.getByTestId('fork-turn-1')).toBeEnabled();
-    expect(screen.getByTestId('fork-origin-banner'))
-      .toHaveTextContent('Forked from Parent session');
+    expect(screen.queryByTestId('fork-origin-banner')).toBeNull();
+    expect(screen.queryByText(/Forked from/i)).toBeNull();
   });
 
   it('SessionMain without fork props renders no fork UI (sessions without the capability unchanged)', () => {

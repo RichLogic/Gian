@@ -32,7 +32,8 @@ test('DSH runtime version follows the real CLI entry behind an npm launcher syml
   assert.equal(dshVersionFromEntrypoint(join(root, 'missing')), null);
 });
 
-test('real Cordis host catalog projects registered providers and models', async () => {
+test('real Cordis host catalog projects registered providers, models, and DSH modes', async () => {
+  const mountedPresets: string[] = [];
   const host = new CordisDshHost({
     llm: {
       listProviders: () => [{ id: 'opencode-go', name: 'OpenCode Go' }],
@@ -42,6 +43,39 @@ test('real Cordis host catalog projects registered providers and models', async 
         name: 'DeepSeek V4 Flash',
       }],
     },
+    approval: {
+      config: { policy: 'ask' },
+      setPolicy: () => undefined,
+    },
+    permissionPresets: {
+      names: ['workspace-write', 'danger-full-access'],
+      defaultPreset: 'workspace-write',
+      resolve: (id: string) => id === 'danger-full-access'
+        ? { sandbox: 'danger-full-access', approval: 'never' }
+        : { sandbox: 'workspace-write', approval: 'ask' },
+      optionOf: (id: string) => ({
+        value: id,
+        name: id,
+        description: id === 'danger-full-access'
+          ? 'Full file access without approval prompts.'
+          : 'Write inside the workspace; wider retries require approval.',
+      }),
+      set: () => undefined,
+    },
+    agentPresets: {
+      defaultId: 'standard',
+      list: async () => [
+        { id: 'standard', name: 'Standard', description: 'Full coding Agent', trust: 'system' },
+        { id: 'code', name: 'PTC', trust: 'system' },
+        { id: 'broken', name: 'Broken', broken: 'invalid composition', trust: 'user' },
+      ],
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      mount: async (_ctx: unknown, id?: string) => {
+        mountedPresets.push(id ?? 'standard');
+        return { id: id ?? 'standard' };
+      },
+    },
+    on: () => () => true,
   }, '0.1.0');
 
   const catalog = await host.catalogList();
@@ -51,6 +85,43 @@ test('real Cordis host catalog projects registered providers and models', async 
     provider: 'opencode-go',
     label: 'DeepSeek V4 Flash',
   }]);
+  assert.deepEqual(catalog.approvalPolicies, [
+    { id: 'ask', label: 'Ask' },
+    { id: 'never', label: 'Never' },
+  ]);
+  assert.equal(catalog.defaultApprovalPolicy, 'ask');
+  assert.deepEqual(catalog.permissionPresets, [
+    {
+      id: 'workspace-write',
+      label: 'Workspace Write',
+      description: 'Write inside the workspace; wider retries require approval.',
+      approvalPolicy: 'ask',
+    },
+    {
+      id: 'danger-full-access',
+      label: 'Full access',
+      description: 'Full file access without approval prompts.',
+      approvalPolicy: 'never',
+    },
+  ]);
+  assert.equal(catalog.defaultPermissionPreset, 'workspace-write');
+  assert.equal(catalog.defaultAgentPreset, 'standard');
+  assert.deepEqual(catalog.agentPresets, [
+    {
+      id: 'standard',
+      label: 'Standard',
+      description: 'Full coding Agent',
+      trust: 'system',
+    },
+    { id: 'code', label: 'PTC', trust: 'system' },
+    {
+      id: 'broken',
+      label: 'Broken',
+      trust: 'user',
+      broken: 'invalid composition',
+    },
+  ]);
+  assert.deepEqual(mountedPresets, [], 'Catalog enumeration must not mount a preset');
 });
 
 test('first Catalog waits for late latest-DSH Provider registration', async () => {
@@ -85,19 +156,25 @@ test('first Catalog waits for late latest-DSH Provider registration', async () =
 test('real Cordis host resumes the exact authenticated Host-owned native session id', async () => {
   const hostBindingKey = 'test-host-binding-key';
   const resumed: Array<Record<string, unknown>> = [];
+  const mountedPresets: string[] = [];
   let createCalled = false;
   const nativeSessionId = 'session-owned-by-gian';
-  const agentContext = { on: () => () => true };
+  const agentContext = { on: () => () => true, agent: undefined as unknown };
   const agent = {
     id: nativeSessionId,
     status: 'idle' as const,
-    session: { id: nativeSessionId, header: { createdAt: 1_700_000_000_000 }, events: [] },
+    session: {
+      id: nativeSessionId,
+      header: { createdAt: 1_700_000_000_000, agentPreset: 'standard' },
+      events: [],
+    },
     ctx: agentContext,
     cancel: () => undefined,
     whenIdle: async () => undefined,
     followup: () => undefined,
     steer: () => undefined,
   };
+  agentContext.agent = agent;
   const host = new CordisDshHost({
     agents: {
       create: async () => {
@@ -113,6 +190,15 @@ test('real Cordis host resumes the exact authenticated Host-owned native session
     llm: {
       listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
       listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    agentPresets: {
+      defaultId: 'code',
+      list: async () => [{ id: 'standard' }, { id: 'code' }],
+      resolve: async (id?: string) => ({ id: id ?? 'code' }),
+      mount: async (_ctx: unknown, id?: string) => {
+        mountedPresets.push(id ?? 'code');
+        return { id: id ?? 'code' };
+      },
     },
     on: () => () => true,
   } as never, '0.1.2', hostBindingKey);
@@ -140,6 +226,7 @@ test('real Cordis host resumes the exact authenticated Host-owned native session
     provider: 'deepseek-official',
     model: 'deepseek-chat',
   });
+  assert.deepEqual(mountedPresets, ['standard']);
   assert.equal(result.session.id, 'gian-session');
   assert.equal(result.session.nativeId, nativeSessionId);
   assert.equal(result.session.createdAt, new Date(1_700_000_000_000).toISOString());
@@ -208,10 +295,14 @@ test('real Cordis host reports a missing persisted native Session canonically', 
   ));
 });
 
-test('latest DSH turn config selects the advertised model, effort, and approval policy', async () => {
+test('latest DSH turn config selects the advertised model, effort, and permission preset', async () => {
   const waterfalls = new Map<string, (...args: unknown[]) => unknown>();
   const followed: Array<Record<string, unknown>> = [];
   const policies: string[] = [];
+  const permissionPresets: string[] = [];
+  const presetResolutions: string[] = [];
+  const presetMounts: string[] = [];
+  let createdMeta: Record<string, unknown> | undefined;
   const agentContext = {
     get: (name: string) => name === 'approval' ? {
       setPolicy: (_agent: unknown, policy: string) => policies.push(policy),
@@ -233,7 +324,8 @@ test('latest DSH turn config selects the advertised model, effort, and approval 
   };
   const rootContext = {
     agents: {
-      create: async (options: { setup?: (ctx: unknown) => void }) => {
+      create: async (options: { meta?: Record<string, unknown>; setup?: (ctx: unknown) => void }) => {
+        createdMeta = options.meta;
         options.setup?.(agentContext);
         return { agent, dispose: async () => undefined };
       },
@@ -255,10 +347,43 @@ test('latest DSH turn config selects the advertised model, effort, and approval 
       }),
       resolveCallConfig: async (config: Record<string, unknown>) => config,
     },
+    approval: {
+      config: { policy: 'ask' as const },
+      setPolicy: (_agent: unknown, policy: string) => policies.push(policy),
+    },
+    permissionPresets: {
+      names: ['workspace-write', 'danger-full-access'],
+      defaultPreset: 'workspace-write',
+      resolve: (id: string) => id === 'danger-full-access'
+        ? { sandbox: 'danger-full-access', approval: 'never' as const }
+        : { sandbox: 'workspace-write', approval: 'ask' as const },
+      optionOf: (id: string) => ({ value: id, name: id }),
+      set: (_session: unknown, id: string) => permissionPresets.push(id),
+    },
+    agentPresets: {
+      defaultId: 'standard',
+      list: async () => [{ id: 'standard', name: 'Standard' }],
+      resolve: async (id?: string) => {
+        presetResolutions.push(id ?? 'standard');
+        return { id: id ?? 'standard' };
+      },
+      mount: async (_ctx: unknown, id?: string) => {
+        presetMounts.push(id ?? 'standard');
+        return { id: id ?? 'standard' };
+      },
+    },
     on: () => () => true,
   };
   const host = new CordisDshHost(rootContext as never, '0.1.1');
-  await host.sessionCreate({ sessionId: 'gian-agent', cwd: '/tmp', roots: ['/tmp'], config: {} });
+  await host.sessionCreate({
+    sessionId: 'gian-agent',
+    cwd: '/tmp',
+    roots: ['/tmp'],
+    config: { agent_preset: 'standard' },
+  });
+  assert.deepEqual(createdMeta, { cwd: '/tmp', agentPreset: 'standard' });
+  assert.deepEqual(presetResolutions, ['standard']);
+  assert.deepEqual(presetMounts, ['standard']);
   const catalog = await host.catalogList() as {
     models: Array<{ reasoning?: { defaultEffort?: string } }>;
   };
@@ -272,7 +397,7 @@ test('latest DSH turn config selects the advertised model, effort, and approval 
       provider: 'opencode-go',
       model: 'deepseek-v4-flash',
       effort: 'high',
-      approval_policy: 'never',
+      permission_preset: 'danger-full-access',
     },
   });
   const assemble = waterfalls.get('system-prompt/assemble');
@@ -297,6 +422,119 @@ test('latest DSH turn config selects the advertised model, effort, and approval 
     model: 'deepseek-v4-flash',
     reasoningEffort: 'high',
   });
-  assert.deepEqual(policies, ['never']);
+  assert.deepEqual(permissionPresets, ['danger-full-access']);
+  assert.deepEqual(policies, []);
   assert.equal(followed.length, 1);
+});
+
+test('real Cordis host bridges an ask approval to interaction.respond', async () => {
+  const listeners = new Map<string, (...args: unknown[]) => unknown>();
+  const emitted: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const agentContext = {
+    on: (name: string, listener: (...args: unknown[]) => unknown) => {
+      listeners.set(name, listener);
+      return () => true;
+    },
+  };
+  const agent = {
+    id: 'native-approval',
+    status: 'idle' as const,
+    session: { id: 'native-approval', header: { createdAt: Date.now() }, events: [] },
+    ctx: agentContext,
+    cancel: () => undefined,
+    whenIdle: async () => undefined,
+    followup: () => undefined,
+    steer: () => undefined,
+  };
+  const approval = {
+    config: { policy: 'ask' as const },
+    setPolicy: () => undefined,
+  };
+  const host = new CordisDshHost({
+    agents: {
+      create: async (options: { setup?: (ctx: unknown) => void | Promise<void> }) => {
+        await options.setup?.(agentContext);
+        return { agent, dispose: async () => undefined };
+      },
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    approval,
+    agentPresets: {
+      defaultId: 'standard',
+      list: async () => [{ id: 'standard', name: 'Standard' }],
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      mount: async () => ({ id: 'standard' }),
+    },
+    on: () => () => true,
+  } as never, '0.1.3');
+  host.attachSink(event => emitted.push(event));
+  const initialized = await host.initialize() as { capabilities: Record<string, number> };
+  assert.equal(initialized.capabilities.interaction, 1);
+  await host.sessionCreate({
+    sessionId: 'gian-approval',
+    cwd: '/tmp',
+    roots: ['/tmp'],
+    config: { agent_preset: 'standard' },
+  });
+
+  const answerer = listeners.get('approval/request');
+  assert.ok(answerer);
+  const answer = answerer({
+    agent,
+    toolName: 'bash',
+    reason: 'Run tests',
+  }, async () => 'unavailable') as Promise<string>;
+  const requested = emitted.find(event => event.method === 'interaction.requested');
+  assert.ok(requested);
+  assert.equal(requested.params.sessionId, 'gian-approval');
+  assert.deepEqual(requested.params.actions, [
+    { id: 'allow-once', label: 'Allow once', style: 'primary' },
+    { id: 'reject', label: 'Reject', style: 'danger' },
+  ]);
+
+  await host.interactionRespond({
+    sessionId: 'gian-approval',
+    interactionId: String(requested.params.interactionId),
+    actionId: 'allow-once',
+    values: {},
+  });
+  assert.equal(await answer, 'allowed-once');
+  assert.ok(emitted.some(event => event.method === 'interaction.resolved'));
+});
+
+test('permission presets that require approval are hidden without an interaction answerer', async () => {
+  const host = new CordisDshHost({
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    approval: {
+      config: { policy: 'ask' },
+      setPolicy: () => undefined,
+    },
+    permissionPresets: {
+      names: ['workspace-write', 'danger-full-access'],
+      defaultPreset: 'workspace-write',
+      resolve: (id: string) => id === 'danger-full-access'
+        ? { sandbox: 'danger-full-access', approval: 'never' }
+        : { sandbox: 'workspace-write', approval: 'ask' },
+      optionOf: (id: string) => ({ value: id, name: id }),
+      set: () => undefined,
+    },
+  }, '0.1.3');
+
+  const initialized = await host.initialize() as { capabilities: Record<string, number> };
+  assert.equal(initialized.capabilities.interaction, undefined);
+  const catalog = await host.catalogList();
+  assert.deepEqual(catalog.approvalPolicies, [{ id: 'never', label: 'Never' }]);
+  assert.equal(catalog.defaultApprovalPolicy, 'never');
+  assert.deepEqual(catalog.permissionPresets, [{
+    id: 'danger-full-access',
+    label: 'Full access',
+    approvalPolicy: 'never',
+  }]);
+  assert.equal(catalog.defaultPermissionPreset, undefined);
 });

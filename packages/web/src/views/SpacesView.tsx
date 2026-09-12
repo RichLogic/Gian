@@ -181,7 +181,7 @@ function SpacesList({
         <div className="spaces-list-head-row">
           <span className="sidebar-title">{t('spaces.title')}</span>
           {listTab === 'active' && (
-            <button className="btn sm primary" aria-label="New workspace" onClick={onNewClick}>{t('spaces.new')}</button>
+            <button className="btn sm primary" aria-label="New Repo" onClick={onNewClick}>{t('spaces.new')}</button>
           )}
         </div>
         <div className="segm spaces-list-tabs">

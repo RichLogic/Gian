@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "com.zhipu.zcode",
+  "displayName": "ZCode",
+  "tagline": "Zhipu ZCode sessions in Gian.",
+  "featuredOrder": 50,
+  "documentation": {
+    "overview": "overview.md",
+    "setup": "setup.md",
+    "usage": "usage.md",
+    "troubleshooting": "troubleshooting.md"
+  },
+  "branding": {
+    "logoLight": {
+      "path": "assets/logo-light.png",
+      "mediaType": "image/png"
+    },
+    "logoDark": {
+      "path": "assets/logo-dark.png",
+      "mediaType": "image/png"
+    }
+  },
+  "channels": {
+    "stable": {
+      "pluginVersion": "0.1.1"
+    }
+  }
+}

@@ -58,22 +58,25 @@ describe('Panel-2 Settings redesign', () => {
     const navigation = container.querySelector('.settings2-internal-nav')!;
     for (const label of [
       'Files', 'Diffs', 'History', 'Side Chat', 'Browser', 'Terminal',
-      'Archive', 'Adopt', 'Workspaces',
+      'Archive', 'Adopt',
     ]) {
       expect(within(navigation as HTMLElement).getByRole('button', { name: label })).toBeTruthy();
     }
   });
 
-  it('keeps Workspaces, Archive, and Adopt as standalone pages at the bottom', () => {
+  it('keeps Archive and Adopt as standalone pages at the bottom (Workspaces moved to the rail)', () => {
     const { container } = renderWithOperations(
-      <SettingsBody config={config()} activeSection="workspaces" workspaces={[]} />,
+      <SettingsBody config={config()} activeSection="archive" workspaces={[]} />,
     );
-    expect(screen.getByTestId('settings-workspaces-page')).toBeTruthy();
+    expect(screen.getByTestId('settings-archive-page')).toBeTruthy();
     expect(document.getElementById('settings-section-appearance')).toBeNull();
     const navigation = container.querySelector('.settings2-internal-nav')!;
     const labels = [...navigation.querySelectorAll<HTMLButtonElement>('.s2-navitem')]
       .map(button => button.textContent);
-    expect(labels.slice(-3)).toEqual(['Workspaces', 'Archive', 'Adopt']);
+    expect(labels.slice(-2)).toEqual(['Archive', 'Adopt']);
+    // The Workspaces management page is gone (2026-09-06): its section key is
+    // unknown to the nav, so a stale value falls back to the continuous doc.
+    expect(screen.queryByTestId('settings-workspaces-page')).toBeNull();
   });
 
   it('replaces every Settings slider with a minus/value/plus stepper', async () => {
@@ -91,14 +94,17 @@ describe('Panel-2 Settings redesign', () => {
     expect(screen.getByRole('checkbox', { name: 'Compact folders' })).toBeTruthy();
   });
 
-  it('replaces the deferred AI Agents placeholder after the section is selected', async () => {
+  it('shows the AI Agents link-out card after the section is selected', async () => {
     function ControlledSettings() {
       const [section, setSection] = useState<NavKey>('appearance');
       return <SettingsBody config={config()} activeSection={section} onSectionChange={setSection} />;
     }
     const { container } = renderWithOperations(<ControlledSettings />);
     fireEvent.click(screen.getByRole('button', { name: 'AI Agents' }));
-    expect(await screen.findByText(/No Agents yet/)).toBeTruthy();
+    // WP4: Agent management moved to the top-level Agents page; Settings
+    // keeps only a link-out (no deferred management block anymore).
+    expect(await screen.findByText(/moved to the Agents page/)).toBeTruthy();
+    expect(screen.getByTestId('settings-open-agents-page')).toBeTruthy();
     expect(container.querySelector('#settings-section-executors .settings-section-deferred')).toBeNull();
   });
 

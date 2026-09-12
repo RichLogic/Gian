@@ -288,7 +288,7 @@ export function SideChatDock({
         })}
         <button
           type="button"
-          className="sheet-tab sidechat-new prominent"
+          className="sheet-tab sidechat-new"
           data-testid="sidechat-create"
           disabled={!createEnabled}
           title={createTitle}

@@ -134,6 +134,21 @@ test('documentation-only changes select quality checks without product tests', (
   assert.deepEqual(plan.checks.map(check => check.id), ['quality:traceability', 'quality:docs']);
 });
 
+test('design-only changes select quality checks without product tests', () => {
+  const plan = buildAffectedPlan(
+    [
+      'design/2026-09-10-agent-runtime-management/index.html',
+      'design/2026-09-10-agent-runtime-management/01-agents.png',
+    ],
+    'quick',
+    inputs,
+  );
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.deferredTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:traceability', 'quality:docs']);
+});
+
 test('Web changes include the strict UI operation gate', () => {
   const plan = buildAffectedPlan(['packages/web/src/App.tsx'], 'quick', inputs);
   assert.equal(plan.checks.some(check => check.id === 'quality:operations:strict'), true);

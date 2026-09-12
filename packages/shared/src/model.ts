@@ -1,20 +1,16 @@
 import {
-  EXECUTOR_DEFS,
-  EXECUTOR_IDS,
   PRODUCT_EXECUTOR_IDS,
-  type ExecutorId,
+  legacyExecutorFeatures,
+  type LegacyExecutorId,
   type ProductExecutorId,
-} from './executors.js';
+} from './legacy-plugin-aliases.js';
 
-/** Canonical executor identity. The registration source lives in
- * `executors.ts`; this alias keeps the historical name used across layers. */
-export type Executor = ExecutorId;
+/** Historical wire/storage field name. Values are open plugin identities;
+ * exact Session execution uses proxy_binding.pluginId. */
+export type Executor = string;
 
-/** Proxy kinds exposed in the product AI Agents catalog. `grok` remains a
- *  valid protocol/vendor `Executor` (its Proxy and Host adapter stay in the
- *  tree) but is no longer offered anywhere in the product surface.
- *  Derived from the executor registry; parity is pinned by
- *  `test/executors.test.mjs`. */
+/** Legacy product kinds retained for migration-only APIs. New product lists
+ * come from the signed Proxy Catalog. */
 export const PRODUCT_EXECUTORS = PRODUCT_EXECUTOR_IDS;
 export type ProductExecutor = ProductExecutorId;
 
@@ -23,51 +19,24 @@ export function isProductExecutor(value: unknown): value is ProductExecutor {
     && (PRODUCT_EXECUTORS as readonly string[]).includes(value);
 }
 
-const CLI_CAPABILITY_EXECUTORS: readonly string[] = ['claude', 'codex'];
-const NATIVE_CONFIG_EXECUTORS: readonly string[] = ['kimi', 'grok', 'dsh'];
-const NATIVE_SESSION_EXECUTORS: readonly string[] = [
-  'claude',
-  'codex',
-  'kimi',
-  'grok',
-  'zcode',
-];
-
 /** Legacy per-CLI capability surface (/models + /slash). Catalog-driven
  * protocol-v2 agents answer everything through gian.proxy catalogs instead. */
 export function usesCliCapabilitySurface(executor: Executor): executor is 'claude' | 'codex' {
-  return EXECUTOR_DEFS[executor]?.cliCapabilitySurface === true;
+  return legacyExecutorFeatures(executor)?.cliCapabilitySurface === true;
 }
 
 /** Kimi, Grok and DSH expose opaque native config options instead of the
  * Gian ApprovalMode segmented control, so the product renders their catalog
  * options verbatim. Total for any runtime input: unknown ids answer false. */
 export function usesNativeExecutorConfig(executor: Executor): executor is 'kimi' | 'grok' | 'dsh' {
-  return EXECUTOR_DEFS[executor]?.nativeExecutorConfig === true;
+  return legacyExecutorFeatures(executor)?.nativeExecutorConfig === true;
 }
 
 /** Executors Gian can list/adopt provider-native sessions through a dedicated
  * native history surface. DSH does not declare session.native.list, so it is
  * excluded even though its config is native. */
-export function supportsNativeSessions(executor: Executor): boolean {
-  return EXECUTOR_DEFS[executor]?.nativeSessions === true;
-}
-
-/** Runtime parity check between the literal predicate unions above and the
- * executor registry (called by tests; keeps drift impossible to merge). */
-export function executorRegistryParity(): Array<{ id: ExecutorId; ok: boolean }> {
-  const nativeConfigLiteral = (id: ExecutorId): boolean =>
-    NATIVE_CONFIG_EXECUTORS.includes(id);
-  const nativeSessionsLiteral = (id: ExecutorId): boolean =>
-    NATIVE_SESSION_EXECUTORS.includes(id);
-  const productLiteral: readonly string[] = ['claude', 'codex', 'kimi', 'dsh', 'zcode'];
-  return EXECUTOR_IDS.map((id) => ({
-    id,
-    ok: EXECUTOR_DEFS[id].cliCapabilitySurface === CLI_CAPABILITY_EXECUTORS.includes(id)
-      && EXECUTOR_DEFS[id].nativeExecutorConfig === nativeConfigLiteral(id)
-      && EXECUTOR_DEFS[id].nativeSessions === nativeSessionsLiteral(id)
-      && EXECUTOR_DEFS[id].productVisible === productLiteral.includes(id),
-  }));
+export function supportsNativeSessions(executor: Executor): executor is LegacyExecutorId {
+  return legacyExecutorFeatures(executor)?.nativeSessions === true;
 }
 
 export type SessionType = 'coding' | 'subtask' | 'manager';
@@ -205,6 +174,7 @@ export type ApprovalCategory =
   | 'command'
   | 'network'
   | 'file_write_outside_ws'
+  | 'browser_capture'
   | 'exit_plan_mode'
   | 'question'
   | 'other';
@@ -256,17 +226,26 @@ export interface Session {
   /** Internal creator Session FK; null for external and non-Tool creators. */
   created_by_session_id?: string | null;
   executor: Executor;
-  /** Owning user Agent (agents.json schema v3). No SQL FK — Agents live
+  /** Owning user Agent (agents.json schema v4). No SQL FK — Agents live
    *  outside SQLite and can be deleted; a deleted Agent's sessions stay
    *  read-only (no new turns) and render from the snapshots below. NULL for
    *  sessions created before migration 055, which resolve through the
    *  kind's default Agent. Optional for compatibility with older hosts. */
   agent_id?: string | null;
+  /** Canonical Proxy plugin identity. Backfilled from `executor` on
+   *  migration 068; new rows write the Agent pluginId or official alias. */
+  proxy_plugin_id?: string | null;
+  /** Exact Session binding snapshot. Null on legacy / WP1 scaffolding rows.
+   *  When `proxy_binding_json` is present and malformed, this stays null and
+   *  `proxy_binding_error` is set. */
+  proxy_binding?: import('./session-proxy-binding.js').SessionProxyBinding | null;
+  /** Diagnosable fail-closed reason when stored binding JSON is invalid. */
+  proxy_binding_error?: string | null;
   /** Snapshot of the owning Agent's display name at creation/bind time. */
   agent_name?: string | null;
   /** Immutable Agent runtime selected when the Session was created. Sessions
    * predating migration 064 omit it and retain legacy Agent-path resolution. */
-  runtime_profile?: import('./agents.js').AgentRuntimeProfile | null;
+  runtime_profile?: import('./session-proxy-binding.js').SessionRuntimeProfile | null;
   model: string | null;
   /** Legacy Claude/Codex policy. Kimi stores its exact ACP mode in
    *  `executor_config` and therefore keeps this NULL. */
@@ -430,6 +409,8 @@ export interface Approval {
   id: string;
   session_id: string;
   turn_id: string;
+  /** Present for Host-local approvals that need live transcript projection. */
+  turn_number?: number;
   category: ApprovalCategory;
   title: string;
   command: string;

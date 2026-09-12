@@ -65,6 +65,7 @@ import {
   REFERENCE_ICONS,
   ReferencePopover,
   ReferencePopoverHead,
+  useHoverPreview,
 } from '../components/composer/reference-popover.js';
 import type { ReferenceAnchor } from '../components/composer/reference-popover.js';
 import {
@@ -332,6 +333,7 @@ export function NewSessionView({
   workspaces,
   initialWorkspaceId,
   initialAgentId,
+  initialMessage,
   draftScope,
   draftLabel,
   onCreate,
@@ -349,6 +351,9 @@ export function NewSessionView({
   initialWorkspaceId?: string;
   /** Preselected Agent (⌘J/⌘K "new subtask" shortcut carries the choice). */
   initialAgentId?: string;
+  /** One-shot composer prefill (Timer's 新建定时任务 CTA). Seeds the message
+   *  only when the restored draft carries no text of its own. */
+  initialMessage?: string;
   /** Task-owned forms keep one persistent draft per Task. Session-mode forms
    *  omit this prop and are automatically keyed by the selected Workspace. */
   draftScope?: NewSessionDraftScope;
@@ -356,9 +361,9 @@ export function NewSessionView({
   draftLabel?: string;
   onCreate: (input: CreateSessionInput) => void;
   onCancel: () => void;
-  /** Open the Workspaces "New workspace" sheet tab (the drop's "+ New
-   *  workspace" row). The view stashes its draft first; App returns here
-   *  with the created workspace preselected. */
+  /** Open the New Repo dialog (the drop's "+ New Repo" row). The view
+   *  stashes its draft first; App returns here with the created workspace
+   *  preselected. */
   onNewWorkspace: () => void;
   creating: boolean;
   createError?: string | null;
@@ -389,7 +394,14 @@ export function NewSessionView({
     const owner = draftScope?.kind === 'task'
       ? draftScope
       : workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null;
-    const saved = readNewSessionDraft(owner) ?? takeLegacyNewSessionDraft();
+    const restored = readNewSessionDraft(owner) ?? takeLegacyNewSessionDraft();
+    // One-shot prefill (Timer's 新建定时任务 CTA): seeds the composer only
+    // when the restored draft carries no text of its own.
+    const restoredHasText = Boolean(restored?.message?.trim())
+      || Boolean(restored?.document && restored.document.segments.length > 0);
+    const saved = restoredHasText || !initialMessage
+      ? restored
+      : { ...(restored ?? {}), message: initialMessage };
     // A Task draft owns its Workspace choice too. A Workspace draft cannot
     // redirect the form to another Workspace because the storage key itself
     // is the ownership boundary.
@@ -453,6 +465,9 @@ export function NewSessionView({
     anchor: ReferenceAnchor;
     anchorEl: HTMLElement;
   } | null>(null);
+  // Chips preview on hover/focus (2026-09-10 owner call); a plain click
+  // performs no action, except image attachments which zoom straight out.
+  const referenceHover = useHoverPreview();
   const editorRef = useRef<InlineComposerEditorHandle>(null);
   const attachmentIdsRef = useRef(new Set(initial.draft?.screenshotAttachments?.map(item => item.id) ?? []));
   const catalogResolveSignature = useRef('');
@@ -592,14 +607,20 @@ export function NewSessionView({
     }
     const values: Record<string, ConfigValue> = { ...catalogValues };
     for (const option of catalog.configOptions) {
-      if (option.role === 'model' && model) values[option.id] = model;
+      if (option.role === 'model' && model && values[option.id] === undefined) {
+        values[option.id] = model;
+      }
       else if (
         option.role === 'effort'
         && effort
+        && values[option.id] === undefined
         && option.choices?.some(choice => Object.is(choice.value, effort))
       ) values[option.id] = effort;
-      else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
-      else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
+      else if (option.role === 'approval_mode' && mode && values[option.id] === undefined) {
+        values[option.id] = mode;
+      } else if (option.role === 'fast' && values[option.id] === undefined) {
+        values[option.id] = serviceTier === 'fast';
+      }
     }
     const configs = createConfigsFromCatalog(executor, catalog.configOptions, values);
     const signature = JSON.stringify({
@@ -844,10 +865,18 @@ export function NewSessionView({
   const modelControlVisible = showModelChip || showNativeStatic;
   const effortControlVisible = showEffortChip || showNativeStatic;
   const catalogViewValues: Record<string, ConfigValue> = { ...catalogValues };
-  if (catalogModel && displayModel) catalogViewValues[catalogModel.id] = displayModel;
-  if (catalogEffort && displayEffort) catalogViewValues[catalogEffort.id] = displayEffort;
-  if (catalogApproval && displayMode) catalogViewValues[catalogApproval.id] = displayMode;
-  if (catalogFast) catalogViewValues[catalogFast.id] = serviceTier === 'fast';
+  if (catalogModel && displayModel && catalogViewValues[catalogModel.id] === undefined) {
+    catalogViewValues[catalogModel.id] = displayModel;
+  }
+  if (catalogEffort && displayEffort && catalogViewValues[catalogEffort.id] === undefined) {
+    catalogViewValues[catalogEffort.id] = displayEffort;
+  }
+  if (catalogApproval && displayMode && catalogViewValues[catalogApproval.id] === undefined) {
+    catalogViewValues[catalogApproval.id] = displayMode;
+  }
+  if (catalogFast && catalogViewValues[catalogFast.id] === undefined) {
+    catalogViewValues[catalogFast.id] = serviceTier === 'fast';
+  }
   const showFastChip = turnFast
     ? optionVisible(turnFast, catalogViewValues)
     : !catalogReady && executor === 'codex';
@@ -859,7 +888,6 @@ export function NewSessionView({
   );
   const sessionExtras = catalog.configOptions.filter((option) => (
     option.binding === 'session'
-    && specialOptionIds.has(option.id)
     && option.id !== catalogApproval?.id
     && optionVisible(option, catalogViewValues)
   ));
@@ -977,14 +1005,20 @@ export function NewSessionView({
     const values: Record<string, ConfigValue> = { ...catalogValues };
     if (catalogReady) {
       for (const option of catalog.configOptions) {
-        if (option.role === 'model' && model) values[option.id] = model;
+        if (option.role === 'model' && model && values[option.id] === undefined) {
+          values[option.id] = model;
+        }
         else if (
           option.role === 'effort'
           && effort
+          && values[option.id] === undefined
           && option.choices?.some(choice => Object.is(choice.value, effort))
         ) values[option.id] = effort;
-        else if (option.role === 'approval_mode' && mode) values[option.id] = mode;
-        else if (option.role === 'fast') values[option.id] = serviceTier === 'fast';
+        else if (option.role === 'approval_mode' && mode && values[option.id] === undefined) {
+          values[option.id] = mode;
+        } else if (option.role === 'fast' && values[option.id] === undefined) {
+          values[option.id] = serviceTier === 'fast';
+        }
       }
     }
     const payload = buildSessionCreatePayload({
@@ -1438,7 +1472,26 @@ export function NewSessionView({
             aria-hidden="true"
             tabIndex={-1}
           />
-          <div className="composer-input-wrap">
+          <div
+            className="composer-input-wrap"
+            onMouseOver={event => {
+              const chip = (event.target as HTMLElement).closest?.('.composer-inline-reference') as HTMLElement | null;
+              if (chip?.dataset.referenceId && !(event.relatedTarget instanceof Node && chip.contains(event.relatedTarget))) {
+                const id = chip.dataset.referenceId;
+                referenceHover.scheduleOpen(() => setActiveReference({
+                  id,
+                  anchor: chip.getBoundingClientRect(),
+                  anchorEl: chip,
+                }));
+              }
+            }}
+            onMouseOut={event => {
+              const chip = (event.target as HTMLElement).closest?.('.composer-inline-reference') as HTMLElement | null;
+              if (chip && !(event.relatedTarget instanceof Node && chip.contains(event.relatedTarget))) {
+                referenceHover.scheduleClose(() => setActiveReference(null));
+              }
+            }}
+          >
             <input
               className="ns-title-input"
               data-testid="ns-title-input"
@@ -1460,9 +1513,17 @@ export function NewSessionView({
               onKeyDown={handleMessageKeyDown}
               onPaste={handlePaste}
               placeholder={t('coding.new.message.placeholder')}
-              onReferenceActivate={(id, _referenceType, anchorEl) => setActiveReference(previous => previous?.id === id
-                ? null
-                : { id, anchor: anchorEl.getBoundingClientRect(), anchorEl })}
+              onReferenceActivate={(id, _referenceType, _anchorEl) => {
+                // 2026-09-10 owner call: chips preview on hover/focus only —
+                // a plain click performs no action, EXCEPT image attachments,
+                // which zoom straight to the lightbox. (Remove stays on the
+                // hover popover.)
+                const shot = screenshotAttachments.find(item => item.id === id);
+                if (shot && isNativeImageMime(shot.mime) && zoomImage) {
+                  const thumb = screenshotPreviews[shot.id];
+                  if (thumb) zoomImage(thumb, shot.name);
+                }
+              }}
             />
           </div>
           {activeReference && activeContextItem && (
@@ -1472,6 +1533,8 @@ export function NewSessionView({
               anchorEl={activeReference.anchorEl}
               onClose={() => setActiveReference(null)}
               onRemove={removeContextItem}
+              onMouseEnter={referenceHover.cancelClose}
+              onMouseLeave={() => referenceHover.scheduleClose(() => setActiveReference(null))}
             />
           )}
           {activeReference && activeScreenshot && (
@@ -1479,6 +1542,8 @@ export function NewSessionView({
               anchor={activeReference.anchor}
               anchorEl={activeReference.anchorEl}
               onClose={() => setActiveReference(null)}
+              onMouseEnter={referenceHover.cancelClose}
+              onMouseLeave={() => referenceHover.scheduleClose(() => setActiveReference(null))}
             >
               <ReferencePopoverHead
                 icon={REFERENCE_ICONS.file}

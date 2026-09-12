@@ -1,9 +1,10 @@
 {
   "name": "@gian/codex-proxy",
-  "version": "0.2.12",
+  "version": "0.2.15",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
+  "gianProxy": { "releaseId": "codex", "shipping": true, "realAcceptance": { "binaryEnv": "CODEX_BIN", "proxyBinaryArg": "--codex-bin", "setup": "default" } },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
@@ -13,10 +14,10 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*"
   },
   "devDependencies": {
-    "@gian/proxy-protocol": "workspace:*",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }

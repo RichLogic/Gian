@@ -1,9 +1,8 @@
-import { supportsNativeSessions, type ApprovalMode, type Executor, type NativeSession } from '@gian/shared';
+import { executorIdForPluginId, pluginIdForExecutorId, resolvePluginIdInput, supportsNativeSessions, type ApprovalMode, type Executor, type NativeSession } from '@gian/shared';
 import type { Hono } from 'hono';
-import { randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
-import { replayNativeJsonl } from '../../native/replay.js';
 import { clearNativeSessionsCache, scanNativeSessions } from '../../native/scanner.js';
+import { existingNativeSessionSql } from '../../session/compatibility-executor.js';
 import type { SessionManager } from '../../session/manager.js';
 import type { Db } from '../../storage/db.js';
 import type { WsBroadcaster } from '../ws-broadcast.js';
@@ -16,7 +15,7 @@ interface NativeSessionRouteDependencies {
 
 export function registerNativeSessionRoutes(
   app: Hono,
-  { db, sessions, broadcaster }: NativeSessionRouteDependencies,
+  { db, sessions }: NativeSessionRouteDependencies,
 ): void {
   const nativeMutations = new Map<string, Promise<void>>();
   const serializeNativeMutation = async <T>(key: string, operation: () => Promise<T>): Promise<T> => {
@@ -46,9 +45,11 @@ export function registerNativeSessionRoutes(
       approval_mode?: ApprovalMode;
       agent_id?: string;
     }>();
-    const executor = body.executor;
+    const executor = typeof body.executor === 'string'
+      ? executorIdForPluginId(body.executor)
+      : null;
     const nativeId = body.native_session_id;
-    if (executor === undefined || !supportsNativeSessions(executor)) {
+    if (!executor || !supportsNativeSessions(executor)) {
       return c.json({ error: 'executor does not support native session adoption' }, 400);
     }
     if (!nativeId) return c.json({ error: 'native_session_id required' }, 400);
@@ -66,10 +67,9 @@ export function registerNativeSessionRoutes(
       }, 400);
     }
     return serializeNativeMutation(`${executor}:${nativeId}`, async () => {
-      const existing = db.prepare(
-        `SELECT id, name FROM sessions
-         WHERE executor = ? AND native_session_id = ?`,
-      ).get(executor, nativeId) as { id: string; name: string | null } | undefined;
+      const pluginId = pluginIdForExecutorId(executor);
+      const existing = db.prepare(existingNativeSessionSql()).get(nativeId, pluginId, executor) as
+        { id: string; name: string | null } | undefined;
       if (existing) {
         return c.json({
           error: `Already adopted as session ${existing.name ?? existing.id}`,
@@ -142,70 +142,49 @@ export function registerNativeSessionRoutes(
         return c.json({ error: 'native session not found in this workspace' }, 404);
       }
 
-      const sessionId = randomUUID();
-      const now = new Date().toISOString();
-      const sessionName = body.name?.trim() || `adopted ${nativeId.slice(0, 8)}`;
-
-      let binding: {
-        agentId: string | null;
-        agentName: string | null;
-        runtimeProfile: import('@gian/shared').AgentRuntimeProfile | null;
-      };
       try {
-        binding = await sessions.resolveAdoptAgent(executor, body.agent_id);
+        const adopted = await sessions.adoptPluginNativeSession({
+          workspaceId: workspace.id,
+          cwd: workspace.path,
+          executor,
+          nativeSessionId: nativeId,
+          approvalMode,
+          ...(body.name ? { name: body.name } : {}),
+          ...(body.agent_id ? { agentId: body.agent_id } : {}),
+        });
+        clearNativeSessionsCache();
+        return c.json(adopted);
       } catch (error) {
-        const value = error as { code?: unknown; message?: unknown; agents?: unknown };
+        const value = error as {
+          code?: unknown;
+          sessionId?: unknown;
+          message?: unknown;
+          agents?: unknown;
+        };
+        const message = typeof value.message === 'string' ? value.message : String(error);
+        if (value.code === 'SESSION_ALREADY_EXISTS') {
+          return c.json({
+            error: message,
+            ...(typeof value.sessionId === 'string' ? { gian_session_id: value.sessionId } : {}),
+          }, 409);
+        }
         if (value.code === 'AGENT_REQUIRED') {
           return c.json({
-            error: String(value.message ?? error),
+            error: message,
             code: 'AGENT_REQUIRED',
             agents: value.agents ?? [],
           }, 400);
         }
-        return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+        return c.json({ error: message }, value.code === 'AUTH_REQUIRED' ? 401 : 400);
       }
-
-      db.prepare(
-        `INSERT INTO sessions
-          (id, name, type, workspace_id, executor, agent_id, agent_name,
-           runtime_profile_json,
-           model, approval_mode,
-           active_channel, status, archived,
-           worktree_path, branch, base_branch, worktree_outcome,
-           native_session_id,
-           created_at, updated_at)
-         VALUES
-          (?, ?, 'coding', ?, ?, ?, ?, ?, NULL, ?,
-           'web', 'new', 0,
-           NULL, NULL, NULL, NULL,
-           ?,
-           ?, ?)`,
-      ).run(
-        sessionId,
-        sessionName,
-        workspace.id,
-        executor,
-        binding.agentId,
-        binding.agentName,
-        binding.runtimeProfile ? JSON.stringify(binding.runtimeProfile) : null,
-        approvalMode,
-        nativeId,
-        now,
-        now,
-      );
-
-      const replay = replayNativeJsonl(db, sessionId, native.filePath, executor);
-      clearNativeSessionsCache();
-      const session = sessions.getSession(sessionId);
-      broadcaster.broadcast({ type: 'session:created', session, origin: 'native-adopt' });
-      return c.json({ session, replay });
     });
   });
 
   app.delete('/api/workspaces/:id/native-sessions/:nativeId', async c => {
     const nativeId = c.req.param('nativeId');
-    const executor = c.req.query('executor') as Executor | undefined;
-    if (executor === undefined || !supportsNativeSessions(executor)) {
+    const rawExecutor = c.req.query('executor');
+    const executor = rawExecutor ? executorIdForPluginId(rawExecutor) : null;
+    if (!executor || !supportsNativeSessions(executor)) {
       return c.json({ error: 'executor does not support native session surfaces' }, 400);
     }
     if (executor === 'kimi') {
@@ -303,7 +282,7 @@ export function registerNativeSessionRoutes(
       native_session_id: string;
     }>;
     const adopted = new Map(adoptedRows.map(row => [
-      `${row.executor}:${row.native_session_id}`,
+      `${resolvePluginIdInput(row.executor) ?? row.executor}:${row.native_session_id}`,
       { gianSessionId: row.gianSessionId, gianSessionName: row.gianSessionName },
     ]));
 

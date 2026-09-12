@@ -338,3 +338,20 @@ test('removing one window also removes its transcript subscription without affec
   assert.equal(secondMessages.length, 1);
   assert.equal(broadcaster.size, 1);
 });
+
+test('broadcast listeners fire even when no WebSocket client is connected', () => {
+  const broadcaster = new WsBroadcaster();
+  const seen: string[] = [];
+  const stop = broadcaster.onBroadcast(message => seen.push(message.type));
+  broadcaster.broadcast({
+    type: 'session:updated',
+    session: { id: 'session-a', status: 'running' },
+  });
+  assert.deepEqual(seen, ['session:updated']);
+  stop();
+  broadcaster.broadcast({
+    type: 'session:updated',
+    session: { id: 'session-a', status: 'done' },
+  });
+  assert.deepEqual(seen, ['session:updated']);
+});

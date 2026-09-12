@@ -1,8 +1,21 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+
+const isolatedKimiHome = mkdtempSync(join(tmpdir(), 'gian-kimi-race-home-'));
+mkdirSync(join(isolatedKimiHome, '.kimi-code'), { recursive: true });
+process.env.HOME = isolatedKimiHome;
+process.env.KIMI_CODE_HOME = join(isolatedKimiHome, '.kimi-code');
+const fakeKimiCli = join(
+  fileURLToPath(new URL('../..', import.meta.url)),
+  'test',
+  'fixtures',
+  'fake-kimi-cli.mjs',
+);
+chmodSync(fakeKimiCli, 0o755);
 
 import {
   AgentSideConnection,
@@ -131,7 +144,7 @@ async function makeHarness(options: {
   }) => Promise<unknown>) | null = null;
   let nativeSessionId = '';
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     terminalProcessGroupAdapter: options.adapterOptions,
     transportFactory: async (client: Client) => {
       const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -190,7 +203,7 @@ async function makeHarness(options: {
   const service = new KimiProxyService({ runtime });
   await service.initialize();
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
-  const adapter = new KimiProtocolV2Adapter(service, '0.2.7', (method, params) => {
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.9', (method, params) => {
     notifications.push({ method, params });
   });
   await adapter.handle({
@@ -382,7 +395,7 @@ test('unexpected exit: ensureStarted waits for the old generation cleanup barrie
   (slowCleanup.processGroupAdapter as TerminalProcessGroupAdapter).groupExists = () => !terminated;
 
   const client = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: factory,
     terminalProcessGroupAdapter: slowCleanup,
   });
@@ -438,7 +451,7 @@ test('failed generation cleanup keeps ensureStarted failing instead of masking P
   };
 
   const client = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: factory,
     terminalProcessGroupAdapter: unkillable,
   });

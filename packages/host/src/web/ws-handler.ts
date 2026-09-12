@@ -65,6 +65,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         id: r.id,
         session_id: r.sessionId,
         turn_id: r.turnId,
+        ...(r.turnNumber !== undefined ? { turn_number: r.turnNumber } : {}),
         category: r.category,
         title: r.description,
         command: typeof r.subject === 'string' ? r.subject : '',
@@ -472,6 +473,24 @@ async function dispatch(
     }
     case 'term:spawn': {
       if (!term) return;
+      if (msg.target !== undefined && (
+        msg.target.kind !== 'agent_cli'
+        || typeof msg.target.agent_id !== 'string'
+        || msg.target.agent_id.length === 0
+        || msg.target.agent_id.length > 128
+        || msg.target.agent_id.includes('\0')
+      )) {
+        throw Object.assign(
+          new Error('Agent CLI terminal target is invalid.'),
+          { code: 'TERMINAL_TARGET_INVALID' },
+        );
+      }
+      if (msg.target && (msg.cwd !== undefined || msg.shell !== undefined)) {
+        throw Object.assign(
+          new Error('Agent CLI terminals do not accept cwd or shell overrides.'),
+          { code: 'TERMINAL_TARGET_INVALID' },
+        );
+      }
       const spawnOpts: import('../term/manager.js').SpawnOptions = {
         termId: msg.term_id,
         cols: msg.cols,
@@ -479,6 +498,9 @@ async function dispatch(
       };
       if (msg.cwd !== undefined) spawnOpts.cwd = msg.cwd;
       if (msg.shell !== undefined) spawnOpts.shell = msg.shell;
+      if (msg.target?.kind === 'agent_cli') {
+        spawnOpts.target = { kind: 'agent_cli', agentId: msg.target.agent_id };
+      }
       const result = await term.spawn(spawnOpts);
       broadcaster.send(ws, {
         type: 'term:replay',

@@ -275,3 +275,82 @@ test('OAuth client id resolves from development env or packaged runtime config',
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 304', async () => {
+  const calls: Array<{ url: string; ifNoneMatch: string | null }> = [];
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store: memoryStore(),
+    fetch: (async (input, init) => {
+      const url = String(input);
+      calls.push({
+        url,
+        ifNoneMatch: new Headers(init?.headers).get('if-none-match'),
+      });
+      if (new Headers(init?.headers).get('if-none-match') === '"seq-3"') {
+        return new Response(null, { status: 304, headers: { etag: '"seq-3"' } });
+      }
+      return Response.json([
+        { tag_name: 'catalog-v1.1.0', assets: [] },
+        { tag_name: 'unrelated-v9.0.0', assets: [] },
+        {
+          tag_name: 'catalog-v1.3.0',
+          assets: [{ name: 'catalog-v1.json', size: 10 }],
+        },
+      ], { headers: { etag: '"seq-3"' } });
+    }) as typeof fetch,
+  });
+
+  const latest = await service.fetchReleaseMetadata({
+    repository: 'RichLogic/Gian-Proxy-Catalog',
+    operation: 'latest-catalog',
+  });
+  assert.equal(latest.status, 200);
+  assert.deepEqual(await latest.json(), {
+    tag: 'catalog-v1.3.0',
+    sequence: 3,
+    assets: [{ name: 'catalog-v1.json', size: 10 }],
+  });
+
+  const cached = await service.fetchReleaseMetadata({
+    repository: 'RichLogic/Gian-Proxy-Catalog',
+    operation: 'latest-catalog',
+    ifNoneMatch: '"seq-3"',
+  });
+  assert.equal(cached.status, 304);
+  assert.equal(calls.length, 2);
+});
+
+test('catalog asset download refuses unapproved redirects and never forwards Authorization', async () => {
+  const headers: Array<string | null> = [];
+  const store = memoryStore();
+  store.saved = { token: 'github-token-sentinel', user };
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store,
+    fetch: (async (input, init) => {
+      const url = String(input);
+      headers.push(new Headers(init?.headers).get('authorization'));
+      if (url.includes('/releases/tags/')) {
+        return Response.json({
+          tag_name: 'catalog-v1.1.0',
+          assets: [{
+            name: 'catalog-v1.json',
+            browser_download_url: 'https://evil.example/catalog-v1.json',
+          }],
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch,
+  });
+
+  const response = await service.fetchReleaseMetadata({
+    repository: 'RichLogic/Gian-Proxy-Catalog',
+    operation: 'catalog-asset',
+    tag: 'catalog-v1.1.0',
+    asset: 'catalog-v1.json',
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: 'redirect_not_allowed' });
+  assert.deepEqual(headers, [`Bearer github-token-sentinel`]);
+});

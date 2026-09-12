@@ -28,7 +28,7 @@ test('Codex host answers initialize / catalog / createSession', async () => {
   const { host, dir } = makeHost();
   try {
     const init = await host.initialize();
-    assert.equal(init.protocol.version, '2.0');
+    assert.equal(init.protocol.version, '2.2');
 
     const catalog = await host.catalog();
     assert.ok(Array.isArray(catalog.configOptions));
@@ -107,7 +107,7 @@ test('Codex session shutdown closes the session without killing the host', async
     await sessionB.shutdown();
     assert.equal(host.hasSessions(), false);
     const init = await host.initialize();
-    assert.equal(init.protocol.version, '2.0');
+    assert.equal(init.protocol.version, '2.2');
   } finally {
     await host.shutdown();
     rmSync(dir, { recursive: true, force: true });

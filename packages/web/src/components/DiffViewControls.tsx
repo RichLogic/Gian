@@ -83,7 +83,8 @@ function WordWrapIcon() {
 }
 
 function FileArrowIcon({ direction }: { direction: 'previous' | 'next' }) {
-  const d = direction === 'previous' ? 'M6 14l6-6 6 6' : 'M6 10l6 6 6-6';
+  // lucide move-up / move-down
+  const d = direction === 'previous' ? 'M8 6L12 2L16 6 M12 2V22' : 'M8 18l4 4 4-4 M12 2v20';
   return (
     <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
          strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

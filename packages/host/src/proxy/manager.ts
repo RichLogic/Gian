@@ -1,41 +1,64 @@
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { EXECUTOR_DEFS, EXECUTOR_IDS } from '@gian/shared';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Executor } from '@gian/shared';
 import {
   ProtocolV2Host,
   ProtocolV2SessionClient,
 } from './protocol-v2-session-client.js';
-import type { ProtocolV2ClientOptions } from './protocol-v2-client.js';
 import type { ProxyClient } from './types.js';
-import type { CliRuntimeManager } from '../runtime/manager.js';
 import type {
   RuntimeLease,
   RuntimeProcessGroupReservation,
 } from '../runtime/types.js';
+import {
+  genericLaunchId,
+  officialSessionLaunchId,
+  sharedProcessKey,
+  validateLaunchBinding,
+  type ProxyLaunchBinding,
+} from './launch-binding.js';
+import type { LegacyLaunchResolution } from './legacy-launch.js';
+import { ProxySupervisor } from './supervisor.js';
 
-type ProxyExecutor = Executor;
-type SharedRuntimeHost = ProtocolV2Host;
-function isKimiRuntimeClient(client: ProxyClient): client is ProtocolV2SessionClient {
-  return client instanceof ProtocolV2SessionClient && client.executor === 'kimi';
+export type { ProxyProtocolDescriptor } from './launch-binding.js';
+
+type OwnerKey = string;
+
+export class InspectionUnavailableError extends Error {}
+
+export interface InspectionHostOptions {
+  agentId?: string;
+  cliPath?: string | null;
+  proxyVersion?: string | null;
+  runtimeProfileId?: string | null;
+  configHome?: string | null;
+  cliFingerprint?: string | null;
 }
 
-/** Product executor alias → gian.proxy plugin id (registry-owned identity). */
-function pluginIdFor(executor: ProxyExecutor): string {
-  return EXECUTOR_DEFS[executor].pluginId;
+export function inspectionProfileIdentity(options: InspectionHostOptions): string | null {
+  const { runtimeProfileId, configHome, cliFingerprint } = options;
+  if (!runtimeProfileId && !configHome && !cliFingerprint) return null;
+  return createHash('sha256').update(
+    [runtimeProfileId ?? '', configHome ?? '', cliFingerprint ?? ''].join('\u0000'),
+  ).digest('hex').slice(0, 32);
 }
 
-export interface ProxyProtocolDescriptor {
-  pluginVersion: string;
+interface RuntimeOwnerFacts {
+  ownerKey: OwnerKey;
+  launchId: string;
   processScope: 'shared' | 'session';
+  retireOnFailedAttach: boolean;
 }
 
 interface RuntimeBinding {
-  executor: ProxyExecutor;
+  executor: OwnerKey;
   lease?: RuntimeLease;
   retiring: boolean;
   releaseEligible: boolean;
+  processScope?: 'shared' | 'session';
+  retireOnFailedAttach?: boolean;
+  launchId?: string;
   ensureProcessTreeExited: () => Promise<void>;
   releaseProtection: () => Promise<void>;
   releasePromise?: Promise<void>;
@@ -43,15 +66,36 @@ interface RuntimeBinding {
 }
 
 interface SessionDisposal {
-  executor?: ProxyExecutor;
+  executor?: OwnerKey;
   promise: Promise<void> | null;
   failure?: { error: unknown; reported: boolean };
 }
 
-interface KimiHostRetirement {
-  host: SharedRuntimeHost;
-  promise: Promise<void> | null;
-  failure?: { error: unknown; reported: boolean };
+interface SessionLaunchClaim {
+  ownerKey: OwnerKey;
+  launchId: string;
+}
+
+interface PreparedLaunch {
+  binding: ProxyLaunchBinding;
+  acquireLease: () => Promise<RuntimeLease | null>;
+  fallbackRuntimeBin?: string;
+  validateHandshake: boolean;
+  launchId: string;
+  offeredProtocolVersions?: readonly string[];
+  retireOnFailedAttach?: boolean;
+  executor?: Executor;
+}
+
+interface PreparedInspectionLaunch {
+  binding: ProxyLaunchBinding;
+  acquireLease: () => Promise<RuntimeLease | null>;
+  releaseUnusedLease: () => Promise<void>;
+}
+
+interface InspectionBorrowRecord {
+  count: number;
+  idleTimer?: NodeJS.Timeout;
 }
 
 export interface ProxyManagerConfig {
@@ -59,118 +103,252 @@ export interface ProxyManagerConfig {
   dataDir: string;
   /** Gian Host version sent during protocol negotiation. */
   hostVersion?: string;
-  /** Path to cc-proxy spawn.js entry. */
-  ccProxyEntry: string;
-  claudeProxy?: ProxyProtocolDescriptor;
-  /** Path to codex-proxy spawn.js entry. */
-  codexProxyEntry?: string;
-  codexProxy?: ProxyProtocolDescriptor;
-  /** Path to kimi-proxy spawn.js entry. */
-  kimiProxyEntry?: string;
-  kimiProxy?: ProxyProtocolDescriptor;
-  grokProxyEntry?: string;
-  grokProxy?: ProxyProtocolDescriptor;
-  /** Path to dsh-proxy spawn.js entry (plugin id ai.deepseek.harness). */
-  dshProxyEntry?: string;
-  dshProxy?: ProxyProtocolDescriptor;
-  /** Path to zcode-proxy spawn.js entry (plugin id com.zhipu.zcode). */
-  zcodeProxyEntry?: string;
-  zcodeProxy?: ProxyProtocolDescriptor;
-  /** Optional codex CLI binary path (forwarded as --codex-bin). */
-  codexBin?: string;
-  /** Kimi always resolves through this manager; no PATH fallback in proxy. */
-  runtimeManager?: CliRuntimeManager;
-  /** Resolve an immutable managed Proxy version selected by a Session Runtime
-   * Profile. Omitted uses the boot descriptor for legacy Sessions. */
-  resolveProxyVersion?: (
+  /** Bounded adapter for Sessions that predate proxy_binding_json. New and
+   * exact Sessions never enter this path. */
+  resolveLegacyLaunch?: (
     executor: Executor,
-    version: string,
-  ) => Promise<{ entryPath: string; protocol?: ProxyProtocolDescriptor }>;
-  /** Resolve the currently activated managed Proxy after Host boot. This is
-   *  required when an Agent installs its first Proxy without replacing Host. */
-  resolveCurrentProxy?: (
-    executor: Executor,
-  ) => Promise<{ entryPath: string; protocol?: ProxyProtocolDescriptor }>;
+    options: { cliPath: string | null; proxyVersion: string | null },
+  ) => Promise<LegacyLaunchResolution>;
+  resolveInspectionLaunch?: (
+    pluginId: string,
+    options: InspectionHostOptions,
+  ) => Promise<PreparedInspectionLaunch>;
+  inspectionHostIdleTtlMs?: number;
 }
 
 /**
- * Owns proxy client lifecycles. cc-proxy is one process per session
- * (matches its per-turn spawn model). codex-proxy is one shared process for
- * all codex sessions; per-session facades route notifications by params.sessionId.
+ * Owns proxy client lifecycles. Official getOrCreate is a one-way adapter
+ * into the generic launch contract. Unknown reverse-domain plugins use
+ * acquireWithBinding and never need a Host Provider registration.
  */
 export class ProxyManager {
   private clients = new Map<string, ProxyClient>();
-  private executorBySession = new Map<string, ProxyExecutor>();
-  /** Runtime ownership follows the exact process-owning object, never a
-   * reusable session id or mutable "current host" slot. */
+  private executorBySession = new Map<string, OwnerKey>();
   private runtimeByOwner = new Map<object, RuntimeBinding>();
-  /** Strong cleanup tasks outlive cache/host-slot deletion. A failed release
-   * remains here so a later close can retry instead of reporting a false
-   * drain after losing the only owner reference. */
-  private pendingRuntimeReleasesByExecutor = new Map<
-    ProxyExecutor,
-    Set<Promise<void>>
-  >();
+  private pendingRuntimeReleasesByExecutor = new Map<OwnerKey, Set<Promise<void>>>();
   private creatingBySession = new Map<
     string,
-    { executor: ProxyExecutor; promise: Promise<ProxyClient | null> }
+    { executor: OwnerKey; launchId: string; promise: Promise<ProxyClient | null> }
   >();
-  /** A session key cannot be recreated while its previous identity is still
-   * being disposed. Failed barriers remain closed until an explicit dispose
-   * or executor close retries the exact cleanup. */
   private disposingBySession = new Map<string, SessionDisposal>();
-  /** Shared hosts are keyed by the Agent's resolved CLI path ('' = the
-   *  provider default): two Agents on one Proxy kind with different CLI
-   *  paths get independent host processes; same-path Agents share one. */
-  private codexHosts = new Map<string, SharedRuntimeHost>();
-  private codexHostInits = new Map<string, Promise<SharedRuntimeHost>>();
-  private kimiHosts = new Map<string, SharedRuntimeHost>();
-  private kimiHostInits = new Map<string, Promise<SharedRuntimeHost>>();
-  private zcodeHosts = new Map<string, SharedRuntimeHost>();
-  private zcodeHostInits = new Map<string, Promise<SharedRuntimeHost>>();
-  private dshHosts = new Map<string, SharedRuntimeHost>();
-  private dshHostInits = new Map<string, Promise<SharedRuntimeHost>>();
-  /** A failed-attach Kimi host is never replaced until this exact host has
-   * completed process-tree and updater-lease retirement. Records are keyed by
-   * the exact host so hosts of different (kind, path) pairs retire
-   * independently. */
-  private kimiHostRetirements = new Map<SharedRuntimeHost, KimiHostRetirement>();
-  private retiringKimiHostBySession = new Map<string, SharedRuntimeHost>();
-  private closeEpochByExecutor = new Map<ProxyExecutor, number>();
-  private closingByExecutor = new Map<ProxyExecutor, Promise<void>>();
-  private creatingByExecutor = new Map<
-    ProxyExecutor,
-    Set<Promise<ProxyClient | null>>
-  >();
+  private readonly supervisor = new ProxySupervisor();
+  private readonly sharedHostIdentities = new WeakSet<ProtocolV2Host>();
+  private readonly retireOnFailedAttachHosts = new WeakSet<ProtocolV2Host>();
+  private readonly retiringHostBySession = new Map<string, ProtocolV2Host>();
+  private readonly launchIdBySession = new Map<string, string>();
+  private readonly factsByRuntime = new WeakMap<object, RuntimeOwnerFacts>();
+  private closeEpochByExecutor = new Map<OwnerKey, number>();
+  private closingByExecutor = new Map<OwnerKey, Promise<void>>();
+  private creatingByExecutor = new Map<OwnerKey, Set<Promise<ProxyClient | null>>>();
   private runtimeLeaseReleases = new WeakMap<RuntimeLease, Promise<void>>();
-  /** Session-scoped Proxies may temporarily host persistent Fork children.
-   *  Once that happens, runtime ownership moves from the parent facade to the
-   *  exact ProtocolV2Host until its last attached facade closes. */
   private readonly forkOwningSessionHosts = new WeakSet<ProtocolV2Host>();
+  private readonly inspectionBorrowsByExecutor = new Map<
+    OwnerKey,
+    Map<ProtocolV2Host, InspectionBorrowRecord>
+  >();
 
   constructor(private cfg: ProxyManagerConfig) {}
-
-  /** Shared-host map key for one Agent's resolved CLI path. '' is the
-   *  provider-default resolution (environment override / PATH / official). */
-  private static hostKey(cliPath?: string | null, proxyVersion?: string | null): string {
-    return `${cliPath ?? ''}\u0000${proxyVersion ?? ''}`;
-  }
 
   async getOrCreate(
     sessionId: string,
     executor: Executor,
     options?: { cliPath?: string | null; proxyVersion?: string | null },
   ): Promise<ProxyClient> {
-    const proxyExecutor: ProxyExecutor = executor;
-    const cliPath = options?.cliPath ?? null;
-    const proxyVersion = options?.proxyVersion ?? null;
+    const resolveLegacyLaunch = this.cfg.resolveLegacyLaunch;
+    if (!resolveLegacyLaunch) {
+      throw new Error('Legacy unbound Proxy launch is unavailable.');
+    }
+    const claim: SessionLaunchClaim = {
+      ownerKey: executor,
+      launchId: officialSessionLaunchId({
+        executor,
+        cliPath: options?.cliPath ?? null,
+        proxyVersion: options?.proxyVersion ?? null,
+      }),
+    };
+    return this.acquire(sessionId, claim, async () => ({
+      ...(await resolveLegacyLaunch(executor, {
+        cliPath: options?.cliPath ?? null,
+        proxyVersion: options?.proxyVersion ?? null,
+      })),
+      validateHandshake: false,
+      launchId: claim.launchId,
+    }));
+  }
+
+  /** Generic supervisor entry: exact binding in, no Provider registry. */
+  async acquireWithBinding(
+    sessionId: string,
+    binding: ProxyLaunchBinding,
+    options?: { acquireLease?: () => Promise<RuntimeLease | null> },
+  ): Promise<ProxyClient> {
+    const validated = validateLaunchBinding(binding);
+    const claim: SessionLaunchClaim = {
+      ownerKey: validated.pluginId,
+      launchId: genericLaunchId(validated),
+    };
+    return this.acquire(sessionId, claim, async () => ({
+      binding: validated,
+      acquireLease: options?.acquireLease ?? (async () => null),
+      validateHandshake: true,
+      launchId: claim.launchId,
+    }));
+  }
+
+  async acquireInspectionHost(
+    pluginId: string,
+    options: InspectionHostOptions = {},
+  ): Promise<{ host: ProtocolV2Host; shared: boolean; release: () => Promise<void> }> {
+    const resolver = this.cfg.resolveInspectionLaunch;
+    if (!resolver) {
+      throw new InspectionUnavailableError('Exact Proxy inspection launch is unavailable.');
+    }
+    let prepared: PreparedInspectionLaunch;
+    let binding: ProxyLaunchBinding;
+    try {
+      prepared = await resolver(pluginId, options);
+      const validated = validateLaunchBinding(prepared.binding);
+      if (validated.pluginId !== pluginId) {
+        throw new Error('Inspection launch resolved a different pluginId.');
+      }
+      if (options.proxyVersion && validated.pluginVersion !== options.proxyVersion) {
+        throw new Error('Inspection launch resolved a different Proxy version.');
+      }
+      const inspectionIdentity = inspectionProfileIdentity(options);
+      binding = inspectionIdentity
+        ? {
+            ...validated,
+            runtimeProfile: {
+              identity: createHash('sha256').update(JSON.stringify({
+                launchRuntime: validated.runtimeProfile?.identity ?? null,
+                inspectionIdentity,
+              })).digest('hex'),
+            },
+          }
+        : validated;
+    } catch (error) {
+      throw new InspectionUnavailableError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    const inspectionId = `__inspect__${randomUUID()}`;
+    let client: ProxyClient;
+    try {
+      const validated = validateLaunchBinding(binding);
+      const claim: SessionLaunchClaim = {
+        ownerKey: validated.pluginId,
+        launchId: genericLaunchId(validated),
+      };
+      client = await this.acquire(inspectionId, claim, async () => ({
+        binding: validated,
+        acquireLease: prepared.acquireLease,
+        validateHandshake: false,
+        launchId: claim.launchId,
+      }));
+      await prepared.releaseUnusedLease();
+    } catch (error) {
+      await prepared.releaseUnusedLease().catch(() => undefined);
+      throw error;
+    }
+    if (!(client instanceof ProtocolV2SessionClient)) {
+      await this.dispose(inspectionId).catch(() => undefined);
+      throw new InspectionUnavailableError('Inspection requires a gian.proxy/2 host.');
+    }
+    const host = client.runtimeHost();
+    if (binding.processScope === 'session') {
+      let released = false;
+      return {
+        host,
+        shared: false,
+        release: async () => {
+          if (released) return;
+          released = true;
+          await this.dispose(inspectionId);
+        },
+      };
+    }
+
+    const ownerKey = binding.pluginId;
+    let borrows = this.inspectionBorrowsByExecutor.get(ownerKey);
+    if (!borrows) {
+      borrows = new Map();
+      this.inspectionBorrowsByExecutor.set(ownerKey, borrows);
+    }
+    let record = borrows.get(host);
+    if (!record) {
+      record = { count: 0 };
+      borrows.set(host, record);
+    }
+    record.count += 1;
+    if (record.idleTimer) {
+      clearTimeout(record.idleTimer);
+      record.idleTimer = undefined;
+    }
+    let released = false;
+    return {
+      host,
+      shared: true,
+      release: async () => {
+        if (released) return;
+        released = true;
+        await this.dispose(inspectionId);
+        this.releaseInspectionBorrow(ownerKey, host, record!);
+      },
+    };
+  }
+
+  private releaseInspectionBorrow(
+    ownerKey: OwnerKey,
+    host: ProtocolV2Host,
+    record: InspectionBorrowRecord,
+  ): void {
+    const current = this.inspectionBorrowsByExecutor.get(ownerKey)?.get(host);
+    if (current !== record) return;
+    record.count = Math.max(0, record.count - 1);
+    if (record.count > 0) return;
+    const ttlMs = Math.max(1, this.cfg.inspectionHostIdleTtlMs ?? 30_000);
+    record.idleTimer = setTimeout(() => {
+      void this.releaseIdleInspectionHost(ownerKey, host, record).catch(error => {
+        console.error(`[proxy] failed to release idle ${ownerKey} inspection host:`, error);
+      });
+    }, ttlMs);
+    record.idleTimer.unref?.();
+  }
+
+  private async releaseIdleInspectionHost(
+    ownerKey: OwnerKey,
+    host: ProtocolV2Host,
+    record: InspectionBorrowRecord,
+  ): Promise<void> {
+    const borrows = this.inspectionBorrowsByExecutor.get(ownerKey);
+    if (borrows?.get(host) !== record || record.count > 0) return;
+    borrows.delete(host);
+    if (borrows.size === 0) this.inspectionBorrowsByExecutor.delete(ownerKey);
+    if (
+      host.hasSessions()
+      || this.hostHasRegisteredFacade(host)
+      || !this.supervisor.hasShared(host)
+      || this.supervisor.isRetiring(host)
+    ) return;
+    this.supervisor.deleteHost(host);
+    if (this.runtimeByOwner.has(host)) await this.releaseRuntimeBinding(host);
+    else await host.shutdown();
+  }
+
+  private async acquire(
+    sessionId: string,
+    claim: SessionLaunchClaim,
+    prepare: () => Promise<PreparedLaunch>,
+  ): Promise<ProxyClient> {
+    const { ownerKey, launchId } = claim;
     while (true) {
-      const closing = this.closingByExecutor.get(proxyExecutor);
+      const closing = this.closingByExecutor.get(ownerKey);
       if (closing) {
         await closing;
         continue;
       }
-      const runtimeCleanup = this.runtimeCleanupBarrier(proxyExecutor);
+      const runtimeCleanup = this.runtimeCleanupBarrier(ownerKey);
       if (runtimeCleanup) {
         await runtimeCleanup;
         continue;
@@ -187,70 +365,43 @@ export class ProxyManager {
       }
       const existing = this.clients.get(sessionId);
       if (existing) {
-        if (existing.executor !== proxyExecutor) {
-          throw new Error(
-            `Proxy session ${sessionId} already belongs to ${existing.executor}, not ${proxyExecutor}.`,
-          );
-        }
-        if (this.isPublishableClient(sessionId, proxyExecutor, existing)) return existing;
+        this.assertCompatibleLaunch(sessionId, claim, this.launchIdBySession.get(sessionId));
+        if (this.isPublishableClient(sessionId, ownerKey, existing)) return existing;
         if (!existing.isExited()) {
-          if (this.clients.get(sessionId) === existing) {
-            this.clients.delete(sessionId);
-            this.executorBySession.delete(sessionId);
-          }
+          this.forgetSession(sessionId, existing);
           continue;
         }
-        // A fail-closed PGID cleanup intentionally suppresses onExit, so a
-        // dead facade may remain cached for retryable cleanup. Never hand it
-        // back to a caller; prove the tree exited/release its exact binding
-        // or surface the cleanup error while retaining that strong owner.
         await this.cleanupExitedClientBeforePublish(existing);
-        if (this.clients.get(sessionId) === existing) {
-          this.clients.delete(sessionId);
-          this.executorBySession.delete(sessionId);
-        }
+        this.forgetSession(sessionId, existing);
         continue;
       }
 
-      // A session key has one owning Proxy identity. Without this single
-      // flight, concurrent callers can spawn two children, overwrite both
-      // maps, and let the older child's exit callback delete/release the newer
-      // one. Share the complete create/publish attempt instead.
       const creating = this.creatingBySession.get(sessionId);
       if (creating) {
-        if (creating.executor !== proxyExecutor) {
-          throw new Error(
-            `Proxy session ${sessionId} is already starting as ${creating.executor}, not ${proxyExecutor}.`,
-          );
-        }
+        this.assertCompatibleLaunch(sessionId, claim, creating.launchId);
         const client = await creating.promise;
-        if (client && this.isPublishableClient(sessionId, proxyExecutor, client)) {
+        if (client && this.isPublishableClient(sessionId, ownerKey, client)) {
           return client;
         }
         continue;
       }
 
-      const closeEpoch = this.closeEpochByExecutor.get(proxyExecutor) ?? 0;
-      const attempt = this.createClientAttempt(
-        sessionId,
-        proxyExecutor,
-        closeEpoch,
-        cliPath,
-        proxyVersion,
-      );
-      this.creatingBySession.set(sessionId, { executor: proxyExecutor, promise: attempt });
-      let attempts = this.creatingByExecutor.get(proxyExecutor);
+      const closeEpoch = this.closeEpochByExecutor.get(ownerKey) ?? 0;
+      const attempt = this.createClientAttempt(sessionId, claim, closeEpoch, prepare);
+      this.creatingBySession.set(sessionId, {
+        executor: ownerKey,
+        launchId,
+        promise: attempt,
+      });
+      let attempts = this.creatingByExecutor.get(ownerKey);
       if (!attempts) {
         attempts = new Set();
-        this.creatingByExecutor.set(proxyExecutor, attempts);
+        this.creatingByExecutor.set(ownerKey, attempts);
       }
       attempts.add(attempt);
       try {
         const client = await attempt;
-        // dispose() registers its barrier before its first await. If it raced
-        // this creation, let that barrier consume the newly published exact
-        // client rather than returning a facade that is already shutting down.
-        if (client && this.isPublishableClient(sessionId, proxyExecutor, client)) {
+        if (client && this.isPublishableClient(sessionId, ownerKey, client)) {
           return client;
         }
       } finally {
@@ -258,77 +409,107 @@ export class ProxyManager {
           this.creatingBySession.delete(sessionId);
         }
         attempts.delete(attempt);
-        if (attempts.size === 0 && this.creatingByExecutor.get(proxyExecutor) === attempts) {
-          this.creatingByExecutor.delete(proxyExecutor);
+        if (attempts.size === 0 && this.creatingByExecutor.get(ownerKey) === attempts) {
+          this.creatingByExecutor.delete(ownerKey);
         }
       }
     }
   }
 
+  private assertCompatibleLaunch(
+    sessionId: string,
+    claim: SessionLaunchClaim,
+    existingLaunchId: string | undefined,
+  ): void {
+    if (existingLaunchId !== undefined && existingLaunchId !== claim.launchId) {
+      throw new Error(
+        `Proxy session ${sessionId} is already bound to a different exact launch.`,
+      );
+    }
+    const existingOwner = this.executorBySession.get(sessionId)
+      ?? this.creatingBySession.get(sessionId)?.executor;
+    if (existingOwner !== undefined && existingOwner !== claim.ownerKey) {
+      throw new Error(
+        `Proxy session ${sessionId} already belongs to ${existingOwner}, not ${claim.ownerKey}.`,
+      );
+    }
+  }
+
+  private rememberSession(
+    sessionId: string,
+    ownerKey: OwnerKey,
+    launchId: string,
+    client: ProxyClient,
+  ): void {
+    this.clients.set(sessionId, client);
+    this.executorBySession.set(sessionId, ownerKey);
+    this.launchIdBySession.set(sessionId, launchId);
+  }
+
+  private forgetSession(sessionId: string, expected?: ProxyClient): void {
+    if (expected && this.clients.get(sessionId) !== expected) return;
+    this.clients.delete(sessionId);
+    this.executorBySession.delete(sessionId);
+    this.launchIdBySession.delete(sessionId);
+  }
+
+  private factsFor(owner: object): RuntimeOwnerFacts | undefined {
+    return this.factsByRuntime.get(owner)
+      ?? (owner instanceof ProtocolV2SessionClient
+        ? this.factsByRuntime.get(owner.runtimeHost())
+        : undefined);
+  }
+
+  private stampFacts(owner: object, facts: RuntimeOwnerFacts): void {
+    this.factsByRuntime.set(owner, facts);
+    const binding = this.runtimeByOwner.get(owner);
+    if (binding) {
+      binding.processScope = facts.processScope;
+      binding.retireOnFailedAttach = facts.retireOnFailedAttach;
+      binding.launchId = facts.launchId;
+    }
+  }
+
   private async createClientAttempt(
     sessionId: string,
-    executor: ProxyExecutor,
+    claim: SessionLaunchClaim,
     closeEpoch: number,
-    cliPath: string | null,
-    proxyVersion: string | null,
+    prepare: () => Promise<PreparedLaunch>,
   ): Promise<ProxyClient | null> {
-    const client = executor === 'codex'
-      ? await this.createCodexClient(sessionId, cliPath, proxyVersion)
-      : executor === 'kimi'
-        ? await this.createKimiClient(sessionId, cliPath)
-        : executor === 'grok'
-          ? await this.createGrokClient(sessionId, cliPath)
-          : executor === 'dsh'
-            ? await this.createDshClient(sessionId, cliPath)
-            : executor === 'zcode'
-              ? await this.createZcodeClient(sessionId, cliPath)
-              : await this.createClaudeClient(sessionId, cliPath);
-
+    const { ownerKey } = claim;
+    const launch = await prepare();
+    const facts: RuntimeOwnerFacts = {
+      ownerKey,
+      launchId: launch.launchId,
+      processScope: launch.binding.processScope,
+      retireOnFailedAttach: launch.retireOnFailedAttach === true,
+    };
+    const client = await this.spawnFromBinding(sessionId, ownerKey, launch, facts);
     if (!client) return null;
 
     if (
-      (this.closeEpochByExecutor.get(executor) ?? 0) !== closeEpoch
-      || this.closingByExecutor.has(executor)
+      (this.closeEpochByExecutor.get(ownerKey) ?? 0) !== closeEpoch
+      || this.closingByExecutor.has(ownerKey)
     ) {
-      // closeByExecutor started while the runtime/Proxy was resolving. Do not
-      // publish a facade that escaped its drain barrier. This whole cleanup is
-      // part of the tracked creation attempt, so closeByExecutor cannot return
-      // before the stale runtime claim is actually released.
-      if (executor === 'claude' || executor === 'grok') {
+      if (launch.binding.processScope === 'session') {
         if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
         else await client.shutdown();
       }
       return null;
     }
 
-    // Keep this check in the same synchronous continuation as publication.
-    // Exit callbacks may already have cleared an empty host slot while an
-    // earlier register/async return was pending; such a facade must never be
-    // cached after that callback has run.
     if (client.isExited()) {
       await this.cleanupExitedClientBeforePublish(client);
       return null;
     }
 
-    // Shared-host identity can change while an async factory continuation is
-    // pending. Never insert a facade whose exact host has already been
-    // detached or entered retirement, even transiently.
     if (!this.isCurrentSharedClient(client)) return null;
 
-    this.clients.set(sessionId, client);
-    this.executorBySession.set(sessionId, executor);
+    this.rememberSession(sessionId, ownerKey, launch.launchId, client);
     client.onExit(code => {
-      // A force-recovered session may already have installed a fresh client
-      // under the same Gian session id by the time the old process exits.
-      // Never let that stale exit evict the replacement.
       if (this.clients.get(sessionId) !== client) return;
       console.log(`[proxy] session=${sessionId} exited code=${code}`);
-      if (this.clients.get(sessionId) === client) {
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
-      }
-      // Always release this exact client's lease. Never look up by session id:
-      // that id may already belong to a replacement client.
+      this.forgetSession(sessionId, client);
       this.markRuntimeBindingReleaseEligible(client);
       void this.releaseRuntimeBinding(client).catch(error => {
         console.error(`[proxy] failed to release runtime for session=${sessionId}:`, error);
@@ -345,21 +526,21 @@ export class ProxyManager {
     if (existing) {
       throw new Error(`Proxy session ${sessionId} is already registered.`);
     }
-    this.clients.set(sessionId, client);
-    this.executorBySession.set(sessionId, client.executor as ProxyExecutor);
+    const ownerKey = client instanceof ProtocolV2SessionClient
+      ? (this.supervisor.ownerOf(client.runtimeHost()) ?? String(client.pluginId))
+      : String(client.executor ?? client.pluginId ?? 'unknown');
+    const facts = this.factsFor(client);
+    this.rememberSession(sessionId, ownerKey, facts?.launchId ?? `adopted:${sessionId}`, client);
     if (
       client instanceof ProtocolV2SessionClient
-      && (client.executor === 'claude' || client.executor === 'grok')
+      && !this.sharedHostIdentities.has(client.runtimeHost())
     ) {
       this.promoteForkOwningSessionHost(client.runtimeHost());
     }
     client.onExit((code) => {
       if (this.clients.get(sessionId) !== client) return;
       console.log(`[proxy] session=${sessionId} exited code=${code}`);
-      if (this.clients.get(sessionId) === client) {
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
-      }
+      this.forgetSession(sessionId, client);
     });
   }
 
@@ -369,12 +550,14 @@ export class ProxyManager {
       if (!(owner instanceof ProtocolV2SessionClient) || owner.runtimeHost() !== host) continue;
       this.runtimeByOwner.set(host, binding);
       this.runtimeByOwner.delete(owner);
+      const facts = this.factsFor(owner) ?? this.factsFor(host);
+      if (facts) this.stampFacts(host, facts);
       this.forkOwningSessionHosts.add(host);
       host.onHostExit(() => {
-        this.dropSessionScopedClientsForHost(host.executor, host);
+        this.dropClientsForHost(host);
         this.markRuntimeBindingReleaseEligible(host);
         void this.releaseRuntimeBinding(host).catch(error => {
-          console.error(`[proxy] failed to release fork-owning ${host.executor} runtime:`, error);
+          console.error(`[proxy] failed to release fork-owning ${host.pluginId} runtime:`, error);
         });
       });
       return;
@@ -384,8 +567,7 @@ export class ProxyManager {
 
   /** Drop an adopted facade without disposing the parent Proxy process. */
   forgetAdopted(sessionId: string): void {
-    this.clients.delete(sessionId);
-    this.executorBySession.delete(sessionId);
+    this.forgetSession(sessionId);
   }
 
   get(sessionId: string): ProxyClient | undefined {
@@ -400,22 +582,15 @@ export class ProxyManager {
   private isCurrentSharedClient(client: ProxyClient): boolean {
     if (!(client instanceof ProtocolV2SessionClient)) return true;
     const host = client.runtimeHost();
-    if (client.executor === 'codex') {
-      return [...this.codexHosts.values()].includes(host);
+    if (this.sharedHostIdentities.has(host)) {
+      return this.supervisor.hasShared(host) && !this.supervisor.isRetiring(host);
     }
-    if (client.executor === 'kimi') {
-      return [...this.kimiHosts.values()].includes(host)
-        && !this.kimiHostRetirements.has(host);
-    }
-    if (client.executor === 'dsh') {
-      return [...this.dshHosts.values()].includes(host);
-    }
-    return true;
+    return !this.supervisor.isRetiring(host);
   }
 
   private isPublishableClient(
     sessionId: string,
-    executor: ProxyExecutor,
+    executor: OwnerKey,
     client: ProxyClient,
   ): boolean {
     if (
@@ -428,33 +603,20 @@ export class ProxyManager {
     return this.isCurrentSharedClient(client);
   }
 
-  /**
-   * Evict a wedged per-session facade, then wait for its executor-specific
-   * hard stop. Eviction happens before the first await so concurrent reuse
-   * cannot observe the stale facade. Shared Codex recovery closes only the
-   * affected proxy session; the host process and other sessions stay alive.
-   */
   async forceDispose(sessionId: string): Promise<void> {
     const client = this.clients.get(sessionId);
     if (!client) return;
     const executor = this.executorBySession.get(sessionId);
-    this.clients.delete(sessionId);
-    this.executorBySession.delete(sessionId);
+    const launchId = this.launchIdBySession.get(sessionId);
+    this.forgetSession(sessionId);
     try {
       await client.forceKill();
     } catch (error) {
-      // Keep a failed cleanup retryable instead of losing the only facade
-      // that can still address the wedged proxy-side session.
-      if (!this.clients.has(sessionId)) {
-        this.clients.set(sessionId, client);
-        if (executor) this.executorBySession.set(sessionId, executor);
+      if (!this.clients.has(sessionId) && executor && launchId) {
+        this.rememberSession(sessionId, executor, launchId, client);
       }
       throw error;
     }
-    // Runtime leases are now bound to the exact process owner rather than the
-    // session id. Force Recover must not release the lease until that old
-    // process tree is confirmed gone, and it must never touch a replacement
-    // facade installed under the same session id.
     if (this.runtimeByOwner.has(client)) {
       void this.releaseRuntimeBinding(client).catch(error => {
         console.error(`[proxy] failed to release recovered runtime for session=${sessionId}:`, error);
@@ -466,12 +628,6 @@ export class ProxyManager {
     }
   }
 
-  /**
-   * Tear down a single client by its session/cache key. No-ops when the
-   * client isn't registered. Used by warmCapabilities() to retry model
-   * discovery inside a fresh runtime when the previous attempt came back
-   * with an empty model list.
-   */
   async dispose(sessionId: string): Promise<void> {
     let record = this.disposingBySession.get(sessionId);
     if (record?.promise) return record.promise;
@@ -479,33 +635,30 @@ export class ProxyManager {
       record = {
         executor: this.executorBySession.get(sessionId)
           ?? this.creatingBySession.get(sessionId)?.executor
-          ?? (this.retiringKimiHostBySession.has(sessionId) ? 'kimi' : undefined),
+          ?? (this.retiringHostBySession.has(sessionId)
+            ? this.supervisor.ownerOf(this.retiringHostBySession.get(sessionId)!)
+            : undefined),
         promise: null,
       };
-      // Publish the barrier before inspecting or detaching any client. A
-      // same-key getOrCreate can no longer return the old facade from here on.
       this.disposingBySession.set(sessionId, record);
     }
     record.failure = undefined;
 
-    // An unattached Kimi facade has no session.close RPC to await. Capture its
-    // exact host and remove it from reuse synchronously, before this async
-    // method reaches its first await; another session key must observe the
-    // host-retirement barrier in the same tick.
     const immediateClient = this.clients.get(sessionId);
-    let failedKimiHost: SharedRuntimeHost | undefined;
+    let failedAttachHost: ProtocolV2Host | undefined;
     if (
-      immediateClient && isKimiRuntimeClient(immediateClient)
+      immediateClient instanceof ProtocolV2SessionClient
+      && this.retireOnFailedAttachHosts.has(immediateClient.runtimeHost())
       && !immediateClient.hasAttachedSession()
     ) {
-      failedKimiHost = immediateClient.runtimeHost();
-      if (!failedKimiHost.hasSessions()) {
-        this.detachKimiHostForRetirement(failedKimiHost);
-        this.beginKimiHostRetirement(failedKimiHost);
+      failedAttachHost = immediateClient.runtimeHost();
+      if (!failedAttachHost.hasSessions()) {
+        this.detachHostForRetirement(failedAttachHost);
+        this.beginHostRetirement(failedAttachHost);
       }
     }
 
-    const attempt = this.performDispose(sessionId, record, failedKimiHost);
+    const attempt = this.performDispose(sessionId, record, failedAttachHost);
     record.promise = attempt;
     try {
       await attempt;
@@ -524,7 +677,7 @@ export class ProxyManager {
   private async performDispose(
     sessionId: string,
     record: SessionDisposal,
-    failedKimiHost?: SharedRuntimeHost,
+    failedAttachHost?: ProtocolV2Host,
   ): Promise<void> {
     const creating = this.creatingBySession.get(sessionId);
     if (creating) {
@@ -534,30 +687,35 @@ export class ProxyManager {
 
     const client = this.clients.get(sessionId);
     if (!client) {
-      const retiringKimi = failedKimiHost ?? this.retiringKimiHostBySession.get(sessionId);
-      if (retiringKimi) {
-        await this.retryKimiHostRetirement(retiringKimi);
-      } else if (record.executor === 'kimi') {
-        await this.retryKimiHostRetirement();
+      const retiring = failedAttachHost ?? this.retiringHostBySession.get(sessionId);
+      if (retiring) {
+        await this.retryHostRetirement(retiring);
+      } else if (record.executor && this.supervisor.hasRetirementsFor(record.executor)) {
+        await this.retryHostRetirement(undefined, record.executor);
       }
       return;
     }
-    const executor = this.executorBySession.get(sessionId) ?? client.executor;
+    const executor = this.executorBySession.get(sessionId)
+      ?? (client instanceof ProtocolV2SessionClient
+        ? String(client.pluginId)
+        : String(client.executor ?? client.pluginId ?? 'unknown'));
     record.executor = executor;
-    let retiringKimiHost = failedKimiHost;
+    let retiringHost = failedAttachHost;
     if (
-      !retiringKimiHost
-      && isKimiRuntimeClient(client)
+      !retiringHost
+      && client instanceof ProtocolV2SessionClient
+      && this.retireOnFailedAttachHosts.has(client.runtimeHost())
       && !client.hasAttachedSession()
     ) {
-      retiringKimiHost = client.runtimeHost();
-      if (!retiringKimiHost.hasSessions()) {
-        this.detachKimiHostForRetirement(retiringKimiHost);
-        this.beginKimiHostRetirement(retiringKimiHost);
+      retiringHost = client.runtimeHost();
+      if (!retiringHost.hasSessions()) {
+        this.detachHostForRetirement(retiringHost);
+        this.beginHostRetirement(retiringHost);
       }
     }
 
-    if (executor === 'claude' || executor === 'grok') {
+    const facts = this.factsFor(client);
+    if (facts?.processScope === 'session') {
       if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
       else {
         await client.shutdown();
@@ -567,20 +725,34 @@ export class ProxyManager {
       await client.shutdown();
     }
 
-    if (this.clients.get(sessionId) === client) {
-      this.clients.delete(sessionId);
-      this.executorBySession.delete(sessionId);
-    }
+    this.forgetSession(sessionId, client);
 
-    if (retiringKimiHost && !retiringKimiHost.hasSessions()) {
-      await this.retryKimiHostRetirement(retiringKimiHost);
+    if (retiringHost && !retiringHost.hasSessions()) {
+      await this.retryHostRetirement(retiringHost);
     }
   }
 
   async closeAll(): Promise<void> {
     await Promise.allSettled(this.closingByExecutor.values());
+    const owners = new Set<string>();
+    for (const owner of this.executorBySession.values()) owners.add(owner);
+    for (const owner of this.creatingByExecutor.keys()) owners.add(owner);
+    for (const owner of this.pendingRuntimeReleasesByExecutor.keys()) owners.add(owner);
+    for (const owner of this.inspectionBorrowsByExecutor.keys()) owners.add(owner);
+    for (const binding of this.runtimeByOwner.values()) owners.add(binding.executor);
+    for (const record of this.disposingBySession.values()) {
+      if (record.executor) owners.add(record.executor);
+    }
+    for (const host of this.supervisor.listShared()) {
+      const owner = this.supervisor.ownerOf(host);
+      if (owner) owners.add(owner);
+    }
+    for (const host of this.supervisor.retirementHosts()) {
+      const owner = this.supervisor.ownerOf(host);
+      if (owner) owners.add(owner);
+    }
     const results = await Promise.allSettled(
-      (EXECUTOR_IDS as readonly ProxyExecutor[]).map(executor => this.closeByExecutor(executor)),
+      [...owners].map(owner => this.closeByOwnerKey(owner)),
     );
     const failures = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -590,38 +762,45 @@ export class ProxyManager {
     }
   }
 
-  /**
-   * Close only clients for the given executor. New clients will be lazily
-   * spawned on the next session message. For codex, also shuts down the shared
-   * host process so it re-spawns fresh on next use.
-   */
-  async closeByExecutor(executor: ProxyExecutor): Promise<void> {
-    const previous = this.closingByExecutor.get(executor);
+  async closeByExecutor(executor: Executor | string): Promise<void> {
+    return this.closeByOwnerKey(executor as OwnerKey);
+  }
+
+  private async closeByOwnerKey(ownerKey: OwnerKey): Promise<void> {
+    const previous = this.closingByExecutor.get(ownerKey);
     this.closeEpochByExecutor.set(
-      executor,
-      (this.closeEpochByExecutor.get(executor) ?? 0) + 1,
+      ownerKey,
+      (this.closeEpochByExecutor.get(ownerKey) ?? 0) + 1,
     );
     const closing = (async () => {
       if (previous) await previous;
-      await this.performCloseByExecutor(executor);
+      await this.performCloseByOwner(ownerKey);
     })();
-    this.closingByExecutor.set(executor, closing);
+    this.closingByExecutor.set(ownerKey, closing);
     try {
       await closing;
     } finally {
-      if (this.closingByExecutor.get(executor) === closing) {
-        this.closingByExecutor.delete(executor);
+      if (this.closingByExecutor.get(ownerKey) === closing) {
+        this.closingByExecutor.delete(ownerKey);
       }
     }
   }
 
-  private async performCloseByExecutor(executor: ProxyExecutor): Promise<void> {
-    const creating = Array.from(this.creatingByExecutor.get(executor) ?? []);
+  private async performCloseByOwner(ownerKey: OwnerKey): Promise<void> {
+    const inspectionBorrows = this.inspectionBorrowsByExecutor.get(ownerKey);
+    if (inspectionBorrows) {
+      for (const record of inspectionBorrows.values()) {
+        if (record.idleTimer) clearTimeout(record.idleTimer);
+      }
+      inspectionBorrows.clear();
+      this.inspectionBorrowsByExecutor.delete(ownerKey);
+    }
+    const creating = Array.from(this.creatingByExecutor.get(ownerKey) ?? []);
     const failures: unknown[] = [];
     const retryableSessionDisposals = new Set(
       Array.from(this.disposingBySession.entries())
         .filter(([, record]) => (
-          record.executor === executor && record.promise === null && record.failure
+          record.executor === ownerKey && record.promise === null && record.failure
         ))
         .map(([sessionId]) => sessionId),
     );
@@ -635,91 +814,67 @@ export class ProxyManager {
     const deferredBindings = new Set<object>();
     const toClose: Array<{ sessionId: string; client: ProxyClient }> = [];
     for (const [sid, exec] of this.executorBySession) {
-      if (exec === executor) {
+      if (exec === ownerKey) {
         const client = this.clients.get(sid);
         if (client) toClose.push({ sessionId: sid, client });
       }
     }
 
-    // Start bounded process-tree cleanup before waiting for any per-session
-    // disposal. A shared facade may be stuck forever in session.close; killing
-    // its exact host rejects that RPC and lets the disposal barrier drain.
     const cleanupAttempts: Array<{ owner?: object; promise: Promise<void> }> = [];
-    if (executor === 'claude' || executor === 'grok') {
-      for (const current of toClose) {
-        if (this.clients.get(current.sessionId) === current.client) {
-          this.clients.delete(current.sessionId);
-          this.executorBySession.delete(current.sessionId);
-        }
-        cleanupAttempts.push({
-          owner: current.client,
-          promise: this.runtimeByOwner.has(current.client)
-            ? this.releaseRuntimeBinding(current.client)
-            : current.client.shutdown(),
-        });
+    const sessionClients: Array<{ sessionId: string; client: ProxyClient }> = [];
+    const sharedHosts = new Set<ProtocolV2Host>([
+      ...this.supervisor.hostsForOwner(ownerKey),
+      ...this.supervisor.retirementHosts(ownerKey),
+    ]);
+    for (const current of toClose) {
+      const facts = this.factsFor(current.client);
+      if (facts?.processScope === 'session') {
+        sessionClients.push(current);
+        continue;
       }
-    } else if (executor === 'codex') {
-      const pendings = [...this.codexHostInits.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
-      this.codexHostInits.clear();
-      const hosts = [...this.codexHosts.values()];
-      this.codexHosts.clear();
-      if (hosts.length > 0) this.dropExecutorClients('codex');
-      for (const host of hosts) {
-        cleanupAttempts.push({
-          owner: host,
-          promise: this.runtimeByOwner.has(host)
-            ? this.releaseRuntimeBinding(host)
-            : host.shutdown(),
-        });
-      }
-    } else if (executor === 'dsh') {
-      const pendings = [...this.dshHostInits.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
-      this.dshHostInits.clear();
-      const hosts = [...this.dshHosts.values()];
-      this.dshHosts.clear();
-      if (hosts.length > 0) this.dropExecutorClients('dsh');
-      for (const host of hosts) {
-        cleanupAttempts.push({
-          owner: host,
-          promise: this.runtimeByOwner.has(host)
-            ? this.releaseRuntimeBinding(host)
-            : host.shutdown(),
-        });
-      }
-    } else if (executor === 'zcode') {
-      const pendings = [...this.zcodeHostInits.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
-      this.zcodeHostInits.clear();
-      const hosts = [...this.zcodeHosts.values()];
-      this.zcodeHosts.clear();
-      if (hosts.length > 0) this.dropExecutorClients('zcode');
-      for (const host of hosts) {
-        cleanupAttempts.push({
-          owner: host,
-          promise: this.runtimeByOwner.has(host)
-            ? this.releaseRuntimeBinding(host)
-            : host.shutdown(),
-        });
-      }
-    } else {
-      const pendings = [...this.kimiHostInits.values()];
-      if (pendings.length > 0) await Promise.allSettled(pendings);
-      this.kimiHostInits.clear();
-      const hosts = [...this.kimiHosts.values()];
-      for (const host of hosts) {
-        this.detachKimiHostForRetirement(host);
-        cleanupAttempts.push({ owner: host, promise: this.beginKimiHostRetirement(host) });
-      }
-      for (const record of [...this.kimiHostRetirements.values()]) {
-        if (hosts.includes(record.host)) continue;
-        cleanupAttempts.push({
-          owner: record.host,
-          promise: this.retryKimiHostRetirement(record.host),
-        });
+      if (current.client instanceof ProtocolV2SessionClient) {
+        sharedHosts.add(current.client.runtimeHost());
+      } else if (this.runtimeByOwner.has(current.client)) {
+        sessionClients.push(current);
       }
     }
+
+    for (const current of sessionClients) {
+      this.forgetSession(current.sessionId, current.client);
+      cleanupAttempts.push({
+        owner: current.client,
+        promise: this.runtimeByOwner.has(current.client)
+          ? this.releaseRuntimeBinding(current.client)
+          : current.client.shutdown(),
+      });
+    }
+
+    const pendings = this.supervisor.pendingInitsFor(ownerKey);
+    if (pendings.length > 0) await Promise.allSettled(pendings);
+    for (const host of sharedHosts) {
+      const facts = this.factsFor(host);
+      const retire = facts?.retireOnFailedAttach === true
+        || this.retireOnFailedAttachHosts.has(host);
+      if (retire) {
+        this.detachHostForRetirement(host);
+        cleanupAttempts.push({
+          owner: host,
+          promise: this.supervisor.isRetiring(host)
+            ? this.retryHostRetirement(host)
+            : this.beginHostRetirement(host),
+        });
+        continue;
+      }
+      this.supervisor.deleteHost(host);
+      this.dropClientsForHost(host);
+      cleanupAttempts.push({
+        owner: host,
+        promise: this.runtimeByOwner.has(host)
+          ? this.releaseRuntimeBinding(host)
+          : host.shutdown(),
+      });
+    }
+    this.dropOwnerClients(ownerKey);
 
     const cleanupResults = await Promise.allSettled(
       cleanupAttempts.map(attempt => attempt.promise),
@@ -736,94 +891,213 @@ export class ProxyManager {
       failures.push(result.reason);
     }
 
-    await this.drainSessionDisposals(executor, retryableSessionDisposals, failures);
-    // Unexpected-exit cleanup may already have removed every cache/host slot.
-    // Its strong promise and binding still form part of this close barrier.
-    await this.awaitPendingRuntimeReleases(executor);
-    for (const owner of this.collectUnreportedRuntimeReleaseFailures(executor, failures)) {
+    await this.drainSessionDisposals(ownerKey, retryableSessionDisposals, failures);
+    await this.awaitPendingRuntimeReleases(ownerKey);
+    for (const owner of this.collectUnreportedRuntimeReleaseFailures(ownerKey, failures)) {
       deferredBindings.add(owner);
     }
-    await this.drainRuntimeBindings(executor, deferredBindings, failures);
+    await this.drainRuntimeBindings(ownerKey, deferredBindings, failures);
     if (failures.length > 0) {
-      throw new AggregateError(failures, `Failed to close ${executor} Proxy runtime safely.`);
+      throw new AggregateError(failures, `Failed to close ${ownerKey} Proxy runtime safely.`);
     }
   }
 
-  private requireProtocol(
-    executor: ProxyExecutor,
-    protocol: ProxyProtocolDescriptor | undefined,
-    expectedScope: 'shared' | 'session',
-  ): ProxyProtocolDescriptor {
-    if (!protocol) {
-      throw new Error(`${executor} Proxy launch descriptor is required.`);
+  private async spawnFromBinding(
+    sessionId: string,
+    ownerKey: OwnerKey,
+    launch: PreparedLaunch,
+    facts: RuntimeOwnerFacts,
+  ): Promise<ProxyClient | null> {
+    if (launch.binding.processScope === 'session') {
+      return this.spawnSessionScoped(sessionId, ownerKey, launch, facts);
     }
-    if (protocol.processScope !== expectedScope) {
-      throw new Error(
-        `${executor} gian.proxy/2 manifest must use ${expectedScope} process scope.`,
+    const host = await this.getOrCreateSharedHost(sessionId, ownerKey, launch, facts);
+    if (!host) return null;
+    const client = host.createSessionClient(sessionId);
+    this.stampFacts(client, facts);
+    return client;
+  }
+
+  private async getOrCreateSharedHost(
+    sessionId: string,
+    ownerKey: OwnerKey,
+    launch: PreparedLaunch,
+    facts: RuntimeOwnerFacts,
+  ): Promise<ProtocolV2Host | null> {
+    const key = sharedProcessKey(launch.binding);
+    const retire = facts.retireOnFailedAttach;
+    while (true) {
+      if (retire) {
+        if (this.disposingBySession.has(sessionId)) {
+          if (this.supervisor.hasRetirementsFor(ownerKey)) {
+            await this.retryHostRetirement(undefined, ownerKey);
+          }
+          return null;
+        }
+        if (this.supervisor.hasRetirementsFor(ownerKey)) {
+          await this.retryHostRetirement(undefined, ownerKey);
+          continue;
+        }
+      }
+      const current = this.supervisor.getShared(key);
+      if (current) return current;
+
+      const host = await this.supervisor.getOrStart(
+        key,
+        ownerKey,
+        () => this.startSharedHost(key, ownerKey, launch, facts),
       );
+      if (retire && this.disposingBySession.has(sessionId)) {
+        if (this.supervisor.getShared(key) === host && !host.hasSessions()) {
+          this.detachHostForRetirement(host);
+          this.beginHostRetirement(host);
+        }
+        if (this.supervisor.isRetiring(host)) {
+          await this.retryHostRetirement(host);
+        }
+        return null;
+      }
+      if (retire && (this.supervisor.hasRetirementsFor(ownerKey) || this.supervisor.getShared(key) !== host)) {
+        continue;
+      }
+      return host;
     }
-    return protocol;
   }
 
-  private createProtocolHost(
-    executor: ProxyExecutor,
-    options: Omit<ProtocolV2ClientOptions, 'pluginId' | 'pluginVersion' | 'processScope' | 'hostVersion'>
-      & { protocol: ProxyProtocolDescriptor },
-  ): ProtocolV2Host {
-    return new ProtocolV2Host({
-      executor,
-      pluginId: pluginIdFor(executor),
-      pluginVersion: options.protocol.pluginVersion,
-      processScope: options.protocol.processScope,
-      entry: options.entry,
-      dataDir: options.dataDir,
-      hostVersion: this.cfg.hostVersion ?? '0.1.0',
-      ...(options.runtimeBin ? { runtimeBin: options.runtimeBin } : {}),
-      ...(options.nodeBin ? { nodeBin: options.nodeBin } : {}),
-      ...(options.env ? { env: options.env } : {}),
-      ...(options.log ? { log: options.log } : { log: (message) => console.log(message) }),
-    });
-  }
-
-  private async createClaudeClient(sessionId: string, cliPath: string | null): Promise<ProxyClient> {
-    const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
-    mkdirSync(dataDir, { recursive: true });
-    const lease = this.cfg.runtimeManager
-      ? await this.cfg.runtimeManager.acquire('claude', cliPath)
-      : null;
+  private async startSharedHost(
+    key: string,
+    ownerKey: OwnerKey,
+    launch: PreparedLaunch,
+    facts: RuntimeOwnerFacts,
+  ): Promise<ProtocolV2Host> {
+    const lease = await launch.acquireLease();
     let runtimeOwner: object | undefined = lease
-      ? this.trackStartupRuntime('claude', lease)
+      ? this.trackStartupRuntime(ownerKey, lease)
       : undefined;
     let reservation: RuntimeProcessGroupReservation | undefined;
     let host: ProtocolV2Host | undefined;
     try {
       reservation = await lease?.reserveProcessGroup?.();
       if (runtimeOwner && reservation) {
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.cancelBeforeSpawn());
+      }
+      const dataDir = this.hostDataDir(String(launch.binding.pluginId), key);
+      mkdirSync(dataDir, { recursive: true });
+      host = this.createProtocolHost(launch, {
+        dataDir,
+        runtimeBin: lease?.binaryPath ?? launch.fallbackRuntimeBin,
+        env: lease?.env,
+      });
+      this.sharedHostIdentities.add(host);
+      if (facts.retireOnFailedAttach) this.retireOnFailedAttachHosts.add(host);
+      if (runtimeOwner) {
+        this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
+        runtimeOwner = host;
+      } else {
+        this.trackSpawnedRuntime(ownerKey, host, () => host!.shutdown());
+        runtimeOwner = host;
+      }
+      this.stampFacts(host, facts);
+      if (reservation) {
+        if (!runtimeOwner) throw new Error('Shared runtime reservation lost its lease owner.');
+        this.setRuntimeProtection(runtimeOwner, async () => {
+          throw new Error(
+            'Proxy spawned without a verifiable process group; retaining its pending reservation.',
+          );
+        });
+        const groupId = host.processGroupId();
         this.setRuntimeProtection(
           runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
+          () => reservation!.releaseUnregistered(groupId),
+        );
+        const registration = await reservation.register(groupId);
+        if (registration === 'already-empty') {
+          host.observeProcessGroupAbsence();
+          this.markRuntimeBindingReleaseEligible(runtimeOwner);
+          throw new Error('Proxy exited before its process group could be registered.');
+        }
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
+      }
+      if (launch.validateHandshake) {
+        await host.initialize();
+        await host.catalog();
+      }
+      const startedHost = host;
+      this.supervisor.setShared(key, startedHost, ownerKey);
+      startedHost.onHostExit(() => {
+        if (this.supervisor.getShared(key) === startedHost) {
+          if (facts.retireOnFailedAttach) {
+            this.detachHostForRetirement(startedHost);
+          } else {
+            this.supervisor.deleteShared(key, startedHost);
+            this.dropClientsForHost(startedHost);
+          }
+        }
+        this.markRuntimeBindingReleaseEligible(startedHost);
+        if (facts.retireOnFailedAttach) {
+          void this.beginHostRetirement(startedHost).catch(error => {
+            console.error(`[proxy] failed to release ${startedHost.pluginId} runtime:`, error);
+          });
+        } else {
+          void this.releaseRuntimeBinding(startedHost).catch(error => {
+            console.error(`[proxy] failed to release ${startedHost.pluginId} runtime:`, error);
+          });
+        }
+      });
+      return startedHost;
+    } catch (error) {
+      if (runtimeOwner) {
+        await this.cleanupFailedRuntimeStartup(
+          runtimeOwner,
+          error,
+          `${String(launch.binding.pluginId)} runtime startup cleanup failed.`,
         );
       }
-      const protocol = this.requireProtocol('claude', this.cfg.claudeProxy, 'session');
-      host = this.createProtocolHost('claude', {
-        protocol,
-        entry: this.cfg.ccProxyEntry,
+      throw error;
+    }
+  }
+
+  private async spawnSessionScoped(
+    sessionId: string,
+    ownerKey: OwnerKey,
+    launch: PreparedLaunch,
+    facts: RuntimeOwnerFacts,
+  ): Promise<ProxyClient | null> {
+    if (this.disposingBySession.has(sessionId)) return null;
+    const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
+    mkdirSync(dataDir, { recursive: true });
+    const lease = await launch.acquireLease();
+    let runtimeOwner: object | undefined = lease
+      ? this.trackStartupRuntime(ownerKey, lease)
+      : undefined;
+    let reservation: RuntimeProcessGroupReservation | undefined;
+    let host: ProtocolV2Host | undefined;
+    try {
+      reservation = await lease?.reserveProcessGroup?.();
+      if (runtimeOwner && reservation) {
+        this.setRuntimeProtection(runtimeOwner, () => reservation!.cancelBeforeSpawn());
+      }
+      host = this.createProtocolHost(launch, {
         dataDir,
-        ...(lease ? { runtimeBin: lease.binaryPath, env: lease.env } : {}),
+        runtimeBin: lease?.binaryPath ?? launch.fallbackRuntimeBin,
+        env: lease?.env,
       });
+      this.supervisor.rememberOwner(host, ownerKey);
       const client = host.createSessionClient(sessionId);
       if (runtimeOwner) {
         this.promoteStartupRuntime(runtimeOwner, client, () => host!.shutdown());
         runtimeOwner = client;
       } else {
-        this.trackSpawnedRuntime('claude', client, () => host!.shutdown());
+        this.trackSpawnedRuntime(ownerKey, client, () => host!.shutdown());
         runtimeOwner = client;
       }
+      this.stampFacts(host, facts);
+      this.stampFacts(client, facts);
       if (reservation) {
-        if (!runtimeOwner) throw new Error('Claude runtime reservation lost its lease owner.');
+        if (!runtimeOwner) throw new Error('Session runtime reservation lost its lease owner.');
         this.setRuntimeProtection(runtimeOwner, async () => {
           throw new Error(
-            'Claude Proxy spawned without a verifiable process group; retaining its pending reservation.',
+            'Proxy spawned without a verifiable process group; retaining its pending reservation.',
           );
         });
         const groupId = client.processGroupId();
@@ -835,9 +1109,13 @@ export class ProxyManager {
         if (registration === 'already-empty') {
           client.observeProcessGroupAbsence();
           this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('Claude Proxy exited before its process group could be registered.');
+          throw new Error('Proxy exited before its process group could be registered.');
         }
         this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
+      }
+      if (launch.validateHandshake) {
+        await client.initialize();
+        await client.catalog();
       }
       return client;
     } catch (error) {
@@ -845,582 +1123,60 @@ export class ProxyManager {
         await this.cleanupFailedRuntimeStartup(
           runtimeOwner,
           error,
-          'Claude runtime startup cleanup failed.',
+          `${String(launch.binding.pluginId)} runtime startup cleanup failed.`,
         );
       }
       throw error;
     }
   }
 
-  private async createCodexClient(
-    sessionId: string,
-    cliPath: string | null,
-    proxyVersion: string | null,
-  ): Promise<ProxyClient> {
-    const host = await this.getOrCreateCodexHost(cliPath, proxyVersion);
-    return host.createSessionClient(sessionId);
+  private createProtocolHost(
+    launch: PreparedLaunch,
+    options: {
+      dataDir: string;
+      runtimeBin?: string;
+      env?: Readonly<Record<string, string>>;
+    },
+  ): ProtocolV2Host {
+    const binding = launch.binding;
+    return new ProtocolV2Host({
+      ...(launch.executor ? { executor: launch.executor } : {}),
+      pluginId: binding.pluginId,
+      pluginVersion: binding.pluginVersion,
+      processScope: binding.processScope,
+      protocolVersions: launch.offeredProtocolVersions
+        ? [...launch.offeredProtocolVersions]
+        : [binding.protocolVersion],
+      entry: binding.entryPath,
+      dataDir: options.dataDir,
+      hostVersion: this.cfg.hostVersion ?? '0.1.0',
+      ...(options.runtimeBin ? { runtimeBin: options.runtimeBin } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      log: (message) => console.log(message),
+    });
   }
 
-  private async getOrCreateCodexHost(
-    cliPath: string | null,
-    proxyVersion: string | null,
-  ): Promise<SharedRuntimeHost> {
-    if (!this.cfg.codexProxyEntry) {
-      throw new Error(
-        'codex executor requested but codexProxyEntry is not configured',
-      );
-    }
-    const key = ProxyManager.hostKey(cliPath, proxyVersion);
-    const current = this.codexHosts.get(key);
-    if (current) return current;
-    let pending = this.codexHostInits.get(key);
-    if (!pending) {
-      pending = this.startCodexHost(key, cliPath, proxyVersion);
-      this.codexHostInits.set(key, pending);
-    }
-    try {
-      return await pending;
-    } finally {
-      if (this.codexHostInits.get(key) === pending) this.codexHostInits.delete(key);
-    }
-  }
-
-  private async startCodexHost(
-    key: string,
-    cliPath: string | null,
-    proxyVersion: string | null,
-  ): Promise<SharedRuntimeHost> {
-    const lease = this.cfg.runtimeManager
-      ? await this.cfg.runtimeManager.acquire('codex', cliPath)
-      : null;
-    let runtimeOwner: object | undefined = lease
-      ? this.trackStartupRuntime('codex', lease)
-      : undefined;
-    let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: SharedRuntimeHost | undefined;
-    try {
-      reservation = await lease?.reserveProcessGroup?.();
-      if (runtimeOwner && reservation) {
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
-        );
-      }
-      const dataDir = this.hostDataDir('codex', key);
-      mkdirSync(dataDir, { recursive: true });
-      const selected = proxyVersion && this.cfg.resolveProxyVersion
-        ? await this.cfg.resolveProxyVersion('codex', proxyVersion)
-        : { entryPath: this.cfg.codexProxyEntry!, protocol: this.cfg.codexProxy };
-      const protocol = this.requireProtocol('codex', selected.protocol, 'shared');
-      host = this.createProtocolHost('codex', {
-        protocol,
-        entry: selected.entryPath,
-        dataDir,
-        ...(lease?.binaryPath ?? this.cfg.codexBin
-          ? { runtimeBin: lease?.binaryPath ?? this.cfg.codexBin! }
-          : {}),
-        ...(lease ? { env: lease.env } : {}),
-      });
-      if (runtimeOwner) {
-        this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
-        runtimeOwner = host;
-      } else {
-        this.trackSpawnedRuntime('codex', host, () => host!.shutdown());
-        runtimeOwner = host;
-      }
-      if (reservation) {
-        if (!runtimeOwner) throw new Error('Codex runtime reservation lost its lease owner.');
-        this.setRuntimeProtection(runtimeOwner, async () => {
-          throw new Error(
-            'Codex Proxy spawned without a verifiable process group; retaining its pending reservation.',
-          );
-        });
-        const groupId = host.processGroupId();
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.releaseUnregistered(groupId),
-        );
-        const registration = await reservation.register(groupId);
-        if (registration === 'already-empty') {
-          host.observeProcessGroupAbsence();
-          this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('Codex Proxy exited before its process group could be registered.');
-        }
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
-      }
-      const startedHost = host;
-      this.codexHosts.set(key, startedHost);
-      startedHost.onHostExit(() => {
-        if (this.codexHosts.get(key) === startedHost) {
-          this.codexHosts.delete(key);
-          this.dropSharedClientsForHost('codex', startedHost);
-        }
-        this.markRuntimeBindingReleaseEligible(startedHost);
-        void this.releaseRuntimeBinding(startedHost).catch(error => {
-          console.error('[proxy] failed to release Codex runtime:', error);
-        });
-      });
-      return startedHost;
-    } catch (error) {
-      if (runtimeOwner) {
-        await this.cleanupFailedRuntimeStartup(
-          runtimeOwner,
-          error,
-          'Codex runtime startup cleanup failed.',
-        );
-      }
-      throw error;
+  private dropOwnerClients(ownerKey: OwnerKey): void {
+    for (const [sessionId, executor] of [...this.executorBySession]) {
+      if (executor !== ownerKey) continue;
+      this.forgetSession(sessionId);
     }
   }
 
-  private async createDshClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateDshHost(cliPath);
-    if (!host) return null;
-    return host.createSessionClient(sessionId);
-  }
-
-  private async getOrCreateDshHost(cliPath: string | null): Promise<SharedRuntimeHost | null> {
-    if (!this.cfg.dshProxyEntry) {
-      throw new Error(
-        'dsh executor requested but dshProxyEntry is not configured',
-      );
-    }
-    if (!this.cfg.runtimeManager) {
-      throw new Error(
-        'dsh executor requested but CliRuntimeManager is not configured',
-      );
-    }
-    const key = ProxyManager.hostKey(cliPath);
-    const current = this.dshHosts.get(key);
-    if (current) return current;
-    let pending = this.dshHostInits.get(key);
-    if (!pending) {
-      pending = this.startDshHost(key, cliPath);
-      this.dshHostInits.set(key, pending);
-    }
-    try {
-      return await pending;
-    } finally {
-      if (this.dshHostInits.get(key) === pending) this.dshHostInits.delete(key);
-    }
-  }
-
-  private async startDshHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('dsh', cliPath);
-    let runtimeOwner: object | undefined = this.trackStartupRuntime('dsh', lease);
-    let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: SharedRuntimeHost | undefined;
-    try {
-      reservation = await lease.reserveProcessGroup?.();
-      if (reservation) {
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
-        );
-      }
-      const protocol = this.requireProtocol('dsh', this.cfg.dshProxy, 'shared');
-      host = this.createProtocolHost('dsh', {
-        protocol,
-        entry: this.cfg.dshProxyEntry!,
-        dataDir: this.hostDataDir('dsh', key),
-        runtimeBin: lease.binaryPath,
-        env: lease.env,
-      });
-      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
-      runtimeOwner = host;
-      if (reservation) {
-        this.setRuntimeProtection(runtimeOwner, async () => {
-          throw new Error(
-            'DSH Proxy spawned without a verifiable process group; retaining its pending reservation.',
-          );
-        });
-        const groupId = host.processGroupId();
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.releaseUnregistered(groupId),
-        );
-        const registration = await reservation.register(groupId);
-        if (registration === 'already-empty') {
-          host.observeProcessGroupAbsence();
-          this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('DSH Proxy exited before its process group could be registered.');
-        }
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
-      }
-      const startedHost = host;
-      this.dshHosts.set(key, startedHost);
-      startedHost.onHostExit(() => {
-        if (this.dshHosts.get(key) === startedHost) {
-          this.dshHosts.delete(key);
-          this.dropSharedClientsForHost('dsh', startedHost);
-        }
-        this.markRuntimeBindingReleaseEligible(startedHost);
-        void this.releaseRuntimeBinding(startedHost).catch(error => {
-          console.error('[proxy] failed to release DSH runtime:', error);
-        });
-      });
-      return startedHost;
-    } catch (error) {
-      await this.cleanupFailedRuntimeStartup(
-        runtimeOwner,
-        error,
-        'DSH runtime startup cleanup failed.',
-      );
-      throw error;
-    }
-  }
-
-  private async createZcodeClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateZcodeHost(cliPath);
-    if (!host) return null;
-    return host.createSessionClient(sessionId);
-  }
-
-  private async getOrCreateZcodeHost(cliPath: string | null): Promise<SharedRuntimeHost | null> {
-    const launch = this.cfg.resolveCurrentProxy
-      ? await this.cfg.resolveCurrentProxy('zcode')
-      : this.cfg.zcodeProxyEntry
-        ? { entryPath: this.cfg.zcodeProxyEntry, protocol: this.cfg.zcodeProxy }
-        : null;
-    if (!launch) {
-      throw new Error(
-        'zcode executor requested but zcodeProxyEntry is not configured',
-      );
-    }
-    if (!this.cfg.runtimeManager) {
-      throw new Error(
-        'zcode executor requested but CliRuntimeManager is not configured',
-      );
-    }
-    const key = `${ProxyManager.hostKey(cliPath)}\u0000${launch.entryPath}\u0000${launch.protocol?.pluginVersion ?? 'legacy'}`;
-    const current = this.zcodeHosts.get(key);
-    if (current) return current;
-    let pending = this.zcodeHostInits.get(key);
-    if (!pending) {
-      pending = this.startZcodeHost(key, cliPath, launch);
-      this.zcodeHostInits.set(key, pending);
-    }
-    try {
-      return await pending;
-    } finally {
-      if (this.zcodeHostInits.get(key) === pending) this.zcodeHostInits.delete(key);
-    }
-  }
-
-  private async startZcodeHost(
-    key: string,
-    cliPath: string | null,
-    launch: { entryPath: string; protocol?: ProxyProtocolDescriptor },
-  ): Promise<SharedRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('zcode', cliPath);
-    let runtimeOwner: object | undefined = this.trackStartupRuntime('zcode', lease);
-    let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: SharedRuntimeHost | undefined;
-    try {
-      reservation = await lease.reserveProcessGroup?.();
-      if (reservation) {
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
-        );
-      }
-      const protocol = this.requireProtocol('zcode', launch.protocol, 'shared');
-      host = this.createProtocolHost('zcode', {
-        protocol,
-        entry: launch.entryPath,
-        dataDir: this.hostDataDir('zcode', key),
-        // GIAN_RUNTIME_BIN for zcode-proxy is the ZCode CLI entry (zcode.cjs).
-        runtimeBin: lease.binaryPath,
-        env: lease.env,
-      });
-      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
-      runtimeOwner = host;
-      if (reservation) {
-        this.setRuntimeProtection(runtimeOwner, async () => {
-          throw new Error(
-            'ZCode Proxy spawned without a verifiable process group; retaining its pending reservation.',
-          );
-        });
-        const groupId = host.processGroupId();
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.releaseUnregistered(groupId),
-        );
-        const registration = await reservation.register(groupId);
-        if (registration === 'already-empty') {
-          host.observeProcessGroupAbsence();
-          this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('ZCode Proxy exited before its process group could be registered.');
-        }
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
-      }
-      const startedHost = host;
-      this.zcodeHosts.set(key, startedHost);
-      startedHost.onHostExit(() => {
-        if (this.zcodeHosts.get(key) === startedHost) {
-          this.zcodeHosts.delete(key);
-          this.dropSharedClientsForHost('zcode', startedHost);
-        }
-        this.markRuntimeBindingReleaseEligible(startedHost);
-        void this.releaseRuntimeBinding(startedHost).catch(error => {
-          console.error('[proxy] failed to release ZCode runtime:', error);
-        });
-      });
-      return startedHost;
-    } catch (error) {
-      await this.cleanupFailedRuntimeStartup(
-        runtimeOwner,
-        error,
-        'ZCode runtime startup cleanup failed.',
-      );
-      throw error;
-    }
-  }
-
-  private async createKimiClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
-    const host = await this.getOrCreateKimiHost(sessionId, cliPath);
-    if (!host) return null;
-    return host.createSessionClient(sessionId);
-  }
-
-  private async getOrCreateKimiHost(
-    sessionId: string,
-    cliPath: string | null,
-  ): Promise<SharedRuntimeHost | null> {
-    if (!this.cfg.kimiProxyEntry) {
-      throw new Error('kimi executor requested but kimiProxyEntry is not configured');
-    }
-    if (!this.cfg.runtimeManager) {
-      throw new Error('kimi executor requested but CliRuntimeManager is not configured');
-    }
-    const key = ProxyManager.hostKey(cliPath);
-    while (true) {
-      if (this.disposingBySession.has(sessionId)) {
-        if (this.kimiHostRetirements.size > 0) await this.retryKimiHostRetirement();
-        return null;
-      }
-      // Preserve a synchronous fast path when no host is retiring. Awaiting an
-      // already-resolved helper here would open a microtask window in which a
-      // failed-attach dispose can detach the old host after this check.
-      if (this.kimiHostRetirements.size > 0) {
-        await this.retryKimiHostRetirement();
-        continue;
-      }
-      const current = this.kimiHosts.get(key);
-      if (current) return current;
-
-      let pending = this.kimiHostInits.get(key);
-      if (!pending) {
-        pending = this.startKimiHost(key, cliPath);
-        this.kimiHostInits.set(key, pending);
-      }
-      try {
-        const host = await pending;
-        if (this.disposingBySession.has(sessionId)) {
-          if (this.kimiHosts.get(key) === host && !host.hasSessions()) {
-            this.detachKimiHostForRetirement(host);
-            this.beginKimiHostRetirement(host);
-          }
-          if (this.kimiHostRetirements.has(host)) {
-            await this.retryKimiHostRetirement(host);
-          }
-          return null;
-        }
-        // A waiter can resume after another session synchronously detached
-        // this just-started host. Re-enter the barrier instead of publishing a
-        // facade for the retiring identity.
-        if (this.kimiHostRetirements.size > 0 || this.kimiHosts.get(key) !== host) continue;
-        return host;
-      } finally {
-        if (this.kimiHostInits.get(key) === pending) this.kimiHostInits.delete(key);
-      }
-    }
-  }
-
-  private async startKimiHost(key: string, cliPath: string | null): Promise<SharedRuntimeHost> {
-    const lease = await this.cfg.runtimeManager!.acquire('kimi', cliPath);
-    let runtimeOwner: object = this.trackStartupRuntime('kimi', lease);
-    let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: SharedRuntimeHost | undefined;
-    try {
-      reservation = await lease.reserveProcessGroup?.();
-      if (reservation) {
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.cancelBeforeSpawn(),
-        );
-      }
-      const protocol = this.requireProtocol('kimi', this.cfg.kimiProxy, 'shared');
-      host = this.createProtocolHost('kimi', {
-        protocol,
-        entry: this.cfg.kimiProxyEntry!,
-        dataDir: this.hostDataDir('kimi', key),
-        runtimeBin: lease.binaryPath,
-        env: lease.env,
-      });
-      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
-      runtimeOwner = host;
-      if (reservation) {
-        this.setRuntimeProtection(runtimeOwner, async () => {
-          throw new Error(
-            'Kimi Proxy spawned without a verifiable process group; retaining its pending reservation.',
-          );
-        });
-        const groupId = host.processGroupId();
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.releaseUnregistered(groupId),
-        );
-        const registration = await reservation.register(groupId);
-        if (registration === 'already-empty') {
-          host.observeProcessGroupAbsence();
-          this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('Kimi Proxy exited before its process group could be registered.');
-        }
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
-      }
-      const startedHost = host;
-      this.kimiHosts.set(key, startedHost);
-      startedHost.onHostExit(() => {
-        if (this.kimiHosts.get(key) === startedHost) {
-          // Attached facades receive their own exit callback from the host.
-          // This also clears facades that never attached a native session.
-          this.detachKimiHostForRetirement(startedHost);
-        }
-        this.markRuntimeBindingReleaseEligible(startedHost);
-        void this.beginKimiHostRetirement(startedHost).catch(error => {
-          console.error('[proxy] failed to release Kimi runtime:', error);
-        });
-      });
-      // Session waiters re-check their exact facade/host relationship after
-      // this shared init resolves, before this host can be published.
-      return startedHost;
-    } catch (error) {
-      await this.cleanupFailedRuntimeStartup(
-        runtimeOwner,
-        error,
-        'Kimi runtime startup cleanup failed.',
-      );
-      throw error;
-    }
-  }
-
-  private async createGrokClient(sessionId: string, cliPath: string | null): Promise<ProxyClient | null> {
-    if (!this.cfg.grokProxyEntry) {
-      throw new Error('grok executor requested but grokProxyEntry is not configured');
-    }
-    if (!this.cfg.runtimeManager) {
-      throw new Error('grok executor requested but CliRuntimeManager is not configured');
-    }
-    if (this.disposingBySession.has(sessionId)) return null;
-    const dataDir = join(this.cfg.dataDir, 'proxy', sessionId);
-    mkdirSync(dataDir, { recursive: true });
-    const lease = await this.cfg.runtimeManager.acquire('grok', cliPath);
-    let runtimeOwner: object = this.trackStartupRuntime('grok', lease);
-    let reservation: RuntimeProcessGroupReservation | undefined;
-    let host: ProtocolV2Host | undefined;
-    try {
-      reservation = await lease.reserveProcessGroup?.();
-      if (reservation) {
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.cancelBeforeSpawn());
-      }
-      const protocol = this.requireProtocol('grok', this.cfg.grokProxy, 'session');
-      host = this.createProtocolHost('grok', {
-        protocol,
-        entry: this.cfg.grokProxyEntry,
-        dataDir,
-        runtimeBin: lease.binaryPath,
-        env: lease.env,
-      });
-      this.promoteStartupRuntime(runtimeOwner, host, () => host!.shutdown());
-      runtimeOwner = host;
-      if (reservation) {
-        this.setRuntimeProtection(runtimeOwner, async () => {
-          throw new Error(
-            'Grok Proxy spawned without a verifiable process group; retaining its pending reservation.',
-          );
-        });
-        const groupId = host.processGroupId();
-        this.setRuntimeProtection(
-          runtimeOwner,
-          () => reservation!.releaseUnregistered(groupId),
-        );
-        const registration = await reservation.register(groupId);
-        if (registration === 'already-empty') {
-          host.observeProcessGroupAbsence();
-          this.markRuntimeBindingReleaseEligible(runtimeOwner);
-          throw new Error('Grok Proxy exited before its process group could be registered.');
-        }
-        this.setRuntimeProtection(runtimeOwner, () => reservation!.release());
-      }
-      const client = host.createSessionClient(sessionId);
-      this.promoteStartupRuntime(host, client, () => host!.shutdown());
-      return client;
-    } catch (error) {
-      await this.cleanupFailedRuntimeStartup(
-        runtimeOwner,
-        error,
-        'Grok runtime startup cleanup failed.',
-      );
-      throw error;
-    }
-  }
-
-  private dropKimiClientsForHost(host: SharedRuntimeHost): void {
-    for (const [sessionId, executor] of this.executorBySession) {
-      if (executor !== 'kimi') continue;
-      const client = this.clients.get(sessionId);
-      if (
-        client && isKimiRuntimeClient(client)
-        && client.runtimeHost() === host
-      ) {
-        this.retiringKimiHostBySession.set(sessionId, host);
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
-      }
-    }
-  }
-
-  private dropExecutorClients(executorToDrop: ProxyExecutor): void {
-    for (const [sessionId, executor] of this.executorBySession) {
-      if (executor !== executorToDrop) continue;
-      this.clients.delete(sessionId);
-      this.executorBySession.delete(sessionId);
-    }
-  }
-
-  /** Drop only the facades bound to one exact shared host — other (kind,
-   *  path) hosts of the same executor keep their sessions. */
-  private dropSharedClientsForHost(executorToDrop: ProxyExecutor, host: SharedRuntimeHost): void {
-    for (const [sessionId, executor] of this.executorBySession) {
-      if (executor !== executorToDrop) continue;
-      const client = this.clients.get(sessionId);
+  private dropClientsForHost(host: ProtocolV2Host): void {
+    for (const [sessionId, client] of this.clients) {
       if (
         client instanceof ProtocolV2SessionClient
         && client.runtimeHost() === host
       ) {
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
+        if (this.retireOnFailedAttachHosts.has(host)) {
+          this.retiringHostBySession.set(sessionId, host);
+        }
+        this.forgetSession(sessionId);
       }
     }
   }
 
-  private dropSessionScopedClientsForHost(executorToDrop: ProxyExecutor, host: ProtocolV2Host): void {
-    for (const [sessionId, executor] of this.executorBySession) {
-      if (executor !== executorToDrop) continue;
-      const client = this.clients.get(sessionId);
-      if (
-        client instanceof ProtocolV2SessionClient
-        && client.runtimeHost() === host
-      ) {
-        this.clients.delete(sessionId);
-        this.executorBySession.delete(sessionId);
-      }
-    }
-  }
-
-  /** Per-(kind, path) host state directory. The default path keeps the
-   *  legacy `{kind}` directory so existing profiles stay compatible. */
   private hostDataDir(kind: string, key: string): string {
     const suffix = key
       ? `-${createHash('sha256').update(key).digest('hex').slice(0, 12)}`
@@ -1428,7 +1184,7 @@ export class ProxyManager {
     return join(this.cfg.dataDir, 'proxy', `${kind}${suffix}`);
   }
 
-  private trackStartupRuntime(executor: ProxyExecutor, lease: RuntimeLease): object {
+  private trackStartupRuntime(executor: OwnerKey, lease: RuntimeLease): object {
     const owner = {};
     this.runtimeByOwner.set(owner, {
       executor,
@@ -1442,7 +1198,7 @@ export class ProxyManager {
   }
 
   private trackSpawnedRuntime(
-    executor: ProxyExecutor,
+    executor: OwnerKey,
     owner: object,
     ensureProcessTreeExited: () => Promise<void>,
   ): void {
@@ -1470,8 +1226,6 @@ export class ProxyManager {
     if (!binding) throw new Error('Runtime startup binding was lost before spawn publication.');
     binding.releaseEligible = false;
     binding.ensureProcessTreeExited = ensureProcessTreeExited;
-    // Publish the real owner before deleting the token, with no await between
-    // operations, so close enumeration always sees one strong binding.
     this.runtimeByOwner.set(runtimeOwner, binding);
     if (this.runtimeByOwner.get(startupOwner) === binding) {
       this.runtimeByOwner.delete(startupOwner);
@@ -1490,60 +1244,41 @@ export class ProxyManager {
     }
   }
 
-  private detachKimiHostForRetirement(host: SharedRuntimeHost): void {
-    for (const [key, current] of this.kimiHosts) {
-      if (current === host) this.kimiHosts.delete(key);
-    }
-    this.dropKimiClientsForHost(host);
-    if (!this.kimiHostRetirements.has(host)) {
-      this.kimiHostRetirements.set(host, { host, promise: null });
-    }
+  private detachHostForRetirement(host: ProtocolV2Host): void {
+    this.supervisor.detachForRetirement(host);
+    this.dropClientsForHost(host);
   }
 
-  private beginKimiHostRetirement(host: SharedRuntimeHost): Promise<void> {
-    this.detachKimiHostForRetirement(host);
-    const record = this.kimiHostRetirements.get(host)!;
-    if (record.promise) return record.promise;
-    record.failure = undefined;
+  private beginHostRetirement(host: ProtocolV2Host): Promise<void> {
+    this.detachHostForRetirement(host);
+    const existing = this.supervisor.retirementPromise(host);
+    if (existing) return existing;
     const attempt = this.runtimeByOwner.has(host)
       ? this.releaseRuntimeBinding(host)
       : host.shutdown();
-    record.promise = attempt;
-    void attempt.then(
-      () => {
-        if (this.kimiHostRetirements.get(host) === record) {
-          this.kimiHostRetirements.delete(host);
-        }
-        for (const [sessionId, retiringHost] of this.retiringKimiHostBySession) {
-          if (retiringHost === host) this.retiringKimiHostBySession.delete(sessionId);
-        }
-      },
-      error => {
-        if (this.kimiHostRetirements.get(host) === record) {
-          record.promise = null;
-          record.failure = { error, reported: false };
-        }
-      },
-    );
-    return attempt;
+    return this.supervisor.beginRetirement(host, attempt, (ok) => {
+      if (!ok) return;
+      for (const [sessionId, retiringHost] of this.retiringHostBySession) {
+        if (retiringHost === host) this.retiringHostBySession.delete(sessionId);
+      }
+    });
   }
 
-  private async retryKimiHostRetirement(expectedHost?: SharedRuntimeHost): Promise<void> {
+  private async retryHostRetirement(
+    expectedHost?: ProtocolV2Host,
+    ownerKey?: OwnerKey,
+  ): Promise<void> {
     if (expectedHost) {
-      const record = this.kimiHostRetirements.get(expectedHost);
-      if (!record) return;
-      await this.beginKimiHostRetirement(record.host);
+      await this.beginHostRetirement(expectedHost);
       return;
     }
     await Promise.all(
-      [...this.kimiHostRetirements.values()].map(record => (
-        this.beginKimiHostRetirement(record.host)
-      )),
+      this.supervisor.retirementHosts(ownerKey).map(host => this.beginHostRetirement(host)),
     );
   }
 
   private async drainSessionDisposals(
-    executor: ProxyExecutor,
+    executor: OwnerKey,
     retryableAtStart: ReadonlySet<string>,
     failures: unknown[],
   ): Promise<void> {
@@ -1572,7 +1307,7 @@ export class ProxyManager {
     }
   }
 
-  private runtimeCleanupBarrier(executor: ProxyExecutor): Promise<void> | null {
+  private runtimeCleanupBarrier(executor: OwnerKey): Promise<void> | null {
     const pending: Promise<void>[] = [];
     for (const binding of this.runtimeByOwner.values()) {
       if (binding.executor !== executor || !binding.retiring) continue;
@@ -1590,20 +1325,17 @@ export class ProxyManager {
   }
 
   private async cleanupExitedClientBeforePublish(client: ProxyClient): Promise<void> {
-    if (client instanceof ProtocolV2SessionClient && client.executor === 'codex') {
+    if (client instanceof ProtocolV2SessionClient && this.sharedHostIdentities.has(client.runtimeHost())) {
       const host = client.runtimeHost();
-      for (const [key, current] of this.codexHosts) {
-        if (current === host) this.codexHosts.delete(key);
+      if (this.retireOnFailedAttachHosts.has(host)) {
+        this.detachHostForRetirement(host);
+        await this.beginHostRetirement(host);
+        return;
       }
-      this.dropSharedClientsForHost('codex', host);
+      this.supervisor.deleteHost(host);
+      this.dropClientsForHost(host);
       if (this.runtimeByOwner.has(host)) await this.releaseRuntimeBinding(host);
       else await host.shutdown();
-      return;
-    }
-    if (isKimiRuntimeClient(client)) {
-      const host = client.runtimeHost();
-      this.detachKimiHostForRetirement(host);
-      await this.beginKimiHostRetirement(host);
       return;
     }
     if (this.runtimeByOwner.has(client)) await this.releaseRuntimeBinding(client);
@@ -1613,12 +1345,21 @@ export class ProxyManager {
     }
   }
 
+  private hostHasRegisteredFacade(host: ProtocolV2Host, except?: ProxyClient): boolean {
+    for (const client of this.clients.values()) {
+      if (client === except) continue;
+      if (client instanceof ProtocolV2SessionClient && client.runtimeHost() === host) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async releaseForkHostIfEmpty(client: ProxyClient): Promise<void> {
-    if (
-      !(client instanceof ProtocolV2SessionClient)
-      || (client.executor !== 'claude' && client.executor !== 'grok')
-    ) return;
+    if (!(client instanceof ProtocolV2SessionClient)) return;
+    if (this.sharedHostIdentities.has(client.runtimeHost())) return;
     const host = client.runtimeHost();
+    if (this.hostHasRegisteredFacade(host, client)) return;
     if (!host.hasSessions() && this.runtimeByOwner.has(host)) {
       await this.releaseRuntimeBinding(host);
     }
@@ -1674,13 +1415,13 @@ export class ProxyManager {
     return release;
   }
 
-  private async awaitPendingRuntimeReleases(executor: ProxyExecutor): Promise<void> {
+  private async awaitPendingRuntimeReleases(executor: OwnerKey): Promise<void> {
     const pending = Array.from(this.pendingRuntimeReleasesByExecutor.get(executor) ?? []);
     if (pending.length > 0) await Promise.allSettled(pending);
   }
 
   private collectUnreportedRuntimeReleaseFailures(
-    executor: ProxyExecutor,
+    executor: OwnerKey,
     failures: unknown[],
   ): Set<object> {
     const deferred = new Set<object>();
@@ -1696,7 +1437,7 @@ export class ProxyManager {
   }
 
   private async drainRuntimeBindings(
-    executor: ProxyExecutor,
+    executor: OwnerKey,
     deferred: ReadonlySet<object>,
     failures: unknown[],
   ): Promise<void> {

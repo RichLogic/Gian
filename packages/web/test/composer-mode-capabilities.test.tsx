@@ -304,7 +304,7 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       return element.getAttribute('data-testid') ?? element.getAttribute('aria-label');
     });
     expect(order).toEqual([
-      'context',
+      'composer-agent-icon',
       'composer-model-chip',
       'separator',
       'composer-thinking-chip',
@@ -313,15 +313,21 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       'spacer',
       null,
       'Add context',
+      'context',
       'Send',
     ]);
-    expect(index('.context-usage-anchor')).toBeLessThan(index('[data-testid="composer-model-chip"]'));
+    // 2026-09-10 owner call: the Agent icon leads the bar; the context-usage
+    // ring trails the right cluster (after the mode chip and the attach "+").
+    expect(index('[data-testid="composer-agent-icon"]')).toBe(0);
     expect(index('[data-testid="composer-model-chip"]')).toBeLessThan(index('[data-testid="composer-thinking-chip"]'));
     expect(index('[data-testid="composer-thinking-chip"]')).toBeLessThan(index('[data-testid="composer-fast-chip"]'));
     expect(index('[data-testid="composer-fast-chip"]')).toBeLessThan(index('.spacer'));
     expect(index('.spacer')).toBeLessThan(index('.cmp-approval-btn'));
     expect(index('.cmp-approval-btn')).toBeLessThan(index('[aria-label="Add context"]'));
-    expect(index('[aria-label="Add context"]')).toBeLessThan(index('[aria-label="Send"]'));
+    expect(index('[aria-label="Add context"]')).toBeLessThan(index('.context-usage-anchor'));
+    expect(index('.context-usage-anchor')).toBeLessThan(index('[aria-label="Send"]'));
+    // The mode chip carries the shield-plus mark.
+    expect(bar.querySelector('.cmp-approval-btn .cmp-approval-ico')).not.toBeNull();
     expect(bar.querySelector('[data-testid="composer-model-chip"] .agent-logo')).toBeNull();
     expect(bar.querySelector('[data-testid="composer-model-chip"] .cmp-executor-mark')).toBeNull();
     expect(bar.querySelector('.cmp-bulb')).toBeNull();

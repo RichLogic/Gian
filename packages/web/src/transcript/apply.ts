@@ -594,6 +594,21 @@ export function applyEnvelope(
       ? data.context_items as MessageContextItem[]
       : [];
     const composerDocument = normalizeComposerDocument(data.composer_document) ?? undefined;
+    // Scheduled-task origin metadata (Issue #51): the Host stamps it on the
+    // canonical user_message of a bound-session schedule Run. Echo
+    // reconciliation below only compares text/attachments/context items, so
+    // this extra field never disturbs the FIFO matcher.
+    const scheduledTaskRaw = data.scheduled_task;
+    const scheduledTask = typeof scheduledTaskRaw === 'object' && scheduledTaskRaw !== null
+      && typeof (scheduledTaskRaw as Record<string, unknown>).schedule_id === 'string'
+      && typeof (scheduledTaskRaw as Record<string, unknown>).run_id === 'string'
+      && typeof (scheduledTaskRaw as Record<string, unknown>).schedule_name === 'string'
+      ? {
+          schedule_id: (scheduledTaskRaw as Record<string, unknown>).schedule_id as string,
+          run_id: (scheduledTaskRaw as Record<string, unknown>).run_id as string,
+          schedule_name: (scheduledTaskRaw as Record<string, unknown>).schedule_name as string,
+        }
+      : undefined;
     const rawAttachments = Array.isArray(data.attachments) ? data.attachments : [];
     let attachments = rawAttachments
       .filter((a): a is { name: string; mime: string; url: string; size?: number } =>
@@ -632,6 +647,7 @@ export function applyEnvelope(
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(contextItems.length > 0 ? { contextItems } : {}),
       ...(composerDocument ? { composerDocument } : {}),
+      ...(scheduledTask ? { scheduledTask } : {}),
     };
     // The host prepends a sentinel-wrapped meta block to the user text: the
     // Manager system prompt / a `create_subtask` note (<<gian:manager-system>>),

@@ -43,7 +43,24 @@ function catalog() {
     ],
     effortLevels: ['low', 'medium', 'high'],
     approvalPolicies: ['ask', 'never'],
+    defaultApprovalPolicy: 'ask',
+    permissionPresets: [
+      {
+        id: 'workspace-write',
+        label: 'Workspace Write',
+        description: 'Write inside the workspace; wider retries require approval.',
+        approvalPolicy: 'ask',
+      },
+      {
+        id: 'danger-full-access',
+        label: 'Full access',
+        description: 'Full file access without approval prompts.',
+        approvalPolicy: 'never',
+      },
+    ],
+    defaultPermissionPreset: 'workspace-write',
     agentPresets: ['standard'],
+    defaultAgentPreset: 'standard',
     slashCommands: [],
   };
 }
@@ -85,29 +102,35 @@ function startTurn(params) {
     },
   });
 
-  if (script.startsWith('question')) {
+  if (script.startsWith('question') || script.startsWith('approval')) {
+    const approval = script.startsWith('approval');
     interactionCounter += 1;
-    const interactionId = `question-${interactionCounter}`;
+    const interactionId = `${approval ? 'approval' : 'question'}-${interactionCounter}`;
     state.pending = { interactionId, turn, step: 0 };
     notify('interaction.requested', {
       sessionId: params.sessionId,
       interactionId,
-      kind: 'question',
-      title: 'Choose a file',
-      description: 'Select the fake file to continue.',
+      kind: approval ? 'approval' : 'question',
+      title: approval ? 'Approve bash' : 'Choose a file',
+      description: approval ? 'Run tests' : 'Select the fake file to continue.',
       turn,
       step: 0,
-      inputs: [{
-        id: 'file',
-        type: 'single_select',
-        label: 'File',
-        required: true,
-        choices: [
-          { value: 'a', displayName: 'A' },
-          { value: 'b', displayName: 'B' },
-        ],
-      }],
-      actions: [{ id: 'submit', label: 'Submit', style: 'primary' }],
+      inputs: approval ? [] : [{
+          id: 'file',
+          type: 'single_select',
+          label: 'File',
+          required: true,
+          choices: [
+            { value: 'a', displayName: 'A' },
+            { value: 'b', displayName: 'B' },
+          ],
+        }],
+      actions: approval
+        ? [
+            { id: 'allow-once', label: 'Allow once', style: 'primary' },
+            { id: 'reject', label: 'Reject', style: 'danger' },
+          ]
+        : [{ id: 'submit', label: 'Submit', style: 'primary' }],
     });
     return { accepted: true };
   }

@@ -1,4 +1,7 @@
 import type { Executor, ProductExecutor } from './model.js';
+import type { ProxyPluginId } from './plugin-id.js';
+import type { OpenRuntimeProfile } from './session-proxy-binding.js';
+import type { AgentHomeBinding } from './managed-runtime.js';
 
 export interface AgentProxyDefaults {
   /** Empty means the Proxy/CLI default. */
@@ -10,19 +13,25 @@ export interface AgentProxyDefaults {
 }
 
 /** Stable user-Agent primary key (uuid). Agents live in `agents.json`
- *  (schema v3), not in SQLite — sessions reference them by plain text. */
+ *  (schema v4), not in SQLite — sessions reference them by plain text. */
 export type AgentId = string;
 
 /** A user-owned Agent: a named configuration on top of one Proxy
- *  kind. Multiple Agents may share a kind; the kind's official CLI / GitHub
- *  Proxy is still installed once per kind. */
+ *  plugin. Multiple Agents may share a pluginId; an official kind's CLI /
+ *  GitHub Proxy is still installed once per kind. The live identity is the
+ *  open `pluginId`, not a closed Executor union. */
 export interface UserAgent {
   id: AgentId;
   /** Trimmed, case-insensitively unique across saved Agents; never empty. */
   name: string;
-  proxy: ProductExecutor;
-  /** Absolute CLI path chosen by the user; null = resolve via the kind's
-   *  environment override, PATH, then official install locations. */
+  pluginId: ProxyPluginId;
+  /** Official product kind when `pluginId` aliases one; otherwise null. */
+  proxy: ProductExecutor | null;
+  /** Provider state/configuration root. ZCode is the external-App exception
+   *  and therefore has no Gian-managed HOME. */
+  home?: AgentHomeBinding | null;
+  /** @deprecated Migration/development compatibility only. Production APIs
+   *  reject this input and managed execution never resolves from it. */
   cliPath: string | null;
   defaults: AgentProxyDefaults;
 }
@@ -34,6 +43,7 @@ export type AgentRuntimeVerification = 'verified' | 'unverified' | 'incompatible
 export interface AgentRuntimeProfile {
   id: string;
   agentId: AgentId;
+  pluginId: ProxyPluginId;
   proxy: ProductExecutor;
   cliPath: string;
   cliVersion: string;
@@ -76,7 +86,13 @@ export interface UserAgentStatus extends UserAgent {
   /** Installed Proxy (plugin) status of the Agent's kind. A kind has exactly
    *  one installed Proxy no matter how many Agents reference it. */
   plugin: AgentProxyStatus;
-  runtimeProfile: AgentRuntimeProfile | null;
+  /** Canonical live Runtime Profile for official and unknown pluginIds. */
+  runtimeProfile: OpenRuntimeProfile | null;
+  skill?: {
+    name: 'gian-session';
+    version: string;
+    state: 'ready' | 'missing' | 'conflict' | 'invalid';
+  } | null;
   officialInstallUrl: string;
 }
 

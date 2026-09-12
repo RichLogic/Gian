@@ -64,6 +64,8 @@ export function attentionMessageForEvent(event: ChatEvent): AttentionMessage | n
           ? 'The agent needs network access.'
           : data.category === 'file_write_outside_ws'
             ? 'The agent needs permission to write outside the workspace.'
+            : data.category === 'browser_capture'
+              ? 'The agent wants to capture the current Browser page.'
             : data.category === 'exit_plan_mode'
               ? 'The agent has a plan ready for your decision.'
               : 'The agent needs your approval.';

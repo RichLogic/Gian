@@ -177,6 +177,31 @@ test('protocol v2 activity presentation types cover every Gian card fallback', (
   }
 });
 
+test('protocol v2 file activities preserve adapter-supplied line counts', () => {
+  const [event] = projectNotification('kimi', v2Notification('activity.updated', {
+    activityId: 'edit-1',
+    kind: 'file',
+    title: 'Edit',
+    status: 'succeeded',
+    presentation: {
+      type: 'file',
+      data: {
+        path: 'src/status.ts',
+        operation: 'write',
+        added: 3,
+        removed: 2,
+      },
+    },
+  }), 'session-1', 1);
+
+  assert.deepEqual((event?.display?.data as { files?: unknown }).files, [{
+    path: 'src/status.ts',
+    kind: 'update',
+    added: 3,
+    removed: 2,
+  }]);
+});
+
 test('protocol v2 plan, diff, lifecycle, and errors retain their UI facts', () => {
   const [plan] = projectNotification('grok', v2Notification('plan.updated', {
     planId: 'plan-1',
@@ -188,11 +213,27 @@ test('protocol v2 plan, diff, lifecycle, and errors retain their UI facts', () =
 
   const [diff] = projectNotification('grok', v2Notification('diff.updated', {
     diffId: 'diff-1',
-    diff: '--- a/a.txt\n+++ b/a.txt\n',
+    diff: [
+      'diff --git a/a.txt b/a.txt',
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,2 +1,3 @@',
+      '-old',
+      '+new',
+      '+extra',
+      ' unchanged',
+      '',
+    ].join('\n'),
     truncated: false,
     files: [{ path: 'a.txt', status: 'modified' }],
   }), 'session-1', 1);
   assert.equal(diff?.display?.type, 'activity.file-change');
+  assert.deepEqual((diff?.display?.data as { files?: unknown }).files, [{
+    path: 'a.txt',
+    kind: 'update',
+    added: 2,
+    removed: 1,
+  }]);
 
   const [started] = projectNotification('grok', v2Notification('turn.started', {}), 'session-1', 1);
   const [completed] = projectNotification('grok', v2Notification('turn.completed', {

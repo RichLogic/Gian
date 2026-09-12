@@ -1,0 +1,357 @@
+/* ============================================================
+   Gian — Design Tokens
+   Three themes (light / warm / dark) + accent system
+   ============================================================ */
+
+:root {
+  /* Type scale */
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* --fz-* tokens are declared on body + each zone container below.
+   * They CANNOT live here on :root — Chrome substitutes the inner
+   * var(--zone-scale) eagerly at :root (where --zone-scale is unset →
+   * fallback 1), bakes the calc into `calc(13px * 1)`, and that
+   * already-resolved value inherits down regardless of what
+   * descendants set --zone-scale to. Declared per-zone, each rule
+   * re-evaluates with that zone's --zone-scale. */
+
+  /* Radii — soft but restrained */
+  --r-1: 4px;
+  --r-2: 7px;
+  --r-3: 10px;
+  --r-4: 14px;
+  --r-pill: 999px;
+
+  /* Spacing (IDE-dense baseline) */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --sp-9: 24px;
+
+  --gutter: 3px;
+
+  /* Chrome dimensions */
+  --topbar-h: 42px;
+  --nav-w: 56px;
+  --rail-w: 272px;
+  /* Unified panel header height (main head / sheet tab strip / inspector
+   * head / sidebar top row) — density variants below. */
+  --panel-header-h: 36px;
+
+  /* Motion */
+  --ease: cubic-bezier(.2,.7,.2,1);
+  /* Soft UI motion (phase 6): panels, dock, tabs, popovers, sidebar. */
+  --ease-soft: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-fast: 140ms;
+  --dur-med: 240ms;
+
+  /* Executor brand (same across themes) */
+  --codex-h: 270;
+  --codex: oklch(0.62 0.14 var(--codex-h));
+  --codex-soft: oklch(0.62 0.14 var(--codex-h) / 0.12);
+  --claude-h: 36;
+  --claude: oklch(0.70 0.15 var(--claude-h));
+  --claude-soft: oklch(0.70 0.15 var(--claude-h) / 0.14);
+  --kimi: #0c0c0c;
+  --kimi-soft: rgb(12 12 12 / 0.12);
+
+  /* Platform */
+  --discord:      oklch(0.58 0.16 280);
+  --discord-soft: oklch(0.58 0.16 280 / 0.14);
+  --slack:        oklch(0.62 0.14 105);
+  --slack-soft:   oklch(0.62 0.14 105 / 0.14);
+}
+
+/* ---------- Accent presets ----------
+   8 evenly-spaced hues so any two are visually distinguishable. Each
+   theme's default is set on theme switch by SettingsBody; the
+   declarations live in one place so any preset is usable under any theme. */
+body                        { --accent-h: 230; --accent-c: 0.13; }  /* fallback = azure */
+body[data-accent="rose"]    { --accent-h:   5; --accent-c: 0.15; }
+body[data-accent="ember"]   { --accent-h:  35; --accent-c: 0.14; }
+body[data-accent="citron"]  { --accent-h:  95; --accent-c: 0.13; }
+body[data-accent="moss"]    { --accent-h: 150; --accent-c: 0.11; }
+body[data-accent="teal"]    { --accent-h: 195; --accent-c: 0.11; }
+body[data-accent="azure"]   { --accent-h: 230; --accent-c: 0.13; }
+body[data-accent="ink"]     { --accent-h: 270; --accent-c: 0.13; }
+body[data-accent="plum"]    { --accent-h: 320; --accent-c: 0.14; }
+
+/* ---------- Status-icon gradient (spec 2026-06-28 §H) ----------
+   Three analogous oklch stops swept around the accent hue, plus a glow color.
+   Computed from --accent-h / --accent-c and the per-theme --gL1/2/3 above, so
+   the status icons re-tint for every accent + theme automatically. */
+body {
+  --g1:    oklch(var(--gL1) calc(var(--accent-c) + 0.04) calc(var(--accent-h) - 46));
+  --g2:    oklch(var(--gL2) calc(var(--accent-c) + 0.06) calc(var(--accent-h) + 8));
+  --g3:    oklch(var(--gL3) calc(var(--accent-c) + 0.04) calc(var(--accent-h) + 60));
+  --gGlow: oklch(var(--gL2) var(--accent-c) calc(var(--accent-h) + 8) / 0.6);
+}
+
+/* ---------- Font scale per zone ----------
+   Each zone container redeclares --fz-* with its own --zone-scale,
+   so each rule re-evaluates the calc() at the matching element. The
+   shared declaration block below applies to body AND every zone
+   container — putting them in one selector list keeps the token list
+   defined once, while the per-element matching ensures each location
+   gets its own resolved --zone-scale baked into the result. */
+
+body,
+.sidebar, .topbar, .inspector,
+.transcript, .composer, .composer-wrap, .approval,
+.sheet, .gian-terminal, .sheet-file, .md-preview {
+  /* Base sizes calibrated 2026-08-03 to match Air's default UI type size
+     (pixel-measured on same-resolution screenshots: Gian ran ~6% small).
+     Token names keep their old numbers; the px below is the real base. */
+  --fz-10: calc(11px * var(--zone-scale, 1));
+  --fz-11: calc(12px * var(--zone-scale, 1));
+  --fz-12: calc(13px * var(--zone-scale, 1));
+  --fz-13: calc(14px * var(--zone-scale, 1));
+  --fz-14: calc(15px * var(--zone-scale, 1));
+  --fz-15: calc(16px * var(--zone-scale, 1));
+  --fz-16: calc(17px * var(--zone-scale, 1));
+  --fz-20: calc(21px * var(--zone-scale, 1));
+  --fz-28: calc(29px * var(--zone-scale, 1));
+}
+
+/* Default --zone-scale per element (body + each zone). When the body
+   carries the data-scale-X="Y" attribute, the more-specific rules
+   below override the zone's --zone-scale, which then re-feeds into
+   the per-zone --fz-* recalculation above. */
+body { --zone-scale: 1; }
+
+.sidebar, .topbar, .inspector                                    { --zone-scale: 1; }
+body[data-scale-chrome="sm"] .sidebar,
+body[data-scale-chrome="sm"] .topbar,
+body[data-scale-chrome="sm"] .inspector                          { --zone-scale: 0.875; }
+body[data-scale-chrome="lg"] .sidebar,
+body[data-scale-chrome="lg"] .topbar,
+body[data-scale-chrome="lg"] .inspector                          { --zone-scale: 1.125; }
+body[data-scale-chrome="xl"] .sidebar,
+body[data-scale-chrome="xl"] .topbar,
+body[data-scale-chrome="xl"] .inspector                          { --zone-scale: 1.25;  }
+
+/* Chat zone is driven by concrete settings: --chat-zone-scale (px size /
+   14px base, set inline on body) replaces the old data-scale-chat steps,
+   and --chat-font-family swaps the transcript/composer typeface. */
+.transcript, .composer, .composer-wrap, .approval            { --zone-scale: var(--chat-zone-scale, 1); }
+.transcript, .composer, .composer-wrap {
+  font-family: var(--chat-font-family, var(--font-sans));
+}
+
+.sheet, .gian-terminal, .sheet-file, .md-preview                   { --zone-scale: 1; }
+body[data-scale-code="sm"] .sheet,
+body[data-scale-code="sm"] .gian-terminal,
+body[data-scale-code="sm"] .sheet-file,
+body[data-scale-code="sm"] .md-preview                             { --zone-scale: 0.875; }
+body[data-scale-code="lg"] .sheet,
+body[data-scale-code="lg"] .gian-terminal,
+body[data-scale-code="lg"] .sheet-file,
+body[data-scale-code="lg"] .md-preview                             { --zone-scale: 1.125; }
+body[data-scale-code="xl"] .sheet,
+body[data-scale-code="xl"] .gian-terminal,
+body[data-scale-code="xl"] .sheet-file,
+body[data-scale-code="xl"] .md-preview                             { --zone-scale: 1.25;  }
+
+/* ============================================================
+   THEME — LIGHT (cool cream, high softness, low contrast chrome)
+   ============================================================ */
+body[data-theme="light"] {
+  --dsh: oklch(0.62 0.12 195);
+
+  --bg:            oklch(0.955 0.004 280);
+  --surface:       oklch(1.000 0.000 0);
+  --surface-2:    oklch(0.970 0.003 280);
+  --surface-3:    oklch(0.935 0.005 280);
+  --surface-inset: oklch(0.945 0.004 280);
+
+  --text:          oklch(0.22 0.02 280);
+  --text-2:        oklch(0.45 0.015 280);
+  --text-3:        oklch(0.62 0.012 280);
+  --text-inv:      oklch(0.98 0 0);
+
+  --hairline:      oklch(0.22 0.02 280 / 0.08);
+  --hairline-2:    oklch(0.22 0.02 280 / 0.04);
+
+  --accent:        oklch(0.55 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.42 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.12);
+  --accent-ring:   oklch(0.55 var(--accent-c) var(--accent-h) / 0.30);
+  /* Status-icon gradient lightness band (spec 2026-06-28 §H1). */
+  --gL1: 0.66; --gL2: 0.74; --gL3: 0.58;
+
+  --ok:    oklch(0.58 0.13 150);
+  --ok-soft: oklch(0.58 0.13 150 / 0.13);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.55 0.14 250);
+  --lane-2: oklch(0.58 0.12 195);
+  --lane-3: oklch(0.55 0.15 300);
+  --lane-4: oklch(0.62 0.14 55);
+  --lane-5: oklch(0.56 0.16 25);
+  --lane-6: oklch(0.58 0.13 150);
+  --lane-7: oklch(0.68 0.12 85);
+  --lane-8: oklch(0.55 0.14 340);
+  --warn:  oklch(0.70 0.14 75);
+  --warn-soft: oklch(0.70 0.14 75 / 0.15);
+  --danger: oklch(0.58 0.18 25);
+  --danger-soft: oklch(0.58 0.18 25 / 0.13);
+
+  --shadow-1: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 1px 2px oklch(0.22 0.02 280 / 0.04);
+  --shadow-2: 0 0 0 1px oklch(0.22 0.02 280 / 0.06), 0 6px 24px -8px oklch(0.22 0.02 280 / 0.18);
+
+  /* — ported from design/tokens.css — --border alias for mp-think / inline borders */
+  --border: oklch(0.22 0.02 280 / 0.12);
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   THEME — WARM (cream paper, toasted walnut text)
+   ============================================================ */
+body[data-theme="warm"] {
+  --dsh: oklch(0.62 0.12 195);
+
+  --bg:            oklch(0.955 0.020 80);
+  --surface:       oklch(0.990 0.012 82);
+  --surface-2:    oklch(0.965 0.018 80);
+  --surface-3:    oklch(0.925 0.022 78);
+  --surface-inset: oklch(0.940 0.020 80);
+
+  --text:          oklch(0.30 0.04 55);
+  --text-2:        oklch(0.48 0.035 60);
+  --text-3:        oklch(0.62 0.025 65);
+  --text-inv:      oklch(0.98 0.01 80);
+
+  --hairline:      oklch(0.30 0.04 55 / 0.10);
+  --hairline-2:    oklch(0.30 0.04 55 / 0.05);
+
+  --accent:        oklch(0.52 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.40 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.14);
+  --accent-ring:   oklch(0.52 var(--accent-c) var(--accent-h) / 0.32);
+  --gL1: 0.64; --gL2: 0.73; --gL3: 0.56;
+
+  --ok:    oklch(0.55 0.13 150);
+  --ok-soft: oklch(0.55 0.13 150 / 0.14);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.52 0.14 250);
+  --lane-2: oklch(0.55 0.12 195);
+  --lane-3: oklch(0.52 0.15 300);
+  --lane-4: oklch(0.58 0.14 55);
+  --lane-5: oklch(0.53 0.16 28);
+  --lane-6: oklch(0.55 0.13 150);
+  --lane-7: oklch(0.64 0.12 85);
+  --lane-8: oklch(0.52 0.14 340);
+  --warn:  oklch(0.65 0.14 65);
+  --warn-soft: oklch(0.65 0.14 65 / 0.16);
+  --danger: oklch(0.55 0.18 30);
+  --danger-soft: oklch(0.55 0.18 30 / 0.14);
+
+  --shadow-1: 0 0 0 1px oklch(0.30 0.04 55 / 0.07), 0 1px 2px oklch(0.30 0.04 55 / 0.05);
+  --shadow-2: 0 0 0 1px oklch(0.30 0.04 55 / 0.08), 0 6px 24px -8px oklch(0.30 0.04 55 / 0.20);
+
+  /* — ported from design/tokens.css — */
+  --border: oklch(0.30 0.04 55 / 0.14);
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   THEME — DARK (Air-matched neutral ramp: near-black frame,
+   lifted islands. Values taken from JetBrains Air build
+   262.132.31 fleet/themes/dark.json: window frame #090909,
+   island #18191B, secondary #252629, raised #323438,
+   text #E0E1E4, secondary/tertiary text = 52%/35% white,
+   border = 13% white.)
+   ============================================================ */
+body[data-theme="dark"] {
+  --dsh: oklch(0.62 0.12 195);
+
+  --bg:            oklch(0.140 0.004 265);
+  --surface:       oklch(0.213 0.004 265);
+  --surface-2:    oklch(0.269 0.006 271);
+  --surface-3:    oklch(0.325 0.008 265);
+  --surface-inset: oklch(0.175 0.004 265);
+
+  --text:          oklch(0.910 0.004 271);
+  --text-2:        oklch(0.680 0.005 268);
+  --text-3:        oklch(0.550 0.005 268);
+  --text-inv:      oklch(0.180 0.005 265);
+
+  --hairline:      oklch(0.910 0.004 271 / 0.13);
+  --hairline-2:    oklch(0.910 0.004 271 / 0.07);
+
+  --accent:        oklch(0.72 var(--accent-c) var(--accent-h));
+  --accent-text:   oklch(0.80 var(--accent-c) var(--accent-h));
+  --accent-soft:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.18);
+  --accent-ring:   oklch(0.72 var(--accent-c) var(--accent-h) / 0.40);
+  --gL1: 0.70; --gL2: 0.80; --gL3: 0.62;
+
+  --ok:    oklch(0.75 0.14 150);
+  --ok-soft: oklch(0.75 0.14 150 / 0.16);
+  /* History DAG chain palette (Air-style): 1 = main line, 2-8 cycle through
+   * freshly claimed branch chains. Independent of --accent. */
+  --lane-1: oklch(0.74 0.13 250);
+  --lane-2: oklch(0.76 0.11 195);
+  --lane-3: oklch(0.74 0.14 300);
+  --lane-4: oklch(0.78 0.13 60);
+  --lane-5: oklch(0.72 0.15 25);
+  --lane-6: oklch(0.75 0.14 150);
+  --lane-7: oklch(0.82 0.12 90);
+  --lane-8: oklch(0.73 0.13 340);
+  --warn:  oklch(0.80 0.14 80);
+  --warn-soft: oklch(0.80 0.14 80 / 0.18);
+  --danger: oklch(0.72 0.17 25);
+  --danger-soft: oklch(0.72 0.17 25 / 0.18);
+
+  --shadow-1: 0 0 0 1px oklch(0.910 0.004 271 / 0.13);
+  --shadow-2: 0 0 0 1px oklch(0.910 0.004 271 / 0.10), 0 10px 32px -8px oklch(0 0 0 / 0.55);
+
+  /* — ported from design/tokens.css — */
+  --border: oklch(0.910 0.004 271 / 0.14);
+
+  color-scheme: dark;
+}
+
+/* ---------- Density ---------- */
+body[data-density="compact"] { --rail-w: 250px; --topbar-h: 38px; --nav-w: 52px; --panel-header-h: 32px; }
+body[data-density="cozy"]    { --rail-w: 272px; --topbar-h: 42px; --nav-w: 56px; --panel-header-h: 36px; }
+body[data-density="roomy"]   { --rail-w: 300px; --topbar-h: 48px; --nav-w: 64px; --panel-header-h: 40px; }
+
+/* ---------- Base ---------- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fz-13);
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; background: none; border: none; color: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; color: inherit; }
+::selection { background: var(--accent-soft); color: var(--accent-text); }
+
+/* Keycap */
+kbd.kc {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-radius: var(--r-1);
+  box-shadow: inset 0 -1px 0 var(--hairline), 0 0 0 1px var(--hairline);
+}
+
+/* Hairline separator using gradient — soft fade instead of hard line */

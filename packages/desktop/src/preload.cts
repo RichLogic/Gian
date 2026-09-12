@@ -1,9 +1,19 @@
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron');
 import type {
   GianBrowserBounds,
+  GianBrowserCreateTabInput,
   GianBrowserElementCapture,
+  GianBrowserFindOptions,
+  GianBrowserFindResult,
+  GianBrowserDownloadsSnapshot,
+  GianBrowserExtension,
+  GianBrowserExtensionsSnapshot,
+  GianBrowserPreferences,
+  GianBrowserPermissionDecision,
+  GianBrowserPermissionsSnapshot,
   GianBrowserProjectTarget,
   GianBrowserState,
+  GianBrowserTabsSnapshot,
   PickComposerResourcesResult,
   GianScreenshotCapture,
   GianScreenshotErrorCode,
@@ -86,6 +96,27 @@ contextBridge.exposeInMainWorld(
       },
     }),
     browser: Object.freeze({
+      createTab: (input?: GianBrowserCreateTabInput) =>
+        ipcRenderer.invoke('desktop:browser:create-tab', input),
+      listTabs: () => ipcRenderer.invoke('desktop:browser:list-tabs'),
+      listDownloads: () => ipcRenderer.invoke('desktop:browser:list-downloads'),
+      cancelDownload: (downloadId: string) =>
+        ipcRenderer.invoke('desktop:browser:cancel-download', downloadId),
+      revealDownload: (downloadId: string) =>
+        ipcRenderer.invoke('desktop:browser:reveal-download', downloadId),
+      listPermissionRequests: () =>
+        ipcRenderer.invoke('desktop:browser:list-permission-requests'),
+      respondPermission: (requestId: string, decision: GianBrowserPermissionDecision) =>
+        ipcRenderer.invoke('desktop:browser:respond-permission', requestId, decision),
+      listExtensions: () => ipcRenderer.invoke('desktop:browser:list-extensions'),
+      installExtension: (): Promise<GianBrowserExtension | null> =>
+        ipcRenderer.invoke('desktop:browser:install-extension'),
+      setExtensionEnabled: (extensionKey: string, enabled: boolean) =>
+        ipcRenderer.invoke('desktop:browser:set-extension-enabled', extensionKey, enabled),
+      removeExtension: (extensionKey: string) =>
+        ipcRenderer.invoke('desktop:browser:remove-extension', extensionKey),
+      configure: (preferences: GianBrowserPreferences) =>
+        ipcRenderer.invoke('desktop:browser:configure', preferences),
       getState: (tabId: string) => ipcRenderer.invoke('desktop:browser:get-state', tabId),
       navigate: (tabId: string, url: string) => ipcRenderer.invoke('desktop:browser:navigate', tabId, url),
       openProject: (tabId: string, target: GianBrowserProjectTarget) =>
@@ -93,19 +124,82 @@ contextBridge.exposeInMainWorld(
       goBack: (tabId: string) => ipcRenderer.invoke('desktop:browser:back', tabId),
       goForward: (tabId: string) => ipcRenderer.invoke('desktop:browser:forward', tabId),
       reload: (tabId: string) => ipcRenderer.invoke('desktop:browser:reload', tabId),
+      recover: (tabId: string) => ipcRenderer.invoke('desktop:browser:recover', tabId),
       stop: (tabId: string) => ipcRenderer.invoke('desktop:browser:stop', tabId),
+      findInPage: (tabId: string, text: string, options?: GianBrowserFindOptions) =>
+        ipcRenderer.send('desktop:browser:find', tabId, text, options),
+      stopFindInPage: (tabId: string) => ipcRenderer.invoke('desktop:browser:stop-find', tabId),
+      openDevTools: (tabId: string) => ipcRenderer.invoke('desktop:browser:open-devtools', tabId),
       setLayout: (tabId: string, bounds: GianBrowserBounds, visible: boolean) =>
         ipcRenderer.invoke('desktop:browser:set-layout', tabId, bounds, visible),
+      setBackground: (tabId: string, cssColor: string) =>
+        ipcRenderer.invoke('desktop:browser:set-background', tabId, cssColor),
+      setZoom: (tabId: string, factor: number) =>
+        ipcRenderer.invoke('desktop:browser:set-zoom', tabId, factor),
       openExternal: (tabId: string) => ipcRenderer.invoke('desktop:browser:open-external', tabId),
       closeTab: (tabId: string) => ipcRenderer.invoke('desktop:browser:close-tab', tabId),
       clearData: () => ipcRenderer.invoke('desktop:browser:clear-data'),
       setInspectMode: (tabId: string, enabled: boolean) =>
         ipcRenderer.invoke('desktop:browser:set-inspect-mode', tabId, enabled),
+      subscribeTabs: (listener: (snapshot: GianBrowserTabsSnapshot) => void) => {
+        const wrapped = (_event: Electron.IpcRendererEvent, snapshot: GianBrowserTabsSnapshot) =>
+          listener(snapshot);
+        ipcRenderer.on('desktop:browser:tabs', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:tabs', wrapped);
+      },
+      subscribePresentationRequested: (listener: (tabId: string) => void) => {
+        const wrapped = (_event: Electron.IpcRendererEvent, tabId: string) => listener(tabId);
+        ipcRenderer.on('desktop:browser:presentation-requested', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:presentation-requested', wrapped);
+      },
       subscribe: (listener: (tabId: string, state: GianBrowserState) => void) => {
         const wrapped = (_event: Electron.IpcRendererEvent, tabId: string, state: GianBrowserState) =>
           listener(tabId, state);
         ipcRenderer.on('desktop:browser:state', wrapped);
         return () => ipcRenderer.removeListener('desktop:browser:state', wrapped);
+      },
+      subscribeFind: (listener: (tabId: string, result: GianBrowserFindResult) => void) => {
+        const wrapped = (
+          _event: Electron.IpcRendererEvent,
+          tabId: string,
+          result: GianBrowserFindResult,
+        ) => listener(tabId, result);
+        ipcRenderer.on('desktop:browser:find-result', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:find-result', wrapped);
+      },
+      subscribeFindRequested: (listener: (tabId: string) => void) => {
+        const wrapped = (_event: Electron.IpcRendererEvent, tabId: string) => listener(tabId);
+        ipcRenderer.on('desktop:browser:find-requested', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:find-requested', wrapped);
+      },
+      subscribeAddressRequested: (listener: (tabId: string) => void) => {
+        const wrapped = (_event: Electron.IpcRendererEvent, tabId: string) => listener(tabId);
+        ipcRenderer.on('desktop:browser:address-requested', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:address-requested', wrapped);
+      },
+      subscribeDownloads: (listener: (snapshot: GianBrowserDownloadsSnapshot) => void) => {
+        const wrapped = (
+          _event: Electron.IpcRendererEvent,
+          snapshot: GianBrowserDownloadsSnapshot,
+        ) => listener(snapshot);
+        ipcRenderer.on('desktop:browser:downloads', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:downloads', wrapped);
+      },
+      subscribePermissions: (listener: (snapshot: GianBrowserPermissionsSnapshot) => void) => {
+        const wrapped = (
+          _event: Electron.IpcRendererEvent,
+          snapshot: GianBrowserPermissionsSnapshot,
+        ) => listener(snapshot);
+        ipcRenderer.on('desktop:browser:permissions', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:permissions', wrapped);
+      },
+      subscribeExtensions: (listener: (snapshot: GianBrowserExtensionsSnapshot) => void) => {
+        const wrapped = (
+          _event: Electron.IpcRendererEvent,
+          snapshot: GianBrowserExtensionsSnapshot,
+        ) => listener(snapshot);
+        ipcRenderer.on('desktop:browser:extensions', wrapped);
+        return () => ipcRenderer.removeListener('desktop:browser:extensions', wrapped);
       },
       subscribeElement: (listener: (tabId: string, capture: GianBrowserElementCapture) => void) => {
         const wrapped = (

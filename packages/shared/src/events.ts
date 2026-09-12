@@ -225,6 +225,7 @@ export interface ApprovalRequestedData {
     | 'command'
     | 'network'
     | 'file_write_outside_ws'
+    | 'browser_capture'
     | 'exit_plan_mode'
     | 'question'
     | 'other';

@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.1.5';
+export const PLUGIN_VERSION = '0.1.6';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -195,7 +195,8 @@ export class DshProxyService {
   }): AttachedSession {
     const existing = this.sessions.get(params.sessionId);
     if (existing) {
-      if (existing.createFingerprint !== params.createFingerprint) {
+      if (existing.createFingerprint !== params.createFingerprint
+        || (params.nativeSessionId !== null && params.nativeSessionId !== existing.nativeSessionId)) {
         throw new ServiceError('CONFLICT', `Session ${params.sessionId} was reused with different params.`);
       }
       return existing;

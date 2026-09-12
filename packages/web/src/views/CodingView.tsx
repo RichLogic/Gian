@@ -1,68 +1,27 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ApprovalDecision, ApprovalMode, ComposerDocument, ConfigValue, Executor, MessageContextItem, NativeConfigValue, Session, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
-import { ModeDropdown } from '../components/ModeDropdown.js';
 import type { Mode } from '../components/Topbar.js';
+import { LeftRail } from '../components/SidebarChrome.js';
+import { SessionsSidebar } from '../components/SessionsSidebar.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { RailLayoutController } from '../components/RailLayout.js';
 import type { ActionControlState } from '../components/action-gating.js';
-import {
-  useOperationDispatchOptional,
-  useSessionOperationPending,
-  useSessionOrderOverlay,
-} from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
 import type { PlanLifecycleState } from '../transcript/apply.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import type { ApprovalActionContext, QueueEntry, TranscriptItem } from '../types.js';
-import { sessionNeedsAttention, buildRailSections, orderByIds } from '../session-routing.js';
-import { moveById, useDragReorder } from '../dnd-reorder.js';
-import type { DropPlace, RowDragProps } from '../dnd-reorder.js';
 import { SessionMain } from './SessionMain.js';
-import { relTime, statusGlyphShown, StatusIcon } from './session-list-status.js';
 import { clearNewSessionDraft, NewSessionView } from './new-session-view.js';
 import type { CreateSessionInput } from './new-session-view.js';
 export { buildSessionCreatePayload } from './new-session-view.js';
 export type { CreateSessionInput, SessionCreateFormState } from './new-session-view.js';
 
-// ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
-function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill={filled ? 'currentColor' : 'none'} stroke="currentColor"
-         strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
-      {d.split(' M').map((seg, i) => (
-        <path key={i} d={i === 0 ? seg : `M${seg}`} />
-      ))}
-    </svg>
-  );
-}
-
-const ICON = {
-  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM21 21l-4.3-4.3',
-  plus:   'M12 5v14 M5 12h14',
-  kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
-  branch: 'M5 3v10M11 6v7M5 6h6M11 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4ZM5 15a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
-  eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
-  folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
-  folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
-  // pushpin — pin / unpin rows (same glyph as the task pin in PathBreadcrumb)
-  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z',
-  archive: 'M3 4h18v4H3z M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8 M10 12h4',
-  caretRight: 'M9 6l6 6-6 6',
-  caretDown: 'M6 9l6 6 6-6',
-};
-
-/** Reserved collapse-set key for the 无归属 (Unfiled) group — '$' can never
- *  collide with a workspace UUID. */
-const UNFILED_GROUP_KEY = '$unfiled';
-
 
 export interface CodingViewProps {
-  /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
+  /** Top-level app mode — the persistent sidebar navigation reads/drives this. */
   mode: Mode;
   onSetAppMode: (mode: Mode) => void;
-  /** Open the global CommandPalette (sidebar search button). */
-  onOpenSearch: () => void;
   workspaces: Workspace[];
   sessions: Session[];
   activeSession: Session | null;
@@ -77,14 +36,21 @@ export interface CodingViewProps {
   onLoadOlder: (sessionId: string, executor: Executor) => void;
   onRetryHistory: (sessionId: string, executor: Executor) => void;
   onSelectSession: (id: string) => void;
-  /** Open the Workspaces "New workspace" sheet tab (new-session page's
-   *  workspace drop "+ New workspace" row). */
+  /** Open the New Repo dialog (new-session page's workspace drop "+ New Repo"
+   *  row, Repos section "+"). */
   onNewWorkspace: () => void;
+  /** Open the Edit Repo dialog (Repos rail group ⋯ menu, name-only). */
+  onEditWorkspace: (workspace: Workspace) => void;
   /** App-driven request to open the new-session page with this workspace
-   *  preselected (auto-return after creating one from the New Workspace
-   *  sheet). Consumed once via onConsumeOpenNewForWorkspace. */
+   *  preselected (auto-return after creating one from the New Repo dialog).
+   *  Consumed once via onConsumeOpenNewForWorkspace. */
   openNewForWorkspace?: string | null;
   onConsumeOpenNewForWorkspace?: () => void;
+  /** App-driven request to open the new-session page with a prefilled
+   *  composer message (the Timer 新建定时任务 CTA's guidance prompt).
+   *  Consumed once via onConsumeOpenNewWithMessage. */
+  openNewWithMessage?: string | null;
+  onConsumeOpenNewWithMessage?: () => void;
   onCreateSession: (input: CreateSessionInput) => OperationRun;
   /** Latest create run, owned by App so timed-out attempts survive this
    * view unmounting during mode switches. */
@@ -155,14 +121,8 @@ export interface CodingViewProps {
   onPinSession: (sessionId: string, pinned: boolean) => void;
   /** Archive a session from the sidebar row. */
   onArchiveSession: (sessionId: string) => void;
-  /** Open the Files view in Changed mode for this session's working tree. */
-  onShowChanges: (session: Session) => void;
   /** Open a selected file in Diffs pinned to the card's Last-turn scope. */
   onShowLastTurnChanges: (session: Session, turn: number, path: string) => void;
-  /** Active session's working tree id (`wt:<id>` or `ws:<id>`), null if none. */
-  activeWorkingTreeId: string | null;
-  /** Branch name for the active session's working tree. */
-  activeBranch: string | null;
   /** Session Fork standard control (proposal §10.6): two-layer gating for
    *  the per-turn transcript affordance (`session.fork.atTurn`) of the
    *  ACTIVE session. The head-fork entry lives in the session dropdown menu;
@@ -170,6 +130,10 @@ export interface CodingViewProps {
   forkAtTurnControl: ActionControlState | null;
   /** `sidechat.create` gating used by transcript selection actions. */
   sideChatControl?: ActionControlState | null;
+  /** Timer "open the Run's Turn" request (Issue #51): sessionId + schedule
+   *  Run id; forwarded to the Transcript of the matching active session. */
+  scheduleFocus?: { sessionId: string; runId: string } | null;
+  onConsumeScheduleFocus?: () => void;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }
@@ -198,6 +162,8 @@ export function CodingView(p: CodingViewProps) {
   /** Workspace preselected in NewSessionView when opened via a workspace
    *  row's "+" action. Undefined when opened from the header "+" button. */
   const [newForWs, setNewForWs] = useState<string | undefined>(undefined);
+  /** One-shot composer prefill handed to the next NewSessionView mount. */
+  const [newPrefill, setNewPrefill] = useState<string | undefined>(undefined);
   const fallbackRail = useResizableWidth('rail.w', 272, 200, 480, 'left');
   const rail = p.railLayout ?? fallbackRail;
 
@@ -228,6 +194,18 @@ export function CodingView(p: CodingViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.openNewForWorkspace]);
 
+  // Timer's 新建定时任务 CTA: open the new-session page with the guidance
+  // prompt prefilled in the composer (the draft store keeps it if edited).
+  useEffect(() => {
+    if (p.openNewWithMessage == null) return;
+    setNewForWs(undefined);
+    setNewPrefill(p.openNewWithMessage);
+    if (!preserveCreateRun) p.onClearSessionCreateRun();
+    setShowNew(true);
+    p.onConsumeOpenNewWithMessage?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.openNewWithMessage]);
+
   async function verifyUnknownCreate() {
     if (!createUnknown || verifyingCreate) return;
     setVerifyingCreate(true);
@@ -247,6 +225,7 @@ export function CodingView(p: CodingViewProps) {
     // Explicit failures are safe to forget. In-flight and unknown outcomes
     // remain globally interlocked even if the form closes.
     if (!preserveCreateRun) p.onClearSessionCreateRun();
+    setNewPrefill(undefined);
     setShowNew(false);
   };
 
@@ -263,6 +242,7 @@ export function CodingView(p: CodingViewProps) {
   useEffect(() => {
     const open = () => {
       setNewForWs(undefined);
+      setNewPrefill(undefined);
       if (!preserveCreateRun) p.onClearSessionCreateRun();
       setShowNew(true);
     };
@@ -275,38 +255,45 @@ export function CodingView(p: CodingViewProps) {
       className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
-      {/* The rail stays mounted while collapsed so its width can transition
-          (phase 6); `.view.rail-collapsed` shrinks it to zero and disables
-          interaction. As a side benefit, sidebar state (collapsed groups)
-          survives a hide/show cycle. */}
-      <Sidebar
-        mode={p.mode}
-        onSetMode={p.onSetAppMode}
-        onOpenSearch={p.onOpenSearch}
-        workspaces={p.workspaces}
-        sessions={p.sessions}
-        activeSessionId={p.activeSessionId}
-        showNew={showNew}
-        onToggleNew={() => {
-          setNewForWs(undefined);
-          if (!preserveCreateRun) p.onClearSessionCreateRun();
-          setShowNew(v => !v);
-        }}
-        onNewForWorkspace={id => {
-          setNewForWs(id);
-          if (!preserveCreateRun) p.onClearSessionCreateRun();
-          setShowNew(true);
-        }}
-        onPinSession={p.onPinSession}
-        onArchiveSession={p.onArchiveSession}
-        onSelect={id => { resetNewSession(); p.onSelectSession(id); }}
-      />
+      {/* Collapsed (2026-08-31 redesign): the full sidebar swaps for the 38px
+          icon rail (Agents / Timer / Custom / 消息). Group-collapse state is
+          persisted in localStorage, so unmounting the rail loses nothing. */}
+      {rail.collapsed ? (
+        <LeftRail
+          mode={p.mode}
+          listMode="sessions"
+          onSetMode={p.onSetAppMode}
+          onExpand={() => rail.setCollapsed(false)}
+        />
+      ) : (
+        <SessionsSidebar
+          mode={p.mode}
+          onSetMode={p.onSetAppMode}
+          listMode="sessions"
+          onSetListMode={p.onSetAppMode}
+          workspaces={p.workspaces}
+          sessions={p.sessions}
+          activeSessionId={p.activeSessionId}
+          onNewWorkspace={p.onNewWorkspace}
+          onEditWorkspace={p.onEditWorkspace}
+          onNewForWorkspace={id => {
+            setNewForWs(id);
+            setNewPrefill(undefined);
+            if (!preserveCreateRun) p.onClearSessionCreateRun();
+            setShowNew(true);
+          }}
+          onPinSession={p.onPinSession}
+          onArchiveSession={p.onArchiveSession}
+          onSelect={id => { resetNewSession(); p.onSelectSession(id); }}
+        />
+      )}
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize sidebar" />
       {showNew ? (
         <NewSessionView
           key={`workspace:${newForWs ?? 'active'}`}
           workspaces={p.workspaces}
           initialWorkspaceId={newForWs}
+          initialMessage={newPrefill}
           onCancel={resetNewSession}
           onNewWorkspace={p.onNewWorkspace}
           creating={creatingSession}
@@ -369,16 +356,14 @@ export function CodingView(p: CodingViewProps) {
             : undefined}
           onDelete={() => p.onDelete(p.activeSession!.id)}
           onReopen={() => p.onReopenSession(p.activeSession!.id)}
-          onShowChanges={() => p.onShowChanges(p.activeSession!)}
           onShowLastTurnChanges={(turn, path) =>
             p.onShowLastTurnChanges(p.activeSession!, turn, path)}
-          workingTreeId={p.activeWorkingTreeId}
-          branch={p.activeBranch}
           forkAtTurnControl={p.forkAtTurnControl}
+          scheduleFocus={p.scheduleFocus && p.scheduleFocus.sessionId === p.activeSession.id
+            ? { runId: p.scheduleFocus.runId }
+            : null}
+          onConsumeScheduleFocus={p.onConsumeScheduleFocus}
           sideChatControl={p.sideChatControl}
-          originParentName={p.activeSession.origin?.kind === 'fork'
-            ? p.sessions.find(s => s.id === p.activeSession!.origin!.session_id)?.name ?? undefined
-            : undefined}
         />
       ) : (
         <CodingViewEmpty />
@@ -402,380 +387,5 @@ function CodingViewEmpty() {
         </p>
       </div>
     </main>
-  );
-}
-
-function Sidebar({
-  mode,
-  onSetMode,
-  onOpenSearch,
-  workspaces,
-  sessions,
-  activeSessionId,
-  onToggleNew,
-  onNewForWorkspace,
-  onPinSession,
-  onArchiveSession,
-  onSelect,
-}: {
-  mode: Mode;
-  onSetMode: (mode: Mode) => void;
-  onOpenSearch: () => void;
-  workspaces: Workspace[];
-  sessions: Session[];
-  activeSessionId: string | null;
-  showNew: boolean;
-  onToggleNew: () => void;
-  onNewForWorkspace: (workspaceId: string) => void;
-  onPinSession: (sessionId: string, pinned: boolean) => void;
-  onArchiveSession: (sessionId: string) => void;
-  onSelect: (id: string) => void;
-}) {
-  const t = useT();
-
-  const collapsedKey = 'gian.sidebar.collapsed.workspace';
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem(collapsedKey);
-      return new Set<string>(raw ? JSON.parse(raw) : []);
-    } catch { return new Set(); }
-  });
-
-  useEffect(() => {
-    try { localStorage.setItem(collapsedKey, JSON.stringify(Array.from(collapsed))); }
-    catch { /* localStorage full / disabled — non-essential */ }
-  }, [collapsed, collapsedKey]);
-
-  function toggleGroup(key: string) {
-    setCollapsed(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-  }
-
-  function makeRowHandlers(s: Session) {
-    return {
-      active: s.id === activeSessionId,
-      onSelect: () => onSelect(s.id),
-      onPin: (pinned: boolean) => onPinSession(s.id, pinned),
-      onArchive: () => onArchiveSession(s.id),
-    };
-  }
-
-  const wsById = new Map(workspaces.map(w => [w.id, w]));
-
-  const active = sessions.filter(s => s.archived === 0);
-
-  const filtered = active.filter(s => {
-    // The per-Task Manager (type='manager') lives in Tasks mode only — it is
-    // never a row in the Sessions list. Subtasks (type='subtask') DO appear
-    // here: a subtask is a 1:1 session. buildRailSections omits every Session
-    // owned by a hidden Workspace until Settings > Workspaces shows it again.
-    return s.type !== 'manager';
-  });
-
-  // Every session groups by workspace — no "needs you" section pinned to the
-  // top (it overrode workspace grouping). Attention is conveyed per-row via the
-  // StatusIcon (pending/error/unread), not by reordering. Pinned sessions and
-  // pinned workspaces split off into a Codex-style "Pinned" section
-  // (2026-08-03); the rest render under "Projects".
-  const sections = buildRailSections(filtered, workspaces);
-
-  function renderRow(s: Session, drag?: { props: RowDragProps; className: string }) {
-    return (
-      <SessionRow
-        key={s.id}
-        session={s}
-        wsHidden={s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1}
-        drag={drag}
-        {...makeRowHandlers(s)}
-      />
-    );
-  }
-
-  // Drag reorder (2026-08-29): workspace GROUP headers drag within their own
-  // section (pinned groups among pinned, project groups among projects — the
-  // two controllers never cross), and session rows drag within their
-  // workspace group (SidebarGroup owns that controller). Both dispatch
-  // whole-list reorder operations (operations/workspace.ts · session.ts).
-  const dispatch = useOperationDispatchOptional();
-  const reorderWorkspacesByDrag = (dragId: string, targetId: string, place: DropPlace) => {
-    if (!dispatch) return;
-    const current = workspaces.map(w => w.id);
-    const next = moveById(current, dragId, targetId, place);
-    if (next !== current) dispatch('workspace.reorder', { ids: next });
-  };
-  const pinnedWsDnd = useDragReorder(reorderWorkspacesByDrag);
-  const projectWsDnd = useDragReorder(reorderWorkspacesByDrag);
-
-  // The unfiled (无归属) rows drag among themselves — scope 'workspace' with
-  // a NULL parent (see POST /api/sessions/reorder).
-  const unfiledOrder = useSessionOrderOverlay('workspace', null);
-  const unfiledRows = useMemo(
-    () => (unfiledOrder ? orderByIds(sections.unfiled, unfiledOrder) : sections.unfiled),
-    [sections, unfiledOrder],
-  );
-  const unfiledDnd = useDragReorder((dragId, targetId, place) => {
-    if (!dispatch) return;
-    const current = unfiledRows.map(s => s.id);
-    const next = moveById(current, dragId, targetId, place);
-    if (next !== current) {
-      dispatch('session.reorder', { scope: 'workspace', parentId: null, ids: next });
-    }
-  });
-
-  return (
-    <aside className="sidebar">
-      <div className="sb-head">
-        <div className="sb-toprow">
-          <ModeDropdown mode={mode} onSetMode={onSetMode} />
-          <span className="sb-toprow-spacer" />
-          <button
-            type="button"
-            className="sb-iconbtn"
-            data-testid="sb-open-search"
-            aria-label={t('coding.sidebar.search.label')}
-            title={t('coding.sidebar.search.label')}
-            onClick={onOpenSearch}
-          >
-            <SvgIcon d={ICON.search} />
-          </button>
-          <button
-            type="button"
-            className="sb-iconbtn"
-            data-testid="sb-new-session"
-            aria-label={t('coding.sidebar.new')}
-            title={t('coding.sidebar.new')}
-            onClick={onToggleNew}
-          >
-            <SvgIcon d={ICON.plus} />
-          </button>
-        </div>
-      </div>
-
-      <div className="sb-scroll">
-        {/* Section labels only appear once something is pinned — with no
-            pinned content the rail looks exactly like before. */}
-        {sections.hasPinned && (
-          <>
-            <div className="sb-section static" data-testid="sb-section-pinned">
-              <span className="sb-section-label">{t('coding.sidebar.section.pinned')}</span>
-            </div>
-            {sections.pinnedSessions.map(s => renderRow(s))}
-            {sections.pinnedWsIds.map(wsId => (
-              <SidebarGroup
-                key={wsId}
-                wsId={wsId}
-                list={sections.byWs.get(wsId)!}
-                workspace={wsById.get(wsId)}
-                isCollapsed={collapsed.has(wsId)}
-                onToggle={() => toggleGroup(wsId)}
-                onNewForWorkspace={onNewForWorkspace}
-                renderRow={renderRow}
-                groupDrag={{ props: pinnedWsDnd.rowProps(wsId), className: pinnedWsDnd.rowClass(wsId) }}
-              />
-            ))}
-          </>
-        )}
-        {sections.hasPinned && sections.projectWsIds.length > 0 && (
-          <div className="sb-section static" data-testid="sb-section-projects">
-            <span className="sb-section-label">{t('coding.sidebar.section.projects')}</span>
-          </div>
-        )}
-        {sections.projectWsIds.map(wsId => (
-          <SidebarGroup
-            key={wsId}
-            wsId={wsId}
-            list={sections.byWs.get(wsId)!}
-            workspace={wsById.get(wsId)}
-            isCollapsed={collapsed.has(wsId)}
-            onToggle={() => toggleGroup(wsId)}
-            onNewForWorkspace={onNewForWorkspace}
-            renderRow={renderRow}
-            groupDrag={{ props: projectWsDnd.rowProps(wsId), className: projectWsDnd.rowClass(wsId) }}
-          />
-        ))}
-        {/* 无归属: sessions of hidden workspaces stay reachable here instead
-            of disappearing from the rail. Same collapsible affordance as the
-            task 完成 section; the collapse state shares the rail's persisted
-            set under a reserved key. */}
-        {sections.unfiled.length > 0 && (
-          <>
-            <button
-              className="sb-section"
-              onClick={() => toggleGroup(UNFILED_GROUP_KEY)}
-              aria-expanded={!collapsed.has(UNFILED_GROUP_KEY)}
-              data-testid="sb-section-unfiled"
-            >
-              <SvgIcon d={collapsed.has(UNFILED_GROUP_KEY) ? ICON.caretRight : ICON.caretDown} size={12} />
-              <span className="sb-section-label">{t('coding.sidebar.section.unfiled')}</span>
-              <span className="count">{sections.unfiled.length}</span>
-            </button>
-            {!collapsed.has(UNFILED_GROUP_KEY) && unfiledRows.map(s => renderRow(s, {
-              props: unfiledDnd.rowProps(s.id),
-              className: unfiledDnd.rowClass(s.id),
-            }))}
-          </>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-/** One workspace group in the Sessions rail (2026-08-29: extracted from the
- *  Sidebar's renderGroup so the session list can own hooks): the `.sb-group`
- *  header toggles collapse on click and drags for WORKSPACE reorder via the
- *  Sidebar's section controller; its session rows drag WITHIN the group via
- *  this component's own controller (`session.reorder`, scope 'workspace'). */
-function SidebarGroup({
-  wsId,
-  list,
-  workspace,
-  isCollapsed,
-  onToggle,
-  onNewForWorkspace,
-  renderRow,
-  groupDrag,
-}: {
-  wsId: string;
-  /** The group's rail-sorted sessions (all unpinned — pinned rows live in the
-   *  Pinned section, see buildRailSections). */
-  list: Session[];
-  workspace: Workspace | undefined;
-  isCollapsed: boolean;
-  onToggle: () => void;
-  onNewForWorkspace: (workspaceId: string) => void;
-  renderRow: (s: Session, drag?: { props: RowDragProps; className: string }) => React.ReactNode;
-  /** Workspace-level drag (owned by the Sidebar's pinned/projects controller). */
-  groupDrag: { props: RowDragProps; className: string };
-}) {
-  const t = useT();
-  const dispatch = useOperationDispatchOptional();
-  // Session drag reorder within the group: while the run is in flight its
-  // whole-group overlay (the dragged id order) wins over the canonical sort;
-  // on confirm the Host's workspace_order column reproduces it.
-  const orderOverlay = useSessionOrderOverlay('workspace', wsId);
-  const rows = useMemo(
-    () => (orderOverlay ? orderByIds(list, orderOverlay) : list),
-    [list, orderOverlay],
-  );
-  const sessionDnd = useDragReorder((dragId, targetId, place) => {
-    if (!dispatch) return;
-    const current = rows.map(s => s.id);
-    const next = moveById(current, dragId, targetId, place);
-    if (next !== current) {
-      dispatch('session.reorder', { scope: 'workspace', parentId: wsId, ids: next });
-    }
-  });
-  const name = workspace?.name ?? wsId;
-  // Group count = sessions that NEED the user (待处理), not the raw total —
-  // the total says nothing actionable (2026-07-31). Hidden when zero.
-  const attn = list.filter(sessionNeedsAttention).length;
-  return (
-    <div>
-      <div className={`sb-group${groupDrag.className}`} onClick={onToggle} {...groupDrag.props}>
-        <span className="sb-group-ico"><SvgIcon d={isCollapsed ? ICON.folder : ICON.folderOpen} size={14} /></span>
-        <span>{name}</span>
-        {attn > 0 && <span className="count">{attn}</span>}
-        <span className="sb-group-acts">
-          <button
-            type="button"
-            className="sb-act"
-            data-testid={`sb-new-session-${wsId}`}
-            aria-label={t('coding.sidebar.ws.new')}
-            title={t('coding.sidebar.ws.new')}
-            onClick={e => { e.stopPropagation(); onNewForWorkspace(wsId); }}
-          >
-            <SvgIcon d={ICON.plus} size={13} />
-          </button>
-        </span>
-      </div>
-      {!isCollapsed && rows.map(s => renderRow(s, {
-        props: sessionDnd.rowProps(s.id),
-        className: sessionDnd.rowClass(s.id),
-      }))}
-    </div>
-  );
-}
-
-function SessionRow({
-  session, active, wsHidden, onSelect, onPin, onArchive, drag,
-}: {
-  session: Session;
-  active: boolean;
-  wsHidden?: boolean;
-  onSelect: () => void;
-  onPin: (pinned: boolean) => void;
-  onArchive: () => void;
-  /** Drag-reorder wiring (the owning list's controller); absent for the
-   *  standalone pinned rows, which keep their pinned_at order. */
-  drag?: { props: RowDragProps; className: string };
-}) {
-  const t = useT();
-  const pinned = session.pinned_at != null;
-  // Destructive-delete rule (proposal §5): the row stays visible with a
-  // pending affordance until the canonical session:deleted removes it.
-  const deleting = useSessionOperationPending(session.id, 'session.delete');
-  return (
-    <div
-      className={`rail-item session-row${active ? ' active' : ''}${deleting ? ' deleting' : ''}${drag?.className ?? ''}`}
-      data-testid={`session-row-${session.id}`}
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
-      }}
-      {...(drag?.props ?? {})}
-    >
-      <div className="ri-body">
-        <div className="ri-row1">
-          {/* Single-line (Codex-style) row: title only; executor/branch dropped. */}
-          <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
-        </div>
-      </div>
-      {/* Row-end = status glyph when there is one (running/pending/error/unread),
-          else the relative time. Mutually exclusive so the row stays compact. */}
-      {deleting
-        ? <span className="spinner" role="status" aria-label={t('coding.session.deleting')} />
-        : statusGlyphShown(session.status, session.unread === 1 && !active)
-          ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
-          : <span className={`ri-age ${session.executor}`} title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
-      {wsHidden && (
-        <span
-          className="ri-hidden-badge"
-          title={t('coding.session.workspaceHidden')}
-          aria-label={t('coding.session.workspaceHidden.aria')}
-        >
-          <SvgIcon d={ICON.eyeOff} size={11} />
-        </span>
-      )}
-      {/* Hover actions: pin / archive. They cover the row-end glyph on hover
-          (CSS). Pinned rows show no always-on pin glyph — membership in the
-          "Pinned" section already says it (2026-08-03). */}
-      <span className="ri-acts">
-        <button
-          type="button"
-          className="ri-act"
-          data-testid={`session-pin-${session.id}`}
-          aria-label={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
-          title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
-          onClick={e => { e.stopPropagation(); onPin(!pinned); }}
-        >
-          <SvgIcon d={ICON.pin} size={13} filled={pinned} />
-        </button>
-        <button
-          type="button"
-          className="ri-act"
-          data-testid={`session-archive-${session.id}`}
-          aria-label={t('coding.session.archive')}
-          title={t('coding.session.archive')}
-          onClick={e => { e.stopPropagation(); onArchive(); }}
-        >
-          <SvgIcon d={ICON.archive} size={13} />
-        </button>
-      </span>
-    </div>
   );
 }

@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const emittedAt = '2026-04-26T00:00:00.000Z';
+let negotiatedProtocol = '2.0';
 
 function write(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -40,9 +41,14 @@ for await (const line of rl) {
   }
 
   switch (req.method) {
-    case 'initialize':
+    case 'initialize': {
+      const offered = req.params?.protocol?.versions ?? [];
+      const version = offered.includes('2.2') ? '2.2'
+        : offered.includes('2.1') ? '2.1'
+        : offered[0] || '2.0';
+      negotiatedProtocol = version;
       result(req.id, {
-        protocol: { name: 'gian.proxy', version: '2.0' },
+        protocol: { name: 'gian.proxy', version },
         plugin: {
           id: process.env.GIAN_PLUGIN_ID ?? 'claude',
           name: 'Claude Code',
@@ -57,12 +63,14 @@ for await (const line of rl) {
         },
       });
       break;
+    }
     case 'catalog.list':
       result(req.id, {
         catalogRevision: 'claude-fixture-1',
         input: [{ type: 'text' }],
         configOptions: [],
         slashCommands: [],
+        ...(negotiatedProtocol === '2.0' ? {} : { specialCatalogs: {} }),
       });
       break;
     case 'catalog.resolve':

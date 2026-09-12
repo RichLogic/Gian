@@ -1,3 +1,4 @@
+import { drainProcessGroup, processGroupMembers } from './dev-process-group.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -79,18 +80,10 @@ export function resolveDevEnvironment(
   const clean = Object.fromEntries(
     Object.entries(env).filter(([key]) => !key.startsWith('GIAN_')),
   );
-  const proxyEntries = {};
-  for (const key of [
-    'GIAN_CC_PROXY_ENTRY',
-    'GIAN_CODEX_PROXY_ENTRY',
-    'GIAN_KIMI_PROXY_ENTRY',
-    'GIAN_GROK_PROXY_ENTRY',
-    'GIAN_DSH_PROXY_ENTRY',
-    'GIAN_ZCODE_PROXY_ENTRY',
-  ]) {
-    const value = typeof env[key] === 'string' ? env[key].trim() : '';
-    if (value) proxyEntries[key] = value;
-  }
+  const proxyEntries = typeof env.GIAN_DEV_PROXY_ENTRIES === 'string'
+    && env.GIAN_DEV_PROXY_ENTRIES.trim()
+    ? { GIAN_DEV_PROXY_ENTRIES: env.GIAN_DEV_PROXY_ENTRIES.trim() }
+    : {};
   const isolatedDataDir = typeof env.GIAN_DEV_DATA_DIR === 'string'
     ? env.GIAN_DEV_DATA_DIR.trim()
     : '';
@@ -100,6 +93,14 @@ export function resolveDevEnvironment(
   const githubBrokerSocket = join(
     tmpdir(),
     `gian-github-${createHash('sha256').update(identity.runtimeId).digest('hex').slice(0, 24)}.sock`,
+  );
+  const remoteBrokerSocket = join(
+    tmpdir(),
+    `gian-remote-${createHash('sha256').update(identity.runtimeId).digest('hex').slice(0, 24)}.sock`,
+  );
+  const browserBrokerSocket = join(
+    tmpdir(),
+    `gian-browser-${createHash('sha256').update(identity.runtimeId).digest('hex').slice(0, 24)}.sock`,
   );
   return {
     ...clean,
@@ -116,6 +117,8 @@ export function resolveDevEnvironment(
     GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',
     GIAN_GITHUB_CLIENT_ID: githubClientId,
     GIAN_DESKTOP_GITHUB_BROKER_SOCKET: githubBrokerSocket,
+    GIAN_DESKTOP_REMOTE_BROKER_SOCKET: remoteBrokerSocket,
+    GIAN_DESKTOP_BROWSER_BROKER_SOCKET: browserBrokerSocket,
     GIAN_RELEASE_VERSION: releaseVersion,
     GIAN_DEV_RUNTIME_ID: identity.runtimeId,
     GIAN_DEV_WORKTREE: identity.worktree,
@@ -425,12 +428,35 @@ async function stopDesktop(paths) {
   return true;
 }
 
+function legacySupervisorMatches(pid) {
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) return false;
+  const command = result.stdout.trim();
+  return command.endsWith(` ${join(rootDir, 'scripts', 'dev-supervisor.mjs')}`);
+}
+
 async function stopServices(paths) {
   const state = await readJson(paths.servicesState);
-  if (!state?.supervisorPid || !isProcessAlive(state.supervisorPid)) return false;
-  process.kill(state.supervisorPid, 'SIGTERM');
-  const stopped = await waitFor(() => !isProcessAlive(state.supervisorPid), 15_000);
-  if (!stopped) throw new Error(`GianDev supervisor pid ${state.supervisorPid} did not stop`);
+  if (!state) return false;
+  const identity = resolveRuntimeIdentity();
+  if (state.runtimeId !== identity.runtimeId || state.worktree !== identity.worktree) {
+    throw new Error('refusing to stop a foreign GianDev runtime');
+  }
+  if (isProcessAlive(state.supervisorPid)) {
+    const born = processGroupMembers(state.supervisorPid).find(member => member.pid === state.supervisorPid)?.startedAt;
+    if (state.supervisorStartedAt ? born !== state.supervisorStartedAt : !legacySupervisorMatches(state.supervisorPid)) {
+      throw new Error('refusing to stop a reused/unverified GianDev supervisor pid');
+    }
+    process.kill(state.supervisorPid, 'SIGTERM');
+    const stopped = await waitFor(() => !isProcessAlive(state.supervisorPid), 15_000);
+    if (!stopped) throw new Error(`GianDev supervisor pid ${state.supervisorPid} did not stop`);
+  }
+  if (processGroupMembers(state.servicesPid).length > 0) {
+    // Recover only recorded members with matching process birth times. A
+    // recycled PID or a legacy unowned watcher is never silently adopted.
+    await drainProcessGroup(state.servicesPid, { expected: state.serviceGroupMembers ?? [] });
+  }
+  await writeJsonAtomic(paths.servicesState, { ...state, status: 'stopped', servicesPid: null, serviceGroupMembers: [], message: 'stopped by dev:down' });
   return true;
 }
 

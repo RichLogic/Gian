@@ -29,43 +29,40 @@ async function setup(): Promise<TaskCreateCtx> {
   };
 }
 
-async function createSubtask(ctx: TaskCreateCtx, executor: string) {
+async function createSubtask(ctx: TaskCreateCtx, body: Record<string, unknown>) {
   return ctx.appCtx.fetch(`/api/tasks/${ctx.taskId}/subtasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       workspace_id: ctx.workspaceId,
-      executor,
-      name: `subtask-${executor}`,
+      name: 'subtask',
+      ...body,
     }),
   });
 }
 
-test('POST /api/tasks/:id/subtasks accepts dsh instead of treating it as an unknown executor', async () => {
+test('POST /api/tasks/:id/subtasks rejects the legacy executor-only shape', async () => {
   const ctx = await setup();
   try {
-    const response = await createSubtask(ctx, 'dsh');
+    const response = await createSubtask(ctx, { executor: 'dsh' });
     const body = await response.json() as { error?: string };
-    assert.notEqual(
-      body.error,
-      'executor must be claude, codex, kimi, or grok',
-      'DSH Task sessions were rejected by a stale executor allowlist',
-    );
-    if (response.status === 400) {
-      assert.fail(`dsh still rejected at the task route: ${body.error}`);
-    }
+    assert.equal(response.status, 400);
+    assert.equal(body.error, 'agent_id required');
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('POST /api/tasks/:id/subtasks still rejects an unknown executor', async () => {
+test('POST /api/tasks/:id/subtasks forwards explicit Agent identity', async () => {
   const ctx = await setup();
   try {
-    const response = await createSubtask(ctx, 'nope');
+    const response = await createSubtask(ctx, {
+      agent_id: 'missing-agent',
+      executor: 'nope',
+    });
     const body = await response.json() as { error?: string };
-    assert.equal(response.status, 400);
-    assert.match(String(body.error), /executor must be/);
+    assert.equal(response.status, 404);
+    assert.match(String(body.error), /agent not found/);
   } finally {
     await ctx.cleanup();
   }

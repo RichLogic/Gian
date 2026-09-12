@@ -1,7 +1,17 @@
 export const PROTOCOL_NAME = 'gian.proxy' as const;
 export const PROTOCOL_V2 = '2.1' as const;
 export const PROTOCOL_V2_LEGACY = '2.0' as const;
-export const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_V2, PROTOCOL_V2_LEGACY] as const;
+export const PROTOCOL_V22 = '2.2' as const;
+export const PROTOCOL_V23 = '2.3' as const;
+export const NEXT_PROTOCOL_VERSION = PROTOCOL_V23;
+export const KNOWN_PROTOCOL_VERSIONS = [
+  PROTOCOL_V23,
+  PROTOCOL_V22,
+  PROTOCOL_V2,
+  PROTOCOL_V2_LEGACY,
+] as const;
+/** 2.3 extends 2.2 Runtime control with read-only Customization Inventory. */
+export const SUPPORTED_PROTOCOL_VERSIONS = KNOWN_PROTOCOL_VERSIONS;
 
 export const MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024;
 export const MAX_DIFF_UTF8_BYTES = 8 * 1024 * 1024;
@@ -44,6 +54,10 @@ export const OPTIONAL_METHOD_CAPABILITIES = {
   'session.fork': 'session.fork',
   'turn.steer': 'turn.steer',
   'interaction.respond': 'interaction',
+  'runtime.discover': 'runtime.discover',
+  'runtime.probe': 'runtime.probe',
+  'customization.list': 'customization.list',
+  'customization.detail': 'customization.list',
 } as const;
 
 export const CAPABILITY_NAMES = [
@@ -69,7 +83,50 @@ export const CAPABILITY_NAMES = [
   'event.step',
   'event.request',
   'integration.mcp.streamableHttp',
+  'runtime.discover',
+  'runtime.probe',
+  'customization.list',
 ] as const;
+
+export const PROTOCOL_V22_ONLY_CAPABILITIES = [
+  'runtime.discover',
+  'runtime.probe',
+] as const;
+
+export const PROTOCOL_V22_ONLY_METHODS = [
+  'runtime.discover',
+  'runtime.probe',
+] as const;
+
+/** Host-set marker that selects the no-Runtime bootstrap server.
+ *  A real 2.2 Session must never set this. */
+export const RUNTIME_BOOTSTRAP_ENV = 'GIAN_RUNTIME_BOOTSTRAP';
+export const RUNTIME_BOOTSTRAP_VALUE = '1';
+
+export const RUNTIME_CANDIDATE_SOURCES = [
+  'configured',
+  'official-user',
+  'official-system',
+  'path',
+] as const;
+
+export const MAX_RUNTIME_CANDIDATES = 32;
+export const MAX_RUNTIME_SETUP_ACTIONS = 16;
+export const MAX_RUNTIME_CONTENT_ROOTS = 32;
+/** v4-only bound. Do not apply to legacy v2/v3 `verifiedCliVersions`. */
+export const MAX_MANIFEST_V4_VERIFIED_VERSIONS = 32;
+/** v4-only bound. Matches compiled Catalog range text; v2/v3 ranges stay unbounded. */
+export const MAX_MANIFEST_V4_PROTOCOL_RANGE_CHARS = 64;
+/** Shape grammar for compiled/v4 range text. Tokens match protocolRangeIncludes
+ *  (`^`, `~`, `x|X|*`, comparators, pipe, digits, dot, ASCII space). Controls
+ *  and other characters fail closed before semantic exclusivity. */
+export const MANIFEST_V4_PROTOCOL_RANGE_PATTERN = /^[0-9.<>=|^~xX* ]+$/;
+export const MAX_RUNTIME_PATH_CHARS = 4096;
+export const MAX_RUNTIME_LABEL_CHARS = 128;
+export const MAX_RUNTIME_ID_CHARS = 64;
+export const MAX_RUNTIME_MESSAGE_CHARS = 512;
+export const MAX_RUNTIME_CODE_CHARS = 64;
+export const MAX_RUNTIME_URL_CHARS = 1024;
 
 export const CATALOG_ACTION_IDS = [
   'sidechat.create',
@@ -257,6 +314,124 @@ export const DOMAIN_CODES = [
   'INTERNAL',
 ] as const;
 
+// ---------------------------------------------------------------------------
+// Customization Inventory (gian.proxy/2.3, Issue #50)
+// ---------------------------------------------------------------------------
+
+/** Read-only asset kinds a Proxy may inventory. */
+export const CUSTOMIZATION_KINDS = ['skill', 'mcp', 'hook', 'rule'] as const;
+
+/** Per-kind result status. Non-`ok` results always carry empty `items`. */
+export const CUSTOMIZATION_LIST_STATUSES = [
+  'ok',
+  'provider_unsupported',
+  'proxy_unsupported',
+  'unavailable',
+] as const;
+
+/** Honesty about how much of the provider surface the result covers. */
+export const INVENTORY_COMPLETENESS = [
+  'effective',
+  'configured',
+  'partial',
+  'none',
+] as const;
+
+/** Whether an item is usable in a fresh runtime, when the Provider states it. */
+export const CUSTOMIZATION_ACTIVATIONS = [
+  'enabled',
+  'disabled',
+  'shadowed',
+  'pending_trust',
+  'invalid',
+  'unknown',
+] as const;
+
+export const CUSTOMIZATION_SCOPE_LEVELS = [
+  'user',
+  'workspace',
+  'directory',
+  'system',
+  'unknown',
+] as const;
+
+export const CUSTOMIZATION_ORIGIN_KINDS = [
+  'builtin',
+  'user_file',
+  'project_file',
+  'plugin',
+  'managed',
+  'unknown',
+] as const;
+
+export const CUSTOMIZATION_DISCOVERY_METHODS = [
+  'provider_api',
+  'provider_cli',
+  'config_parse',
+  'filesystem_scan',
+] as const;
+
+/** Stable Gian-wide diagnostics codes. Provider-native wording belongs in the
+ *  already-sanitized `message` only, never in `code`. */
+export const CUSTOMIZATION_DIAGNOSTIC_CODES = [
+  'INVENTORY_TRUNCATED',
+  'SOURCE_UNREADABLE',
+  'SOURCE_MALFORMED',
+  'SOURCE_UNTRUSTED',
+  'SOURCE_NOT_ENUMERABLE',
+  'PROVIDER_INSPECTION_FAILED',
+  'EFFECTIVE_STATE_UNRESOLVED',
+  'PROXY_UPGRADE_REQUIRED',
+  'FIELD_REDACTED',
+] as const;
+
+/** Rules-specific status facts. UI wording is owned by the Web layer; the
+ *  wire contract never uses override/fallback terminology. `configured`
+ *  means the file is a declared candidate whose runtime selection cannot be
+ *  proven by this Proxy (e.g. a fallback candidate behind an unreadable
+ *  provider config). */
+export const RULE_EFFECT_STATUSES = [
+  'effective',
+  'imported',
+  'subtree',
+  'inactive',
+  'unreadable',
+  'unknown',
+  'configured',
+] as const;
+
+export const CUSTOMIZATION_SKILL_FORMATS = [
+  'agent-skill',
+  'legacy-command',
+  'provider-builtin',
+  'unknown',
+] as const;
+
+export const CUSTOMIZATION_MCP_TRANSPORTS = [
+  'stdio',
+  'http',
+  'sse',
+  'websocket',
+  'other',
+  'unknown',
+] as const;
+
+export const CUSTOMIZATION_DETAIL_STATUSES = ['ok', 'unavailable'] as const;
+
+/** Stable item id prefix: `ci1_` + 32 lowercase hex chars (128-bit SHA-256
+ *  prefix). Conformance rejects other id spellings. */
+export const CUSTOMIZATION_STABLE_ID_PREFIX = 'ci1_' as const;
+export const CUSTOMIZATION_STABLE_ID_HEX_CHARS = 32 as const;
+
+export const MAX_CUSTOMIZATION_ITEMS = 500;
+export const MAX_CUSTOMIZATION_DIAGNOSTICS = 50;
+export const MAX_CUSTOMIZATION_WARNINGS = 20;
+export const MAX_CUSTOMIZATION_ID_UTF8_BYTES = 128;
+export const MAX_CUSTOMIZATION_NAME_UTF8_BYTES = 256;
+export const MAX_CUSTOMIZATION_TEXT_UTF8_BYTES = 4096;
+export const MAX_CUSTOMIZATION_PATH_UTF8_BYTES = 4096;
+export const MAX_CUSTOMIZATION_DETAIL_UTF8_BYTES = 1024 * 1024;
+
 export const FINGERPRINT_EXCLUDED_FIELDS = [
   'jsonrpc',
   'eventId',
@@ -271,6 +446,17 @@ export const FINGERPRINT_EXCLUDED_FIELDS = [
 export type CoreMethod = typeof CORE_METHODS[number];
 export type OptionalMethod = keyof typeof OPTIONAL_METHOD_CAPABILITIES;
 export type ProxyMethod = CoreMethod | OptionalMethod;
+export type ProtocolV22OnlyCapability = typeof PROTOCOL_V22_ONLY_CAPABILITIES[number];
+export type ProtocolV22OnlyMethod = typeof PROTOCOL_V22_ONLY_METHODS[number];
+export type RuntimeCandidateSource = typeof RUNTIME_CANDIDATE_SOURCES[number];
+
+export function isProtocolV22OnlyMethod(method: string): method is ProtocolV22OnlyMethod {
+  return (PROTOCOL_V22_ONLY_METHODS as readonly string[]).includes(method);
+}
+
+export function isProtocolV22OnlyCapability(name: string): name is ProtocolV22OnlyCapability {
+  return (PROTOCOL_V22_ONLY_CAPABILITIES as readonly string[]).includes(name);
+}
 export type CapabilityName = typeof CAPABILITY_NAMES[number];
 export type CatalogActionId = typeof CATALOG_ACTION_IDS[number];
 export type DomainCode = typeof DOMAIN_CODES[number];
@@ -345,4 +531,11 @@ export function protocolRangeIncludes(range: string, version: string): boolean {
     return comparators.length > 0
       && comparators.every((comparator) => comparatorMatches(comparator, parsed));
   });
+}
+
+/** Manifest v4 includes the 2.2 baseline and excludes legacy 2.1/2.0. */
+export function isManifestV4ExclusiveProtocolRange(range: string): boolean {
+  return protocolRangeIncludes(range, PROTOCOL_V22)
+    && !protocolRangeIncludes(range, PROTOCOL_V2)
+    && !protocolRangeIncludes(range, PROTOCOL_V2_LEGACY);
 }

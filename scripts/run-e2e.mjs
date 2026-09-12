@@ -1,16 +1,21 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync, rmSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const hostDir = join(rootDir, 'packages', 'host');
 const webDir = join(rootDir, 'packages', 'web');
 const janitorPath = join(rootDir, 'scripts', 'e2e-janitor.mjs');
+const proxyAcceptanceCatalog = JSON.parse(readFileSync(
+  join(rootDir, 'test', 'proxy-real-acceptance.json'),
+  'utf8',
+));
 
 function delay(ms) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
@@ -52,11 +57,29 @@ async function reserveE2ePorts() {
 export function createE2eEnvironment(
   source,
   { dataDir, hostPort, webPort },
-  { proxyMock = false } = {},
+  { proxyMock = false, proxyProvider = 'codex' } = {},
 ) {
   const clean = sanitizedTestEnv(source);
   delete clean.FORCE_COLOR;
   delete clean.NO_COLOR;
+  const proxyDefinition = proxyDefinitions.find(definition => definition.id === proxyProvider);
+  if (proxyMock && !proxyDefinition) throw new Error(`Unknown Proxy Mock provider ${proxyProvider}.`);
+  const proxyCapabilities = proxyMock
+    ? proxyAcceptanceCatalog.providers?.[proxyProvider]?.capabilities
+    : null;
+  if (proxyMock && !Array.isArray(proxyCapabilities)) {
+    throw new Error(`Proxy Mock provider ${proxyProvider} has no capability profile.`);
+  }
+  const mockEntry = proxyDefinition
+    ? join(
+      rootDir,
+      'packages',
+      'proxies',
+      proxyDefinition.directory,
+      'scripts',
+      'fake-catalog-ui-proxy.mjs',
+    )
+    : null;
   return {
     ...clean,
     GIAN_DATA_DIR: dataDir,
@@ -70,21 +93,31 @@ export function createE2eEnvironment(
     GIAN_WEB_PORT: String(webPort),
     ...(proxyMock ? {
       GIAN_E2E_PROXY_MOCK: '1',
-      GIAN_CODEX_PROXY_ENTRY: join(
-        rootDir,
-        'packages',
-        'proxies',
-        'codex-proxy',
-        'scripts',
-        'fake-catalog-ui-proxy.mjs',
-      ),
-      // The mock never executes the vendor binary. Git is an existing,
-      // executable fixture whose `--version` output contains a plain SemVer,
-      // so Agent discovery can exercise the normal readiness path without
-      // touching Codex or consuming a model turn.
-      CODEX_BIN: '/usr/bin/git',
+      GIAN_E2E_PROXY_PROVIDER: proxyProvider,
+      GIAN_E2E_PROXY_AGENT_ID: `e2e-${proxyDefinition.id}-agent`,
+      GIAN_E2E_PROXY_PLUGIN_ID: proxyDefinition.pluginId,
+      GIAN_E2E_PROXY_PROCESS_SCOPE: proxyDefinition.manifest.process.scope,
+      GIAN_E2E_PROXY_CAPABILITIES: JSON.stringify(proxyCapabilities),
+      GIAN_DEV_PROXY_ENTRIES: JSON.stringify({ [proxyDefinition.pluginId]: mockEntry }),
+      GIAN_DEV_PROXY_OVERRIDES_ONLY: '1',
     } : {}),
   };
+}
+
+export async function seedProxyMockAgent(dataDir, proxyProvider = 'codex') {
+  const definition = proxyDefinitions.find(item => item.id === proxyProvider);
+  if (!definition) throw new Error(`Unknown Proxy Mock provider ${proxyProvider}.`);
+  await writeFile(join(dataDir, 'agents.json'), `${JSON.stringify({
+    schemaVersion: 4,
+    agents: [{
+      id: `e2e-${definition.id}-agent`,
+      name: `${definition.manifest.displayName} E2E`,
+      pluginId: definition.pluginId,
+      proxy: null,
+      cliPath: definition.manifest.runtime.kind === 'none' ? null : '/usr/bin/git',
+      defaults: { model: '', thinking: '', mode: '' },
+    }],
+  }, null, 2)}\n`, 'utf8');
 }
 
 function startProcess(args, { cwd, env }) {
@@ -203,14 +236,24 @@ function interruptedExitCode(signal) {
 export async function main(args = process.argv.slice(2)) {
   const proxyMock = args.includes('--proxy-mock');
   args = args.filter(arg => arg !== '--proxy-mock');
+  const providerIndex = args.indexOf('--proxy-provider');
+  const proxyProvider = providerIndex >= 0 ? args[providerIndex + 1] : 'codex';
+  if (providerIndex >= 0) {
+    if (!proxyProvider) throw new Error('--proxy-provider requires a value');
+    args.splice(providerIndex, 2);
+  }
+  if (proxyMock && !shippingProxyIds.includes(proxyProvider)) {
+    throw new Error(`Proxy Mock provider must be shipping: ${proxyProvider}.`);
+  }
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-e2e-'));
   startJanitor(dataDir);
   const [hostPort, webPort] = await reserveE2ePorts();
   const env = createE2eEnvironment(
     process.env,
     { dataDir, hostPort, webPort },
-    { proxyMock },
+    { proxyMock, proxyProvider },
   );
+  if (proxyMock) await seedProxyMockAgent(dataDir, proxyProvider);
   const command = pnpmInvocation(['exec', 'playwright', 'test', ...args]);
   let host;
   let playwright;

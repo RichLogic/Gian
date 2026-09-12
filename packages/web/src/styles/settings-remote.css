@@ -1,0 +1,195 @@
+/* Settings › Remote (WP5) — enrollment, pairing grant, devices, audit.
+   Builds on the settings-v3 card/kv language; only the Remote-specific bits
+   (QR block, short code, fingerprint, device rows, audit table) live here. */
+
+.rs-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.rs-value {
+  font: var(--fz-12)/1.4 var(--font-sans);
+  color: var(--text);
+  word-break: break-word;
+}
+
+.s2-card dd .hint {
+  display: block;
+  margin-top: 5px;
+}
+
+.rs-warn {
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--r-1);
+  padding: 12px 14px;
+}
+
+.rs-warn-title {
+  margin: 0 0 6px;
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+}
+
+.rs-warn p {
+  margin: 0 0 10px;
+  font: var(--fz-12)/1.5 var(--font-sans);
+  color: var(--text-2);
+}
+
+.rs-fingerprint,
+.rs-code {
+  font-family: var(--font-mono);
+  font-size: var(--fz-12);
+  color: var(--text);
+  word-break: break-all;
+}
+
+.rs-pair-grant {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.rs-qr {
+  width: 148px;
+  height: 148px;
+  padding: 6px;
+  background: #fff;
+  border-radius: var(--r-1);
+  box-shadow: inset 0 0 0 1px var(--surface-2);
+  flex: none;
+}
+
+.rs-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.rs-pair-side {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rs-pair-field {
+  display: grid;
+  gap: 3px;
+}
+
+.rs-pair-label {
+  font: var(--fz-12)/1.3 var(--font-sans);
+  color: var(--text-3);
+}
+
+.rs-code {
+  font-size: 20px;
+  letter-spacing: 0.08em;
+}
+
+.rs-countdown {
+  font: var(--fz-13)/1.3 var(--font-mono);
+  color: var(--text);
+}
+
+.rs-claim-modal {
+  max-width: 460px;
+}
+
+.rs-claim-grid {
+  margin: 10px 0;
+}
+
+.rs-device-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.rs-device {
+  border: 1px solid var(--surface-2);
+  border-radius: var(--r-1);
+  padding: 10px 12px;
+}
+
+.rs-device.revoked {
+  opacity: 0.65;
+}
+
+.rs-device-id {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.rs-device-name {
+  font: 600 var(--fz-13)/1.3 var(--font-sans);
+  color: var(--text);
+}
+
+.rs-device-platform {
+  font: var(--fz-12)/1.3 var(--font-sans);
+  color: var(--text-3);
+}
+
+.rs-device-meta {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+}
+
+.rs-device-meta div {
+  display: grid;
+  gap: 2px;
+}
+
+.rs-device-meta dt {
+  font: var(--fz-12)/1.3 var(--font-sans);
+  color: var(--text-3);
+}
+
+.rs-device-meta dd {
+  margin: 0;
+  font: var(--fz-12)/1.3 var(--font-sans);
+  color: var(--text);
+}
+
+.rs-device-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.rs-audit {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font: var(--fz-12)/1.4 var(--font-sans);
+}
+
+.rs-audit th {
+  text-align: left;
+  color: var(--text-3);
+  font-weight: 500;
+  padding: 4px 8px 4px 0;
+}
+
+.rs-audit td {
+  padding: 4px 8px 4px 0;
+  color: var(--text);
+  border-top: 1px solid var(--surface-2);
+}
+
+.rs-audit-empty {
+  margin-top: 10px;
+}
+.rs-live-actions { border: 0; padding: 0; margin: 0; min-width: 0; }
+.rs-public-url { margin-top: 16px; }
+.rs-public-url .input { flex: 1; min-width: 0; }

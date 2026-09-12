@@ -95,7 +95,6 @@ function props(overrides: Partial<CodingViewProps> = {}): CodingViewProps {
   return {
     mode: 'sessions',
     onSetAppMode: vi.fn(),
-    onOpenSearch: vi.fn(),
     workspaces: [workspace],
     sessions: [existingSession],
     activeSession: null,
@@ -110,6 +109,7 @@ function props(overrides: Partial<CodingViewProps> = {}): CodingViewProps {
     onRetryHistory: vi.fn(),
     onSelectSession: vi.fn(),
     onNewWorkspace: vi.fn(),
+    onEditWorkspace: vi.fn(),
     onCreateSession: vi.fn(() => pendingRun),
     creatingSession: false,
     onClearSessionCreateRun: vi.fn(),

@@ -36,6 +36,7 @@ import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 const AGENT: UserAgent = {
   id: 'agent-claude-review',
   name: 'Claude Review',
+  pluginId: 'claude',
   proxy: 'claude',
   cliPath: null,
   defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },

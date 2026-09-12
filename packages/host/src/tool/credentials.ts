@@ -14,7 +14,32 @@ const INTERNAL_RENEWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 const DUMMY_HASH = createHash('sha256').update('gian-tool-invalid-credential').digest();
 const KNOWN_METHODS = new Set<string>(GIAN_TOOL_METHODS);
 const ADMIN_ONLY_METHODS = new Set<GianToolMethod>(['task.create', 'task.update']);
-const INTERNAL_ONLY_METHODS = new Set<GianToolMethod>(['worktree.create_and_bind']);
+// schedule.* is conversation-bound: only internal Gian Sessions may hold the
+// grants; external controllers manage Schedules via the Desktop REST API.
+const INTERNAL_ONLY_METHODS = new Set<GianToolMethod>([
+  'worktree.create_and_bind',
+  'browser.tabs',
+  'browser.open',
+  'browser.snapshot',
+  'browser.click',
+  'browser.fill',
+  'browser.press',
+  'browser.wait',
+  'browser.evaluate',
+  'browser.screenshot',
+  'browser.go_back',
+  'browser.reload',
+  'browser.close',
+  'schedule.preview',
+  'schedule.create',
+  'schedule.list',
+  'schedule.get',
+  'schedule.update',
+  'schedule.pause',
+  'schedule.resume',
+  'schedule.run_now',
+  'schedule.archive',
+]);
 
 export type GianToolRole = 'standard' | 'admin';
 
@@ -259,7 +284,7 @@ export class GianToolCredentialManager {
     const requested = input.grants
       ?? defaultGianToolGrants(role).filter(method => !INTERNAL_ONLY_METHODS.has(method));
     if (requested.some(method => INTERNAL_ONLY_METHODS.has(method))) {
-      throw new Error('worktree.create_and_bind requires an internal Session credential');
+      throw new Error('requested Gian Tool method requires an internal Session credential');
     }
     return this.issue({
       kind: 'external_controller',

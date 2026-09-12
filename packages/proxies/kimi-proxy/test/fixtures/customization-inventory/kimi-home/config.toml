@@ -1,0 +1,12 @@
+model = "kimi-k2"
+extra_skill_dirs = ["~/kimi-team-skills", "team-skills"]
+
+[[hooks]]
+event = "PreToolUse"
+matcher = "Bash(git *)"
+command = "./scripts/guard.sh --token kimi-hook-canary"
+timeout = 10
+
+[[hooks]]
+event = "Notification"
+command = "terminal-notifier -title Kimi -message 'Done'"

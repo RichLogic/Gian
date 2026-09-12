@@ -131,13 +131,38 @@ test('MCP validates and dispatches all methods through the local RPC client', as
     'session.cancel_delivery': { delivery_id: 'delivery-1' },
     'session.wait': { session_id: 'session-1', timeout_ms: 0 },
     'session.stop': { session_id: 'session-1' },
+    'queue.update': { session_id: 'session-1', queue_id: 'queue-1', text: 'Edited' },
+    'queue.remove': { session_id: 'session-1', queue_id: 'queue-1' },
+    'queue.clear': { session_id: 'session-1' },
+    'queue.send_now': { session_id: 'session-1' },
     'worktree.create_and_bind': { branch: 'feat/managed-view', base_ref: 'HEAD' },
+    'browser.tabs': {},
+    'browser.open': { url: 'https://example.com' },
+    'browser.snapshot': { tab_id: 'tab-1' },
+    'browser.click': { tab_id: 'tab-1', snapshot_id: 'snapshot-1', ref: '@e1' },
+    'browser.fill': { tab_id: 'tab-1', snapshot_id: 'snapshot-1', ref: '@e1', text: 'hello' },
+    'browser.press': { tab_id: 'tab-1', key: 'Enter' },
+    'browser.wait': { tab_id: 'tab-1' },
+    'browser.evaluate': { tab_id: 'tab-1', expression: 'document.title' },
+    'browser.screenshot': { tab_id: 'tab-1' },
+    'browser.go_back': { tab_id: 'tab-1' },
+    'browser.reload': { tab_id: 'tab-1' },
+    'browser.close': { tab_id: 'tab-1' },
     'interaction.list': {},
     'interaction.respond': {
       session_id: 'session-1',
       interaction_id: 'interaction-1',
       decision: 'allow_once',
     },
+    'schedule.preview': { trigger: { kind: 'cron', expression: '30 9 * * *' }, timezone: 'UTC' },
+    'schedule.create': { name: 'MCP schedule', prompt: 'p', trigger: { kind: 'cron', expression: '30 9 * * *' }, timezone: 'UTC', confirmation_timeout_ms: 5_000 },
+    'schedule.list': {},
+    'schedule.get': { schedule_id: 'schedule-1' },
+    'schedule.update': { schedule_id: 'schedule-1', expected_revision: 1, name: 'Renamed' },
+    'schedule.pause': { schedule_id: 'schedule-1' },
+    'schedule.resume': { schedule_id: 'schedule-1' },
+    'schedule.run_now': { schedule_id: 'schedule-1' },
+    'schedule.archive': { schedule_id: 'schedule-1' },
   };
 
   for (const [index, method] of GIAN_TOOL_METHODS.entries()) {
@@ -205,4 +230,29 @@ test('MCP returns Host errors as MCP tool errors without rewriting the envelope'
   assert.equal(result.isError, true);
   assert.deepEqual(result.structuredContent, hostResult);
   assert.deepEqual(JSON.parse(result.content[0].text), hostResult);
+});
+
+test('approved Browser screenshots use an MCP image block without duplicating pixels into JSON', async () => {
+  const result = await dispatchGianMcpTool({
+    method: 'browser.screenshot',
+    args: { tab_id: 'tab-1' },
+    requestId: 'browser-shot',
+    hostRequestId: () => 'browser-shot',
+    dataDir: '/tmp/gian-mcp-test',
+    callerId: 'internal-session:session-1',
+    call: async () => ({
+      ok: true,
+      request_id: 'browser-shot',
+      data: {
+        tab_id: 'tab-1',
+        mime_type: 'image/png',
+        base64: 'cG5n',
+        width: 800,
+        height: 600,
+      },
+    }),
+  });
+  assert.deepEqual(result.content[1], { type: 'image', data: 'cG5n', mimeType: 'image/png' });
+  assert.equal(JSON.stringify(result.structuredContent).includes('cG5n'), false);
+  assert.equal(result.structuredContent.data.width, 800);
 });

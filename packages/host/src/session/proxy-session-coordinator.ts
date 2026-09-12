@@ -1,16 +1,21 @@
-import type {
-  AgentProxyDefaults,
-  ConfigOption,
-  ConfigValue,
-  Executor,
-  ExecutorConfigState,
-  NativeConfigOption,
-  ProxyCatalog,
-  ProxyNotification,
-  ResolvedProxyCatalog,
-  Session,
-  SessionAvailableActions,
-  SlashListResult,
+import {
+  isSessionProxyBinding,
+  sessionAllowsLegacyRuntimeFallback,
+  sessionBoundRuntimeCliPath,
+  sessionExactBindingError,
+  sessionProxyPluginVersion,
+  type AgentProxyDefaults,
+  type ConfigOption,
+  type ConfigValue,
+  type Executor,
+  type ExecutorConfigState,
+  type NativeConfigOption,
+  type ProxyCatalog,
+  type ProxyNotification,
+  type ResolvedProxyCatalog,
+  type Session,
+  type SessionAvailableActions,
+  type SlashListResult,
 } from '@gian/shared';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
@@ -26,6 +31,12 @@ import type {
   GianSessionHostServiceIssuer,
   GianSessionHostServiceLease,
 } from '../tool/session-host-services.js';
+import {
+  assertHandshakeMatchesBinding,
+  SessionBindingError,
+  type PreparedSessionLaunch,
+  type SessionBindingPlanner,
+} from './binding-planner.js';
 
 export interface BringUpProxySessionInput {
   sessionId: string;
@@ -45,6 +56,7 @@ export interface BringUpProxySessionInput {
   displayName?: string | null;
   sessionConfig?: Record<string, string | boolean | number | null>;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
+  preparedLaunch?: PreparedSessionLaunch;
 }
 
 export interface BringUpProxySessionResult {
@@ -126,6 +138,7 @@ export class ProxySessionCoordinator {
     /** Resolves a session's owning Agent CLI path for rehydrate/refresh. */
     private resolveCliPath?: (executor: Executor, session?: Session) => string | null,
     private hostServices?: GianSessionHostServiceIssuer,
+    private bindingPlanner?: SessionBindingPlanner,
   ) {
     this.sessionStore = sessions;
     void watcher;
@@ -162,7 +175,10 @@ export class ProxySessionCoordinator {
     const cliPath = session
       ? this.resolveCliPath?.(session.executor, session) ?? null
       : null;
-    this.catalogByExecutor.set(catalogKey(client.executor, cliPath), catalog);
+    this.catalogByExecutor.set(
+      catalogKey(client.executor ?? session?.executor ?? client.pluginId ?? 'unknown', cliPath),
+      catalog,
+    );
   }
 
   forget(sessionId: string): void {
@@ -204,19 +220,56 @@ export class ProxySessionCoordinator {
       .get(session.workspace_id) as { path: string } | undefined;
     if (!workspace) throw new Error(`workspace missing for session ${session.id}`);
 
+    const bindingError = sessionExactBindingError(session);
+    if (bindingError) {
+      throw Object.assign(
+        new Error(`Session exact Proxy binding is unusable (${bindingError}).`),
+        { code: 'PROXY_BINDING_UNUSABLE' },
+      );
+    }
+
+    let capturedLegacyLaunch: PreparedSessionLaunch | undefined;
+    let preparedLaunch: PreparedSessionLaunch | undefined;
+    if (isSessionProxyBinding(session.proxy_binding) && this.bindingPlanner) {
+      preparedLaunch = await this.bindingPlanner.prepareExact(session.proxy_binding);
+    } else if (sessionAllowsLegacyRuntimeFallback(session) && this.bindingPlanner) {
+      try {
+        capturedLegacyLaunch = await this.bindingPlanner.captureLegacyAttach({
+          pluginId: session.proxy_plugin_id ?? session.executor,
+          agentId: session.agent_id ?? session.id,
+          selectedPath: sessionBoundRuntimeCliPath(session)
+            ?? this.resolveCliPath?.(session.executor, session)
+            ?? null,
+          runtimeProfile: session.runtime_profile,
+        }) ?? undefined;
+        preparedLaunch = capturedLegacyLaunch;
+      } catch (error) {
+        if (!(error instanceof SessionBindingError) || ![
+          'BINDING_RUNTIME_PROFILE_REQUIRED',
+          'BINDING_RUNTIME_PATH_REQUIRED',
+        ].includes(error.code)) {
+          throw error;
+        }
+        // A legacy row without enough saved Runtime facts may still use the
+        // compatibility adapter, but must remain unbound rather than snapshot
+        // whichever provider default happens to resolve today.
+      }
+    }
     const result = await this.bringUp({
       sessionId: session.id,
       executor: session.executor,
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
-      cliPath: session.runtime_profile?.cliPath
-        ?? this.resolveCliPath?.(session.executor, session)
-        ?? null,
-      proxyVersion: session.runtime_profile?.proxyVersion ?? null,
+      cliPath: sessionBoundRuntimeCliPath(session)
+        ?? (sessionAllowsLegacyRuntimeFallback(session)
+          ? this.resolveCliPath?.(session.executor, session) ?? null
+          : null),
+      proxyVersion: sessionProxyPluginVersion(session),
       nativeSessionId: session.native_session_id,
       forkBoundaries: persistedForkBoundaries(this.db, session.id),
       executorConfig: session.executor_config,
       displayName: session.name,
+      ...(preparedLaunch ? { preparedLaunch } : {}),
       ...(session.executor === 'codex'
         ? {
             hostServiceIdentity: {
@@ -240,10 +293,28 @@ export class ProxySessionCoordinator {
         ? [JSON.stringify(remapped), JSON.stringify(result.availableActions), now, session.id]
         : [JSON.stringify(remapped), now, session.id]),
     );
+    if (capturedLegacyLaunch) {
+      this.db.prepare(
+        'UPDATE sessions SET proxy_binding_json = ?, runtime_profile_json = ?, updated_at = ? WHERE id = ? AND proxy_binding_json IS NULL',
+      ).run(
+        JSON.stringify(capturedLegacyLaunch.sessionBinding),
+        capturedLegacyLaunch.sessionBinding.runtimeProfile
+          ? JSON.stringify(capturedLegacyLaunch.sessionBinding.runtimeProfile)
+          : null,
+        now,
+        session.id,
+      );
+    }
     this.callbacks.onSessionUpdated(session.id, {
       executor_config: remapped,
       native_config_options: result.configOptions,
       ...(result.availableActions ? { available_actions: result.availableActions } : {}),
+      ...(capturedLegacyLaunch
+        ? {
+          proxy_binding: capturedLegacyLaunch.sessionBinding,
+          runtime_profile: capturedLegacyLaunch.sessionBinding.runtimeProfile,
+        }
+        : {}),
       updated_at: now,
     });
     return result.proxySessionId;
@@ -251,15 +322,52 @@ export class ProxySessionCoordinator {
 
   async bringUp(args: BringUpProxySessionInput): Promise<BringUpProxySessionResult> {
     const cliPath = args.cliPath ?? null;
-    const client = await this.proxy.getOrCreate(args.sessionId, args.executor, {
-      cliPath,
-      proxyVersion: args.proxyVersion ?? null,
-    });
+    let client: ProxyClient;
+    if (args.preparedLaunch) {
+      try {
+        client = await this.proxy.acquireWithBinding(
+          args.sessionId,
+          args.preparedLaunch.launchBinding,
+          { acquireLease: args.preparedLaunch.acquireLease },
+        );
+      } catch (error) {
+        try {
+          await args.preparedLaunch.releaseUnusedLease();
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            'Proxy acquisition failed and its unused Runtime lease could not be released.',
+          );
+        }
+        throw error;
+      }
+      try {
+        await args.preparedLaunch.releaseUnusedLease();
+      } catch (error) {
+        try {
+          await this.proxy.dispose(args.sessionId);
+        } catch (disposeError) {
+          throw new AggregateError(
+            [error, disposeError],
+            'Unused Runtime lease release and Proxy disposal both failed.',
+          );
+        }
+        throw error;
+      }
+    } else {
+      client = await this.proxy.getOrCreate(args.sessionId, args.executor, {
+        cliPath,
+        proxyVersion: args.proxyVersion ?? null,
+      });
+    }
     // Replace any stale callbacks before the new facade starts initialization.
     // Native create/adopt may emit notifications or exit before createSession
     // resolves, so binding only at the end of bring-up would lose that state.
     this.bind(args.sessionId, client);
     const initialized = await client.initialize();
+    if (args.preparedLaunch) {
+      assertHandshakeMatchesBinding(initialized, args.preparedLaunch.sessionBinding);
+    }
     this.rememberProtocolCapabilities(catalogKey(args.executor, cliPath), initialized);
     const catalog = await client.catalog();
     this.catalogByExecutor.set(catalogKey(args.executor, cliPath), catalog);
@@ -484,7 +592,7 @@ export class ProxySessionCoordinator {
   }
 
   async listSlashCommands(
-    executor: 'codex' | 'claude',
+    executor: Executor,
     _cwd?: string,
     cliPath?: string | null,
   ): Promise<SlashListResult> {

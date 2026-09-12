@@ -105,33 +105,6 @@ export function useNewWorkspace(onChange: () => void) {
   return { open, setOpen, form, setForm, saving, cloning, error, submit, clone, reset };
 }
 
-export function NewWorkspacePanel({
-  onChange,
-  onClose,
-}: {
-  onChange: () => void;
-  onClose: () => void;
-}) {
-  const workspace = useNewWorkspace(() => {
-    onChange();
-    onClose();
-  });
-  return (
-    <div className="ws-new-panel">
-      <NewWorkspaceForm
-        form={workspace.form}
-        saving={workspace.saving}
-        cloning={workspace.cloning}
-        error={workspace.error}
-        onChange={patch => workspace.setForm(previous => ({ ...previous, ...patch }))}
-        onSubmit={workspace.submit}
-        onClone={workspace.clone}
-        onCancel={onClose}
-      />
-    </div>
-  );
-}
-
 export function NewWorkspaceForm({
   form,
   saving,
@@ -172,7 +145,7 @@ export function NewWorkspaceForm({
         </div>
         <input
           className="input"
-          aria-label="Workspace name"
+          aria-label="Repo name"
           placeholder="my-project"
           value={form.name}
           onChange={event => onChange({ name: event.target.value, nameTouched: true })}
@@ -188,7 +161,7 @@ export function NewWorkspaceForm({
         <div className="wsn-row">
           <input
             className="input"
-            aria-label="Workspace path"
+            aria-label="Repo path"
             placeholder="/Users/you/Code/some-project"
             value={form.path}
             onChange={event => changePath(event.target.value)}

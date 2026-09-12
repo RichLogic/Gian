@@ -24,7 +24,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
 export type BrowserNotificationPermission = NotificationPermission | 'unsupported';
 
 export function visibleSessionForNativeNotification(input: {
-  mode: 'sessions' | 'tasks' | 'spaces';
+  mode: 'sessions' | 'tasks' | 'spaces' | 'agents' | 'timer' | 'custom';
   viewState: 'main' | 'both' | 'workbench';
   activeSessionId: string | null;
   activeSubtaskId: string | null;
@@ -34,6 +34,8 @@ export function visibleSessionForNativeNotification(input: {
   // the session behind them. In `both`, the Session remains visibly present.
   if (input.viewState === 'workbench') return null;
   if (input.mode === 'sessions') return input.activeSessionId;
+  // Timer shows no conversation surface — the schedule detail is not the
+  // control Session, so a notification for it must not be suppressed.
   if (
     input.mode === 'tasks'
     && input.activeSubtaskId
@@ -97,21 +99,19 @@ export async function requestDesktopNotificationPermission(): Promise<BrowserNot
   return Notification.requestPermission();
 }
 
-function sessionLabel(session: Pick<Session, 'name' | 'executor'> | null | undefined): string {
+function sessionLabel(
+  session: Pick<Session, 'name' | 'agent_name'> | null | undefined,
+): string {
   if (!session) return 'Session';
   const name = session.name?.trim();
   if (name) return name;
-  if (session.executor === 'codex') return 'Codex session';
-  if (session.executor === 'kimi') return 'Kimi session';
-  if (session.executor === 'grok') return 'Grok session';
-  if (session.executor === 'dsh') return 'DeepSeek Harness session';
-  if (session.executor === 'zcode') return 'ZCode session';
-  return 'Claude session';
+  const agentName = session.agent_name?.trim();
+  return agentName || 'Session';
 }
 
 function notificationForEnvelope(
   env: EventEnvelope,
-  session: Pick<Session, 'name' | 'executor'> | null | undefined,
+  session: Pick<Session, 'name' | 'agent_name'> | null | undefined,
   prefs: NotificationPrefs,
 ): { title: string; body: string; tag: string } | null {
   const label = sessionLabel(session);
@@ -151,7 +151,7 @@ function notificationForEnvelope(
 export function maybeNotifyForEnvelope(
   env: EventEnvelope,
   options: {
-    session?: Pick<Session, 'name' | 'executor'> | null;
+    session?: Pick<Session, 'name' | 'agent_name'> | null;
     onClick?: () => void;
   } = {},
 ): boolean {

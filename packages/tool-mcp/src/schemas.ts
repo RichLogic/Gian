@@ -1,4 +1,4 @@
-import { EXECUTOR_IDS, GIAN_TOOL_METHODS, type GianToolMethod } from '@gian/shared';
+import { GIAN_TOOL_METHODS, type GianToolMethod } from '@gian/shared';
 
 export type GianMcpToolName = GianToolMethod | 'gian_call';
 
@@ -18,13 +18,20 @@ export interface GianMcpToolDefinition {
     readOnlyHint: boolean;
     destructiveHint: boolean;
     idempotentHint: boolean;
-    openWorldHint: false;
+    openWorldHint: boolean;
   };
 }
 
 const id = (description: string): Record<string, unknown> => ({
   type: 'string',
   minLength: 1,
+  description,
+});
+const pluginId = (description: string): Record<string, unknown> => ({
+  type: 'string',
+  minLength: 1,
+  maxLength: 128,
+  pattern: '^(?:claude|codex|kimi|grok|[a-z0-9]+(?:[.-][a-z0-9]+)+)$',
   description,
 });
 const nullableString = (description: string): Record<string, unknown> => ({
@@ -72,6 +79,39 @@ const idempotency: Record<string, unknown> = {
   maxLength: 256,
   description: 'Stable unique key for this intended write. Reuse it only to retry the exact same call.',
 };
+const triggerParam: Record<string, unknown> = {
+  oneOf: [
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'at'],
+      properties: {
+        kind: { const: 'once' },
+        at: { type: 'string', description: 'RFC 3339 instant with Z or explicit offset.' },
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'expression'],
+      properties: {
+        kind: { const: 'cron' },
+        expression: { type: 'string', description: 'Standard 5-field cron: minute hour day-of-month month day-of-week.' },
+      },
+    },
+    {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'every_ms', 'anchor_at'],
+      properties: {
+        kind: { const: 'interval' },
+        every_ms: { type: 'integer', minimum: 300000, maximum: 31536000000, description: 'Interval in ms (>= 5 minutes).' },
+        anchor_at: { type: 'string', description: 'RFC 3339 instant anchoring the interval grid.' },
+      },
+    },
+  ],
+  description: 'Trigger definition: once {at} | cron {expression} | interval {every_ms, anchor_at}. Minimum pace is 5 minutes.',
+};
 
 function input(
   properties: Record<string, Record<string, unknown>>,
@@ -91,6 +131,7 @@ function read(
   name: GianToolMethod,
   description: string,
   inputSchema: GianMcpInputSchema,
+  openWorldHint = false,
 ): GianMcpToolDefinition {
   return {
     name,
@@ -100,7 +141,7 @@ function read(
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
-      openWorldHint: false,
+      openWorldHint,
     },
   };
 }
@@ -110,6 +151,7 @@ function write(
   description: string,
   inputSchema: GianMcpInputSchema,
   destructiveHint = false,
+  openWorldHint = false,
 ): GianMcpToolDefinition {
   inputSchema.properties.idempotency_key = idempotency;
   inputSchema.required = [...(inputSchema.required ?? []), 'idempotency_key'];
@@ -121,7 +163,26 @@ function write(
       readOnlyHint: false,
       destructiveHint,
       idempotentHint: true,
-      openWorldHint: false,
+      openWorldHint,
+    },
+  };
+}
+
+function action(
+  name: GianToolMethod,
+  description: string,
+  inputSchema: GianMcpInputSchema,
+  openWorldHint = false,
+): GianMcpToolDefinition {
+  return {
+    name,
+    description,
+    inputSchema,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint,
     },
   };
 }
@@ -154,7 +215,7 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     task_id: nullableString('Task ID filter; null selects unassigned Sessions.'),
     workspace_id: nullableString('Workspace ID filter.'),
     agent_id: nullableString('Agent ID filter.'),
-    proxy: enumValue([...EXECUTOR_IDS], 'Underlying Proxy filter.'),
+    proxy: pluginId('Underlying Proxy pluginId filter.'),
     status: enumArray(['new', 'running', 'pending', 'error', 'done'], 'Session statuses.'),
     archived: enumValue(['active', 'archived', 'all'], 'Archive filter.'),
     limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Maximum rows.' },
@@ -178,6 +239,7 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     session_id: id('Session ID.'),
     name: id('New Session name.'),
     config,
+    expected_session_revision: id('Optional Session revision for compare-and-write.'),
   }, ['session_id'], [{ required: ['name'] }, { required: ['config'] }])),
   write('session.assign_task', 'Assign an existing Session to an open Task.', input({
     session_id: id('Session ID.'),
@@ -195,6 +257,18 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     session_id: id('Session ID.'),
     text: id('User message.'),
     busy: enumValue(['queue', 'fail', 'steer'], 'Behavior when a Turn is active.'),
+    items: {
+      type: 'array',
+      description: 'Optional structured input items. Host ownership checks still apply.',
+    },
+    context_items: {
+      type: 'array',
+      description: 'Optional message context items.',
+    },
+    composer_document: {
+      type: 'object',
+      description: 'Optional composer document compiled with the message text.',
+    },
   }, ['session_id', 'text'])),
   write('session.cancel_delivery', 'Cancel a queued delivery before its Turn starts.', input({
     delivery_id: id('Delivery ID returned by session.send.'),
@@ -206,7 +280,31 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
     timeout_ms: { type: 'integer', minimum: 0, maximum: 45000, description: 'Wait limit in milliseconds.' },
   }, ['session_id'])),
   write('session.stop', 'Stop the active Turn; succeeds as a no-op when already idle.',
-    input({ session_id: id('Session ID.') }, ['session_id']), true),
+    input({
+      session_id: id('Session ID.'),
+      expected_session_revision: id('Optional Session revision for compare-and-write.'),
+    }, ['session_id']), true),
+  write('queue.update', 'Edit one queued message text without changing attachments or position.', input({
+    session_id: id('Session ID.'),
+    queue_id: id('Queue entry ID.'),
+    text: id('Replacement text.'),
+    expected_queue_revision: id('Optional Queue revision for compare-and-write.'),
+  }, ['session_id', 'queue_id', 'text'])),
+  write('queue.remove', 'Remove one Queue entry and cancel its Tool delivery if present.', input({
+    session_id: id('Session ID.'),
+    queue_id: id('Queue entry ID.'),
+    expected_queue_revision: id('Optional Queue revision for compare-and-write.'),
+  }, ['session_id', 'queue_id'])),
+  write('queue.clear', 'Clear the Session Queue and cancel Tool-created queued deliveries.',
+    input({
+      session_id: id('Session ID.'),
+      expected_queue_revision: id('Optional Queue revision for compare-and-write.'),
+    }, ['session_id']), true),
+  write('queue.send_now', 'Start the Queue head or steer the whole Queue into the active Turn.',
+    input({
+      session_id: id('Session ID.'),
+      expected_queue_revision: id('Optional Queue revision for compare-and-write.'),
+    }, ['session_id']), true),
   write(
     'worktree.create_and_bind',
     'Create a managed Git worktree for this authenticated Gian Session and open it in Gian views.',
@@ -225,6 +323,57 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
       },
     }, ['branch']),
   ),
+  read('browser.tabs', 'List the tabs in Gian Browser, including page generation, lifecycle, URL, title, and control state.', input({}), true),
+  write('browser.open', 'Open a URL in Gian Browser. Omit tab_id to create a visible panel2 tab; provide tab_id to navigate an existing tab.', input({
+    url: { type: 'string', minLength: 1, maxLength: 8192, description: 'HTTP(S), gian-browser, or allowed about URL.' },
+    tab_id: id('Existing Browser tab ID. Omit to create a tab.'),
+    activate: { type: 'boolean', description: 'Present a newly created tab in panel2. Defaults to true.' },
+  }, ['url']), false, true),
+  read('browser.snapshot', 'Read the page accessibility tree. Interactive nodes receive @e refs that can be used only with this snapshot_id and page generation.', input({
+    tab_id: id('Browser tab ID.'),
+    max_nodes: { type: 'integer', minimum: 20, maximum: 1000, description: 'Maximum AX nodes to inspect; defaults to 500.' },
+  }, ['tab_id']), true),
+  write('browser.click', 'Click an element from the latest Browser accessibility snapshot using its @e ref.', input({
+    tab_id: id('Browser tab ID.'),
+    snapshot_id: id('Snapshot ID returned by browser.snapshot.'),
+    ref: id('Interactive element ref such as @e3.'),
+  }, ['tab_id', 'snapshot_id', 'ref']), false, true),
+  write('browser.fill', 'Replace the value of an editable element from a Browser accessibility snapshot and dispatch input/change events.', input({
+    tab_id: id('Browser tab ID.'),
+    snapshot_id: id('Snapshot ID returned by browser.snapshot.'),
+    ref: id('Editable element ref such as @e3.'),
+    text: { type: 'string', maxLength: 100000, description: 'Replacement text.' },
+  }, ['tab_id', 'snapshot_id', 'ref', 'text']), false, true),
+  write('browser.press', 'Press a keyboard key or chord in the page. Supply snapshot_id and ref together to focus a snapshot element first.', input({
+    tab_id: id('Browser tab ID.'),
+    key: { type: 'string', minLength: 1, maxLength: 100, description: 'Key or chord, for example Enter, Tab, Escape, or Control+A.' },
+    snapshot_id: id('Optional snapshot ID used with ref.'),
+    ref: id('Optional element ref to focus before pressing.'),
+  }, ['tab_id', 'key']), false, true),
+  read('browser.wait', 'Wait until the page stops loading or visible body text appears.', input({
+    tab_id: id('Browser tab ID.'),
+    condition: enumValue(['load', 'text'], 'Condition; defaults to load.'),
+    text: id('Required text when condition is text.'),
+    timeout_ms: { type: 'integer', minimum: 100, maximum: 30000, description: 'Wait limit; defaults to 10000 ms.' },
+  }, ['tab_id']), true),
+  action('browser.evaluate', 'Evaluate JavaScript in the page main world as a non-idempotent escape hatch for complex operations. Prefer snapshot/click/fill/press first. Result must be serializable and at most 256 KiB and is never written to the Gian Tool ledger.', input({
+    tab_id: id('Browser tab ID.'),
+    expression: { type: 'string', minLength: 1, maxLength: 100000, description: 'JavaScript expression, optionally returning a Promise.' },
+  }, ['tab_id', 'expression']), true),
+  read('browser.screenshot', 'Capture the current Browser viewport as a PNG image.', input({
+    tab_id: id('Browser tab ID.'),
+    max_width: { type: 'integer', minimum: 320, maximum: 2000, description: 'Maximum image width; defaults to 1600.' },
+  }, ['tab_id']), true),
+  write('browser.go_back', 'Navigate one step back in a Gian Browser tab.', input({
+    tab_id: id('Browser tab ID.'),
+  }, ['tab_id']), false, true),
+  write('browser.reload', 'Reload a Gian Browser tab and invalidate prior element refs.', input({
+    tab_id: id('Browser tab ID.'),
+    ignore_cache: { type: 'boolean', description: 'Reload without cached resources.' },
+  }, ['tab_id']), false, true),
+  write('browser.close', 'Close a Gian Browser tab.', input({
+    tab_id: id('Browser tab ID.'),
+  }, ['tab_id']), true, true),
   read('interaction.list', 'List pending approvals, questions, and native choices.',
     input({ session_id: id('Optional Session ID filter.') })),
   write('interaction.respond', 'Resolve one pending interaction using only its advertised choices.', input({
@@ -250,11 +399,71 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
       description: 'Answers keyed by advertised question ID.',
     },
     native_option_id: id('Advertised native Provider option ID.'),
+    expected_interaction_revision: id('Optional Interaction revision for compare-and-write.'),
   }, ['session_id', 'interaction_id'], [
     { required: ['decision'] },
     { required: ['answers'] },
     { required: ['native_option_id'] },
   ])),
+  read('schedule.preview', 'Preview future occurrences of a schedule trigger. Read-only.',
+    input({
+      trigger: triggerParam,
+      timezone: id('IANA timezone name.'),
+      after: id('RFC 3339 instant to preview after; defaults to now.'),
+      limit: { type: 'integer', minimum: 3, maximum: 10, description: 'Occurrence count (3-10).' },
+    }, ['trigger', 'timezone'])),
+  write('schedule.create', 'Propose a schedule bound to this conversation. When the requested action and timing are known, call this tool to show the user a confirmation card. Results default to this conversation; destination and formatting are not required clarifications. Blocks until the user approves or rejects it in Gian; creation is host-enforced confirmation, never silent.', input({
+    name: id('Schedule name.'),
+    prompt: id('Durable prompt sent to the bound conversation on every occurrence.'),
+    trigger: triggerParam,
+    timezone: id('IANA timezone name.'),
+    misfire_policy: enumValue(['skip', 'run_once'], 'Behavior for occurrences missed while the Host was down.'),
+    confirmation_timeout_ms: {
+      type: 'integer',
+      minimum: 5000,
+      maximum: 1800000,
+      description: 'How long to wait for the user decision (5 minute default).',
+    },
+  }, ['name', 'prompt', 'trigger', 'timezone'])),
+  read('schedule.list', 'List schedules bound to this conversation.', input({
+    status: enumArray(['active', 'paused', 'completed', 'archived'], 'Schedule statuses to include.'),
+    limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Maximum rows.' },
+    cursor: id('Opaque pagination cursor from a previous page.'),
+  })),
+  read('schedule.get', 'Get one schedule of this conversation with optional recent runs.', input({
+    schedule_id: id('Schedule ID.'),
+    include_runs: { type: 'boolean', description: 'Include the latest runs.' },
+  }, ['schedule_id'])),
+  write('schedule.update', 'Update a schedule of this conversation. Revision CAS required.', input({
+    schedule_id: id('Schedule ID.'),
+    expected_revision: { type: 'integer', minimum: 1, description: 'Current schedule revision.' },
+    name: id('New name.'),
+    prompt: id('New durable prompt.'),
+    trigger: triggerParam,
+    timezone: id('New IANA timezone.'),
+    misfire_policy: enumValue(['skip', 'run_once'], 'New misfire policy.'),
+  }, ['schedule_id', 'expected_revision'], [
+    { required: ['name'] },
+    { required: ['prompt'] },
+    { required: ['trigger'] },
+    { required: ['timezone'] },
+    { required: ['misfire_policy'] },
+  ])),
+  write('schedule.pause', 'Pause a schedule of this conversation.', input({
+    schedule_id: id('Schedule ID.'),
+    expected_revision: { type: 'integer', minimum: 1, description: 'Optional revision CAS.' },
+  }, ['schedule_id'])),
+  write('schedule.resume', 'Resume a paused schedule of this conversation.', input({
+    schedule_id: id('Schedule ID.'),
+    expected_revision: { type: 'integer', minimum: 1, description: 'Optional revision CAS.' },
+  }, ['schedule_id'])),
+  write('schedule.run_now', 'Trigger one immediate run of a schedule of this conversation.', input({
+    schedule_id: id('Schedule ID.'),
+  }, ['schedule_id'])),
+  write('schedule.archive', 'Irreversibly archive a schedule of this conversation.', input({
+    schedule_id: id('Schedule ID.'),
+    expected_revision: { type: 'integer', minimum: 1, description: 'Optional revision CAS.' },
+  }, ['schedule_id']), true),
   {
     name: 'gian_call',
     description: 'Call any canonical Gian Tool method. Use this compatibility dispatcher when a method-specific MCP tool is deferred or not visible; it adds no domain behavior.',
@@ -271,7 +480,7 @@ export const GIAN_MCP_TOOL_DEFINITIONS: GianMcpToolDefinition[] = [
       },
       idempotency_key: {
         ...idempotency,
-        description: 'Required for the 12 write methods; omit for reads. Reuse only to retry the exact same call.',
+        description: 'Required for the write methods; omit for reads. Reuse only to retry the exact same call.',
       },
     }, ['method', 'params']),
     annotations: {

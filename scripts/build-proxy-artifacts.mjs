@@ -1,126 +1,138 @@
-import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmod,
   copyFile,
   mkdir,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
 import { build } from 'esbuild';
 
 const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const platform = 'darwin-arm64';
-const definitions = [
-  {
-    id: 'claude',
-    directory: 'cc-proxy',
-    displayName: 'Claude Code',
-    processScope: 'session',
-    branding: true,
-    runtime: {
-      id: 'claude',
-      displayName: 'Claude Code CLI',
-      verifiedCliVersions: ['2.1.159'],
-    },
-  },
-  {
-    id: 'codex',
-    directory: 'codex-proxy',
-    displayName: 'Codex',
-    processScope: 'shared',
-    branding: true,
-    skill: 'gian-session',
-    runtime: {
-      id: 'codex',
-      displayName: 'Codex CLI',
-      verifiedCliVersions: ['0.146.0'],
-    },
-  },
-  {
-    id: 'kimi',
-    directory: 'kimi-proxy',
-    displayName: 'Kimi Code',
-    processScope: 'shared',
-    branding: true,
-    runtime: {
-      id: 'kimi',
-      displayName: 'Kimi Code CLI',
-      verifiedCliVersions: ['0.38.0'],
-    },
-  },
-  {
-    id: 'dsh',
-    pluginId: 'ai.deepseek.harness',
-    directory: 'dsh-proxy',
-    displayName: 'DeepSeek Harness',
-    processScope: 'shared',
-    branding: true,
-    runtime: {
-      id: 'dsh',
-      displayName: 'DeepSeek Harness',
-      verifiedCliVersions: ['0.1.1-rc.2'],
-    },
-  },
-  {
-    id: 'grok',
-    directory: 'grok-proxy',
-    displayName: 'Grok Build',
-    processScope: 'session',
-    staged: true,
-    runtime: {
-      id: 'grok',
-      displayName: 'Grok Build CLI',
-      verifiedCliVersions: ['1.0.4'],
-    },
-  },
-  {
-    id: 'zcode',
-    pluginId: 'com.zhipu.zcode',
-    directory: 'zcode-proxy',
-    displayName: 'ZCode',
-    processScope: 'shared',
-    branding: true,
-    runtime: {
-      id: 'zcode',
-      displayName: 'ZCode CLI',
-      verifiedCliVersions: ['0.16.5'],
-    },
-  },
-];
-
-export const shippingProxyIds = definitions
-  .filter(definition => definition.staged !== true)
-  .map(definition => definition.id);
-
-const BUILTIN_PROXY_IDS = new Set(definitions.map(definition => definition.pluginId ?? definition.id));
 const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const RELEASE_ID_RE = /^[a-z][a-z0-9-]{0,63}$/;
+const ACCEPTANCE_SETUPS = new Set(['default', 'claude-settings', 'kimi-store', 'dsh-profile']);
+
+function canonicalRelativePath(value) {
+  const candidate = typeof value === 'string' && value.startsWith('./') ? value.slice(2) : value;
+  return typeof value === 'string'
+    && value.length > 0
+    && !isAbsolute(value)
+    && !value.includes('\\')
+    && !value.split('/').includes('..')
+    && normalize(candidate) === candidate;
+}
+
+/** Discover release metadata from each Proxy package and Manifest. There is
+ * no central Provider list: adding a package changes only that package's own
+ * package.json/manifest plus Catalog data. */
+export async function discoverProxyDefinitions(repoRoot = root) {
+  const proxiesDir = join(repoRoot, 'packages', 'proxies');
+  const result = [];
+  const directories = (await readdir(proxiesDir, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
+    .map(entry => entry.name)
+    .sort();
+  for (const directory of directories) {
+    let packageMetadata;
+    let manifest;
+    try {
+      packageMetadata = JSON.parse(await readFile(join(proxiesDir, directory, 'package.json'), 'utf8'));
+      manifest = JSON.parse(await readFile(join(proxiesDir, directory, 'manifest.json'), 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    const release = packageMetadata.gianProxy;
+    if (!release) continue;
+    if (
+      !RELEASE_ID_RE.test(release.releaseId ?? '')
+      || typeof release.shipping !== 'boolean'
+      || typeof release.realAcceptance?.binaryEnv !== 'string'
+      || !/^[A-Z][A-Z0-9_]+$/.test(release.realAcceptance.binaryEnv)
+      || !ACCEPTANCE_SETUPS.has(release.realAcceptance.setup)
+      || (release.realAcceptance.proxyBinaryArg !== undefined
+        && !/^--[a-z][a-z0-9-]+$/.test(release.realAcceptance.proxyBinaryArg))
+    ) {
+      throw new Error(`${directory} has invalid package.json gianProxy metadata`);
+    }
+    if (!SEMVER_RE.test(packageMetadata.version ?? '') || packageMetadata.version !== manifest.pluginVersion) {
+      throw new Error(`${manifest.id ?? directory} package and Manifest versions differ`);
+    }
+    if (
+      typeof packageMetadata.name !== 'string'
+      || !packageMetadata.name.startsWith('@gian/')
+      || !packageMetadata.name.endsWith('-proxy')
+      || !canonicalRelativePath(packageMetadata.main)
+    ) {
+      throw new Error(`${directory} has invalid Proxy package metadata`);
+    }
+    result.push({
+      id: release.releaseId,
+      pluginId: manifest.id,
+      directory,
+      packageName: packageMetadata.name,
+      pluginVersion: packageMetadata.version,
+      sourceEntry: join(proxiesDir, directory, packageMetadata.main),
+      shipping: release.shipping,
+      realAcceptance: release.realAcceptance,
+      displayName: manifest.displayName,
+      processScope: manifest.process.scope,
+      environment: {
+        runtimeBinary: release.realAcceptance.binaryEnv,
+      },
+      qualification: {
+        binaryArgument: release.realAcceptance.proxyBinaryArg ?? null,
+        setup: release.realAcceptance.setup,
+      },
+      runtime: {
+        id: manifest.runtime.id ?? null,
+        displayName: manifest.runtime.displayName ?? null,
+        verifiedCliVersions: [...(manifest.runtime.verifiedVersions ?? [])],
+      },
+      manifest,
+    });
+  }
+  const releaseIds = result.map(item => item.id);
+  const pluginIds = result.map(item => item.pluginId);
+  if (new Set(releaseIds).size !== releaseIds.length || new Set(pluginIds).size !== pluginIds.length) {
+    throw new Error('Proxy package releaseId and pluginId values must be unique.');
+  }
+  return result;
+}
+
+export const proxyDefinitions = await discoverProxyDefinitions();
+export const shippingProxyIds = proxyDefinitions
+  .filter(definition => definition.shipping)
+  .map(definition => definition.id);
 
 export function assertRuntimeManifest(manifest) {
   const runtime = manifest.runtime;
   if (!runtime || typeof runtime !== 'object') {
-    if (BUILTIN_PROXY_IDS.has(manifest.id)) {
-      throw new Error(`${manifest.id} built-in proxy must declare runtime.verifiedCliVersions`);
-    }
-    return;
+    throw new Error(`${manifest.id} Proxy must declare runtime`);
   }
-  const verified = runtime.verifiedCliVersions;
+  if (runtime.kind !== 'external' && runtime.kind !== 'none') {
+    throw new Error(`${manifest.id} Proxy must declare runtime.kind`);
+  }
+  if (runtime.kind === 'none') return;
+  const verified = runtime.verifiedVersions;
   if (!Array.isArray(verified) || verified.length === 0) {
-    if (BUILTIN_PROXY_IDS.has(manifest.id)) {
-      throw new Error(`${manifest.id} built-in proxy must declare runtime.verifiedCliVersions`);
-    }
-    return;
+    throw new Error(`${manifest.id} external Runtime must declare runtime.verifiedVersions`);
   }
   if (verified.some(version => typeof version !== 'string' || !SEMVER_RE.test(version))) {
-    throw new Error(`${manifest.id} runtime.verifiedCliVersions must contain SemVer values`);
+    throw new Error(`${manifest.id} runtime.verifiedVersions must contain SemVer values`);
   }
   if (new Set(verified).size !== verified.length) {
-    throw new Error(`${manifest.id} runtime.verifiedCliVersions must not contain duplicates`);
+    throw new Error(`${manifest.id} runtime.verifiedVersions must not contain duplicates`);
   }
 }
 
@@ -153,12 +165,8 @@ export async function assertProxySelfTest(entryPoint, manifest) {
     encoding: 'utf8',
     env: {
       ...process.env,
-      ...(manifest.schemaVersion >= 2
-        ? {
-            GIAN_PLUGIN_ID: manifest.id,
-            GIAN_PROTOCOL_VERSIONS: '2.1,2.0',
-          }
-        : {}),
+      GIAN_PLUGIN_ID: manifest.id,
+      GIAN_PROTOCOL_VERSIONS: '2.2',
     },
   });
   let response;
@@ -167,137 +175,94 @@ export async function assertProxySelfTest(entryPoint, manifest) {
   } catch {
     throw new Error(`${manifest.id} proxy self-test returned invalid JSON`);
   }
-  const validVersion = response?.schemaVersion === manifest.schemaVersion
-    && (manifest.schemaVersion === 1 || response?.pluginVersion === manifest.pluginVersion);
-  if (!validVersion || response?.id !== manifest.id || response?.ok !== true) {
+  if (
+    response?.schemaVersion !== manifest.schemaVersion
+    || response?.pluginVersion !== manifest.pluginVersion
+    || response?.id !== manifest.id
+    || response?.ok !== true
+  ) {
     throw new Error(
       `${manifest.id} proxy self-test returned an invalid result: ${JSON.stringify(response)}`,
     );
   }
 }
 
-async function main() {
+function parseArgs(argv) {
   const args = new Map();
-  for (let index = 2; index < process.argv.length; index += 1) {
-    const key = process.argv[index];
-    const value = process.argv[index + 1];
+  for (let index = 0; index < argv.length; index += 1) {
+    const key = argv[index];
+    const value = argv[index + 1];
     if (key?.startsWith('--') && value && !value.startsWith('--')) {
       args.set(key.slice(2), value);
       index += 1;
+    } else {
+      throw new Error(`Invalid Proxy artifact argument: ${String(key)}`);
     }
   }
+  return args;
+}
 
+async function copyManifestReference(definition, packageDir, reference) {
+  if (!canonicalRelativePath(reference?.path) || !/^[0-9a-f]{64}$/.test(reference?.sha256 ?? '')) {
+    throw new Error(`${definition.pluginId} has an invalid Manifest asset reference`);
+  }
+  const source = join(root, 'packages', 'proxies', definition.directory, reference.path);
+  const bytes = await readFile(source);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (digest !== reference.sha256) {
+    throw new Error(`${definition.pluginId} referenced asset ${reference.path} digest mismatch`);
+  }
+  const destination = join(packageDir, reference.path);
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(source, destination);
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
   const requestedPlugin = args.get('plugin');
-  if (requestedPlugin && !definitions.some(definition => definition.id === requestedPlugin)) {
+  if (requestedPlugin && !proxyDefinitions.some(definition => definition.id === requestedPlugin)) {
     throw new Error(`unknown proxy plugin: ${requestedPlugin}`);
   }
   const selectedDefinitions = requestedPlugin
-    ? definitions.filter(definition => definition.id === requestedPlugin)
-    : definitions.filter(definition => shippingProxyIds.includes(definition.id));
+    ? proxyDefinitions.filter(definition => definition.id === requestedPlugin)
+    : proxyDefinitions.filter(definition => definition.shipping);
   const outputDir = resolve(root, args.get('output') ?? 'artifacts/proxies');
   await mkdir(outputDir, { recursive: true });
 
   for (const definition of selectedDefinitions) {
-    const { id, directory } = definition;
-    const packageMetadata = JSON.parse(await readFile(join(
-      root,
-      'packages',
-      'proxies',
-      directory,
-      'package.json',
-    ), 'utf8'));
-    const pluginVersion = packageMetadata.version;
-    if (!/^[0-9A-Za-z.+-]+$/.test(pluginVersion)) {
-      throw new Error(`invalid ${id} proxy version`);
-    }
+    const { id, pluginVersion } = definition;
     const requestedVersion = args.get('version');
     if (requestedVersion && requestedVersion !== pluginVersion) {
       throw new Error(
         `${id} package version ${pluginVersion} does not match requested ${requestedVersion}`,
       );
     }
-    const logoSources = definition.branding ? {
-      light: join(root, 'packages', 'proxies', directory, 'assets', 'logo-light.png'),
-      dark: join(root, 'packages', 'proxies', directory, 'assets', 'logo-dark.png'),
-    } : null;
-    const skillSource = definition.skill
-      ? join(root, 'packages', 'proxies', directory, 'skills', definition.skill, 'SKILL.md')
-      : null;
-    const skills = skillSource ? [{
-      name: definition.skill,
-      path: `skills/${definition.skill}/SKILL.md`,
-      sha256: createHash('sha256').update(await readFile(skillSource)).digest('hex'),
-    }] : undefined;
-    const logoDescriptor = async (variant) => ({
-      path: `assets/logo-${variant}.png`,
-      mediaType: 'image/png',
-      sha256: createHash('sha256').update(await readFile(logoSources[variant])).digest('hex'),
-    });
-    const branding = logoSources ? {
-      logo: {
-        light: await logoDescriptor('light'),
-        dark: await logoDescriptor('dark'),
-      },
-    } : undefined;
-    const manifest = {
-      schemaVersion: branding ? 3 : 2,
-      id: definition.pluginId ?? id,
-      displayName: definition.displayName,
-      pluginVersion,
-      entry: 'proxy.mjs',
-      protocol: { name: 'gian.proxy', range: '>=2.1 <3.0' },
-      process: { scope: definition.processScope },
-      runtime: definition.runtime,
-      ...(skills ? { skills } : {}),
-      ...(branding ? { branding } : {}),
-    };
+    const manifest = structuredClone(definition.manifest);
     assertRuntimeManifest(manifest);
     const staging = join(outputDir, `.staging-${id}`);
     const packageDir = join(staging, 'package');
     const proxyEntry = join(packageDir, 'proxy.mjs');
-    const sourceEntry = join(
-      root,
-      'packages',
-      'proxies',
-      directory,
-      'dist',
-      'src',
-      'cli',
-      'spawn.js',
-    );
     const assetName = `gian-proxy-${id}-${pluginVersion}-${platform}.tar.gz`;
     const assetPath = join(outputDir, assetName);
     const manifestAssetPath = `${assetPath}.manifest.json`;
     await rm(staging, { recursive: true, force: true });
     await mkdir(packageDir, { recursive: true });
     try {
-      await buildProxyBundle(sourceEntry, proxyEntry);
+      await buildProxyBundle(definition.sourceEntry, proxyEntry);
       await chmod(proxyEntry, 0o755);
-      if (logoSources) {
-        const assetDir = join(packageDir, 'assets');
-        await mkdir(assetDir, { recursive: true });
-        await copyFile(logoSources.light, join(assetDir, 'logo-light.png'));
-        await copyFile(logoSources.dark, join(assetDir, 'logo-dark.png'));
-      }
-      if (skillSource) {
-        const skillDir = join(packageDir, 'skills', definition.skill);
-        await mkdir(skillDir, { recursive: true });
-        await copyFile(skillSource, join(skillDir, 'SKILL.md'));
+      const references = [
+        ...Object.values(manifest.branding?.logo ?? {}).filter(Boolean),
+        ...(manifest.skills ?? []),
+      ];
+      for (const reference of references) {
+        await copyManifestReference(definition, packageDir, reference);
       }
       await assertProxySelfTest(proxyEntry, manifest);
       const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
       await writeFile(join(packageDir, 'manifest.json'), manifestJson);
       await writeFile(manifestAssetPath, manifestJson);
-      await execFileAsync('/usr/bin/tar', [
-        '-czf',
-        assetPath,
-        '-C',
-        packageDir,
-        '.',
-      ]);
-      const checksum = createHash('sha256')
-        .update(await readFile(assetPath))
-        .digest('hex');
+      await execFileAsync('/usr/bin/tar', ['-czf', assetPath, '-C', packageDir, '.']);
+      const checksum = createHash('sha256').update(await readFile(assetPath)).digest('hex');
       await writeFile(`${assetPath}.sha256`, `${checksum}  ${assetName}\n`);
       console.log(assetPath);
     } finally {

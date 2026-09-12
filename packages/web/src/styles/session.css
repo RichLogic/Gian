@@ -1,6 +1,6 @@
 /* ============================================================
    Session shell — bridges design system to the app's layout.
-   Most styling comes from coding.css / events.css / components.css.
+   Most styling comes from coding.css / @gian/chat-ui / components.css.
    This file holds only the pieces those don't cover (top-level
    grid, the workspace sidebar, and a few empty-states).
    ============================================================ */
@@ -169,50 +169,8 @@
 }
 @keyframes ns-spin { to { transform: rotate(360deg); } }
 
-/* Empty states */
-
-.transcript-history-load {
-  display: flex;
-  justify-content: center;
-  min-height: 28px;
-}
-
-.transcript-history-error {
-  align-items: center;
-  align-self: center;
-  display: flex;
-  gap: var(--sp-8);
-  justify-content: center;
-  margin: 0 auto var(--sp-8);
-  max-width: 820px;
-  color: var(--danger);
-  font-size: var(--fz-12);
-}
-
-.transcript-empty {
-  align-self: center;
-  margin: var(--sp-8) auto;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-3);
-  letter-spacing: 0.08em;
-  text-transform: none;
-  padding: 6px 14px;
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-}
-
-/* Thinking row: rendered without avatar/author so only the ticker shows.
-   Indent to match the .msg-body column (24px avatar + 10px gap from .msg). */
-
-/* Mascot variant — same indentation, more breathing room above/below
-   since the SVG itself is larger than the ticker text. */
-.msg-mascot {
-  padding-left: 34px;
-  padding-top: 4px;
-  display: flex; align-items: center;
-}
-.msg-mascot .gian-mascot { color: var(--text-2); }
+/* Empty states — transcript history/empty/mascot styles moved to
+   @gian/chat-ui (packages/chat-ui/styles/chat-ui.css). */
 
 /* Live ticker for "thinking…" while a turn runs.
    Overrides coding.css .ticker with session-specific sizing.
@@ -300,9 +258,9 @@
   border-top: 1px solid var(--hairline-2);
 }
 /* Single terminal-style tab strip — reuses the `.sheet-tabs`/`.sheet-tab`
-   language (gian-v2.css); only the deltas live here. */
+   language (gian-v2.css); only the deltas live here. No divider under the
+   strip (2026-09-09 owner call). */
 .sidechat-tabs {
-  border-bottom: 1px solid var(--hairline-2);
   background: var(--surface);
 }
 .sidechat-tabs .sheet-tab .name {
@@ -314,24 +272,21 @@
 .sidechat-tabs .sheet-tab.is-closing { opacity: 0.6; }
 .sidechat-tabs .sheet-tab.is-unavailable { color: var(--warn); }
 .sidechat-tabs .sheet-tab .tab-x:hover { color: var(--danger); background: var(--danger-soft); }
-.sidechat-tabs .sidechat-new.prominent {
+.sidechat-tabs .sidechat-new {
   margin: 4px 5px;
-  min-width: 30px;
-  height: 28px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
   justify-content: center;
-  border-radius: var(--r-2);
-  color: var(--accent-text);
-  background: var(--accent-soft);
-}
-.sidechat-tabs .sidechat-new.prominent:hover {
-  color: var(--accent-text);
-  background: var(--surface-3);
-}
-.sidechat-tabs .sidechat-new:disabled { opacity: 0.5; cursor: default; }
-.sidechat-tabs .sidechat-new.prominent:disabled {
+  border-radius: var(--r-1);
   color: var(--text-3);
+  background: transparent;
+}
+.sidechat-tabs .sidechat-new:hover:not(:disabled) {
+  color: var(--text);
   background: var(--surface-2);
 }
+.sidechat-tabs .sidechat-new:disabled { opacity: 0.5; cursor: default; }
 .sidechat-empty {
   flex: 1;
   display: flex;
@@ -387,12 +342,8 @@
 .sidechat-banner .btn { flex: none; }
 
 /* Per-turn Fork affordance (proposal §10.6): shares the terminal result
-   footer with Copy. A text-free/failed/stopped turn uses the same footer
-   treatment as a right-aligned fallback. */
-.turn-result-fallback {
-  justify-content: flex-end;
-  padding: 2px 4px;
-}
+   footer with Copy; the `.turn-result-fallback` wrapper style moved to
+   @gian/chat-ui with the transcript. */
 .fork-turn-btn {
   flex: none;
 }

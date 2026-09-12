@@ -31,8 +31,12 @@ and hostServices fail-closed — zero model calls.
 
 The production Bridge targets `@deepseek-ai/dsh@0.1.1-rc.2`. Catalog Provider,
 model, and reasoning selections are applied through DSH's per-Agent request
-waterfalls. Typed file/image inputs and interactive approval/question routing
-remain unadvertised until the real Bridge owns those native boundaries.
+waterfalls. The approval chip projects DSH's real page-level permission
+presets (by default `Workspace Write` and `Full access`), while Agent Presets
+remain Session-bound. Approval-backed modes are advertised only when the
+Bridge can round-trip DSH's native approval request through Gian interaction.
+Typed file/image inputs and user-question routing remain unadvertised until
+the real Bridge owns those native boundaries.
 After a Host restart, an exact persisted Gian Session binding is attested with
 a per-process HMAC and resumed through DSH's persistence API; arbitrary native
 history adoption remains unavailable.

@@ -4,9 +4,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { createTaskQueue } from '../core/task-queue.js';
 import { CodexProxyService } from '../core/service.js';
 import { CodexProtocolV2Adapter } from '../protocol/v2-adapter.js';
 import { CodexAppServerClient } from '../runtime/codex-app-server-client.js';
+import { discoverCodexRuntimes, probeCodexRuntime } from '../runtime/discover.js';
 import {
   createProtocolWriter,
   parseRequestLine,
@@ -38,7 +41,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.12';
+  return '0.2.15';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -46,7 +49,7 @@ const PLUGIN_VERSION = readPluginVersion();
 function runSelfTest(argv: string[]): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
   process.stdout.write(`${JSON.stringify({
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: 'codex',
     pluginVersion: PLUGIN_VERSION,
     ok: true,
@@ -79,6 +82,17 @@ function parseArgs(argv: string[]) {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (runSelfTest(argv)) return;
+  if (isRuntimeBootstrapOffer()) {
+    await serveRuntimeBootstrap({
+      pluginId: process.env.GIAN_PLUGIN_ID ?? 'codex',
+      pluginName: 'Codex',
+      pluginVersion: PLUGIN_VERSION,
+      processScope: 'shared',
+      discover: discoverCodexRuntimes,
+      probe: probeCodexRuntime,
+    });
+    return;
+  }
   const options = parseArgs(argv);
   const writer = createProtocolWriter(process.stdout);
 
@@ -109,28 +123,54 @@ async function main(): Promise<void> {
     options.codexBin ? { codexBin: options.codexBin } : {},
   );
   const service = new CodexProxyService({ runtime });
-  let responsePending = false;
-  const pendingNotifications: Array<{ method: string; params: Record<string, unknown> }> = [];
-  const flushNotifications = () => {
-    for (const notification of pendingNotifications.splice(0)) {
-      writer.notification(notification.method, notification.params);
-    }
-  };
+  // Request pipelining (shared Host responsiveness): a slow customization
+  // scan must never block live session traffic, and session traffic must
+  // never block a scan. Session-scoped requests stay serialized among
+  // themselves; customization requests dispatch concurrently. Notifications
+  // produced while a session handler is executing are captured per request
+  // and flushed after that request's Response (Contract: Response-before-
+  // Notification); notifications emitted with no handler active (spontaneous
+  // runtime events) go out immediately.
+  //
+  // The capture slot is request-scoped: only session dispatch tasks install
+  // one, and exactly one session task runs at a time (they are serialized
+  // through the task queue). A concurrent customization scan must never touch
+  // the slot — otherwise it would swallow, reorder, or prematurely flush a
+  // live session's notifications.
+  let sessionCapture: Array<{ method: string; params: Record<string, unknown> }> | null = null;
   const adapter = new CodexProtocolV2Adapter(
     service,
     PLUGIN_VERSION,
     (method, params) => {
-      if (responsePending) pendingNotifications.push({ method, params });
+      if (sessionCapture) sessionCapture.push({ method, params });
       else writer.notification(method, params);
     },
   );
   await service.initialize();
 
+  // Every dispatched task (session or scan) is tracked so EOF/shutdown/signal
+  // can drain in-flight work before the process exits: a scan must never be
+  // orphaned without its Response because the loop ended or a shutdown was
+  // processed while it was still running.
+  const queue = createTaskQueue('codex-proxy');
+
   let shuttingDown = false;
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await service.close();
+    try {
+      await queue.drain();
+      await service.close();
+    } catch (error) {
+      // Fail closed: an unverified terminal cleanup must turn the shutdown
+      // into a failed exit, not a silent clean one — and must never surface
+      // as an unhandled rejection.
+      console.error(
+        '[codex-proxy:shutdown] cleanup failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+      process.exit(1);
+    }
     process.exit(code);
   };
   process.on('SIGINT', () => {
@@ -145,6 +185,51 @@ async function main(): Promise<void> {
     input: process.stdin,
     crlfDelay: Infinity,
   });
+
+  const isCustomization = (method: string): boolean => (
+    method === 'customization.list' || method === 'customization.detail'
+  );
+
+  const dispatchTask = (request: { id: string; method: string; params: Record<string, unknown> }): Promise<void> => (
+    (async () => {
+      // Customization scans emit no notifications: they never install a
+      // capture, so a scan running concurrently with a session handler
+      // cannot steal or reorder that handler's notifications.
+      const capture: Array<{ method: string; params: Record<string, unknown> }> | null
+        = isCustomization(request.method) ? null : [];
+      if (capture) sessionCapture = capture;
+      const flushCapture = (): void => {
+        if (!capture) return;
+        for (const notification of capture) {
+          writer.notification(notification.method, notification.params);
+        }
+        capture.length = 0;
+      };
+      try {
+        const result = await adapter.handle(request);
+        if (request.method === 'sidechat.close') {
+          // Contract §10.5.4: terminal teardown notifications are the one
+          // explicit exception to normal Response-before-Notification order.
+          if (capture) sessionCapture = null;
+          flushCapture();
+          writer.result(request.id, result);
+          return;
+        }
+        writer.result(request.id, result);
+      } catch (error) {
+        writer.error(request.id, error);
+      } finally {
+        if (capture) {
+          if (sessionCapture === capture) sessionCapture = null;
+          flushCapture();
+        }
+        if (request.method === 'shutdown') {
+          input.close();
+          void shutdown(0);
+        }
+      }
+    })()
+  );
 
   for await (const line of input) {
     if (!line.trim()) continue;
@@ -164,32 +249,19 @@ async function main(): Promise<void> {
       continue;
     }
 
-    responsePending = true;
-    try {
-      const result = await adapter.handle(request);
-      if (request.method === 'sidechat.close') {
-        // Contract §10.5.4: terminal teardown notifications are the one
-        // explicit exception to normal Response-before-Notification order.
-        responsePending = false;
-        flushNotifications();
-        writer.result(request.id, result);
-      } else {
-        writer.result(request.id, result);
-        responsePending = false;
-        flushNotifications();
-      }
-      if (request.method === 'shutdown') {
-        input.close();
-        await shutdown(0);
-        return;
-      }
-    } catch (error) {
-      writer.error(request.id, error);
-      responsePending = false;
-      flushNotifications();
+    if (isCustomization(request.method)) {
+      // Pipelined by design; the loop never waits for a scan.
+      queue.enqueuePipelined(() => dispatchTask(request));
+      continue;
     }
+    // Session traffic is strictly serialized relative to itself but never
+    // waits for an in-flight customization scan (and vice versa).
+    queue.enqueueSession(() => dispatchTask(request));
   }
 
+  // EOF with work still in flight: every tracked task (including scans) gets
+  // to write its Response before the process exits.
+  await queue.drain();
   await shutdown(0);
 }
 

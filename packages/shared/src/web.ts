@@ -171,6 +171,7 @@ export interface ApprovalCreatedMessage {
     category: ApprovalCategory;
     description: string;
     status: ApprovalStatus;
+    turn_number?: number;
     native_options?: import('./model.js').NativeApprovalOption[];
   };
 }
@@ -182,12 +183,16 @@ export interface ApprovalUpdatedMessage {
     status: ApprovalStatus;
     resolved_by: ApprovalResolvedBy;
     resolved_at: string;
+    session_id?: string;
+    turn_number?: number;
+    decision?: ApprovalDecision;
   };
 }
 
 export interface QueueUpdatedMessage {
   type: 'queue:updated';
   session_id: string;
+  queue_revision?: string;
   /** Items carry the entry's attachments (localImage/localFile) so the queue
    *  drawer can render thumbnails without a second fetch. */
   queue: Array<Pick<QueueEntry, 'id' | 'text'> & {
@@ -317,7 +322,26 @@ export type ServerToClientMessage =
   | SidechatCreatedMessage
   | SidechatUpdatedMessage
   | SidechatClosedMessage
+  | ScheduleChangedMessage
+  | ScheduleConfirmationMessage
   | ErrorMessage;
+
+/** Coarse invalidation for Schedule list/detail/run-log pages. Carries only
+ *  identities and the reason; clients re-fetch via the schedules REST API. */
+export interface ScheduleChangedMessage {
+  type: 'schedule:changed';
+  reason: 'created' | 'updated' | 'state_changed' | 'run_created' | 'run_updated' | 'archived';
+  schedule_id: string;
+  revision: number;
+  run_id?: string;
+}
+
+/** Full create-confirmation snapshot (contract L): the durable object Web
+ *  renders for the Host-enforced schedule create approval. */
+export interface ScheduleConfirmationMessage {
+  type: 'schedule:confirmation';
+  confirmation: import('./schedule.js').ScheduleConfirmation;
+}
 
 export interface SessionCreateMessage {
   type: 'session:create';
@@ -465,11 +489,13 @@ export interface SessionArchiveMessage {
   request_id?: string;
 }
 
-/** Move an active standalone coding session under an open Task. */
+/** Move an active standalone coding session under an open Task, move a
+ *  Subtask between open Tasks, or (task_id null) release a Subtask back to
+ *  standalone. */
 export interface SessionAssignTaskMessage {
   type: 'session:assign_task';
   session_id: string;
-  task_id: string;
+  task_id: string | null;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -691,6 +717,9 @@ export interface MessageSteerMessage {
 export interface TermSpawnMessage {
   type: 'term:spawn';
   term_id: string;
+  /** Host-authorized command profile. Clients select an Agent identity and
+   * never provide its executable, argv, HOME environment, or installer. */
+  target?: { kind: 'agent_cli'; agent_id: string };
   /** Optional cwd; falls back to $HOME server-side. */
   cwd?: string;
   cols: number;

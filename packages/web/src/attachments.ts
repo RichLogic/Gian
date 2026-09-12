@@ -1,24 +1,12 @@
 import type { InputItem } from '@gian/shared';
+import { isNativeImageMime } from '@gian/chat-ui';
 
 /** Shared cap for Composer uploads and pre-session (New Session) staged files. */
 export const MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB
 
-const NATIVE_IMAGE_MIME = new Set([
-  'image/gif',
-  'image/jpeg',
-  'image/png',
-  'image/webp',
-]);
-
-export function isNativeImageMime(mime: string): boolean {
-  return NATIVE_IMAGE_MIME.has(mime);
-}
-
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
+// Owned by @gian/chat-ui (the attachment presentation package); re-exported
+// so existing web import paths keep working.
+export { isNativeImageMime, formatBytes as fmtBytes } from '@gian/chat-ui';
 
 /**
  * De-duplicate an attachment display name against already-staged names:

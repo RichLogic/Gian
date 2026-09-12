@@ -76,7 +76,7 @@ export class FakeDshRuntime implements BridgeHost {
   private early: BridgeHostEvent[] = [];
 
   constructor(private readonly options: FakeHostOptions = {}) {
-    this.bridgeVersion = options.bridgeVersion ?? '0.1.2';
+    this.bridgeVersion = options.bridgeVersion ?? '0.1.3';
     this.dshVersion = options.dshVersion ?? '0.1.1-rc.2';
   }
 
@@ -147,7 +147,14 @@ export class FakeDshRuntime implements BridgeHost {
       ],
       effortLevels: ['low', 'medium', 'high'],
       approvalPolicies: ['ask', 'never'],
+      defaultApprovalPolicy: 'ask',
+      permissionPresets: [
+        { id: 'workspace-write', label: 'Workspace Write', approvalPolicy: 'ask' },
+        { id: 'danger-full-access', label: 'Full access', approvalPolicy: 'never' },
+      ],
+      defaultPermissionPreset: 'workspace-write',
       agentPresets: ['standard', 'code', 'minimal'],
+      defaultAgentPreset: 'standard',
       slashCommands: [
         { name: '/compact', description: 'Compact the session', source: 'builtin' },
       ],

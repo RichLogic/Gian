@@ -1,0 +1,30 @@
+{
+  "name": "@gian/remote-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "bin": {
+    "gian-remote-server": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.json && cp -R migrations dist/migrations",
+    "start": "node dist/src/cli.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --import tsx --test-reporter spec test/*.test.ts",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@gian/remote-protocol": "workspace:*",
+    "@hono/node-server": "^1.13.7",
+    "@hono/node-ws": "^1.0.5",
+    "better-sqlite3": "13.0.3",
+    "hono": "^4.12.34"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^24.12.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

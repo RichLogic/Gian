@@ -1,0 +1,269 @@
+/* Custom — read-only Customization Inventory page (Issue #50).
+   Design source: design/2026-08-31-sidebar-agents-timer-custom (08–11).
+   Only classes the product did not already have live here; everything else
+   reuses the existing button, segment, menu, management, search, and empty-state tokens. */
+
+/* Content column: the list and the detail are two real layout tracks
+   (presentation/custom-layout.ts owns the side/swap decision). */
+.custom-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.custom-content.detail-side { gap: var(--gutter); }
+.custom-content .custom-main { flex: 1 1 auto; min-width: 0; }
+.custom-content.detail-side .custom-main { min-width: 360px; }
+
+/* Agent / Scope selectors — in the page body under the search field, on one
+   row (design 08/10); they wrap and stretch in narrow columns (design 09). */
+.custom-selectors {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.custom-selectors .custom-select { flex: 1 1 220px; max-width: 480px; }
+.custom-select-btn {
+  width: 100%;
+  height: 30px;
+  gap: 7px;
+  padding: 0 8px 0 10px;
+  font-weight: 500;
+  justify-content: flex-start;
+}
+.custom-select-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.custom-caret { display: inline-flex; color: var(--text-3); margin-left: auto; }
+.custom-lead { display: inline-flex; color: var(--text-2); }
+.custom-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.custom-dot.ok { background: var(--ok); }
+.custom-dot.warn { background: var(--warn); }
+
+.custom-pop-label {
+  padding: 6px 10px 3px;
+  font: 600 10px var(--font-mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.custom-pop-rule { height: 1px; background: var(--hairline-2); margin: 4px 6px; }
+.custom-pop-ic { display: inline-flex; color: var(--text-2); }
+.mode-pop-item .custom-dot { margin-left: auto; }
+.mode-pop-item .sub { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.mode-pop-item .custom-dot + .sub { margin-left: 6px; }
+
+/* Page head + body (design .page-head/.page-body on the real .main card). */
+.custom-page-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--hairline-2);
+}
+.custom-page-head h1 { font: 600 16px var(--font-sans); margin: 0; }
+.custom-page-head .sub { font-size: var(--fz-12); color: var(--text-3); }
+.custom-spacer { flex: 1; }
+.custom-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden auto;
+  padding: 14px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Tab row: equal-width segments + filter button (design .tabs-eq). */
+.custom-tabs-row { display: flex; align-items: center; gap: 8px; }
+.custom-tabs { display: flex; flex: 1; min-width: 0; max-width: 460px; }
+.custom-tabs .segm-item {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 10px;
+}
+.custom-tabs .segm-item .n { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); }
+.custom-tabs .segm-item.active .n { color: var(--accent-text); }
+
+/* Filter popover (design 10C): anchored right, chip groups, active badge. */
+.custom-filter-anchor .mode-pop { left: auto; right: 0; width: 236px; }
+.custom-filter-pop .chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 8px 8px; }
+.custom-pop-foot { display: flex; justify-content: flex-end; padding: 2px 4px; }
+.custom-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font: 500 11px/1.4 var(--font-sans);
+  cursor: pointer;
+}
+.custom-chip:hover { background: var(--surface-2); }
+.custom-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+  color: var(--accent-text);
+}
+.custom-badged { position: relative; }
+.custom-badged::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Inventory rows on the real .management-* structure (densified; rows open
+   the detail sheet, they never expand inline). */
+.custom-inv .management-row { min-height: 0; padding: 7px 12px; cursor: pointer; }
+.custom-inv .management-row:hover { background: var(--surface-2); }
+.custom-inv .management-row.sel { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+.custom-1line .management-row-copy { display: flex; align-items: baseline; gap: 10px; }
+.custom-1line .management-row-copy strong { flex: none; font-weight: 600; }
+/* The flex:1 stretch belongs to the description span only — the chain
+   ordinal is also a direct-child span, and giving it flex:1 shoved the rule
+   name to the middle of the row (2026-09-06 owner report). */
+.custom-1line .management-row-copy > span:not(.custom-ord) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-orig {
+  font: 500 10.5px var(--font-mono);
+  color: var(--text-3);
+  max-width: 150px;
+  font-style: normal;
+}
+.custom-ord { flex: none; width: 20px; font: 500 10.5px var(--font-mono); color: var(--text-3); }
+.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Quiet status component (design .st — dot + text, no background). */
+.st { display: inline-flex; align-items: center; gap: 6px; font: 500 var(--fz-12)/1 var(--font-sans); color: var(--text-2); white-space: nowrap; }
+.st .st-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--text-3); }
+.st.ok .st-dot { background: var(--ok); }
+.st.warn .st-dot { background: var(--warn); }
+.st.err { color: var(--danger); }
+.st.err .st-dot { background: var(--danger); }
+.st.muted { color: var(--text-3); }
+
+/* Inline notices (design .notice info/warn). */
+.custom-notice {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 9px 12px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  font-size: var(--fz-12);
+  color: var(--text-2);
+}
+.custom-notice .n-ico { flex: none; display: flex; margin-top: 1px; }
+.custom-notice .grow { flex: 1; min-width: 0; }
+.custom-notice .btn { flex: none; }
+.custom-notice.info { border-color: var(--accent-ring); background: var(--accent-soft); color: var(--text); }
+.custom-notice.warn { border-color: transparent; background: var(--warn-soft); color: var(--text); }
+.custom-diagnostics { margin: 6px 0 0; padding-left: 16px; }
+.custom-diagnostics li { margin: 2px 0; }
+.custom-diagnostics code { font: 500 11px var(--font-mono); color: var(--text-3); }
+
+/* Empty states on the real .empty. */
+.custom-empty .e-ico { display: inline-flex; color: var(--text-3); }
+.custom-empty .e-t { font-size: var(--fz-13); font-weight: 600; color: var(--text-2); }
+.custom-empty .e-d { max-width: 340px; }
+.custom-empty .btn { margin-top: 4px; }
+
+/* Loading skeleton — stable heights, shimmer block (design 11-1). */
+.custom-skeleton { display: flex; flex-direction: column; gap: 10px; }
+.custom-sk {
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-inset) 50%, var(--surface-3) 75%);
+  background-size: 200% 100%;
+  animation: custom-sk-shimmer 1.4s infinite;
+  box-shadow: inset 0 0 0 1px var(--hairline-2);
+}
+@keyframes custom-sk-shimmer { to { background-position: -200% 0; } }
+.custom-sk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--hairline-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .custom-sk { animation: none; }
+}
+
+.custom-refreshing { font-size: var(--fz-11); color: var(--text-3); }
+
+/* Narrow detail swap: the list column stays mounted but hidden so search
+   text, filters, and scroll position survive the round trip (design 09B). */
+.custom-hidden { display: none !important; }
+
+/* Detail track = the shared panel-2 shell (`.p2`, agents-page.css), the same
+   surface the Agents detail uses: clamp(440px, 42vw, 640px) beside the list,
+   `.p2.replacing` when `custom-layout.ts` swaps it in as the whole content
+   column with a back affordance. Only Custom-specific additions live here. */
+.custom-detail-head h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-detail-foot { flex-wrap: wrap; }
+
+.custom-meta { display: flex; flex-direction: column; gap: 3px; font-size: var(--fz-12); color: var(--text-2); }
+.custom-meta .mono { font-size: 11px; color: var(--text-3); word-break: break-all; }
+.custom-meta .obs { font-size: 11.5px; color: var(--text-3); }
+
+/* "Sanitized configuration" label above MCP/Hook viewers — never "raw". */
+.custom-viewlabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: -8px;
+}
+
+/* Read-only source viewer fills the remaining sheet height; Markdown/text
+   wraps (.wrap), JSON keeps horizontal scrolling (default). */
+.custom-code {
+  margin: 0;
+  font: 11.5px/1.65 var(--font-mono);
+  background: var(--surface-inset);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--r-2);
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre;
+  color: var(--text-2);
+  flex: 1;
+  min-height: 0;
+}
+.custom-code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.custom-note {
+  flex-basis: 100%;
+  font: 10.5px/1.55 var(--font-mono);
+  color: var(--text-3);
+}
+.custom-detail-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--fz-12);
+  color: var(--text-2);
+}
+.custom-error-text { color: var(--danger); font-size: var(--fz-11); word-break: break-all; }

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github", "--token", "kimi-mcp-arg-canary"],
+      "env": { "GITHUB_TOKEN": "kimi-mcp-env-canary" }
+    },
+    "remote": {
+      "url": "https://api.example.com/mcp?token=kimi-mcp-url-canary",
+      "headers": { "Authorization": "Bearer kimi-mcp-header-canary" },
+      "enabled": false
+    }
+  }
+}

@@ -14,14 +14,16 @@
 
 import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
+import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
 import { ZcodeSharedService } from '../service.js';
-import { PLUGIN_ID, PLUGIN_VERSION } from '../identity.js';
+import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_VERSION } from '../identity.js';
+import { discoverZcodeRuntimes, probeZcodeRuntime } from '../runtime/discover.js';
 
 function selfTest(): void {
   // Verify the module graph loads and the wire constants are coherent.
   if (PLUGIN_ID !== 'com.zhipu.zcode') throw new Error('plugin id drifted');
   process.stdout.write(`${JSON.stringify({
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: PLUGIN_ID,
     pluginVersion: PLUGIN_VERSION,
     ok: true,
@@ -32,6 +34,17 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) {
     selfTest();
+    return;
+  }
+  if (isRuntimeBootstrapOffer()) {
+    await serveRuntimeBootstrap({
+      pluginId: process.env.GIAN_PLUGIN_ID ?? PLUGIN_ID,
+      pluginName: PLUGIN_NAME,
+      pluginVersion: PLUGIN_VERSION,
+      processScope: 'shared',
+      discover: discoverZcodeRuntimes,
+      probe: probeZcodeRuntime,
+    });
     return;
   }
 

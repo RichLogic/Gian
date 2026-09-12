@@ -1,0 +1,1 @@
+# Legacy kimi instructions (fixture)

@@ -46,7 +46,7 @@ export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
  * First-run onboarding. Phase 3b (UI Operation Layer): every mutation
  * dispatches a registered pending operation. Step 2 is "add and set up at
  * least one Agent": Agents are created (agent.create) and their paths saved
- * (agent.patch) with `restart: false` — onboarding must never restart
+ * (agent.patch) without any restart — onboarding must never restart
  * mid-wizard and lose itself. When the wizard did touch agents.json, the
  * restart happens once, after `onboarding.complete`.
  */
@@ -114,7 +114,7 @@ export function OnboardingView({
     }
     const settled = await waitForRunSettle(
       store,
-      dispatch('agent.create', { name, proxy: kind, cliPath, restart: false }).id,
+      dispatch('agent.create', { name, proxy: kind, cliPath }).id,
     );
     if (settled.phase !== 'confirmed') {
       setError(settled.error ?? 'Add failed');
@@ -125,6 +125,7 @@ export function OnboardingView({
   }
 
   async function setupOne(agent: UserAgentStatus) {
+    if (!agent.proxy) return;
     setError('');
     // A Proxy activation smoke starts the exact vendor runtime, so a clean
     // machine must provision the CLI first. Installing Proxy first made the

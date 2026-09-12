@@ -1,5 +1,11 @@
 import { readFileSync } from 'node:fs';
-import type { Session } from '@gian/shared';
+import {
+  sessionAllowsLegacyRuntimeFallback,
+  sessionBoundRuntimeCliPath,
+  sessionExactBindingError,
+  sessionProxyPluginVersion,
+  type Session,
+} from '@gian/shared';
 import { locateCcJsonl } from '../native/locate-jsonl.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { Db } from '../storage/db.js';
@@ -165,13 +171,15 @@ export class AutoTitleService {
   }
 
   private async proxyTitle(session: Session): Promise<string | null> {
+    if (sessionExactBindingError(session)) return null;
     if (!session.native_session_id) return null;
     const cwd = this.cwdFor(session);
     if (!cwd) return null;
-    const cliPath = session.runtime_profile?.cliPath
-      ?? this.deps.cliPathForSession?.(session)
-      ?? null;
-    const proxyVersion = session.runtime_profile?.proxyVersion ?? null;
+    const cliPath = sessionBoundRuntimeCliPath(session)
+      ?? (sessionAllowsLegacyRuntimeFallback(session)
+        ? this.deps.cliPathForSession?.(session) ?? null
+        : null);
+    const proxyVersion = sessionProxyPluginVersion(session);
     const cacheKey = nativeSessionsCacheKey(session.executor, cliPath, proxyVersion);
     const attached = typeof this.deps.proxy.get === 'function'
       ? this.deps.proxy.get(session.id)

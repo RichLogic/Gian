@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 const rootDir = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const defaultGuardModule = join(
   rootDir,
-  'packages/host/dist/runtime/kimi-session-store.js',
+  'packages/proxies/kimi-proxy/dist/src/runtime/session-store.js',
 );
 
 function firstVersion(text) {

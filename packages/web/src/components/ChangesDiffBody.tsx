@@ -16,7 +16,7 @@
  * - the stats/actions header stays pinned; previous/next follows the file
  *   nearest that header while the body scrolls.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangedEntry } from '../api.js';
 import { useT } from '../i18n/index.js';
 import {
@@ -193,7 +193,12 @@ export function ChangesDiffBody({
   const rootRef = useRef<HTMLDivElement>(null);
   const [pendingAnchor, setPendingAnchor] = useState<ChangesDiffAnchor | null>(null);
   const filePaths = useMemo(() => state.files.map(file => file.path), [state.files]);
-  const fileNavigation = useReviewFileNavigation(rootRef, filePaths);
+  const expandFile = useCallback((path: string) => {
+    if (workingTreeId && state.collapsed[path]) {
+      toggleChangesDiffCollapsed(workingTreeId, path, ownerSessionId);
+    }
+  }, [workingTreeId, ownerSessionId, state.collapsed]);
+  const fileNavigation = useReviewFileNavigation(rootRef, filePaths, expandFile);
 
   useEffect(() => {
     if (workingTreeId) ensureChangesDiffLoaded(workingTreeId, ownerSessionId);

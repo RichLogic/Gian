@@ -6,6 +6,7 @@ import { gitAbortEntityKey, gitFetchEntityKey, gitIndexEntityKey } from '../src/
 import { gitHistoryFetchEntityKey } from '../src/operations/git-history.js';
 import { nativeEntityKey } from '../src/operations/native.js';
 import { sidechatEntityKey } from '../src/operations/sidechat.js';
+import { scheduleConfirmationEntityKey, scheduleEntityKey } from '../src/operations/schedule.js';
 import { taskEntityKey } from '../src/operations/task.js';
 import { termEntityKey } from '../src/operations/terminal.js';
 import { workspaceEntityKey } from '../src/operations/workspace.js';
@@ -23,6 +24,8 @@ describe('operation entity keys', () => {
     expect(gitIndexEntityKey('wt-1', 'src/a.ts')).toBe('git:wt-1:src/a.ts');
     expect(gitHistoryFetchEntityKey('wt-1')).toBe('git:wt-1:historyFetch');
     expect(browserExternalEntityKey('tab-9')).toBe('browser:external:tab-9');
+    expect(scheduleEntityKey('sch-1')).toBe('schedule:sch-1');
+    expect(scheduleConfirmationEntityKey('conf-1')).toBe('schedule-confirmation:conf-1');
   });
 
   it('openExternalEntityKey includes tree, path, and target tag', () => {
@@ -36,5 +39,9 @@ describe('operation entity keys', () => {
       path: '',
       target: { kind: 'reveal' },
     })).toBe('files:open:wt-1::reveal');
+    expect(openExternalEntityKey({
+      absolutePath: '/Users/me/.gian/attachments/s1/plan.html',
+      target: { kind: 'builtin', builtin: 'default' },
+    })).toBe('files:open:abs:/Users/me/.gian/attachments/s1/plan.html:builtin:default');
   });
 });

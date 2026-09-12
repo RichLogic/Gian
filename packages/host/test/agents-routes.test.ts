@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
@@ -7,6 +7,7 @@ import test from 'node:test';
 import type { UserAgentStatus } from '@gian/shared';
 import { AgentManager } from '../src/agents/manager.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
+import { developmentEntries, testResolver } from './runtime-test-harness.js';
 
 async function executable(path: string, version: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -14,16 +15,34 @@ async function executable(path: string, version: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
-async function makeApp(t: test.TestContext, environmentCliPaths?: Record<string, string>) {
+async function makeApp(
+  t: test.TestContext,
+  environmentCliPaths?: Record<string, string>,
+  pickHome?: () => Promise<
+    | { kind: 'ok'; path: string }
+    | { kind: 'canceled' }
+    | { kind: 'error'; error: string }
+  >,
+) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const proxy = join(root, 'proxy.mjs');
-  await writeFile(proxy, 'export {};\n');
+  const bins = {
+    claude: join(root, 'bin', 'claude'),
+    codex: join(root, 'bin', 'codex'),
+    kimi: join(root, 'bin', 'kimi'),
+    dsh: join(root, 'bin', 'dsh'),
+  };
+  await executable(bins.claude, 'claude 2.1.159');
+  await executable(bins.codex, 'codex 0.146.0');
+  await executable(bins.kimi, 'kimi 0.38.0');
+  await executable(bins.dsh, 'dsh 0.1.1-rc.2');
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxy, codex: proxy, kimi: proxy, dsh: proxy },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     ...(environmentCliPaths ? { environmentCliPaths } : {}),
     homeDir: join(root, 'home'),
     pathEnv: '',
@@ -31,7 +50,6 @@ async function makeApp(t: test.TestContext, environmentCliPaths?: Record<string,
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: { drain: async () => undefined, invalidate: () => true } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({
       catalogRevision: 'test',
@@ -39,9 +57,20 @@ async function makeApp(t: test.TestContext, environmentCliPaths?: Record<string,
       configOptions: [],
       slashCommands: [],
     }),
+    ...(pickHome ? { pickHome } : {}),
   });
-  return { app, agents, root };
+  return { app, agents, root, bins };
 }
+
+test('POST /api/agents/pick-home supports a draft before an Agent id exists', async t => {
+  const { app } = await makeApp(t, undefined, async () => ({
+    kind: 'ok',
+    path: '/Users/test/custom-home',
+  }));
+  const response = await app.request('/api/agents/pick-home', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { path: '/Users/test/custom-home' });
+});
 
 test('GET /api/proxies returns static catalog metadata only', async t => {
   const { app } = await makeApp(t);
@@ -90,12 +119,12 @@ test('GET /api/agents returns saved Agents only, never unsaved catalog kinds', a
 });
 
 test('POST /api/agents creates a draft into a saved Agent; duplicate names 409', async t => {
-  const { app } = await makeApp(t);
+  const { app, bins } = await makeApp(t);
 
   const created = await app.request('/api/agents', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'My Codex', proxy: 'codex' }),
+    body: JSON.stringify({ name: 'My Codex', proxy: 'codex', cliPath: bins.codex }),
   });
   assert.equal(created.status, 201);
   const createdBody = await created.json() as { agent: UserAgentStatus };
@@ -108,7 +137,7 @@ test('POST /api/agents creates a draft into a saved Agent; duplicate names 409',
   const duplicate = await app.request('/api/agents', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'my codex', proxy: 'kimi' }),
+    body: JSON.stringify({ name: 'my codex', proxy: 'kimi', cliPath: bins.kimi }),
   });
   assert.equal(duplicate.status, 409);
   assert.equal(
@@ -128,15 +157,31 @@ test('POST /api/agents creates a draft into a saved Agent; duplicate names 409',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'Grok', proxy: 'grok' }),
   });
-  assert.equal(grok.status, 400, 'Grok stays out of the product catalog');
+  assert.equal(grok.status, 400, 'Grok stays out of the legacy product fallback');
+
 });
 
-test('PATCH /api/agents/:id renames; DELETE removes; 404 for unknown ids', async t => {
-  const { app } = await makeApp(t);
+test('POST /api/agents reuses an explicit GianDev runtime path without exposing a path field', async t => {
+  const claude = join(await mkdtemp(join(tmpdir(), 'gian-agents-route-bin-')), 'bin', 'claude');
+  await executable(claude, 'claude 2.1.220');
+  const { app } = await makeApp(t, { claude });
   const created = await app.request('/api/agents', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'One', proxy: 'kimi' }),
+    body: JSON.stringify({ name: 'Claude second', pluginId: 'claude', home: { kind: 'managed' } }),
+  });
+  assert.equal(created.status, 201);
+  const body = await created.json() as { agent: UserAgentStatus };
+  assert.equal(body.agent.cliPath, claude);
+  assert.equal(body.agent.home?.kind, 'managed');
+});
+
+test('PATCH /api/agents/:id renames; DELETE removes; 404 for unknown ids', async t => {
+  const { app, bins } = await makeApp(t);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'One', proxy: 'kimi', cliPath: bins.kimi }),
   });
   const { agent } = await created.json() as { agent: UserAgentStatus };
 
@@ -171,11 +216,11 @@ test('PATCH /api/agents/:id renames; DELETE removes; 404 for unknown ids', async
 });
 
 test('GET /api/agents/:id serves kind status for drafts and Agent status for saved Agents', async t => {
-  const { app } = await makeApp(t);
+  const { app, bins } = await makeApp(t);
   const created = await app.request('/api/agents', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'Solo', proxy: 'codex' }),
+    body: JSON.stringify({ name: 'Solo', proxy: 'codex', cliPath: bins.codex }),
   });
   const { agent } = await created.json() as { agent: UserAgentStatus };
 
@@ -195,7 +240,7 @@ test('GET /api/agents/:id serves kind status for drafts and Agent status for sav
   assert.equal(unknown.status, 404);
 });
 
-test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path', async t => {
+test('GET /api/proxies/:id/draft-defaults numbers names and exposes HOME plus read-only active path', async t => {
   const claude = join(await mkdtemp(join(tmpdir(), 'gian-agents-route-bin2-')), 'bin', 'claude');
   await executable(claude, 'claude 2.1.220');
   const { app } = await makeApp(t, { claude });
@@ -203,21 +248,25 @@ test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path
   const second = await app.request('/api/proxies/claude/draft-defaults');
   assert.deepEqual(await second.json(), {
     name: 'Claude Code 2',
+    home: { kind: 'managed', path: null },
     cliPath: claude,
   });
-  // dsh has nothing installed in the fixture home and an empty PATH —
-  // the scan comes back empty and the draft starts pathless.
   const dsh = await app.request('/api/proxies/dsh/draft-defaults');
-  assert.deepEqual(await dsh.json(), { name: 'DeepSeek Harness', cliPath: null });
+  assert.deepEqual(await dsh.json(), {
+    name: 'DeepSeek Harness',
+    home: { kind: 'managed', path: null },
+    cliPath: null,
+  });
 
-  // A kind with no saved Agent and no copied path falls back to the local
-  // scan (PATH / official install locations).
+  // Official-user / PATH locations are not Host-scanned. A draft without a
+  // saved Agent or readiness snapshot stays pathless until Runtime discover.
   const kimiBin = join(await mkdtemp(join(tmpdir(), 'gian-agents-route-home-')), '.kimi-code', 'bin', 'kimi');
   await executable(kimiBin, 'kimi 0.31.1');
   const proxy2 = join(await mkdtemp(join(tmpdir(), 'gian-agents-route-p2-')), 'proxy.mjs');
   await writeFile(proxy2, 'export {};\n');
-  const homeDir = dirname(dirname(dirname(kimiBin))); // parent of .kimi-code
+  const homeDir = dirname(dirname(dirname(kimiBin)));
   const agents2 = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(await mkdtemp(join(tmpdir(), 'gian-agents-route-data-')), 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
@@ -228,7 +277,6 @@ test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path
   const app2 = new Hono();
   registerAgentRoutes(app2, {
     agents: agents2,
-    runtimes: { drain: async () => undefined, invalidate: () => true } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({
       catalogRevision: 'test',
@@ -238,8 +286,28 @@ test('GET /api/proxies/:id/draft-defaults numbers names and copies the kind path
     }),
   });
   const kimi = await app2.request('/api/proxies/kimi/draft-defaults');
-  assert.deepEqual(await kimi.json(), { name: 'Kimi Code', cliPath: kimiBin });
+  assert.deepEqual(await kimi.json(), {
+    name: 'Kimi Code',
+    home: { kind: 'managed', path: null },
+    cliPath: null,
+  });
 
   const unknown = await app.request('/api/proxies/grok/draft-defaults');
   assert.equal(unknown.status, 404);
+});
+
+test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t => {
+  const { app, root } = await makeApp(t);
+  const response = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Fixture', pluginId: 'io.gian.fixture' }),
+  });
+  assert.equal(response.status, 404);
+  const body = await response.json() as { code?: string };
+  assert.equal(body.code, 'PLUGIN_NOT_FOUND');
+  const persisted = JSON.parse(await readFile(join(root, 'data', 'agents.json'), 'utf8')) as {
+    agents: unknown[];
+  };
+  assert.equal(persisted.agents.length, 0);
 });

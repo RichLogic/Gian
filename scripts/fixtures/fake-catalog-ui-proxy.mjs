@@ -9,17 +9,43 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const pluginId = process.env.GIAN_PLUGIN_ID ?? 'grok';
+const certificationProvider = process.env.GIAN_E2E_PROXY_PROVIDER ?? pluginId;
+const runtimeBootstrap = process.env.GIAN_RUNTIME_BOOTSTRAP === '1';
+const defaultCapabilities = [
+  'input.localFile',
+  'input.localImage',
+  'input.skill',
+  'catalog.resolve',
+  'session.rename',
+  'session.native.list',
+  'session.native.delete',
+  'session.replay',
+  'turn.steer',
+  'interaction',
+  'event.reasoning',
+  'event.plan',
+  'event.diff',
+  'event.usage',
+  'event.step',
+  'event.request',
+];
+const supportedCapabilities = new Set(JSON.parse(
+  process.env.GIAN_E2E_PROXY_CAPABILITIES ?? JSON.stringify(defaultCapabilities),
+));
 const plugins = {
   claude: { name: 'Claude Code Mock', version: '0.2.0', scope: 'session' },
   codex: { name: 'Codex Mock', version: '0.2.0', scope: 'shared' },
   kimi: { name: 'Kimi Code Mock', version: '0.2.0', scope: 'shared' },
   grok: { name: 'Grok Mock', version: '0.3.0', scope: 'session' },
+  'ai.deepseek.harness': { name: 'DeepSeek Harness Mock', version: '0.1.0', scope: 'shared' },
 };
 const plugin = plugins[pluginId] ?? {
   name: `${pluginId} Mock`,
   version: '0.2.0',
   scope: 'session',
 };
+plugin.version = process.env.GIAN_E2E_PROXY_VERSION ?? plugin.version;
+plugin.scope = process.env.GIAN_E2E_PROXY_SCOPE ?? plugin.scope;
 
 const dataDir = process.env.GIAN_PLUGIN_DATA_DIR ?? join(tmpdir(), `gian-mock-${process.pid}`);
 mkdirSync(dataDir, { recursive: true });
@@ -28,11 +54,12 @@ const sessions = new Map();
 let catalogRevision = 1;
 let processEventSequence = 0;
 let streamSequence = 0;
+let negotiatedProtocol = '2.0';
 
 const model = {
   id: 'model',
   displayName: 'Mock Model',
-  binding: 'turn',
+  binding: certificationProvider === 'dsh' ? 'session' : 'turn',
   role: 'model',
   control: 'select',
   required: true,
@@ -137,6 +164,20 @@ const mockTrace = {
 };
 
 function processCatalog() {
+  const configOptions = [
+    workspaceMode,
+    model,
+    effort,
+    fast,
+    approval,
+    execution,
+    verbosity,
+    mockTrace,
+  ].map(option => {
+    if (negotiatedProtocol === '2.0') return option;
+    const { role: _legacyRole, ...current } = option;
+    return current;
+  });
   return {
     catalogRevision: `ui-mock-${pluginId}-${catalogRevision}`,
     input: [
@@ -145,16 +186,15 @@ function processCatalog() {
       { type: 'localImage' },
       { type: 'skill' },
     ],
-    configOptions: [
-      workspaceMode,
-      model,
-      effort,
-      fast,
-      approval,
-      execution,
-      verbosity,
-      mockTrace,
-    ],
+    configOptions,
+    ...(negotiatedProtocol === '2.0' ? {} : {
+      specialCatalogs: {
+        model: 'model',
+        thinking: 'effort',
+        fast: 'fast',
+        approvalMode: 'permission_mode',
+      },
+    }),
     slashCommands: [{
       name: '/mock:review',
       description: 'Mock catalog slash command',
@@ -189,6 +229,13 @@ function timestamp(sequence) {
 }
 
 function sessionResult(session) {
+  const turnConfigOptions = [model, effort, fast, approval, execution, verbosity, mockTrace]
+    .filter(option => option.binding === 'turn')
+    .map(option => {
+      if (negotiatedProtocol === '2.0') return option;
+      const { role: _legacyRole, ...current } = option;
+      return current;
+    });
   return {
     id: session.id,
     nativeSession: { id: session.nativeSessionId },
@@ -196,7 +243,7 @@ function sessionResult(session) {
     state: session.state,
     sessionConfig: session.sessionConfig,
     lastError: session.lastError,
-    turnConfigOptions: [model, effort, fast, approval, execution, verbosity, mockTrace],
+    turnConfigOptions,
     turnConfigRevision: `ui-mock-turn-${pluginId}-${catalogRevision}`,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -311,16 +358,18 @@ function emitActivity(session, activityId, type, title, presentationData, status
 
 function runGallery(session) {
   emitText(session, 'gallery-text', 'Mock **text** content');
-  emitTurn(session, 'content.delta', {
-    contentId: 'gallery-reasoning',
-    kind: 'reasoning',
-    delta: 'Mock reasoning',
-  });
-  emitTurn(session, 'content.completed', {
-    contentId: 'gallery-reasoning',
-    kind: 'reasoning',
-    content: 'Mock reasoning',
-  });
+  if (supportedCapabilities.has('event.reasoning')) {
+    emitTurn(session, 'content.delta', {
+      contentId: 'gallery-reasoning',
+      kind: 'reasoning',
+      delta: 'Mock reasoning',
+    });
+    emitTurn(session, 'content.completed', {
+      contentId: 'gallery-reasoning',
+      kind: 'reasoning',
+      content: 'Mock reasoning',
+    });
+  }
   emitTurn(session, 'content.completed', {
     contentId: 'gallery-status',
     kind: 'status',
@@ -341,29 +390,35 @@ function runGallery(session) {
   emitActivity(session, 'notice-1', 'notice', 'Mock notice', { message: 'Mock warning', code: 'MOCK_NOTICE' });
   emitActivity(session, 'tool-1', 'tool', 'Mock tool', { name: 'mock_tool', input: { value: 1 }, output: { ok: true } });
   emitActivity(session, 'custom-1', 'custom.widget', 'Unknown activity', { value: 'preserved' });
-  emitTurn(session, 'plan.updated', {
-    planId: 'plan-1',
-    title: 'Mock plan',
-    steps: [
-      { id: 'step-1', text: 'Inspect', status: 'completed' },
-      { id: 'step-2', text: 'Verify', status: 'in_progress' },
-    ],
-  });
-  emitTurn(session, 'diff.updated', {
-    diffId: 'diff-1',
-    diff: '--- a/mock.txt\n+++ b/mock.txt\n@@ -1 +1 @@\n-old\n+new\n',
-    truncated: false,
-    files: [{ path: 'mock.txt', status: 'modified' }],
-  });
-  emitTurn(session, 'usage.updated', {
-    context: { used: 1200, window: 8192 },
-    conversation: {
-      mode: 'delta',
-      inputTokens: 100,
-      outputTokens: 40,
-      totalTokens: 140,
-    },
-  });
+  if (supportedCapabilities.has('event.plan')) {
+    emitTurn(session, 'plan.updated', {
+      planId: 'plan-1',
+      title: 'Mock plan',
+      steps: [
+        { id: 'step-1', text: 'Inspect', status: 'completed' },
+        { id: 'step-2', text: 'Verify', status: 'in_progress' },
+      ],
+    });
+  }
+  if (supportedCapabilities.has('event.diff')) {
+    emitTurn(session, 'diff.updated', {
+      diffId: 'diff-1',
+      diff: '--- a/mock.txt\n+++ b/mock.txt\n@@ -1 +1 @@\n-old\n+new\n',
+      truncated: false,
+      files: [{ path: 'mock.txt', status: 'modified' }],
+    });
+  }
+  if (supportedCapabilities.has('event.usage')) {
+    emitTurn(session, 'usage.updated', {
+      context: { used: 1200, window: 8192 },
+      conversation: {
+        mode: 'delta',
+        inputTokens: 100,
+        outputTokens: 40,
+        totalTokens: 140,
+      },
+    });
+  }
   finishTurn(session);
 }
 
@@ -609,6 +664,11 @@ function scenarioName(request) {
 }
 
 function runScenario(session, name) {
+  if (name.startsWith('interaction') && !supportedCapabilities.has('interaction')) {
+    emitText(session, 'interaction-unavailable', 'Interaction capability unavailable');
+    finishTurn(session);
+    return;
+  }
   switch (name) {
     case 'gallery':
       runGallery(session);
@@ -786,36 +846,59 @@ for await (const line of input) {
   }
   appendFileSync(requestLog, `${JSON.stringify(request)}\n`);
 
+  if ([
+    'catalog.resolve',
+    'session.rename',
+    'session.native.list',
+    'session.native.delete',
+    'session.replay',
+    'turn.steer',
+    'interaction.respond',
+  ].includes(request.method)) {
+    const capability = request.method === 'interaction.respond' ? 'interaction' : request.method;
+    if (!supportedCapabilities.has(capability)) {
+      fail(request.id, 'CAPABILITY_NOT_SUPPORTED', `${capability} is not advertised.`);
+      continue;
+    }
+  }
+
   switch (request.method) {
     case 'initialize':
+      negotiatedProtocol = (process.env.GIAN_PROTOCOL_VERSIONS ?? '2.2').split(',')[0];
       result(request.id, {
-        protocol: { name: 'gian.proxy', version: '2.0' },
+        protocol: {
+          name: 'gian.proxy',
+          version: negotiatedProtocol,
+        },
         plugin: { id: pluginId, name: plugin.name, version: plugin.version },
         process: { scope: plugin.scope },
-        capabilities: {
-          'input.localFile': 1,
-          'input.localImage': 1,
-          'input.skill': 1,
-          'catalog.resolve': 1,
-          'session.rename': 1,
-          'session.native.list': 1,
-          'session.native.delete': 1,
-          'session.replay': 1,
-          'turn.steer': 1,
-          interaction: 1,
-          'event.reasoning': 1,
-          'event.plan': 1,
-          'event.diff': 1,
-          'event.usage': 1,
-          'event.step': 1,
-          'event.request': 1,
-        },
+        capabilities: runtimeBootstrap ? {
+          'runtime.discover': 1,
+          'runtime.probe': 1,
+        } : Object.fromEntries([...supportedCapabilities].map(capability => [capability, 1])),
+      });
+      break;
+    case 'runtime.discover':
+      result(request.id, {
+        candidates: [{ path: '/usr/bin/git', source: 'path', label: 'Fixture Runtime' }],
+        setupActions: [],
+      });
+      break;
+    case 'runtime.probe':
+      result(request.id, {
+        runtimeId: process.env.GIAN_E2E_RUNTIME_ID ?? certificationProvider,
+        displayName: process.env.GIAN_E2E_RUNTIME_NAME ?? 'Fixture Runtime',
+        path: request.params.path,
+        version: process.env.GIAN_E2E_RUNTIME_VERSION ?? '1.0.0',
+        configHome: null,
+        contentRoots: [{ path: request.params.path, mode: 'file' }],
       });
       break;
     case 'catalog.list':
       result(request.id, processCatalog());
       break;
     case 'catalog.resolve': {
+      const sessionConfig = request.params?.sessionConfig ?? {};
       const turnConfig = request.params?.turnConfig ?? {};
       if (turnConfig.execution_mode === 'broken') {
         fail(request.id, 'CONFIG_VALUE_INVALID', 'broken resolve is not a legal execution mode');
@@ -825,7 +908,8 @@ for await (const line of input) {
         ...processCatalog(),
         resolvedDefaults: {
           sessionConfig: {},
-          turnConfig: turnConfig.model === 'mock-vision' && turnConfig.mock_trace === undefined
+          turnConfig: (turnConfig.model ?? sessionConfig.model) === 'mock-vision'
+            && turnConfig.mock_trace === undefined
             ? { mock_trace: true }
             : {},
         },

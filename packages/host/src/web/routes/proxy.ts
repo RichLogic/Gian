@@ -1,18 +1,15 @@
 import { ProxyProtocolError } from '@gian/proxy-protocol';
 import type { Hono } from 'hono';
-import { EXECUTOR_IDS } from '@gian/shared';
-import type { Executor, ProductExecutor } from '@gian/shared';
+import { resolvePluginIdInput } from '@gian/shared';
 import type { SessionManager } from '../../session/manager.js';
 import type { Db } from '../../storage/db.js';
 
 /** Resolves a saved Agent's runtime (kind, CLI path) for agent-scoped
  *  catalog queries. Wired from AgentManager.agentRuntimePath. */
 export type AgentRuntimePathResolver = (agentId: string) => {
-  proxy: ProductExecutor;
+  pluginId: string;
   cliPath: string | null;
 };
-
-const KNOWN_EXECUTORS = new Set<string>(EXECUTOR_IDS);
 
 export function registerProxyRoutes(
   app: Hono,
@@ -23,29 +20,34 @@ export function registerProxyRoutes(
   /** Optional ?agent=<id> discriminator: the catalog of one Proxy kind can
    *  differ per Agent CLI path, so agent-scoped callers resolve their own
    *  (kind, path) instead of the kind default. */
-  const agentCliPath = (c: { req: { query: (name: string) => string | undefined } }):
+  const agentCliPath = (
+    c: { req: { query: (name: string) => string | undefined } },
+    pluginId: string,
+  ):
     | { cliPath: string | null | undefined }
     | { error: string } => {
     const agentId = c.req.query('agent');
     if (agentId === undefined) return { cliPath: undefined };
     if (!agentPaths) return { error: 'agent-scoped catalogs are not available' };
     try {
-      return { cliPath: agentPaths(agentId).cliPath };
+      const agent = agentPaths(agentId);
+      if (resolvePluginIdInput(agent.pluginId) !== pluginId) {
+        return { error: `agent ${agentId} does not use ${pluginId}` };
+      }
+      return { cliPath: agent.cliPath };
     } catch {
       return { error: `agent not found: ${agentId}` };
     }
   };
 
   app.get('/api/proxy/:executor/capabilities', async c => {
-    const executor = c.req.param('executor');
-    if (!KNOWN_EXECUTORS.has(executor)) {
-      return c.json({ error: 'unknown executor' }, 400);
-    }
-    const target = agentCliPath(c);
+    const executor = resolvePluginIdInput(decodeURIComponent(c.req.param('executor')));
+    if (!executor) return c.json({ error: 'invalid pluginId' }, 400);
+    const target = agentCliPath(c, executor);
     if ('error' in target) return c.json({ error: target.error }, 404);
     const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
     try {
-      const catalog = await sessions.warmCapabilities(executor as Executor, cliPath);
+      const catalog = await sessions.warmCapabilities(executor, cliPath);
       return c.json({
         ...catalog,
         capabilities: sessions.getProtocolCapabilities(executor, cliPath) ?? {},
@@ -56,22 +58,8 @@ export function registerProxyRoutes(
   });
 
   app.post('/api/proxy/:executor/catalog/resolve', async c => {
-    const executor = c.req.param('executor');
-    if (!KNOWN_EXECUTORS.has(executor)) {
-      return c.json({ error: 'unknown executor' }, 400);
-    }
-    const target = agentCliPath(c);
-    if ('error' in target) return c.json({ error: target.error }, 404);
-    const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
-    try {
-      await sessions.warmCapabilities(executor as Executor, cliPath);
-    } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
-    }
-    const advertised = sessions.getProtocolCapabilities(executor, cliPath)?.['catalog.resolve'];
-    if (advertised === undefined) {
-      return c.json({ error: 'catalog.resolve is not advertised' }, 404);
-    }
+    const executor = resolvePluginIdInput(decodeURIComponent(c.req.param('executor')));
+    if (!executor) return c.json({ error: 'invalid pluginId' }, 400);
     let body: {
       catalogRevision?: unknown;
       sessionConfig?: unknown;
@@ -86,6 +74,45 @@ export function registerProxyRoutes(
     if (typeof body.catalogRevision !== 'string' || body.catalogRevision.length === 0) {
       return c.json({ error: 'catalogRevision is required' }, 400);
     }
+    let cliPath: string | null | undefined;
+    if (typeof body.sessionId === 'string') {
+      const session = db.prepare(
+        'SELECT executor, proxy_plugin_id, agent_id FROM sessions WHERE id = ?',
+      ).get(body.sessionId) as {
+        executor: string;
+        proxy_plugin_id: string | null;
+        agent_id: string | null;
+      } | undefined;
+      if (!session) return c.json({ error: `session not found: ${body.sessionId}` }, 404);
+      if (resolvePluginIdInput(session.proxy_plugin_id ?? session.executor) !== executor) {
+        return c.json({ error: 'session executor does not match route executor' }, 400);
+      }
+      if (session.agent_id !== null) {
+        if (!agentPaths) return c.json({ error: 'agent-scoped catalogs are not available' }, 404);
+        try {
+          const agent = agentPaths(session.agent_id);
+          if (resolvePluginIdInput(agent.pluginId) !== executor) {
+            return c.json({ error: 'session Agent does not match route pluginId' }, 400);
+          }
+          cliPath = agent.cliPath;
+        } catch {
+          return c.json({ error: `agent not found: ${session.agent_id}` }, 404);
+        }
+      }
+    } else {
+      const target = agentCliPath(c, executor);
+      if ('error' in target) return c.json({ error: target.error }, 404);
+      cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
+    }
+    try {
+      await sessions.warmCapabilities(executor, cliPath);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+    const advertised = sessions.getProtocolCapabilities(executor, cliPath)?.['catalog.resolve'];
+    if (advertised === undefined) {
+      return c.json({ error: 'catalog.resolve is not advertised' }, 404);
+    }
     const sessionConfig = body.sessionConfig && typeof body.sessionConfig === 'object'
       && !Array.isArray(body.sessionConfig)
       ? body.sessionConfig as Record<string, string | boolean | number | null>
@@ -96,7 +123,7 @@ export function registerProxyRoutes(
       : {};
     try {
       return c.json(await sessions.resolveCatalog(
-        executor as Executor,
+        executor,
         {
           catalogRevision: body.catalogRevision,
           sessionConfig,
@@ -114,11 +141,9 @@ export function registerProxyRoutes(
   });
 
   app.get('/api/proxy/:executor/models', async c => {
-    const executor = c.req.param('executor');
-    if (executor !== 'codex' && executor !== 'claude') {
-      return c.json({ error: 'unknown executor' }, 400);
-    }
-    const target = agentCliPath(c);
+    const executor = resolvePluginIdInput(decodeURIComponent(c.req.param('executor')));
+    if (!executor) return c.json({ error: 'invalid pluginId' }, 400);
+    const target = agentCliPath(c, executor);
     if ('error' in target) return c.json({ error: target.error }, 404);
     const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
     try {
@@ -140,11 +165,9 @@ export function registerProxyRoutes(
   });
 
   app.get('/api/proxy/:executor/slash', async c => {
-    const executor = c.req.param('executor');
-    if (executor !== 'codex' && executor !== 'claude') {
-      return c.json({ error: 'unknown executor' }, 400);
-    }
-    const target = agentCliPath(c);
+    const executor = resolvePluginIdInput(decodeURIComponent(c.req.param('executor')));
+    if (!executor) return c.json({ error: 'invalid pluginId' }, 400);
+    const target = agentCliPath(c, executor);
     if ('error' in target) return c.json({ error: target.error }, 404);
     const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
     const workspaceId = c.req.query('workspace');

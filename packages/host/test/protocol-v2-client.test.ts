@@ -252,3 +252,169 @@ test('generic protocol v2 client treats invalid UTF-8 stdout as fatal', async (t
   await exited;
   assert.equal(client.isExited(), true);
 });
+
+test('a timed-out request settles, drops its pending record, and its late response is ignored instead of killing the shared Host', async (t) => {
+  const source = `
+import { createInterface } from 'node:readline';
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of input) {
+  const request = JSON.parse(line);
+  if (request.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+      protocol: { name: 'gian.proxy', version: '2.0' },
+      plugin: { id: 'io.gian.fixture', name: 'Fixture', version: '7.4.2' },
+      process: { scope: 'shared' },
+      capabilities: { 'customization.list': 1 },
+    } }) + '\\n');
+  } else if (request.method === 'customization.list') {
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+        kind: request.params.kind,
+        status: 'ok',
+        completeness: 'configured',
+        observedAt: '2026-09-02T00:00:00.000Z',
+        items: [],
+        truncated: false,
+        diagnostics: [],
+      } }) + '\\n');
+    }, 300);
+  } else if (request.method === 'session.get') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: {
+      code: -32002, message: 'SESSION_NOT_FOUND',
+      data: { domainCode: 'SESSION_NOT_FOUND', retryable: false, details: {} },
+    } }) + '\\n');
+  } else if (request.method === 'shutdown') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
+    break;
+  }
+}
+`;
+  const client = await fixtureClient(t, source);
+  await client.initialize();
+
+  await assert.rejects(
+    client.request('customization.list', { kind: 'skill' }, { timeoutMs: 30 }),
+    /did not answer/,
+  );
+  // The late Response must arrive after the timeout fired.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  // The Host (this client) must still be alive and fully usable: the late
+  // response was ignored as expected latency, never treated as an orphan
+  // protocol violation that kills a shared Proxy serving live sessions.
+  assert.equal(client.isExited(), false);
+  await assert.rejects(
+    client.request('session.get', { sessionId: 'x' }),
+    /SESSION_NOT_FOUND/,
+  );
+  await client.shutdown().catch(() => undefined);
+  assert.equal(client.isExited(), true);
+});
+
+
+test('late responses beyond any tombstone capacity stay harmless; only truly unknown ids are fatal', async (t) => {
+  const source = `
+import { createInterface } from 'node:readline';
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of input) {
+  const request = JSON.parse(line);
+  if (request.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+      protocol: { name: 'gian.proxy', version: '2.0' },
+      plugin: { id: 'io.gian.fixture', name: 'Fixture', version: '7.4.2' },
+      process: { scope: 'shared' },
+      capabilities: { 'customization.list': 1 },
+    } }) + '\\n');
+  } else if (request.method === 'customization.list') {
+    // req-1 answers 5s late (far past any bounded-tombstone TTL); every
+    // other request answers 300ms late — far past its 10ms timeout and after
+    // 128+ further timeouts would have evicted any bounded tombstone.
+    const delay = request.id === 'req-1' ? 5000 : 300;
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+        kind: request.params.kind, status: 'ok', completeness: 'configured',
+        observedAt: '2026-09-02T00:00:00.000Z', items: [], truncated: false, diagnostics: [],
+      } }) + '\\n');
+    }, delay);
+  } else if (request.method === 'session.get') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: {
+      code: -32002, message: 'SESSION_NOT_FOUND',
+      data: { domainCode: 'SESSION_NOT_FOUND', retryable: false, details: {} },
+    } }) + '\\n');
+  } else if (request.method === 'shutdown') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
+    break;
+  }
+}
+`;
+  const client = await fixtureClient(t, source);
+  t.after(() => { client.forceKill(); });
+  await client.initialize();
+  let exited = false;
+  client.onExit(() => { exited = true; });
+
+  for (let i = 1; i <= 130; i += 1) {
+    await assert.rejects(
+      client.request('customization.list', { kind: 'skill' }, { timeoutMs: 10 }),
+      /did not answer/,
+    );
+  }
+  // Wait for every late Response (including req-1 at 5s) to arrive.
+  await new Promise(resolve => setTimeout(resolve, 5600));
+  assert.equal(exited, false, 'a late Response that outlives any bounded tombstone must not kill the Host');
+  await assert.rejects(
+    client.request('session.get', { sessionId: 'x' }),
+    /SESSION_NOT_FOUND/,
+  );
+  await client.shutdown().catch(() => undefined);
+  assert.equal(client.isExited(), true);
+});
+
+test('a response id this client never issued is still a fatal protocol violation', async (t) => {
+  const source = `
+import { createInterface } from 'node:readline';
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of input) {
+  const request = JSON.parse(line);
+  if (request.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+      protocol: { name: 'gian.proxy', version: '2.0' },
+      plugin: { id: 'io.gian.fixture', name: 'Fixture', version: '7.4.2' },
+      process: { scope: 'shared' },
+      capabilities: {},
+    } }) + '\\n');
+  } else if (request.method === 'session.get') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 'req-999999', result: { session: {} } }) + '\\n');
+  } else if (request.method === 'shutdown') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
+    break;
+  }
+}
+`;
+  const client = await fixtureClient(t, source);
+  t.after(() => { client.forceKill(); });
+  const exited = new Promise<void>((resolve) => client.onExit(() => resolve()));
+  await client.initialize();
+  await assert.rejects(client.request('session.get', { sessionId: 'x' }), /protocol|violation|no client request/i);
+  await exited;
+  assert.equal(client.isExited(), true);
+});
+
+test('timeoutMs must be a finite positive number', async (t) => {
+  const client = await fixtureClient(t, fixtureSource());
+  t.after(() => { client.forceKill(); });
+  await client.initialize();
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(
+      client.request('session.get', { sessionId: 'x' }, { timeoutMs: bad }),
+      /finite positive number/,
+    );
+  }
+  // A positive timeout still applies normally: the fixture never answers
+  // session.get, so the timeout settles the request.
+  await assert.rejects(
+    client.request('session.get', { sessionId: 'x' }, { timeoutMs: 100 }),
+    /did not answer session.get within 100ms/,
+  );
+  await client.shutdown().catch(() => undefined);
+});

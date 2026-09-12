@@ -14,6 +14,7 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 export interface GitHubReleaseMetadataBrokerOptions {
   socketPath: string;
   allowedRepository: string;
+  allowedCatalogRepository?: string;
   fetchReleaseMetadata(
     request: GitHubReleaseMetadataRequest,
     signal: AbortSignal,
@@ -32,9 +33,13 @@ export function resolveGitHubReleaseBrokerSocketPath(
 export class GitHubReleaseMetadataBroker {
   private server: Server | null = null;
   private readonly allowedRepository: string;
+  private readonly allowedCatalogRepository: string | null;
 
   constructor(private readonly options: GitHubReleaseMetadataBrokerOptions) {
     this.allowedRepository = normalizeRepository(options.allowedRepository);
+    this.allowedCatalogRepository = options.allowedCatalogRepository
+      ? normalizeRepository(options.allowedCatalogRepository)
+      : null;
   }
 
   async start(): Promise<void> {
@@ -90,6 +95,7 @@ export class GitHubReleaseMetadataBroker {
       const releaseRequest = parseReleaseRequest(
         value,
         this.allowedRepository,
+        this.allowedCatalogRepository,
       );
       if (!releaseRequest) {
         sendJson(response, 400, { error: 'invalid_request' });
@@ -100,10 +106,31 @@ export class GitHubReleaseMetadataBroker {
         releaseRequest,
         controller.signal,
       );
-      const body = await readLimitedResponse(upstream, MAX_RESPONSE_BYTES);
+      if (response.destroyed) return;
+      if (upstream.status === 304) {
+        response.statusCode = 304;
+        const etag = upstream.headers.get('etag');
+        if (etag) response.setHeader('etag', etag);
+        response.end();
+        return;
+      }
+      const maxBytes = releaseRequest.operation === 'catalog-asset'
+        ? 16 * 1024 * 1024
+        : releaseRequest.operation === 'release-asset'
+          ? 64 * 1024 * 1024
+          : MAX_RESPONSE_BYTES;
+      const body = await readLimitedResponse(upstream, maxBytes);
       if (response.destroyed) return;
       response.statusCode = upstream.status;
-      response.setHeader('content-type', 'application/json; charset=utf-8');
+      const etag = upstream.headers.get('etag');
+      if (etag) response.setHeader('etag', etag);
+      response.setHeader(
+        'content-type',
+        releaseRequest.operation === 'catalog-asset'
+          || releaseRequest.operation === 'release-asset'
+          ? 'application/octet-stream'
+          : 'application/json; charset=utf-8',
+      );
       response.setHeader('content-length', String(body.length));
       response.end(body);
     } catch {
@@ -154,10 +181,77 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 function parseReleaseRequest(
   value: unknown,
   allowedRepository: string,
+  allowedCatalogRepository: string | null,
 ): GitHubReleaseMetadataRequest | null {
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Record<string, unknown>;
+  if (
+    candidate.operation === 'latest-catalog'
+    && allowedCatalogRepository
+    && candidate.repository === allowedCatalogRepository
+  ) {
+    if (
+      candidate.ifNoneMatch !== undefined
+      && (
+        typeof candidate.ifNoneMatch !== 'string'
+        || candidate.ifNoneMatch.length === 0
+        || candidate.ifNoneMatch.length > 256
+        || /[\u0000-\u001f\u007f]/.test(candidate.ifNoneMatch)
+      )
+    ) {
+      return null;
+    }
+    return {
+      repository: allowedCatalogRepository,
+      operation: 'latest-catalog',
+      ...(typeof candidate.ifNoneMatch === 'string'
+        ? { ifNoneMatch: candidate.ifNoneMatch }
+        : {}),
+    };
+  }
+  if (
+    candidate.operation === 'catalog-asset'
+    && allowedCatalogRepository
+    && candidate.repository === allowedCatalogRepository
+    && typeof candidate.tag === 'string'
+    && /^catalog-v1\.[1-9]\d*\.0$/.test(candidate.tag)
+    && typeof candidate.asset === 'string'
+    && candidate.asset.length > 0
+    && candidate.asset.length <= 256
+    && !candidate.asset.includes('\\')
+    && !candidate.asset.startsWith('/')
+    && !candidate.asset.includes('\0')
+    && !candidate.asset.split('/').some(part => part === '' || part === '.' || part === '..')
+  ) {
+    return {
+      repository: allowedCatalogRepository,
+      operation: 'catalog-asset',
+      tag: candidate.tag,
+      asset: candidate.asset,
+    };
+  }
   if (candidate.repository !== allowedRepository) return null;
+  if (
+    candidate.operation === 'release-asset'
+    && typeof candidate.tag === 'string'
+    && candidate.tag.length > 0
+    && candidate.tag.length <= 255
+    && !/[\u0000-\u001f\u007f]/.test(candidate.tag)
+    && typeof candidate.asset === 'string'
+    && candidate.asset.length > 0
+    && candidate.asset.length <= 256
+    && !candidate.asset.includes('\\')
+    && !candidate.asset.startsWith('/')
+    && !candidate.asset.includes('\0')
+    && !candidate.asset.split('/').some(part => part === '' || part === '.' || part === '..')
+  ) {
+    return {
+      repository: allowedRepository,
+      operation: 'release-asset',
+      tag: candidate.tag,
+      asset: candidate.asset,
+    };
+  }
   if (candidate.operation === 'list' && candidate.tag === undefined) {
     return { repository: allowedRepository };
   }

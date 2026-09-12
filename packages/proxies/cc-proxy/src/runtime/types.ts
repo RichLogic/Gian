@@ -82,6 +82,7 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     cwd: string;
     model?: string | null;
     isResume: boolean;
+    mcpServers?: import('../core/types.js').ClaudeMcpServer[];
   }): Promise<void>;
 
   /** Update the provider-facing model used by subsequent per-turn CLI

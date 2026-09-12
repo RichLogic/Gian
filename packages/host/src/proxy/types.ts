@@ -19,7 +19,8 @@ import type {
 export type ConfigValue = string | boolean | number | null;
 
 export interface ProxyClient {
-  readonly executor: Executor;
+  readonly pluginId?: string;
+  readonly executor?: Executor;
   readonly protocolV2?: true;
   isExited(): boolean;
   initialize(): Promise<InitializeResult>;

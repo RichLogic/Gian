@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/shared" },
+    { "path": "./packages/chat-ui" },
     { "path": "./packages/host" },
     { "path": "./packages/web" },
     { "path": "./packages/desktop" }

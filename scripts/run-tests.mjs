@@ -102,6 +102,16 @@ export function builtPackageTestPlan(paths, packageRoot) {
   };
 }
 
+/** Root script tests that import or bundle Proxy Protocol must not depend on
+ * stale generated output from the developer checkout. */
+export function scriptsNeedProxyProtocol(paths) {
+  const requiringBuild = new Set([
+    'scripts/build-proxy-artifacts.test.mjs',
+    'scripts/proxy-real-acceptance-catalog.test.mjs',
+  ]);
+  return paths.some(path => requiringBuild.has(path));
+}
+
 function runBuiltPackageTests(entries, runner, packageName, packageRoot, env, extraArgs = []) {
   const paths = entriesForRunner(entries, runner);
   if (paths.length === 0) return;
@@ -134,7 +144,11 @@ export function main(argv = process.argv.slice(2)) {
     return;
   }
 
-  runNodeTests(entriesForRunner(selected, 'scripts-node'), env);
+  const scriptPaths = entriesForRunner(selected, 'scripts-node');
+  if (scriptsNeedProxyProtocol(scriptPaths)) {
+    runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
+  }
+  runNodeTests(scriptPaths, env);
   if (options.qualityGates) {
     run(process.execPath, ['scripts/check-ui-operations.mjs', '--strict'], env);
   }
@@ -159,11 +173,21 @@ export function main(argv = process.argv.slice(2)) {
   if (selected.some(entry => entry.runner === 'host-node-tsx' || proxyRunners.has(entry.runner))) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
   }
+  if (selected.some(entry => entry.runner === 'host-node-tsx' || entry.runner === 'remote-protocol-node' || entry.runner === 'remote-server-node-tsx' || entry.runner === 'remote-web-vitest')) {
+    runPnpm(['--filter', '@gian/remote-protocol', 'build'], env);
+  }
+  // Web and chat-ui tests resolve @gian/chat-ui from its built declarations.
+  if (selected.some(entry => entry.runner === 'web-vitest' || entry.runner === 'chat-ui-vitest' || entry.runner === 'remote-web-vitest')) {
+    runPnpm(['--filter', '@gian/chat-ui', 'build'], env);
+  }
 
   runNodeTests(entriesForRunner(selected, 'shared-node'), env);
   const toolCliPaths = entriesForRunner(selected, 'tool-cli-node');
   const toolMcpPaths = entriesForRunner(selected, 'tool-mcp-node');
   const hostSelected = selected.some(entry => entry.runner === 'host-node-tsx');
+  if (hostSelected && !selected.some(entry => entry.runner === 'proxy-catalog-contract-node')) {
+    runPnpm(['--filter', '@gian/proxy-catalog-contract', 'build'], env);
+  }
   if (toolCliPaths.length > 0 || toolMcpPaths.length > 0 || hostSelected) {
     runPnpm(['--filter', '@gian/tool-cli', 'build'], env);
   }
@@ -176,16 +200,6 @@ export function main(argv = process.argv.slice(2)) {
   if (toolMcpPaths.length > 0) {
     runNodeTests(toolMcpPaths, env);
   }
-  const hostRoot = join(rootDir, 'packages', 'host');
-  const hostPaths = entriesForRunner(selected, 'host-node-tsx')
-    .map(path => relative(hostRoot, join(rootDir, path)));
-  runNodeTests(
-    hostPaths,
-    env,
-    ['--import', 'tsx', '--test-reporter', 'spec'],
-    hostRoot,
-  );
-
   const desktopRoot = join(rootDir, 'packages', 'desktop');
   const desktopPaths = entriesForRunner(selected, 'desktop-node-tsx')
     .map(path => relative(desktopRoot, join(rootDir, path)));
@@ -197,10 +211,29 @@ export function main(argv = process.argv.slice(2)) {
     runPnpm(['exec', 'vitest', 'run', ...webPaths], env, join(rootDir, 'packages', 'web'));
   }
 
+  const chatUiPaths = entriesForRunner(selected, 'chat-ui-vitest')
+    .map(path => relative(join(rootDir, 'packages', 'chat-ui'), join(rootDir, path)));
+  if (chatUiPaths.length > 0) {
+    runPnpm(['exec', 'vitest', 'run', ...chatUiPaths], env, join(rootDir, 'packages', 'chat-ui'));
+  }
+
+  const remoteWebPaths = entriesForRunner(selected, 'remote-web-vitest')
+    .map(path => relative(join(rootDir, 'packages', 'remote-web'), join(rootDir, path)));
+  if (remoteWebPaths.length > 0) {
+    runPnpm(['exec', 'vitest', 'run', ...remoteWebPaths], env, join(rootDir, 'packages', 'remote-web'));
+  }
+
   const protocolPaths = entriesForRunner(selected, 'proxy-protocol-node');
   if (protocolPaths.length > 0) {
     runNodeTests(protocolPaths.map(path => distTestPath(path, join(rootDir, 'packages', 'proxy-protocol'))), env);
   }
+  runBuiltPackageTests(
+    selected,
+    'proxy-catalog-contract-node',
+    '@gian/proxy-catalog-contract',
+    join(rootDir, 'packages', 'proxy-catalog-contract'),
+    env,
+  );
   runBuiltPackageTests(
     selected,
     'cc-proxy-node',
@@ -246,10 +279,54 @@ export function main(argv = process.argv.slice(2)) {
   );
   runBuiltPackageTests(
     selected,
+    'remote-protocol-node',
+    '@gian/remote-protocol',
+    join(rootDir, 'packages', 'remote-protocol'),
+    env,
+  );
+  const remoteServerRoot = join(rootDir, 'packages', 'remote-server');
+  const remoteServerPaths = entriesForRunner(selected, 'remote-server-node-tsx')
+    .map(path => relative(remoteServerRoot, join(rootDir, path)));
+  runNodeTests(
+    remoteServerPaths,
+    env,
+    ['--import', 'tsx', '--test-reporter', 'spec', '--test-timeout=60000'],
+    remoteServerRoot,
+  );
+  runBuiltPackageTests(
+    selected,
     'zcode-proxy-node',
     '@gian/zcode-proxy',
     join(rootDir, 'packages', 'proxies', 'zcode-proxy'),
     env,
+  );
+
+  // Some Host integration tests launch the real compiled Proxy entrypoints.
+  // Run Host only after every selected Proxy runner has produced its dist;
+  // a clean checkout must not depend on stale artifacts from an earlier build.
+  const hostRoot = join(rootDir, 'packages', 'host');
+  const hostPaths = entriesForRunner(selected, 'host-node-tsx')
+    .map(path => relative(hostRoot, join(rootDir, path)));
+  const compiledProxyRunners = [
+    'cc-proxy-node',
+    'codex-proxy-node',
+    'kimi-proxy-node',
+    'grok-proxy-node',
+    'dsh-bridge-node',
+    'dsh-proxy-node',
+    'zcode-proxy-node',
+  ];
+  if (
+    hostPaths.length > 0
+    && !compiledProxyRunners.every(runner => selected.some(entry => entry.runner === runner))
+  ) {
+    runPnpm(['--filter', './packages/proxies/**', 'build'], env);
+  }
+  runNodeTests(
+    hostPaths,
+    env,
+    ['--import', 'tsx', '--test-reporter', 'spec', '--test-timeout=60000'],
+    hostRoot,
   );
 }
 

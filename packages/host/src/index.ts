@@ -1,8 +1,14 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 import { serve } from '@hono/node-server';
-import { EXECUTOR_DEFS, EXECUTOR_IDS, type Executor } from '@gian/shared';
+import {
+  officialCatalogSourcePolicy,
+  parseProxyPluginId,
+  parseSessionProxyBinding,
+  resolvePluginIdInput,
+  isResumableSessionBinding,
+  type Executor,
+} from '@gian/shared';
 import { createApp } from './web/app.js';
 import { startGianToolRpc } from './tool/rpc-server.js';
 import { openDatabase } from './storage/db.js';
@@ -14,11 +20,29 @@ import {
 import { resolveDataDir } from './storage/paths.js';
 import { assertNoEventStorageMaintenance } from './storage/maintenance-lock.js';
 import { sweepColdEvents } from './events/lifecycle.js';
-import { CliRuntimeManager } from './runtime/manager.js';
+import { RuntimeResolver } from './runtime/resolver.js';
+import { RuntimeReadinessCache } from './runtime/readiness-cache.js';
+import { RuntimeControlPlane } from './runtime/control-plane.js';
+import { discoverDevelopmentProxyEntries } from './runtime/development-proxy-source.js';
 import { AgentManager } from './agents/manager.js';
-import { resolveBootProxyDescriptors } from './proxy/boot-descriptors.js';
+import { legacyAgentBootstrap } from './agents/legacy-bootstrap.js';
+import { resolveLegacyLaunch as resolveLegacySessionLaunch } from './proxy/legacy-launch.js';
 import { createGitHubReleaseFetch } from './agents/github-release-fetch.js';
 import { cleanupAgentInstructionBlocks } from './onboarding/agent-instructions.js';
+import {
+  CatalogRefreshController,
+  CatalogService,
+  CatalogSourceClient,
+  CatalogStore,
+  createCatalogNetwork,
+  createPluginArtifactNetwork,
+} from './catalog/index.js';
+import { PluginStore } from './plugin-store/index.js';
+import { RemoteIdentityBrokerClient } from './remote/identity-broker.js';
+import {
+  BROWSER_USE_BROKER_SOCKET_ENV,
+  DesktopBrowserBrokerClient,
+} from './tool/browser-broker.js';
 
 // Vendored proxies live under packages/proxies/{cc,codex}-proxy in the
 // monorepo. At runtime this file resolves from packages/host/{src or
@@ -26,37 +50,19 @@ import { cleanupAgentInstructionBlocks } from './onboarding/agent-instructions.j
 // regardless of dev/build mode.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = resolve(HERE, '..', '..');
-const require = createRequire(import.meta.url);
-
-function resolveProxyEntry(
-  override: string | undefined,
-  packageName: string,
-  monorepoDirectory: string,
-): string {
-  if (override) return override;
-  try {
-    return require.resolve(packageName);
-  } catch {
-    return join(
-      PACKAGES_DIR,
-      'proxies',
-      monorepoDirectory,
-      'dist',
-      'src',
-      'cli',
-      'spawn.js',
-    );
-  }
-}
 
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
   const releaseVersion = process.env.GIAN_RELEASE_VERSION ?? '0.1.0';
   const releaseRepository = (process.env.GIAN_RELEASE_REPOSITORY ?? 'RichLogic/Gian').trim();
   const githubBrokerSocketPath = process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
+  const remoteBrokerSocketPath = process.env.GIAN_DESKTOP_REMOTE_BROKER_SOCKET;
+  const browserBrokerSocketPath = process.env[BROWSER_USE_BROKER_SOCKET_ENV];
   // The socket is a Desktop-only credential boundary. Do not let the
   // capability path flow into Proxy or vendor CLI child environments.
   delete process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
+  delete process.env.GIAN_DESKTOP_REMOTE_BROKER_SOCKET;
+  delete process.env[BROWSER_USE_BROKER_SOCKET_ENV];
   assertNoEventStorageMaintenance(dataDir);
   const db = openDatabase(dataDir);
   configureUserSettingsFile(dataDir);
@@ -91,19 +97,12 @@ async function main(): Promise<void> {
     console.warn('[gian] agent instruction cleanup failed:', err);
   }
 
-  const developmentProxyEntries = Object.fromEntries(
-    EXECUTOR_IDS.map((id) => {
-      const def = EXECUTOR_DEFS[id];
-      return [
-        id,
-        resolveProxyEntry(
-          process.env[def.entryEnvVar],
-          def.proxyPackageName,
-          def.proxyPackageDir,
-        ),
-      ];
-    }),
-  ) as Record<Executor, string>;
+  const developmentProxyEntries = await discoverDevelopmentProxyEntries({
+    proxiesDir: join(PACKAGES_DIR, 'proxies'),
+    overridesJson: process.env.GIAN_DEV_PROXY_ENTRIES,
+    overridesOnly: process.env.GIAN_DEV_PROXY_OVERRIDES_ONLY === '1',
+  });
+  const legacyAgents = legacyAgentBootstrap(config, process.env);
   const agentManager = await AgentManager.create({
     dataDir,
     releaseVersion,
@@ -118,27 +117,8 @@ async function main(): Promise<void> {
       ? resolve(process.env.GIAN_DSH_BRIDGE_PACKAGE_DIR)
       : join(PACKAGES_DIR, 'proxies', 'dsh-bridge'),
     developmentProxyEntries,
-    legacyProxyDefaults: {
-      claude: {
-        model: config.default_claude_model,
-        thinking: config.default_claude_effort,
-        mode: 'ask',
-      },
-      codex: {
-        model: config.default_codex_model,
-        thinking: config.default_codex_effort,
-        mode: 'ask',
-      },
-      kimi: { model: '', thinking: '', mode: '' },
-      grok: { model: '', thinking: '', mode: '' },
-      dsh: { model: '', thinking: '', mode: '' },
-      zcode: { model: '', thinking: '', mode: '' },
-    },
-    environmentCliPaths: Object.fromEntries(
-      EXECUTOR_IDS
-        .map((id) => [id, process.env[EXECUTOR_DEFS[id].binEnvVar]] as const)
-        .filter((entry): entry is [Executor, string] => Boolean(entry[1])),
-    ),
+    legacyProxyDefaults: legacyAgents.legacyProxyDefaults,
+    environmentCliPaths: legacyAgents.environmentCliPaths,
     // v2 migration source: kinds that appear in existing sessions get one
     // default Agent even without a configured path or installed Proxy.
     sessionExecutors: () => (
@@ -153,31 +133,122 @@ async function main(): Promise<void> {
       console.warn(`[gian] managed Skill ${result.state}: ${result.path}${result.error ? ` (${result.error})` : ''}`);
     }
   }
-  const runtimeManager = new CliRuntimeManager(
-    agentManager.runtimeProviders(),
-    agentManager.updateLockDataDir(),
-  );
-  const bootDescriptors = await resolveBootProxyDescriptors(agentManager);
+  const runtimeResolver = new RuntimeResolver({
+    dataDir: join(dataDir, 'runtime-resolver'),
+    updateLockDataDir: agentManager.updateLockDataDir(),
+    hostVersion: releaseVersion,
+  });
+  const readinessCache = new RuntimeReadinessCache();
+  agentManager.setRuntimeResolver(runtimeResolver);
+  agentManager.setReadinessCache(readinessCache);
+  const runtimeControl = new RuntimeControlPlane({
+    resolver: runtimeResolver,
+    cache: readinessCache,
+    resolveLaunch: (pluginId) => agentManager.trustedLaunch(pluginId),
+    catalogItem: (pluginId) => catalogService.get(pluginId),
+  });
+  const catalogPolicy = officialCatalogSourcePolicy();
+  const catalogStore = new CatalogStore({
+    rootDir: join(dataDir, 'catalogs', catalogPolicy.sourceId),
+    policy: catalogPolicy,
+  });
+  await catalogStore.open();
+  const pluginStore = new PluginStore({
+    dataDir,
+    pluginsDir: join(dataDir, 'plugins'),
+    updateLockDataDir: agentManager.updateLockDataDir(),
+    allowedArtifactRepositories: catalogPolicy.artifactRepositories,
+    hostVersion: releaseVersion,
+    network: githubBrokerSocketPath
+      ? createPluginArtifactNetwork({ socketPath: githubBrokerSocketPath })
+      : {
+        async download() {
+          throw new Error('Plugin artifact broker is not configured.');
+        },
+      },
+    listBindingReferences: () => {
+      const rows = db.prepare(
+        'SELECT proxy_binding_json, worktree_outcome FROM sessions WHERE proxy_binding_json IS NOT NULL',
+      ).all() as Array<{ proxy_binding_json: string | null; worktree_outcome: string | null }>;
+      const refs = [];
+      for (const row of rows) {
+        const parsed = parseSessionProxyBinding(row.proxy_binding_json);
+        if (
+          parsed.ok
+          && isResumableSessionBinding({
+            proxy_binding: parsed.binding,
+            worktree_outcome: row.worktree_outcome,
+          })
+        ) {
+          refs.push({
+            pluginId: parsed.binding.pluginId,
+            pluginVersion: parsed.binding.pluginVersion,
+          });
+        }
+      }
+      return refs;
+    },
+  });
+  const catalogSourceClient = new CatalogSourceClient({
+    store: catalogStore,
+    network: createCatalogNetwork({
+      socketPath: githubBrokerSocketPath,
+      policy: catalogPolicy,
+    }),
+    policy: catalogPolicy,
+  });
+  agentManager.setPluginStore(pluginStore);
+  const catalogService = new CatalogService({
+    store: catalogStore,
+    plugins: pluginStore,
+    policy: catalogPolicy,
+    sourceClient: catalogSourceClient,
+    readinessCache,
+    officialPresence: async (pluginId) => agentManager.officialPresence(pluginId),
+    onPluginGenerationChanged: (pluginId) => {
+      readinessCache.invalidate(pluginId);
+      runtimeResolver.invalidate(parseProxyPluginId(pluginId));
+    },
+  });
+  agentManager.setCatalogService(catalogService);
+  const catalogRefresh = new CatalogRefreshController({
+    sourceClient: catalogSourceClient,
+  });
+  catalogRefresh.start();
 
   const handle = createApp({
     db,
     config,
     dataDir,
     hostVersion: releaseVersion,
-    ccProxyEntry: bootDescriptors.claude.entryPath,
-    claudeProxy: bootDescriptors.claude.protocol,
-    codexProxyEntry: bootDescriptors.codex?.entryPath,
-    kimiProxyEntry: bootDescriptors.kimi?.entryPath,
-    grokProxyEntry: bootDescriptors.grok?.entryPath,
-    dshProxyEntry: bootDescriptors.dsh?.entryPath,
-    zcodeProxyEntry: bootDescriptors.zcode?.entryPath,
-    codexProxy: bootDescriptors.codex?.protocol,
-    kimiProxy: bootDescriptors.kimi?.protocol,
-    grokProxy: bootDescriptors.grok?.protocol,
-    dshProxy: bootDescriptors.dsh?.protocol,
-    zcodeProxy: bootDescriptors.zcode?.protocol,
-    runtimeManager,
+    resolveLegacyLaunch: async (executor, options) => {
+      const pluginId = resolvePluginIdInput(executor);
+      if (!pluginId) throw new Error(`Legacy Session has an invalid Proxy identity: ${executor}`);
+      const launch = await agentManager.trustedLaunchVersion(pluginId, options.proxyVersion);
+      if (!launch) {
+        throw new Error(
+          `Trusted Proxy package is unavailable for legacy Session ${pluginId}`
+          + (options.proxyVersion ? `@${options.proxyVersion}` : ''),
+        );
+      }
+      return resolveLegacySessionLaunch({
+        executor,
+        launch,
+        runtimeResolver,
+        cliPath: options.cliPath,
+      });
+    },
+    runtimeResolver,
+    runtimeControl,
+    readinessCache,
     agentManager,
+    catalogService,
+    ...(remoteBrokerSocketPath
+      ? { remoteIdentity: new RemoteIdentityBrokerClient(remoteBrokerSocketPath) }
+      : {}),
+    ...(browserBrokerSocketPath
+      ? { browser: new DesktopBrowserBrokerClient(browserBrokerSocketPath) }
+      : {}),
   });
   const toolRpc = await startGianToolRpc({ dataDir, service: handle.toolService });
 
@@ -192,6 +263,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log('[gian] shutting down…');
+    await catalogRefresh.stop();
     await toolRpc.close();
     await handle.shutdown();
     db.close();

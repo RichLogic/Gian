@@ -13,6 +13,7 @@
     "test": "node --test --import tsx test/*.test.ts",
     "test:smoke": "pnpm run build && pnpm run test:smoke:run",
     "test:smoke:run": "node test/electron-smoke.mjs",
+    "canary:extensions": "electron test/browser-extension-compatibility.mjs",
     "dev": "pnpm run build && electron .",
     "start": "electron .",
     "bundle:build": "node ../../scripts/prepare-desktop-runtime.mjs && pnpm --filter @gian/dsh-bridge build && pnpm --filter @gian/desktop... build && pnpm --filter @gian/web build",

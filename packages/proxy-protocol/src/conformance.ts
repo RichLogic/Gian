@@ -7,7 +7,11 @@ import {
   JSONRPC_VERSION,
   MAX_NDJSON_LINE_BYTES,
   OPTIONAL_METHOD_CAPABILITIES,
+  PROTOCOL_V22,
+  PROTOCOL_V23,
+  PROTOCOL_V22_ONLY_CAPABILITIES,
   isCatalogActionId,
+  isProtocolV22OnlyMethod,
   isSidechatRejectedSessionMethod,
   type CapabilityName,
   type CatalogActionId,
@@ -434,6 +438,13 @@ export class HostProtocolValidator {
     return this.negotiated;
   }
 
+  /** Drop a request the client no longer awaits (e.g. after its timeout).
+   *  A late Response for the forgotten id is then a protocol-violation
+   *  report the client may choose to ignore (bounded tombstone). */
+  forgetRequest(id: string): void {
+    this.pending.delete(id);
+  }
+
   registerRequest(value: unknown): ProxyRequest {
     const request = parseProxyRequest(value);
     if (
@@ -450,6 +461,16 @@ export class HostProtocolValidator {
       this.initializePending = true;
     }
 
+    if (
+      isProtocolV22OnlyMethod(request.method)
+      && this.negotiated?.protocol.version !== PROTOCOL_V22
+      && this.negotiated?.protocol.version !== PROTOCOL_V23
+    ) {
+      throw requestViolation(
+        'CAPABILITY_NOT_SUPPORTED',
+        `gian.proxy/${this.negotiated?.protocol.version ?? 'uninitialized'} cannot invoke ${request.method}.`,
+      );
+    }
     const requiredCapability = OPTIONAL_METHOD_CAPABILITIES[
       request.method as keyof typeof OPTIONAL_METHOD_CAPABILITIES
     ];
@@ -585,6 +606,15 @@ export class HostProtocolValidator {
     const resultSchema = resultSchemas[pending.method];
     const result = resultSchema.safeParse(envelope.result);
     if (!result.success) {
+      if (pending.method === 'customization.list' || pending.method === 'customization.detail') {
+        // Customization responses are per-request data: a malformed Result
+        // fails that request (and the Host's cache), never the shared Host
+        // process that may be serving live sessions.
+        throw requestViolation(
+          'INTERNAL',
+          `Invalid ${pending.method} result: ${formatIssues(result.error)}`,
+        );
+      }
       throw protocolViolation(
         `Invalid ${pending.method} result: ${formatIssues(result.error)}`,
       );
@@ -619,10 +649,11 @@ export class HostProtocolValidator {
           `Handshake process scope ${initialized.process.scope} does not match manifest.`,
         );
       }
+      this.assertCapabilityDependencies(initialized.capabilities);
+      this.assertProtocolVersionCapabilities(initialized);
       this.negotiated = initialized;
       this.initialized = true;
       this.initializePending = false;
-      this.assertCapabilityDependencies(initialized.capabilities);
       this.replaceCatalogActions(undefined);
     } else if (pending.method === 'session.create') {
       const session = (result.data as { session: {
@@ -639,6 +670,14 @@ export class HostProtocolValidator {
         );
       }
       this.assertAvailableActions(session.availableActions);
+      const existing = this.sessions.get(session.id);
+      // An idempotent reattach to the same stream is a snapshot, not a new
+      // stream. Preserve sequence, accepted Turns and terminal event fencing.
+      if (existing?.streamId === session.streamId) {
+        existing.sessionConfig = session.sessionConfig;
+        existing.configOptions = this.mergeCatalogWithTurnOptions(session.turnConfigOptions);
+        return envelope;
+      }
       this.sessions.set(session.id, {
         kind: 'session',
         streamId: session.streamId,
@@ -690,6 +729,14 @@ export class HostProtocolValidator {
         state.configOptions = this.mergeCatalogWithTurnOptions(session.turnConfigOptions);
       }
       this.assertAvailableActions((result.data as { session: { availableActions?: AvailableActions } }).session.availableActions);
+    } else if (pending.method === 'runtime.probe') {
+      const expectedPath = (pending.params as { path: string }).path;
+      const actualPath = (result.data as { path: string }).path;
+      if (actualPath !== expectedPath) {
+        throw protocolViolation(
+          `runtime.probe result.path ${JSON.stringify(actualPath)} must exactly match request.params.path ${JSON.stringify(expectedPath)}.`,
+        );
+      }
     } else if (pending.method === 'session.close') {
       const params = pending.params as { sessionId: string };
       this.sessions.delete(params.sessionId);
@@ -724,9 +771,9 @@ export class HostProtocolValidator {
     }
     if (turnConfigOptions !== undefined) {
       for (const option of turnConfigOptions) {
-        if (this.negotiated?.protocol.version === '2.1' && option.role !== undefined) {
+        if (this.negotiated?.protocol.version !== '2.0' && option.role !== undefined) {
           throw protocolViolation(
-            `gian.proxy/2.1 turn config option ${option.id} must not use the legacy role field.`,
+            `gian.proxy/${this.negotiated?.protocol.version ?? '2.1'} turn config option ${option.id} must not use the legacy role field.`,
           );
         }
         merged.set(option.id, advertisedOption(option));
@@ -770,6 +817,20 @@ export class HostProtocolValidator {
     }
   }
 
+  private assertProtocolVersionCapabilities(initialized: InitializeResult): void {
+    if (
+      initialized.protocol.version === PROTOCOL_V22
+      || initialized.protocol.version === PROTOCOL_V23
+    ) return;
+    for (const name of PROTOCOL_V22_ONLY_CAPABILITIES) {
+      if (initialized.capabilities[name] !== undefined) {
+        throw protocolViolation(
+          `gian.proxy/${initialized.protocol.version} cannot advertise ${name}.`,
+        );
+      }
+    }
+  }
+
   private assertCapabilityDependencies(capabilities: Record<string, number>): void {
     for (const [capability, dependencies] of Object.entries(CAPABILITY_DEPENDENCIES)) {
       if (capabilities[capability] === undefined) continue;
@@ -799,13 +860,15 @@ export class HostProtocolValidator {
       return;
     }
     if (catalog.specialCatalogs === undefined) {
-      throw protocolViolation('gian.proxy/2.1 Catalog must declare specialCatalogs.');
+      throw protocolViolation(
+        `gian.proxy/${version ?? '2.1'} Catalog must declare specialCatalogs.`,
+      );
     }
     const byId = new Map(catalog.configOptions.map((option) => [option.id, option]));
     for (const option of catalog.configOptions) {
       if (option.role !== undefined) {
         throw protocolViolation(
-          `gian.proxy/2.1 config option ${option.id} must not use the legacy role field.`,
+          `gian.proxy/${version ?? '2.1'} config option ${option.id} must not use the legacy role field.`,
         );
       }
     }

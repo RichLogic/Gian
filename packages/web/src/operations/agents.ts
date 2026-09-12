@@ -2,17 +2,11 @@
  * UI Operation Layer — Agent-domain definitions. Kind-level operations
  * (official CLI / Proxy install, update check, the native CLI-path picker)
  * key on `agent:<proxy kind>`; saved-Agent operations key on
- * `agent:id:<uuid>`. All PENDING (REST, plus the desktop bridge for the
- * restart).
+ * `agent:id:<uuid>`. All PENDING REST operations.
  *
- * DESKTOP RESTART FLOW (preserved from the pre-Agent setCliPath flow):
- * changes to the boot load set — create, delete, CLI path, Proxy kind —
- * write agents.json and then restart Gian. The VIEW keeps the restart
- * confirm dialog and dispatches with `restart: true`; the executor writes,
- * asks the bridge to restart. A newly created Agent remains saved when the
- * native restart cannot start so the view can offer an explicit retry;
- * destructive or retargeting changes still roll back to their previous
- * state. Name/defaults are write-through and never restart.
+ * Agent create/delete/path/Proxy-switch mutations take effect for future
+ * Sessions immediately — they never restart Desktop. App-level
+ * `agent.restartApp` stays available for onboarding/install completion only.
  */
 import type {
   AgentInstallResult,
@@ -30,6 +24,7 @@ import {
   installAgentCli,
   installAgentProxy,
   pickAgentCliPath,
+  pickAgentHome,
   updateAgent,
   type CreateAgentInput,
   type UpdateAgentInput,
@@ -39,8 +34,8 @@ import { registry } from './registry.js';
 import type { OperationDefinition } from './types.js';
 
 /** Entity key for one Proxy kind's install/configuration operations. */
-export function agentEntityKey(executor: Executor): string {
-  return `agent:${executor}`;
+export function agentEntityKey(executor: Executor | string | null): string {
+  return `agent:${executor ?? 'unknown'}`;
 }
 
 /** Entity key for one saved Agent's mutations. */
@@ -95,21 +90,25 @@ const agentPickCliPath: OperationDefinition<ExecutorInput, string | null> = {
   timeoutMs: PICK_TIMEOUT_MS,
 };
 
+const agentPickHome: OperationDefinition<{ agentId?: string }, string | null> = {
+  policy: 'pending',
+  entityKey: input => input.agentId
+    ? `${agentIdEntityKey(input.agentId)}:pick-home`
+    : 'pending:agent.pick-home',
+  execute: input => pickAgentHome(input.agentId),
+  timeoutMs: PICK_TIMEOUT_MS,
+};
+
 interface AgentIdInput {
   agentId: string;
 }
 
-/** Save a draft into agents.json (load-set change → restart on desktop). */
-export interface CreateAgentOperationInput extends CreateAgentInput {
-  restart: boolean;
-}
+/** Save a draft into agents.json. Takes effect for future Sessions
+ *  immediately; no restart is requested or performed. */
+export type CreateAgentOperationInput = CreateAgentInput;
 
 export interface CreateAgentOperationResult {
   agent: UserAgentStatus;
-  /** True means the desired Agent was saved, but the current Host still has
-   *  its old boot load set. The view must keep an explicit restart affordance
-   *  instead of silently deleting the user's completed draft. */
-  restartRequired: boolean;
 }
 
 const agentCreate: OperationDefinition<CreateAgentOperationInput, CreateAgentOperationResult> = {
@@ -118,28 +117,26 @@ const agentCreate: OperationDefinition<CreateAgentOperationInput, CreateAgentOpe
   execute: async input => {
     const created = await createAgent({
       name: input.name,
-      proxy: input.proxy,
+      ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}),
+      ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
+      ...(input.home !== undefined ? { home: input.home } : {}),
       ...(input.cliPath !== undefined ? { cliPath: input.cliPath } : {}),
       ...(input.defaults !== undefined ? { defaults: input.defaults } : {}),
     });
-    if (!input.restart) return { agent: created, restartRequired: false };
-    const restarting = await desktopBridge()?.restartApp?.() ?? false;
-    return { agent: created, restartRequired: !restarting };
+    return { agent: created };
   },
   timeoutMs: REST_TIMEOUT_MS,
 };
 
-/** Delete a saved Agent (load-set change → restart on desktop). Rollback
- *  re-creates the Agent from the pre-delete snapshot (new id). */
+/** Delete a saved Agent (immediate effect; no restart). */
 export interface DeleteAgentOperationInput extends AgentIdInput {
   snapshot: {
     name: string;
-    proxy: ProductExecutor;
+    pluginId?: string;
+    proxy: ProductExecutor | null;
     cliPath: string | null;
     defaults: AgentProxyDefaults;
   };
-  restart: boolean;
-  restartFailedMessage?: string;
 }
 
 const agentDelete: OperationDefinition<DeleteAgentOperationInput, boolean> = {
@@ -147,16 +144,7 @@ const agentDelete: OperationDefinition<DeleteAgentOperationInput, boolean> = {
   entityKey: input => agentIdEntityKey(input.agentId),
   execute: async input => {
     await deleteAgent(input.agentId);
-    if (!input.restart) return true;
-    const restarting = await desktopBridge()?.restartApp?.() ?? false;
-    if (restarting) return true;
-    await createAgent({
-      name: input.snapshot.name,
-      proxy: input.snapshot.proxy,
-      cliPath: input.snapshot.cliPath,
-      defaults: input.snapshot.defaults,
-    }).catch(() => undefined);
-    throw new Error(input.restartFailedMessage ?? 'Restart failed');
+    return true;
   },
   timeoutMs: REST_TIMEOUT_MS,
 };
@@ -174,13 +162,10 @@ const agentPatch: OperationDefinition<PatchAgentOperationInput, UserAgentStatus>
   timeoutMs: REST_TIMEOUT_MS,
 };
 
-/** CLI path change (load-set change → restart on desktop, rollback restores
- *  the previous path). */
+/** CLI path change (immediate effect; no restart). */
 export interface SetAgentPathOperationInput extends AgentIdInput {
   path: string | null;
-  restart: boolean;
   previousPath: string | null;
-  restartFailedMessage?: string;
 }
 
 const agentSetPath: OperationDefinition<SetAgentPathOperationInput, UserAgentStatus> = {
@@ -188,26 +173,19 @@ const agentSetPath: OperationDefinition<SetAgentPathOperationInput, UserAgentSta
   entityKey: input => agentIdEntityKey(input.agentId),
   execute: async input => {
     const updated = await updateAgent(input.agentId, { cliPath: input.path });
-    if (!input.restart) return updated;
-    const restarting = await desktopBridge()?.restartApp?.() ?? false;
-    if (restarting) return updated;
-    await updateAgent(input.agentId, { cliPath: input.previousPath }).catch(() => updated);
-    throw new Error(input.restartFailedMessage ?? 'Restart failed');
+    return updated;
   },
   timeoutMs: REST_TIMEOUT_MS,
 };
 
-/** Proxy-kind switch on a saved Agent (load-set change → restart on
- *  desktop, rollback restores the previous kind). The caller retargets the
- *  CLI path in the same patch (the old kind's binary is never the right
- *  runtime for the new kind). */
+/** Proxy-kind switch on a saved Agent (immediate effect; no restart). The
+ *  caller retargets the CLI path in the same patch (the old kind's binary
+ *  is never the right runtime for the new kind). */
 export interface SwitchAgentProxyOperationInput extends AgentIdInput {
   proxy: ProductExecutor;
   cliPath: string | null;
   previousProxy: ProductExecutor;
   previousCliPath: string | null;
-  restart: boolean;
-  restartFailedMessage?: string;
 }
 
 const agentSwitchProxy: OperationDefinition<SwitchAgentProxyOperationInput, UserAgentStatus> = {
@@ -215,14 +193,7 @@ const agentSwitchProxy: OperationDefinition<SwitchAgentProxyOperationInput, User
   entityKey: input => agentIdEntityKey(input.agentId),
   execute: async input => {
     const updated = await updateAgent(input.agentId, { proxy: input.proxy, cliPath: input.cliPath });
-    if (!input.restart) return updated;
-    const restarting = await desktopBridge()?.restartApp?.() ?? false;
-    if (restarting) return updated;
-    await updateAgent(input.agentId, {
-      proxy: input.previousProxy,
-      cliPath: input.previousCliPath,
-    }).catch(() => updated);
-    throw new Error(input.restartFailedMessage ?? 'Restart failed');
+    return updated;
   },
   timeoutMs: REST_TIMEOUT_MS,
 };
@@ -242,6 +213,7 @@ registry.register('agent.installCli', agentInstallCli);
 registry.register('agent.installProxy', agentInstallProxy);
 registry.register('agent.checkProxyUpdate', agentCheckProxyUpdate);
 registry.register('agent.pickCliPath', agentPickCliPath);
+registry.register('agent.pickHome', agentPickHome);
 registry.register('agent.create', agentCreate);
 registry.register('agent.delete', agentDelete);
 registry.register('agent.patch', agentPatch);

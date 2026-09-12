@@ -222,7 +222,10 @@ export function HistoryCommitBody({ tab }: { tab: SheetTab }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const { wrap, split, toggleWrap, toggleSplit } = useDiffViewPreferences();
   const filePaths = useMemo(() => detail?.files.map(file => file.path) ?? [], [detail]);
-  const fileNavigation = useReviewFileNavigation(rootRef, filePaths);
+  const expandFile = useCallback((path: string) => {
+    if (collapsed[path]) setHistoryCommitCollapsed(ownerKey, path, false);
+  }, [ownerKey, collapsed]);
+  const fileNavigation = useReviewFileNavigation(rootRef, filePaths, expandFile);
 
   const load = useCallback(() => {
     if (!workingTreeId || !sha) {

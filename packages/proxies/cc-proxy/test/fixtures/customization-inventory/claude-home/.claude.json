@@ -1,0 +1,19 @@
+{
+  "userID": "fixture-user",
+  "accounts": { "primary": { "token": "canary-unrelated-aa" } },
+  "history": { "entries": [ { "prompt": "canary-unrelated-bb" } ] },
+  "oauthAccount": { "accessToken": "canary-unrelated-cc" },
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github", "--token", "home-mcp-arg-canary"],
+      "env": { "GITHUB_TOKEN": "home-mcp-env-canary" }
+    },
+    "remote": {
+      "type": "http",
+      "url": "https://api.example.com/mcp?token=home-mcp-url-canary",
+      "headers": { "Authorization": "Bearer home-mcp-header-canary" }
+    }
+  }
+}

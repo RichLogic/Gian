@@ -26,9 +26,19 @@ interface Credential {
   user: GitHubUserProfile;
 }
 
+export type GitHubBrokerOperation =
+  | 'list'
+  | 'tag'
+  | 'latest-catalog'
+  | 'catalog-asset'
+  | 'release-asset';
+
 export interface GitHubReleaseMetadataRequest {
   repository: string;
   tag?: string;
+  operation?: GitHubBrokerOperation;
+  asset?: string;
+  ifNoneMatch?: string;
 }
 
 export interface GitHubCredentialStore {
@@ -211,6 +221,12 @@ export class GitHubAuthService {
     request: GitHubReleaseMetadataRequest,
     signal?: AbortSignal,
   ): Promise<Response> {
+    if (request.operation === 'latest-catalog') {
+      return this.fetchLatestCatalog(request, signal);
+    }
+    if (request.operation === 'catalog-asset' || request.operation === 'release-asset') {
+      return this.fetchCatalogAsset(request, signal);
+    }
     const url = releaseMetadataUrl(request);
     const headers = new Headers({
       accept: 'application/vnd.github+json',
@@ -238,6 +254,106 @@ export class GitHubAuthService {
     const anonymousHeaders = new Headers(headers);
     anonymousHeaders.delete('authorization');
     return this.fetchImpl(url, { ...init, headers: anonymousHeaders });
+  }
+
+  private async githubJson(
+    url: string,
+    signal: AbortSignal | undefined,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Response> {
+    const headers = new Headers({
+      accept: 'application/vnd.github+json',
+      'user-agent': 'Gian',
+      'x-github-api-version': API_VERSION,
+      ...extraHeaders,
+    });
+    let authenticated = false;
+    if (this.options.store.isAvailable()) {
+      const credential = await this.options.store.load();
+      if (credential) {
+        headers.set('authorization', `Bearer ${credential.token}`);
+        authenticated = true;
+      }
+    }
+    const init: RequestInit = {
+      headers,
+      redirect: 'error',
+      ...(signal ? { signal } : {}),
+    };
+    const response = await this.fetchImpl(url, init);
+    if (!authenticated || response.status !== 401) return response;
+    const anonymousHeaders = new Headers(headers);
+    anonymousHeaders.delete('authorization');
+    return this.fetchImpl(url, { ...init, headers: anonymousHeaders });
+  }
+
+  private async fetchLatestCatalog(
+    request: GitHubReleaseMetadataRequest,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const url = releaseMetadataUrl({ repository: request.repository });
+    const response = await this.githubJson(
+      url,
+      signal,
+      request.ifNoneMatch ? { 'if-none-match': request.ifNoneMatch } : undefined,
+    );
+    if (response.status === 304) return response;
+    if (!response.ok) return response;
+    const parsed = await response.json() as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Response(JSON.stringify({ error: 'invalid_release_list' }), { status: 502 });
+    }
+    let selected: { tag: string; sequence: number; assets: Array<{ name: string; size: number }> } | null = null;
+    for (const item of parsed) {
+      if (!isRecord(item) || typeof item.tag_name !== 'string') continue;
+      const match = /^catalog-v1\.([1-9]\d*)\.0$/.exec(item.tag_name);
+      if (!match) continue;
+      const sequence = Number(match[1]);
+      const assets = Array.isArray(item.assets)
+        ? item.assets.flatMap((asset) => {
+          if (!isRecord(asset) || typeof asset.name !== 'string' || typeof asset.size !== 'number') {
+            return [];
+          }
+          return [{ name: decodeGitHubCatalogAssetName(asset.name), size: asset.size }];
+        })
+        : [];
+      if (!selected || sequence > selected.sequence) {
+        selected = { tag: item.tag_name, sequence, assets };
+      }
+    }
+    if (!selected) {
+      return new Response(JSON.stringify({ error: 'catalog_release_not_found' }), { status: 404 });
+    }
+    const headers = new Headers({ 'content-type': 'application/json; charset=utf-8' });
+    const etag = response.headers.get('etag');
+    if (etag) headers.set('etag', etag);
+    return new Response(JSON.stringify(selected), { status: 200, headers });
+  }
+
+  private async fetchCatalogAsset(
+    request: GitHubReleaseMetadataRequest,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    if (!request.tag || !request.asset) {
+      return new Response(JSON.stringify({ error: 'invalid_request' }), { status: 400 });
+    }
+    const metadata = await this.githubJson(releaseMetadataUrl({
+      repository: request.repository,
+      tag: request.tag,
+    }), signal);
+    if (!metadata.ok) return metadata;
+    const parsed = await metadata.json() as unknown;
+    if (!isRecord(parsed) || !Array.isArray(parsed.assets)) {
+      return new Response(JSON.stringify({ error: 'invalid_release' }), { status: 502 });
+    }
+    const wanted = encodeGitHubCatalogAssetName(request.asset);
+    const asset = parsed.assets.find((entry) => (
+      isRecord(entry) && (entry.name === wanted || entry.name === request.asset)
+    ));
+    if (!isRecord(asset) || typeof asset.browser_download_url !== 'string') {
+      return new Response(JSON.stringify({ error: 'asset_not_found' }), { status: 404 });
+    }
+    return fetchApprovedAsset(this.fetchImpl, asset.browser_download_url, signal);
   }
 
   private async poll(pending: PendingAuthorization): Promise<GitHubAuthFinishResult> {
@@ -375,6 +491,64 @@ function releaseMetadataUrl(request: GitHubReleaseMetadataRequest): string {
     throw new Error('invalid GitHub release tag');
   }
   return `https://api.github.com/repos/${repository}/releases/tags/${encodeURIComponent(request.tag)}`;
+}
+
+const APPROVED_ASSET_HOSTS = new Set([
+  'github.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+]);
+
+export function encodeGitHubCatalogAssetName(path: string): string {
+  return path.replaceAll('/', '__');
+}
+
+export function decodeGitHubCatalogAssetName(name: string): string {
+  return name.replaceAll('__', '/');
+}
+
+function isApprovedAssetUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.username === ''
+      && url.password === ''
+      && url.port === ''
+      && APPROVED_ASSET_HOSTS.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function fetchApprovedAsset(
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+  url: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop < 5; hop += 1) {
+    if (!isApprovedAssetUrl(current)) {
+      return new Response(JSON.stringify({ error: 'redirect_not_allowed' }), { status: 502 });
+    }
+    const response = await fetchImpl(current, {
+      redirect: 'manual',
+      ...(signal ? { signal } : {}),
+      headers: {
+        accept: 'application/octet-stream',
+        'user-agent': 'Gian',
+      },
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) {
+        return new Response(JSON.stringify({ error: 'redirect_missing' }), { status: 502 });
+      }
+      current = new URL(location, current).href;
+      continue;
+    }
+    return response;
+  }
+  return new Response(JSON.stringify({ error: 'too_many_redirects' }), { status: 502 });
 }
 
 function isGitHubRepository(value: string): boolean {

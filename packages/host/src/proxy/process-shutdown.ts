@@ -55,7 +55,7 @@ function errnoCode(error: unknown): string | undefined {
  * completion check used on POSIX so a runtime lease cannot be released while
  * any member of that group still exists.
  */
-function processGroupIsEmpty(groupId: number): boolean {
+export function processGroupIsEmpty(groupId: number): boolean {
   try {
     process.kill(-groupId, 0);
     return false;
@@ -67,7 +67,7 @@ function processGroupIsEmpty(groupId: number): boolean {
   }
 }
 
-async function waitUntil(check: () => boolean, timeoutMs: number): Promise<boolean> {
+export async function waitUntil(check: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
     const remaining = deadline - Date.now();
@@ -75,6 +75,16 @@ async function waitUntil(check: () => boolean, timeoutMs: number): Promise<boole
     await delay(Math.min(PROCESS_GROUP_POLL_MS, remaining));
   }
   return true;
+}
+
+export async function waitForProcessGroupEmpty(
+  groupId: number,
+  timeoutMs: number,
+): Promise<void> {
+  const empty = await waitUntil(() => processGroupIsEmpty(groupId), timeoutMs);
+  if (!empty) {
+    throw new Error(`Proxy process group ${groupId} was still present after ${timeoutMs}ms.`);
+  }
 }
 
 /**

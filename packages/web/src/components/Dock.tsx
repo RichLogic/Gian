@@ -218,12 +218,14 @@ export function Dock({
       <div className="dock-divider" aria-hidden />
 
       <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
+        {/* Settings is mode-independent (2026-09-06): it must stay clickable
+            on the primary pages (Agents/Timer/Custom) — App hops back to the
+            current chat list mode before opening the rail. */}
         <DockBtn
           group="wb"
           testId="settings"
           label={t('dock.settings')}
           active={activeRail === 'settings'}
-          disabled={workbenchDisabled}
           onClick={() => onToggleRail('settings')}
         >
           <Icon d={ICONS.gear} />

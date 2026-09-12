@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   HostProtocolValidator,
+  signNativeSessionHostBinding,
   proxyErrorResponseSchema,
   type ProxyNotification,
 } from '@gian/proxy-protocol';
@@ -43,6 +44,7 @@ function startProxy(script = 'success'): ChildProcessWithoutNullStreams {
       env: {
         ...process.env,
         DSH_FAKE_SCRIPT: script,
+        GIAN_HOST_BINDING_KEY: 'stdio-binding-test-key',
       },
     },
   );
@@ -52,7 +54,7 @@ class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;
   readonly validator = new HostProtocolValidator({
     pluginId: 'ai.deepseek.harness',
-    pluginVersion: '0.1.5',
+    pluginVersion: '0.1.6',
     processScope: 'shared',
   });
   readonly notifications: ProxyNotification[] = [];
@@ -317,27 +319,47 @@ test('Mock Gian Core validates DSH replay response schema on the real stdio boun
   core.assertCleanWire();
 });
 
-test('Mock Gian Core rejects interaction.respond when the real Bridge does not advertise it', async (t) => {
-  const core = new MockGianCore('success');
+test('Mock Gian Core validates the DSH approval interaction round trip', async (t) => {
+  const core = new MockGianCore('approval');
   t.after(() => {
     if (core.child.exitCode === null) core.child.kill('SIGKILL');
   });
 
   await initialize(core);
-  assert.throws(() => core.validator.registerRequest({
-    jsonrpc: '2.0',
-    id: 'unsupported-interaction',
-    method: 'interaction.respond',
-    params: {
-      responseId: 'dsh-question-response',
-      sessionId: 'dsh-question-session',
-      streamId: 'dsh-question-stream',
-      turnId: 'dsh-question-turn',
-      interactionId: 'dsh-question-interaction',
-      actionId: 'submit',
-      values: { file: 'a' },
-    },
-  }), /interaction|capability/i);
+  await core.request('catalog.list', {});
+  const session = await createSession(core, 'dsh-approval-session');
+  await core.request('turn.start', {
+    sessionId: 'dsh-approval-session',
+    streamId: session.streamId,
+    turnId: 'dsh-approval-turn',
+    input: [{ type: 'text', text: 'run tests' }],
+    config: { model: 'deepseek-chat', permission_preset: 'workspace-write' },
+  });
+  const requested = await core.waitForNotification(
+    'interaction.requested',
+    notification => 'turnId' in notification.params
+      && notification.params.turnId === 'dsh-approval-turn',
+  );
+  const data = requested.params.data as { interactionId: string };
+  const responded = await core.request('interaction.respond', {
+    responseId: 'dsh-approval-response',
+    sessionId: 'dsh-approval-session',
+    streamId: session.streamId,
+    turnId: 'dsh-approval-turn',
+    interactionId: data.interactionId,
+    actionId: 'allow-once',
+    values: {},
+  });
+  assert.ok(responded.result);
+  await core.waitForNotification(
+    'turn.completed',
+    notification => 'turnId' in notification.params
+      && notification.params.turnId === 'dsh-approval-turn',
+  );
+  await core.request('session.close', {
+    sessionId: 'dsh-approval-session',
+    streamId: session.streamId,
+  });
   await core.request('shutdown', {});
   assert.equal(await waitForExit(core.child), 0);
   core.assertCleanWire();
@@ -400,4 +422,39 @@ test('DSH Proxy returns standard JSON-RPC errors on its real stdio boundary', as
   })}\n`);
   await next();
   assert.equal(await waitForExit(child), 0);
+});
+
+
+test('same DSH session completes two stdio Turns across authenticated native reattach', async (t) => {
+  const core = new MockGianCore();
+  t.after(() => { if (core.child.exitCode === null) core.child.kill('SIGKILL'); });
+  await initialize(core);
+  await core.request('catalog.list', {});
+  const sessionId = 'dsh-follow-up';
+  const session = await createSession(core, sessionId);
+  for (const turnId of ['first-turn', 'second-turn']) {
+    const started = await core.request('turn.start', {
+      sessionId, streamId: session.streamId, turnId,
+      input: [{ type: 'text', text: turnId }], config: { model: 'deepseek-chat' },
+    });
+    assert.equal(started.error, undefined);
+    await core.waitForNotification('turn.completed', n => 'turnId' in n.params && n.params.turnId === turnId);
+    const reattached = await core.request('session.create', {
+      sessionId, workspace: { cwd: '/tmp/gian-dsh-contract', roots: ['/tmp/gian-dsh-contract'] }, config: {},
+      nativeSession: {
+        id: 'native-1', history: 'none',
+        hostBindingProof: signNativeSessionHostBinding('stdio-binding-test-key', {
+          pluginId: 'ai.deepseek.harness', sessionId, nativeSessionId: 'native-1', cwd: '/tmp/gian-dsh-contract',
+        }),
+      },
+    });
+    assert.equal(reattached.error, undefined);
+    assert.equal((reattached.result as { session: { streamId: string } }).session.streamId, session.streamId);
+  }
+  assert.equal(core.notifications.filter(n => n.method === 'turn.completed').length, 2);
+  assert.equal(core.notifications.filter(n => n.method === 'turn.failed').length, 0);
+  await core.request('session.close', { sessionId, streamId: session.streamId });
+  await core.request('shutdown', {});
+  assert.equal(await waitForExit(core.child), 0);
+  core.assertCleanWire();
 });

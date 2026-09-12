@@ -15,6 +15,15 @@ function mockEntry(executor: 'grok' | 'codex'): string {
   );
 }
 
+async function mockVersion(executor: 'grok' | 'codex'): Promise<string> {
+  const pkg = JSON.parse(await readFile(
+    resolve(process.cwd(), `../proxies/${executor}-proxy/package.json`),
+    'utf8',
+  )) as { version?: unknown };
+  assert.equal(typeof pkg.version, 'string');
+  return pkg.version;
+}
+
 async function waitFor<T>(read: () => T | undefined, timeoutMs = 3_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -61,7 +70,7 @@ test('controllable mock Proxy covers every gian.proxy/2 request and UI event fam
     executor: 'grok',
     entry: mockEntry('grok'),
     pluginId: 'grok',
-    pluginVersion: '0.3.0',
+    pluginVersion: await mockVersion('grok'),
     processScope: 'session',
     dataDir,
     hostVersion: '0.5.0-test',
@@ -76,7 +85,7 @@ test('controllable mock Proxy covers every gian.proxy/2 request and UI event fam
   client.onNotification(notification => notifications.push(notification));
 
   const initialized = await client.initialize();
-  assert.equal(initialized.protocol.version, '2.0');
+  assert.equal(initialized.protocol.version, '2.3');
   assert.equal(initialized.process.scope, 'session');
   assert.ok(initialized.capabilities['turn.steer']);
   assert.ok(initialized.capabilities['input.localFile']);
@@ -354,7 +363,7 @@ test('shared mock Proxy fans out process events and isolates one bad Session str
     executor: 'codex',
     entry: mockEntry('codex'),
     pluginId: 'codex',
-    pluginVersion: '0.2.0',
+    pluginVersion: await mockVersion('codex'),
     processScope: 'shared',
     dataDir,
     hostVersion: '0.5.0-test',

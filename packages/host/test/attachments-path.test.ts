@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import {
   FALLBACK_ATTACHMENT_MIME,
   mimeForAttachment,
+  previewMimeForAttachment,
   resolveAttachmentPath,
 } from '../src/storage/attachments.js';
 
@@ -45,9 +46,14 @@ test('resolveAttachmentPath keeps a basename inside the session store', () => {
   }
 });
 
-test('mimeForAttachment keeps image types and falls back for downloads', () => {
+test('attachment MIME keeps HTTP downloads opaque but allows safe Remote preview types', () => {
   assert.equal(mimeForAttachment('photo.PNG'), 'image/png');
   assert.equal(mimeForAttachment('shot.JPG'), 'image/jpeg');
   assert.equal(mimeForAttachment('notes.md'), FALLBACK_ATTACHMENT_MIME);
+  assert.equal(previewMimeForAttachment('scan.JPEG'), 'image/jpeg');
+  assert.equal(previewMimeForAttachment('notes.md'), 'text/markdown');
+  assert.equal(previewMimeForAttachment('trace.JSONL'), 'application/x-ndjson');
+  assert.equal(previewMimeForAttachment('script.ts'), 'text/typescript');
   assert.equal(mimeForAttachment('README'), FALLBACK_ATTACHMENT_MIME);
+  assert.equal(previewMimeForAttachment('archive.zip'), FALLBACK_ATTACHMENT_MIME);
 });

@@ -1,8 +1,5 @@
 import {
-  isExecutorId,
-  usesNativeExecutorConfig,
   type ApprovalMode,
-  type Executor,
   type TaskStatus,
   type ThinkingEffort,
 } from '@gian/shared';
@@ -102,7 +99,6 @@ export function registerTaskRoutes(
     const body = await c.req.json<{
       workspace_id?: string;
       agent_id?: string;
-      executor?: Executor;
       name?: string;
       model?: string | null;
       approval_mode?: ApprovalMode;
@@ -112,28 +108,29 @@ export function registerTaskRoutes(
     if (typeof body.workspace_id !== 'string' || body.workspace_id === '') {
       return c.json({ error: 'workspace_id required' }, 400);
     }
-    if (body.agent_id === undefined && !isExecutorId(body.executor)) {
-      return c.json({ error: 'executor must be claude, codex, kimi, grok, or dsh' }, 400);
+    if (typeof body.agent_id !== 'string' || body.agent_id === '') {
+      return c.json({ error: 'agent_id required' }, 400);
     }
     try {
       const session = await sessions.createSession({
         workspace_id: body.workspace_id,
-        ...(body.agent_id !== undefined ? { agent_id: body.agent_id } : {}),
-        ...(body.executor !== undefined ? { executor: body.executor } : {}),
+        agent_id: body.agent_id,
         type: 'subtask',
         task_id: id,
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(body.model !== undefined ? { model: body.model } : {}),
-        ...(body.approval_mode !== undefined && body.executor && !usesNativeExecutorConfig(body.executor)
-          ? { approval_mode: body.approval_mode }
-          : {}),
+        ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
         ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),
         ...(body.service_tier !== undefined ? { service_tier: body.service_tier } : {}),
       });
       broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
       return c.json({ session });
     } catch (error) {
-      return c.json({ error: errorMessage(error) }, 500);
+      const message = errorMessage(error);
+      return c.json(
+        { error: message },
+        message.startsWith('agent not found') ? 404 : 400,
+      );
     }
   });
 

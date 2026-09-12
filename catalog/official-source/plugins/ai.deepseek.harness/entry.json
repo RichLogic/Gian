@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "ai.deepseek.harness",
+  "displayName": "DeepSeek Harness",
+  "tagline": "DeepSeek Harness sessions in Gian.",
+  "featuredOrder": 40,
+  "documentation": {
+    "overview": "overview.md",
+    "setup": "setup.md",
+    "usage": "usage.md",
+    "troubleshooting": "troubleshooting.md"
+  },
+  "branding": {
+    "logoLight": {
+      "path": "assets/logo-light.png",
+      "mediaType": "image/png"
+    },
+    "logoDark": {
+      "path": "assets/logo-dark.png",
+      "mediaType": "image/png"
+    }
+  },
+  "channels": {
+    "stable": {
+      "pluginVersion": "0.1.6"
+    }
+  }
+}

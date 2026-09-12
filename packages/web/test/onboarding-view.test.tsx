@@ -46,6 +46,7 @@ function agent(kind: ProductExecutor, name: string, ready = true): UserAgentStat
   return {
     id: `agent-${kind}-1`,
     name,
+    pluginId: kind,
     proxy: kind,
     cliPath: ready ? `/bin/${kind}` : null,
     defaults: { model: '', thinking: '', mode: '' },
@@ -103,7 +104,7 @@ describe('OnboardingView', () => {
       name: PROXIES.find(entry => entry.id === kind)!.name,
       cliPath: null,
     }));
-    vi.mocked(createAgent).mockImplementation(async input => agent(input.proxy, input.name));
+    vi.mocked(createAgent).mockImplementation(async input => agent(input.proxy ?? 'claude', input.name));
     vi.mocked(updateAgent).mockImplementation(async (id, patch) => ({
       ...agent('claude', 'Claude Code'),
       id,
@@ -155,8 +156,8 @@ describe('OnboardingView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
     await userEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    expect(screen.getByRole('heading', { name: 'Choose your project directory' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Project root' })).toHaveValue('~/Coding');
+    expect(screen.getByRole('heading', { name: 'Choose your Repo root' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Repo root' })).toHaveValue('~/Coding');
     expect(screen.queryByText('~/Coding')).not.toBeInTheDocument();
     expect(screen.getByText('~/Coding/worktrees')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Finish setup' }));

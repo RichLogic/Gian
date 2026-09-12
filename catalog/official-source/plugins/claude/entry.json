@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "claude",
+  "displayName": "Claude Code",
+  "tagline": "Anthropic Claude Code sessions in Gian.",
+  "featuredOrder": 10,
+  "documentation": {
+    "overview": "overview.md",
+    "setup": "setup.md",
+    "usage": "usage.md",
+    "troubleshooting": "troubleshooting.md"
+  },
+  "branding": {
+    "logoLight": {
+      "path": "assets/logo-light.png",
+      "mediaType": "image/png"
+    },
+    "logoDark": {
+      "path": "assets/logo-dark.png",
+      "mediaType": "image/png"
+    }
+  },
+  "channels": {
+    "stable": {
+      "pluginVersion": "0.2.4"
+    }
+  }
+}

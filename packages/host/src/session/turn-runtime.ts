@@ -22,6 +22,61 @@ export class TurnRuntime {
     return this.active.has(sessionId);
   }
 
+  /**
+   * Re-register a persisted `running` Turn as the session's single active
+   * generation after a Host restart. The canonical turns + proxy_replay_turns
+   * rows are the authority: if no generation is active in memory and exactly
+   * one running Turn exists, it becomes active again so provider
+   * terminal/replay notifications settle it instead of being dropped. Never
+   * creates or mutates rows; a no-op when anything is already active or the
+   * evidence is ambiguous.
+   */
+  restoreActiveGenerationFromDb(sessionId: string, expectedTurnId: string): ActiveTurn | null {
+    const current = this.active.get(sessionId);
+    if (current) return current.id === expectedTurnId ? current : null;
+    const rows = this.db.prepare(
+      `SELECT t.id AS id, t.turn_number AS number,
+              r.provider_turn_id AS providerTurnId, r.replay_owned AS replayOwned
+         FROM turns t
+         LEFT JOIN proxy_replay_turns r
+           ON r.turn_id = t.id AND r.session_id = t.session_id
+        WHERE t.session_id = ? AND t.status = 'running'
+        ORDER BY t.turn_number DESC
+        LIMIT 2`,
+    ).all(sessionId) as Array<{
+      id: string;
+      number: number;
+      providerTurnId: string | null;
+      replayOwned: number | null;
+    }>;
+    // Zero rows: nothing to restore. More than one: ambiguous crash state —
+    // leave it to the scheduler's fail-closed path instead of guessing. The
+    // sole row must also be the Schedule Run's exact accepted Turn.
+    if (rows.length !== 1 || rows[0]!.id !== expectedTurnId) return null;
+    const row = rows[0]!;
+    // sendMessage reserves provider_turn_id=hostTurnId before a protocol-v2
+    // Provider exposes its real sourceTurnId. Do not restore that provisional
+    // identity: the first post-restart Provider event must be allowed to bind
+    // and replace it in proxy_replay_turns.
+    const providerTurnId = row.providerTurnId
+      && !(row.replayOwned === 0 && row.providerTurnId === row.id)
+      ? row.providerTurnId
+      : undefined;
+    const restored: ActiveTurn = {
+      id: row.id,
+      number: row.number,
+      ...(providerTurnId ? { providerTurnId } : {}),
+    };
+    this.active.set(sessionId, restored);
+    return restored;
+  }
+
+  clearRestoredGeneration(sessionId: string, turnId: string): void {
+    if (this.active.get(sessionId)?.id !== turnId) return;
+    this.active.delete(sessionId);
+    this.stopIntents.delete(sessionId);
+  }
+
   get(sessionId: string): ActiveTurn | undefined {
     return this.active.get(sessionId);
   }

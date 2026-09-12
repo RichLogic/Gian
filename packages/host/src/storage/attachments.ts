@@ -13,6 +13,36 @@ const IMAGE_MIME_EXT: Record<string, string> = {
 const IMAGE_EXT_MIME: Record<string, string> = Object.fromEntries(
   Object.entries(IMAGE_MIME_EXT).map(([m, e]) => [e, m]),
 );
+IMAGE_EXT_MIME['jpeg'] = 'image/jpeg';
+
+const TEXT_EXT_MIME: Record<string, string> = {
+  txt: 'text/plain',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  json: 'application/json',
+  jsonl: 'application/x-ndjson',
+  yaml: 'application/yaml',
+  yml: 'application/yaml',
+  toml: 'application/toml',
+  csv: 'text/csv',
+  log: 'text/plain',
+  js: 'text/javascript',
+  jsx: 'text/jsx',
+  ts: 'text/typescript',
+  tsx: 'text/tsx',
+  css: 'text/css',
+  html: 'text/html',
+  py: 'text/x-python',
+  go: 'text/x-go',
+  rs: 'text/x-rust',
+  java: 'text/x-java',
+  c: 'text/x-c',
+  h: 'text/x-c',
+  cpp: 'text/x-c++',
+  hpp: 'text/x-c++',
+  sh: 'text/x-shellscript',
+  sql: 'text/x-sql',
+};
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const FALLBACK_ATTACHMENT_MIME = 'application/octet-stream';
@@ -44,14 +74,22 @@ export function resolveAttachmentPath(sessionId: string, filename: string): stri
   return candidate;
 }
 
-/** Guess MIME from the stored filename's extension. Images retain their exact
- *  MIME so they can render inline; all other files are deliberately served as
- *  opaque downloads rather than trusted same-origin content. */
+/** Guess MIME for the same-origin attachment route. Images may render inline;
+ *  every other format remains an opaque download. */
 export function mimeForAttachment(filename: string): string {
   const dot = filename.lastIndexOf('.');
   if (dot < 0) return FALLBACK_ATTACHMENT_MIME;
   const ext = filename.slice(dot + 1).toLowerCase();
   return IMAGE_EXT_MIME[ext] ?? FALLBACK_ATTACHMENT_MIME;
+}
+
+/** MIME allowlist for the isolated Remote read-only viewer. The bytes travel
+ *  through E2EE rather than a same-origin executable-content response. */
+export function previewMimeForAttachment(filename: string): string {
+  const dot = filename.lastIndexOf('.');
+  if (dot < 0) return FALLBACK_ATTACHMENT_MIME;
+  const ext = filename.slice(dot + 1).toLowerCase();
+  return IMAGE_EXT_MIME[ext] ?? TEXT_EXT_MIME[ext] ?? FALLBACK_ATTACHMENT_MIME;
 }
 
 /** Read attachment bytes by session + filename. Returns null when the file

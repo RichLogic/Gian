@@ -2,14 +2,21 @@
 @import url('./shell.css');
 @import url('./components.css');
 @import url('./coding.css');
-@import url('./events.css');
+/* Transcript / markdown / tool-row / interaction-card / context-card styles
+   live in @gian/chat-ui; loaded here so the V2 overrides below keep their
+   cascade position over it. */
+@import url('@gian/chat-ui/styles.css');
 @import url('./session.css');
 /* Phase 1+ — V2 shell + inner overrides; loaded LAST so V2 rules win. */
 @import url('./gian-v2.css');
 @import url('./shell-v2.css');
+/* Persistent primary navigation from the approved 2026-08-31 sidebar. */
+@import url('./sidebar-navigation.css');
 /* Settings v3 — left-nav scrollspy + stacked cards; loaded after V2 +
    legacy session.css so it overrides the ee- / open-cat- rules there. */
 @import url('./settings-v3.css');
+/* Settings › Remote — enrollment / pairing / devices / audit. */
+@import url('./settings-remote.css');
 /* Tasks mode visuals (PRD-v3) — loaded after V2 so Tasks-specific rules win. */
 @import url('./tasks-v3.css');
 /* Workspaces v3 — Inspector list + Workbench detail tab; loaded after V2 so
@@ -17,10 +24,18 @@
 @import url('./workspaces-v3.css');
 /* Chat-owned detail (Plan, Agent, transcript), separate from dock rails. */
 @import url('./chat-context-panel.css');
-/* Trace view (timeline + turn-grouped event list) — same token set as events.css. */
+/* Trace view (timeline + turn-grouped event list) — same token set as the
+   transcript rows in @gian/chat-ui. */
 @import url('./trace.css');
+/* Agents page (WP4): My Agents + Proxy Catalog master/detail. */
+@import url('./agents-page.css');
 @import url('./browser.css');
 @import url('./onboarding.css');
+/* Timer / Schedules (Issue #51) — after tasks-v3 so timer rules win on the
+   shared .view/.sidebar/.main-head shells. */
+@import url('./timer.css');
+/* Custom — read-only Customization Inventory page (Issue #50). */
+@import url('./custom.css');
 /* Drag-reorder indicators (sidebar lists + settings rows); loaded last — the
    rules carry no layout properties, only the insertion-line shadow. */
 @import url('./dnd.css');

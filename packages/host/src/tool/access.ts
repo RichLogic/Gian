@@ -10,6 +10,33 @@ import type { GianToolActor } from './credentials.js';
 
 const TASK_MUTATIONS = new Set<GianToolMethod>(['task.create', 'task.update']);
 
+const SCHEDULE_METHODS = new Set<GianToolMethod>([
+  'schedule.preview',
+  'schedule.create',
+  'schedule.list',
+  'schedule.get',
+  'schedule.update',
+  'schedule.pause',
+  'schedule.resume',
+  'schedule.run_now',
+  'schedule.archive',
+]);
+
+const BROWSER_METHODS = new Set<GianToolMethod>([
+  'browser.tabs',
+  'browser.open',
+  'browser.snapshot',
+  'browser.click',
+  'browser.fill',
+  'browser.press',
+  'browser.wait',
+  'browser.evaluate',
+  'browser.screenshot',
+  'browser.go_back',
+  'browser.reload',
+  'browser.close',
+]);
+
 interface OwnedSessionRow {
   id: string;
   task_id: string | null;
@@ -62,7 +89,38 @@ export class GianToolAccessController {
       return denied(call.request_id, 'Task mutations require a Gian Tool administrator');
     }
 
-    if (call.method === 'worktree.create_and_bind') {
+    if (BROWSER_METHODS.has(call.method) && actor.kind !== 'internal_session') {
+      return denied(call.request_id, 'Browser tools require an internal Gian Session');
+    }
+
+    if (SCHEDULE_METHODS.has(call.method)) {
+      // Contract A/M: schedules are conversation-bound. Internal standard
+      // actors see and manage only Schedules bound to their own Session, and
+      // control_session_id is derived from the credential — never accepted
+      // from params. External controllers use the Desktop REST API.
+      if (actor.kind !== 'internal_session') {
+        return denied(call.request_id, 'Schedule tools require an internal Gian Session');
+      }
+      if (call.method === 'schedule.list') {
+        if (params['control_session_id'] !== undefined) {
+          return denied(call.request_id, 'schedule.list cannot override the conversation binding');
+        }
+        params = { ...params, control_session_id: actor.sessionId };
+      } else {
+        const scheduleId = params['schedule_id'];
+        if (call.method !== 'schedule.create' && call.method !== 'schedule.preview') {
+          if (typeof scheduleId !== 'string') {
+            return missing(call.request_id, `schedule not found: ${String(scheduleId ?? '')}`);
+          }
+          const row = this.db.prepare(
+            'SELECT control_session_id FROM schedules WHERE id = ?',
+          ).get(scheduleId) as { control_session_id: string } | undefined;
+          if (row && row.control_session_id !== actor.sessionId) {
+            return denied(call.request_id, 'This actor cannot access a Schedule bound to another Session');
+          }
+        }
+      }
+    } else if (call.method === 'worktree.create_and_bind') {
       if (actor.kind !== 'internal_session') {
         return denied(call.request_id, 'Worktree self-context requires an internal Gian Session');
       }

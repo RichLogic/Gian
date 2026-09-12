@@ -119,6 +119,14 @@ export function QueueList({
                         url: attachmentUrl(sessionId, item.path),
                       }))}
                       className="qd-text"
+                      // Queued image preview: the chip popover's thumbnail
+                      // opens the in-app lightbox, same as the plain thumbs
+                      // below (2026-09-09 owner report: it was a no-op).
+                      onAttachmentActivate={attachment => {
+                        if (!zoomImage || !attachment.url || !isNativeImageMime(attachment.mime ?? '')) return false;
+                        zoomImage(attachment.url, attachment.name);
+                        return true;
+                      }}
                     />
                   ) : (
                     <>

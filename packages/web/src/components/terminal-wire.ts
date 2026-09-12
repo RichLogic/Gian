@@ -47,7 +47,11 @@ function base64ToBytes(value: string): Uint8Array {
 export function makeWorkbenchWire(
   ws: GianWs,
   termId: string,
-  options: { cwd?: string; shell?: string } = {},
+  options: {
+    cwd?: string;
+    shell?: string;
+    target?: { kind: 'agent_cli'; agent_id: string };
+  } = {},
   dispatch?: OperationDispatcher['dispatch'],
 ): TerminalWire {
   let deferredSpawn: { cols: number; rows: number } | null = null;
@@ -60,6 +64,7 @@ export function makeWorkbenchWire(
       rows,
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.shell ? { shell: options.shell } : {}),
+      ...(options.target ? { target: options.target } : {}),
     });
   };
 

@@ -3,6 +3,10 @@ import { dirname, resolve } from 'node:path';
 
 import type { TokenUsageUpdate } from '@gian/shared';
 import { createAppError } from './errors.js';
+import {
+  ClaudeCustomizationScanner,
+  ScanTimeoutError,
+} from './customization.js';
 import { normalizeInputItems } from './input.js';
 import { listAllSlashCommands } from './slash.js';
 import type {
@@ -23,6 +27,21 @@ import { nowIso, randomId } from './utils.js';
 import type { ClaudeAgentTaskUpdate, ClaudeRuntime } from '../runtime/types.js';
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
+
+function customizationUnavailable(
+  kind: import('@gian/proxy-protocol').CustomizationKind,
+  diagnostics: import('@gian/proxy-protocol').CustomizationDiagnostic[],
+): import('@gian/proxy-protocol').CustomizationListResult {
+  return {
+    kind,
+    status: 'unavailable',
+    completeness: 'none',
+    observedAt: new Date().toISOString(),
+    items: [],
+    truncated: false,
+    diagnostics,
+  };
+}
 
 interface ServiceOptions {
   runtime: ClaudeRuntime;
@@ -91,6 +110,7 @@ function inferContextWindow(modelId: string | null): number | undefined {
 
 export class CcProxyService {
   private readonly runtime: ClaudeRuntime;
+  private readonly customization: ClaudeCustomizationScanner;
   private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
   private readonly approvalsById = new Map<string, PendingApproval>();
@@ -109,6 +129,7 @@ export class CcProxyService {
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
     this.emitEvent = options.emitEvent ?? (() => undefined);
+    this.customization = new ClaudeCustomizationScanner();
   }
 
   async initialize() {
@@ -172,6 +193,46 @@ export class CcProxyService {
 
   setEventSink(handler: ProxyEventSink) {
     this.emitEvent = handler;
+  }
+
+  async inspectCustomizations(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationListResult> {
+    try {
+      return await this.customization.list(params.kind, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return customizationUnavailable(params.kind, [{
+          code: 'PROVIDER_INSPECTION_FAILED',
+          message: error.message,
+        }]);
+      }
+      throw error;
+    }
+  }
+
+  async customizationDetail(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    id: string;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationDetailResult> {
+    try {
+      return await this.customization.detail(params.kind, params.id, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return {
+          kind: params.kind,
+          id: params.id,
+          status: 'unavailable',
+          observedAt: new Date().toISOString(),
+          text: '',
+          truncated: false,
+          diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message: error.message }],
+        };
+      }
+      throw error;
+    }
   }
 
   async close() {
@@ -251,6 +312,7 @@ export class CcProxyService {
       activeTurnId: null,
       lastError: null,
       processAlive: false,
+      mcpServers: structuredClone(input.mcpServers ?? []),
       createdAt,
       updatedAt: createdAt,
     };
@@ -262,6 +324,10 @@ export class CcProxyService {
   getSession(params: GetSessionParams) {
     const session = this.requireSessionById(normalizeNonEmptyString(params.sessionId, 'sessionId'));
     return { session: this.serializeSession(session) };
+  }
+
+  mcpServers(sessionId: string): SessionRecord['mcpServers'] {
+    return structuredClone(this.requireSessionById(sessionId).mcpServers);
   }
 
   async startTurn(params: StartTurnParams, requestId?: number | string) {
@@ -855,6 +921,7 @@ export class CcProxyService {
         cwd: session.cwd,
         model,
         isResume,
+        mcpServers: session.mcpServers,
       });
       this.updateSession(session, { processAlive: true, lastError: null });
     } catch (error) {
@@ -869,6 +936,7 @@ export class CcProxyService {
             cwd: session.cwd,
             model,
             isResume: false,
+            mcpServers: session.mcpServers,
           });
           const updated = this.updateSession(session, {
             claudeSessionId: newClaudeSessionId,

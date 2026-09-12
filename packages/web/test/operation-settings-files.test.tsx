@@ -40,6 +40,7 @@ vi.mock('../src/api.js', async () => {
     adoptNativeSession: vi.fn(),
     deleteNativeSession: vi.fn(),
     openFileWith: vi.fn(),
+    openAbsoluteFile: vi.fn(),
   };
 });
 
@@ -259,6 +260,18 @@ describe('Phase 3b settings/files operations', () => {
     expect(getSnapshot().toasts.some(t => t.kind === 'error' && t.message === 'No such editor')).toBe(true);
   });
 
+  it('files.openExternal opens an absolute attachment through /api/files/open', async () => {
+    vi.mocked(api.openAbsoluteFile).mockResolvedValue({ ok: true });
+    const abs = '/Users/me/.gian/attachments/s1/plan.html';
+    const open = dispatcher.dispatch('files.openExternal', {
+      absolutePath: abs,
+      target: { kind: 'builtin', builtin: 'default' },
+    });
+    await waitFor(() => expect(store.getRun(open.id)?.phase).toBe('confirmed'));
+    expect(api.openAbsoluteFile).toHaveBeenCalledWith(abs, { builtin: 'default' });
+    expect(api.openFileWith).not.toHaveBeenCalled();
+  });
+
   it('term.spawn correlates by request_id, blocks duplicates, and settles on operation:result', () => {
     const run = dispatcher.dispatch('term.spawn', { termId: 'tab-term-1', cols: 80, rows: 24, cwd: '/tmp/w1' });
     expect(run.phase).toBe('pending');
@@ -302,5 +315,23 @@ describe('Phase 3b settings/files operations', () => {
     });
     expect(store.getRun(run.id)?.phase).toBe('failed');
     expect(store.getRun(run.id)?.error).toBe('terminal not found');
+  });
+
+  it('term.spawn forwards only the Host-authorized Agent CLI target', () => {
+    dispatcher.dispatch('term.spawn', {
+      termId: 'agent-cli-a1',
+      cols: 96,
+      rows: 18,
+      target: { kind: 'agent_cli', agent_id: 'a1' },
+    });
+    expect(transport.sent[0]).toMatchObject({
+      type: 'term:spawn',
+      term_id: 'agent-cli-a1',
+      cols: 96,
+      rows: 18,
+      target: { kind: 'agent_cli', agent_id: 'a1' },
+    });
+    expect(transport.sent[0]).not.toHaveProperty('cwd');
+    expect(transport.sent[0]).not.toHaveProperty('shell');
   });
 });

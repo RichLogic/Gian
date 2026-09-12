@@ -880,6 +880,63 @@ test('create persists session_config, turn_config, and create-result turn option
   }
 });
 
+test('turn option conditions can reference the persisted Session-bound Catalog snapshot', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    proxyMgr.client.catalogOverride = {
+      catalogRevision: 'cross-binding-condition',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'session',
+        role: 'model',
+        control: 'select',
+        required: true,
+        defaultValue: 'text',
+        choices: [
+          { value: 'text', displayName: 'Text' },
+          { value: 'vision', displayName: 'Vision' },
+        ],
+      }, {
+        id: 'mock_trace',
+        displayName: 'Trace',
+        binding: 'turn',
+        control: 'boolean',
+        required: false,
+        defaultValue: false,
+        visibleWhen: [{ optionId: 'model', oneOf: ['vision'] }],
+      }],
+      slashCommands: [],
+    };
+    proxyMgr.client.createTurnConfig = {
+      revision: 'cross-binding-turn',
+      options: [{
+        id: 'mock_trace',
+        displayName: 'Trace',
+        binding: 'turn',
+        control: 'boolean',
+        required: false,
+        defaultValue: false,
+        visibleWhen: [{ optionId: 'model', oneOf: ['vision'] }],
+      }],
+    };
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      session_config: { model: 'vision' },
+      turn_config: { mock_trace: true },
+    });
+
+    await sessions.sendMessage(session.id, 'inspect image');
+
+    assert.deepEqual(proxyMgr.client.startTurnCalls[0]?.config, { mock_trace: true });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('unknown approval catalog values stay off the approval_mode column', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup();
   try {

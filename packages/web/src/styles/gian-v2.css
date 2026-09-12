@@ -245,14 +245,6 @@
   display: flex; flex-direction: column; gap: 8px;
   flex: none;
 }
-/* sidebar top row — Codex-style mode dropdown (large bold label + chevron)
-   with the view-specific action buttons pushed right */
-.sb-toprow {
-  display: flex; align-items: center; gap: 4px;
-  height: var(--panel-header-h);
-  position: relative;
-}
-.sb-toprow-spacer { flex: 1; }
 .sb-mode {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 6px;
@@ -266,37 +258,31 @@
 .sb-mode:hover { background: var(--surface); }
 .sb-mode .caret { color: var(--text-3); font-size: 10px; margin-top: 1px; }
 
-.sb-iconbtn {
-  position: relative;
-  width: 28px; height: 28px;
-  border-radius: var(--r-2);
-  color: var(--text-3);
-  display: inline-flex; align-items: center; justify-content: center;
-  background: transparent; border: 0;
-  flex: none;
-}
-.sb-iconbtn:hover { background: var(--surface); color: var(--text); }
-.sb-iconbtn.active { background: var(--surface); color: var(--accent-text); }
-.sb-iconbtn svg { width: 14px; height: 14px; }
-
 .sb-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 0 6px 10px;
 }
-/* Section label — Codex-style "Pinned" / "Projects" / 进行中 / 完成 headers
-   (2026-08-03). A plain label in the Sessions rail (.static); a collapsible
-   button (caret + hover) in the Tasks rail. */
+/* Section label — Codex-style 置顶 / Repos / 进行中 / 完成 headers. A plain
+   grey label at rest; hover reveals the caret (collapse toggle) and, on the
+   two sections that carry one, a "+" action (2026-09-07 refactor: counts and
+   the always-static variants are gone). */
 .sb-section {
+  position: relative;
   display: flex; align-items: center; gap: 4px;
   width: 100%;
-  margin: 10px 2px 2px;
-  padding: 2px 8px;
+  margin: 12px 2px 2px;
+  /* Left edge matches the nav rows' text (2px margin + 10px padding) —
+     2026-09-08 owner call: the label sat 2px left of the rest of the rail. */
+  padding: 3px 10px;
   border: 0;
   border-radius: var(--r-1);
   background: transparent;
-  font: 600 var(--fz-11)/1.2 var(--font-sans);
+  /* Airy rail scale (2026-09-07 owner call): the sidebar matches the rest of
+     Gian — 13px/600 labels, generous spacing, 17px primary icons (the same
+     size the collapsed icon rail uses). */
+  font: 600 var(--fz-12)/1.2 var(--font-sans);
   letter-spacing: 0.02em;
   color: var(--text-3);
   cursor: pointer;
@@ -305,26 +291,43 @@
 }
 .sb-scroll > .sb-section:first-child,
 .sb-scroll > :first-child + .sb-section { margin-top: 2px; }
-button.sb-section:hover { color: var(--text); }
-.sb-section.static { cursor: default; }
+.sb-section:hover { color: var(--text); }
 .sb-section-label {
   min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sb-section .count {
-  font: 500 10.5px/1 var(--font-mono);
-  color: var(--text-3);
-}
 .sb-section svg { flex: none; }
+/* Hover-only affordances, matching Codex: the caret stays hidden until the
+   header is hovered (both collapse states look identical at rest). */
+.sb-section .sb-caret {
+  display: inline-flex; align-items: center;
+  flex: none;
+  color: var(--text-3);
+  opacity: 0;
+  transition: opacity 100ms var(--ease);
+}
+.sb-section:hover .sb-caret { opacity: 1; }
+/* Section-row hover action (the "+" on 进行中 / Repos). Mirrors the
+   .sb-group-acts pattern: out of flow at the row end, backdrop only on hover
+   (the button itself stays invisible off-hover via .sb-act). */
+.sb-section-acts {
+  position: absolute; right: 6px; top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex; align-items: center;
+  padding-left: 6px;
+  border-radius: var(--r-1);
+}
+.sb-section:hover .sb-section-acts { background: var(--bg); }
 
 /* Project group header — Codex-style: sans label with a folder glyph, plain
    count, hover as a soft rounded row (no mono eyebrow / count pill). */
 .sb-group {
-  display: flex; align-items: center; gap: 6px;
+  position: relative;
+  display: flex; align-items: center; gap: 7px;
   margin: 6px 2px 1px;
-  padding: 5px 8px;
+  padding: 6px 10px;
   border-radius: var(--r-2);
-  font: 600 var(--fz-12)/1.2 var(--font-sans);
+  font: 600 var(--fz-13)/1.2 var(--font-sans);
   color: var(--text);
   cursor: pointer;
   user-select: none;
@@ -332,31 +335,45 @@ button.sb-section:hover { color: var(--text); }
 .sb-group:first-child { margin-top: 2px; }
 .sb-group:hover { background: var(--surface); }
 .sb-group-ico {
-  width: 14px;
+  width: 18px;
   color: var(--text-3);
   flex: none;
   display: inline-flex; align-items: center; justify-content: center;
 }
+.sb-group-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .sb-group .count {
   margin-left: auto;
-  font: 500 10.5px/1 var(--font-mono);
+  font: 500 11px/1 var(--font-mono);
   color: var(--text-3);
 }
-/* Group-row hover actions ("+" new session here, pin). Hidden until hover. */
+/* Group-row hover actions ("+" new session here, pin). Out of flow: they
+   overlay the row end on hover instead of permanently shrinking the group
+   name (2026-09-06 — the in-flow acts ate ~20px even while invisible, so
+   long names ellipsized before any button showed). The count yields to the
+   actions on hover, like the session row's age glyph. The opaque backdrop
+   exists ONLY on hover — a permanent one paints an empty pill over every
+   group header (the buttons themselves stay invisible off-hover). */
 .sb-group-acts {
-  margin-left: auto;
+  position: absolute; right: 6px; top: 50%;
+  transform: translateY(-50%);
   display: inline-flex; align-items: center; gap: 1px;
+  padding-left: 6px;
+  border-radius: var(--r-1);
 }
-.sb-group .count ~ .sb-group-acts { margin-left: 0; }
+.sb-group:hover .sb-group-acts { background: var(--surface); }
+.sb-group:hover .count { opacity: 0; }
 .sb-act {
-  width: 20px; height: 20px;
+  width: 22px; height: 22px;
   display: inline-flex; align-items: center; justify-content: center;
   border: 0; background: transparent; color: var(--text-3); cursor: pointer;
   border-radius: var(--r-1);
   opacity: 0; pointer-events: none;
   transition: opacity 100ms var(--ease), background 100ms var(--ease), color 100ms var(--ease);
 }
-.sb-group:hover .sb-act, .sb-act.on { opacity: 1; pointer-events: auto; }
+.sb-group:hover .sb-act, .sb-section:hover .sb-act, .sb-act.on { opacity: 1; pointer-events: auto; }
 .sb-act:hover { background: var(--surface-2); color: var(--text); }
 .sb-act.on { color: var(--text-2); }
 
@@ -364,7 +381,7 @@ button.sb-section:hover { color: var(--text); }
 .rail-item {
   position: relative;
   display: block;
-  padding: 7px 8px 8px 8px;
+  padding: 8px 10px 9px 10px;
   border-radius: var(--r-2);
   width: 100%;
   text-align: left;
@@ -373,11 +390,10 @@ button.sb-section:hover { color: var(--text); }
   transition: background var(--dur-fast) var(--ease-soft);
 }
 .rail-item:hover { background: var(--surface); }
-/* Session rows: reserve the group header's icon width (2px group margin +
-   8px padding + 14px folder glyph + 6px gap) so the session title aligns
-   with the project name text, Codex-style. Hover/active backgrounds stay
-   full-width. */
-.rail-item.session-row { padding-left: 30px; }
+/* Session rows: the title aligns exactly with the group header's name text
+   (2px group margin + 10px padding + 18px icon slot + 7px gap = 37px,
+   airy rail scale). Hover/active backgrounds stay full-width. */
+.rail-item.session-row { padding-left: 37px; }
 .rail-item.active { background: var(--surface-2); }
 .rail-item.active .ri-title { color: var(--text); }
 .ri-body {
@@ -416,7 +432,7 @@ button.sb-section:hover { color: var(--text); }
 .ri-age {
   position: absolute;
   right: 10px; bottom: 8px;
-  font: 10px/1 var(--font-mono);
+  font: var(--fz-10)/1 var(--font-mono);
   color: var(--text-3);
   pointer-events: none;
 }
@@ -753,84 +769,7 @@ button.sb-section:hover { color: var(--text); }
   background: var(--surface-2);
   color: var(--text);
 }
-.msg.user .msg-text {
-  max-width: 88%;
-  padding: 7px 11px;
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  border-radius: var(--r-2);
-}
-
-/* Inline image attachments in a user bubble. Sit above .msg-text so a
- * combined text+image message keeps a sensible reading order; for an
- * image-only send (text empty) this is the entire bubble. Pending echo's
- * opacity dim is inherited from `.msg.user.pending` further down. */
-.msg-attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 88%;
-}
-.msg.user .msg-attachments { justify-content: flex-end; margin-bottom: 4px; }
-.msg-att {
-  display: block;
-  border-radius: var(--r-2);
-  overflow: hidden;
-  background: var(--surface-2);
-  line-height: 0;
-  border: 1px solid var(--hairline);
-}
-.msg-att img {
-  display: block;
-  max-width: 220px;
-  max-height: 220px;
-  width: auto;
-  height: auto;
-  object-fit: cover;
-}
-.msg-att.zoomable { cursor: zoom-in; }
-.msg-file-att {
-  min-width: 0;
-  max-width: 280px;
-  height: 42px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  color: var(--text);
-  background: var(--surface-2);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-2);
-  text-decoration: none;
-  line-height: 1.2;
-}
-.msg-file-att:hover {
-  background: var(--surface-3);
-  border-color: var(--hairline);
-}
-.msg-file-att > svg {
-  width: 18px;
-  height: 18px;
-  color: var(--text-2);
-  flex-shrink: 0;
-}
-.msg-file-meta {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.msg-file-name {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 12px;
-}
-.msg-file-size {
-  color: var(--text-3);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
+/* User message bubble + attachments styling moved to @gian/chat-ui. */
 
 /* In-page image preview overlay (see components/ImageLightbox.tsx). Blows a
    transcript thumbnail up over the current page instead of a new browser tab.
@@ -1054,9 +993,11 @@ button.sb-section:hover { color: var(--text); }
   pointer-events: none;
 }
 /* Inline reference chips — neutral "mention" pills that read as part of the
- * text instead of alert badges. Click opens a floating detail card (.ref-pop). */
-.composer-inline-reference,
-.message-inline-reference {
+ * text instead of alert badges. Click opens a floating detail card (.ref-pop).
+ * The transcript-side chip (.message-inline-reference / .mir-*) and popover
+ * (.ref-pop) styles moved to @gian/chat-ui; below are the composer editor's
+ * own chip variants. */
+.composer-inline-reference {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1078,8 +1019,7 @@ button.sb-section:hover { color: var(--text); }
   cursor: pointer;
   transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
-.composer-inline-reference:hover,
-.message-inline-reference:hover {
+.composer-inline-reference:hover {
   color: var(--text);
   background: var(--surface-3);
   border-color: var(--border);
@@ -1092,8 +1032,7 @@ button.sb-section:hover { color: var(--text); }
   border-color: var(--accent-ring);
   box-shadow: 0 0 0 1px var(--accent-ring);
 }
-.cir-glyph,
-.mir-glyph {
+.cir-glyph {
   display: inline-flex;
   align-items: center;
   flex: none;
@@ -1102,159 +1041,18 @@ button.sb-section:hover { color: var(--text); }
 }
 /* Context chips read as @-mentions; the glyph lives in CSS so it never
  * pollutes text content, copy, or selection. */
-.composer-inline-reference[data-reference-type="context"]::before,
-.message-inline-reference[data-reference-type="context"]::before {
+.composer-inline-reference[data-reference-type="context"]::before {
   content: '@';
   color: var(--text-3);
   font-weight: 600;
 }
-.cir-glyph svg,
-.mir-glyph svg { width: 11px; height: 11px; }
-.cir-label,
-.mir-label {
+.cir-glyph svg { width: 11px; height: 11px; }
+.cir-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.inline-reference-document { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* Reference detail popover (floating preview card) */
-.ref-pop {
-  position: fixed;
-  z-index: 60;
-  max-width: calc(100vw - 16px);
-  /* Cap the whole popover to the viewport and let the body scroll: the
-   * anchor is measured before async content (images) loads, so an
-   * uncapped popover can grow past the window edge. */
-  max-height: calc(100vh - 16px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--surface);
-  border-radius: var(--r-3);
-  box-shadow: var(--shadow-2);
-}
-.ref-pop-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
-  flex: none;
-}
-.ref-pop-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  flex: none;
-  color: var(--text-3);
-}
-.ref-pop-icon svg { width: 14px; height: 14px; }
-.ref-pop-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ref-pop-remove {
-  flex: none;
-  padding: 2px 6px;
-  border-radius: var(--r-1);
-  color: var(--text-3);
-  font-size: 11px;
-}
-.ref-pop-remove:hover { color: var(--danger); background: var(--danger-soft); }
-.ref-pop-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  border-radius: var(--r-1);
-  color: var(--text-3);
-}
-.ref-pop-close:hover { color: var(--text); background: var(--surface-2); }
-.ref-pop-close svg { width: 12px; height: 12px; }
-.ref-pop-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0 10px 10px;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-}
-/* Column flex children would shrink when the body overflows — pin them. */
-.ref-pop-body > * { flex: none; }
-.ref-pop-page {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 550;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ref-pop-url {
-  overflow: hidden;
-  color: var(--text-3);
-  font: 11px/1.4 var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ref-pop-selector {
-  align-self: flex-start;
-  max-width: 100%;
-  padding: 1px 5px;
-  overflow: hidden;
-  color: var(--text-2);
-  background: var(--surface-2);
-  border: 1px solid var(--hairline-2);
-  border-radius: var(--r-1);
-  font: 11px/1.4 var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ref-pop-snippet {
-  max-height: 220px;
-  margin: 2px 0 0;
-  padding: 8px;
-  overflow: auto;
-  color: var(--text-2);
-  background: var(--surface-inset);
-  border-radius: var(--r-2);
-  font: 11px/1.5 var(--font-mono);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* Pasted text renders as markdown (same typography as the transcript);
- * the mono/pre treatment stays for code snippets. */
-.ref-pop-md {
-  font: var(--fz-12)/1.55 var(--font-sans);
-  white-space: normal;
-  color: var(--text);
-}
-.ref-pop-thumb {
-  display: block;
-  max-width: 100%;
-  max-height: 200px;
-  /* Frame the preview so it reads as an image, not as app content — a
-   * screenshot of the app itself otherwise blends into the popover. */
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-2);
-  background: var(--surface-inset);
-  box-shadow: var(--shadow-1);
-  cursor: zoom-in;
-}
-.ref-pop-meta {
-  color: var(--text-3);
-  font-size: 11px;
-}
 .composer-bar {
   display: flex; align-items: center; flex-wrap: wrap;
   padding: 4px 6px 6px;
@@ -3064,26 +2862,23 @@ button.sb-section:hover { color: var(--text); }
 .h-detached svg { width: 12px; height: 12px; flex: none; color: var(--warn); }
 .h-detached code { font: 600 10.5px/1 var(--font-mono); color: var(--text); }
 
-.h-filters { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0 10px 8px; }
+.h-filters { flex: none; display: flex; align-items: center; justify-content: flex-start; gap: 10px; padding: 0 10px 8px; }
 .h-chip {
   display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
   font: 600 var(--fz-11)/1 var(--font-mono); letter-spacing: 0.04em;
   color: var(--text-2); background: transparent;
-  border: 1px solid transparent; border-radius: var(--r-1); padding: 3px 6px; cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--r-1); padding: 3px 4px; cursor: pointer;
 }
 .h-chip:hover { color: var(--text); background: var(--surface-2); }
 .h-chip:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -1px; }
-.h-chip svg { width: 10px; height: 10px; flex: none; color: var(--text-3); }
 .h-chip .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .h-chip .caret { font-size: 8px; opacity: 0.7; flex: none; }
 .h-chip.on { color: var(--accent-text); background: var(--accent-soft); border-color: oklch(from var(--accent) l c h / 0.35); }
-.h-chip.on svg { color: var(--accent-text); }
 
 .h-menu-anchor { position: relative; display: inline-flex; min-width: 0; flex: 0 1 auto; }
-/* The inspector's right-aligned filter chips fly their menus out to the LEFT
- * so they can never extend past the panel edge and cover the rail —
- * .inspector deliberately has no overflow:hidden (see its comment). */
-.h-filters .h-menu { left: auto; right: 0; }
+/* Left-aligned filter chips fly their menus out to the RIGHT (default);
+ * .inspector deliberately has no overflow:hidden so the menu can extend. */
+.h-filters .h-menu { left: 0; right: auto; }
 .h-menu {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
   min-width: 180px; max-width: 260px; max-height: 260px; overflow-y: auto;
@@ -3111,7 +2906,7 @@ button.sb-section:hover { color: var(--text); }
 
 .h-list { position: relative; }
 .h-row {
-  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 5px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px;
   min-height: 28px; padding-right: 6px;
   border-radius: var(--r-2);
   cursor: pointer; position: relative;
@@ -3122,25 +2917,41 @@ button.sb-section:hover { color: var(--text); }
 .h-row.sel { background: var(--accent-soft); }
 .h-row.sel:hover { background: var(--accent-soft); }
 .h-row .g { position: relative; display: block; }
-.h-row .g svg { display: block; width: 38px; overflow: visible; }
+.h-row .g svg { display: block; overflow: visible; }
+/* Air-style single line: subject, then a dimmed body preview, then solid
+ * lane-colored ref pills — all inline; the preview shrinks away first. The
+ * subject GROWS into free space and shrinks on par with the ref pills (whose
+ * text ellipsizes inside) — a flex:none refs cluster used to truncate the
+ * subject early even when the row had room (2026-09-06 owner report). */
+.h-row .l1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .h-row .subject {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 500 var(--fz-12)/1.35 var(--font-sans); color: var(--text);
 }
 .h-row.sel .subject { color: var(--accent-text); }
-.h-row .refs { flex: none; display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.h-row .desc {
+  flex: 0 4 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: var(--fz-12)/1.35 var(--font-sans); color: var(--text-3);
+}
+.h-row .refs { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 
+/* Solid lane-colored pills (Air-style): the pill background follows the
+ * commit's chain color, text stays readable in every theme via --bg. */
 .h-ref {
-  flex: none; display: inline-flex; align-items: center; gap: 3px;
+  flex: none; display: inline-flex; align-items: center;
   max-width: 96px; padding: 1px 6px; border-radius: var(--r-pill);
   font: 600 9.5px/1.5 var(--font-mono); letter-spacing: 0.02em;
 }
-.h-ref svg { width: 9px; height: 9px; flex: none; }
 .h-ref .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.h-ref.local { background: var(--accent-soft); color: var(--accent-text); }
-.h-ref.remote { background: var(--surface-2); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--hairline); }
-.h-ref.tag { background: var(--surface-3); color: var(--text-2); }
-.h-ref.head { background: var(--ok-soft); color: var(--ok); box-shadow: inset 0 0 0 1px oklch(from var(--ok) l c h / 0.4); }
+.h-ref.lane-1 { background: var(--lane-1); color: var(--bg); }
+.h-ref.lane-2 { background: var(--lane-2); color: var(--bg); }
+.h-ref.lane-3 { background: var(--lane-3); color: var(--bg); }
+.h-ref.lane-4 { background: var(--lane-4); color: var(--bg); }
+.h-ref.lane-5 { background: var(--lane-5); color: var(--bg); }
+.h-ref.lane-6 { background: var(--lane-6); color: var(--bg); }
+.h-ref.lane-7 { background: var(--lane-7); color: var(--bg); }
+.h-ref.lane-8 { background: var(--lane-8); color: var(--bg); }
+.h-ref.head { background: var(--ok); color: var(--bg); }
 .h-ref.more { background: var(--surface-2); color: var(--text-3); }
 
 .h-foot { padding: 8px 6px 2px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
@@ -3296,7 +3107,7 @@ button.sb-section:hover { color: var(--text); }
 @keyframes sk-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .sk-line { animation: none; } }
 
-/* History empty state in panel 2 (renderEmpty slot) */
+/* Shared icon empty state (Diffs no-tree placeholder) */
 .history-empty .fpe-icon { color: var(--text-3); opacity: 0.75; }
 .history-empty .fpe-title { font-size: var(--fz-12); color: var(--text-2); }
 .history-empty .fpe-hint { font-size: var(--fz-10); font-family: var(--font-mono); }

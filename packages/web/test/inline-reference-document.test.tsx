@@ -1,6 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ComposerDocument, MessageContextItem } from '@gian/shared';
 import { InlineReferenceDocument } from '../src/components/composer/InlineReferenceDocument.js';
 
@@ -27,7 +27,7 @@ function documentWithReference(): ComposerDocument {
 }
 
 describe('InlineReferenceDocument', () => {
-  it('opens a floating detail card when a context chip is clicked', async () => {
+  it('previews a context chip on hover; a plain click performs no action', async () => {
     const user = userEvent.setup();
     render(
       <InlineReferenceDocument
@@ -39,16 +39,17 @@ describe('InlineReferenceDocument', () => {
     const chip = screen.getByRole('button', { name: /span\.ri-title/ });
     expect(document.querySelector('.ref-pop')).toBeNull();
 
+    // A plain click does nothing (2026-09-10 owner call).
     await user.click(chip);
-    expect(document.querySelector('.ref-pop')).not.toBeNull();
+    expect(document.querySelector('.ref-pop')).toBeNull();
+
+    // Hover opens the floating detail card.
+    await user.hover(chip);
+    await vi.waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
     expect(screen.getByText('Browser element')).toBeInTheDocument();
     expect(screen.getByText('Gian')).toBeInTheDocument();
     expect(screen.getByText('http://127.0.0.1:5191/')).toBeInTheDocument();
     expect(screen.getByText('<span class="ri-title"></span>')).toBeInTheDocument();
-
-    // Clicking the chip again toggles the card closed.
-    await user.click(chip);
-    expect(document.querySelector('.ref-pop')).toBeNull();
   });
 
   it('closes the card on outside pointer down', async () => {
@@ -63,8 +64,8 @@ describe('InlineReferenceDocument', () => {
       </div>,
     );
 
-    await user.click(screen.getByRole('button', { name: /span\.ri-title/ }));
-    expect(document.querySelector('.ref-pop')).not.toBeNull();
+    await user.hover(screen.getByRole('button', { name: /span\.ri-title/ }));
+    await vi.waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
     await user.click(screen.getByRole('button', { name: 'elsewhere' }));
     expect(document.querySelector('.ref-pop')).toBeNull();
   });
@@ -90,13 +91,18 @@ describe('InlineReferenceDocument', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: /实现要点/ }));
+    const chip = screen.getByRole('button', { name: /实现要点/ });
+    await user.hover(chip);
+    await vi.waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
     const snippet = document.querySelector('.ref-pop-snippet.ref-pop-md');
     expect(snippet).not.toBeNull();
     // Markdown is parsed, not shown raw.
     expect(snippet!.querySelector('strong')).toHaveTextContent('Claude 风格');
     expect(snippet!.querySelector('code')).toHaveTextContent('code');
     expect(snippet!.textContent).not.toContain('**');
+
+    // The pointer must stay on the card while inspecting it (hover-driven).
+    await user.hover(snippet as HTMLElement);
 
     // Scrolling inside the popover keeps it open; a page scroll closes it.
     act(() => { snippet!.dispatchEvent(new Event('scroll', { bubbles: false })); });
@@ -127,8 +133,8 @@ describe('InlineReferenceDocument', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: /quoted from/ }));
-    expect(screen.getByText('Quote')).toBeInTheDocument();
+    await user.hover(screen.getByRole('button', { name: /quoted from/ }));
+    await vi.waitFor(() => expect(screen.getByText('Quote')).toBeInTheDocument());
     expect(screen.queryByText('Pasted text')).toBeNull();
   });
 
@@ -143,7 +149,8 @@ describe('InlineReferenceDocument', () => {
     expect(screen.getByText('span.ri-title')).toBeInTheDocument();
   });
 
-  it('keeps attachment chips as download links', () => {
+  it('attachment chips preview on hover; the body keeps the download link', async () => {
+    const user = userEvent.setup();
     render(
       <InlineReferenceDocument
         document={{
@@ -155,7 +162,13 @@ describe('InlineReferenceDocument', () => {
         attachments={[{ name: 'notes.txt', url: '/api/sessions/s/attachments/notes.txt' }]}
       />,
     );
-    const link = screen.getByRole('link', { name: /notes\.txt/ });
+    const chip = screen.getByRole('button', { name: /notes\.txt/ });
+    // Plain click: nothing.
+    await user.click(chip);
+    expect(document.querySelector('.ref-pop')).toBeNull();
+    await user.hover(chip);
+    await vi.waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
+    const link = screen.getByRole('link', { name: 'Download' });
     expect(link).toHaveAttribute('href', '/api/sessions/s/attachments/notes.txt');
   });
 });

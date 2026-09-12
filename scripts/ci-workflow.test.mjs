@@ -5,19 +5,29 @@ import test from 'node:test';
 const workflowUrl = new URL('../.github/workflows/ci.yml', import.meta.url);
 const releaseWorkflowUrl = new URL('../.github/workflows/release.yml', import.meta.url);
 const securityWorkflowUrl = new URL('../.github/workflows/security-audit.yml', import.meta.url);
+const proxyCertificationWorkflowUrl = new URL('../.github/workflows/proxy-certification.yml', import.meta.url);
+const proxyReleaseWorkflowUrl = new URL('../.github/workflows/proxy-release.yml', import.meta.url);
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 
 test('hosted workflows pin every source, release, and audit gate to Node 24', async () => {
-  const [workflow, releaseWorkflow, securityWorkflow] = await Promise.all([
+  const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease] = await Promise.all([
     readFile(workflowUrl, 'utf8'),
     readFile(releaseWorkflowUrl, 'utf8'),
     readFile(securityWorkflowUrl, 'utf8'),
+    readFile(proxyCertificationWorkflowUrl, 'utf8'),
+    readFile(proxyReleaseWorkflowUrl, 'utf8'),
   ]);
 
   assert.match(workflow, /\n  pull_request:\n/);
   assert.match(workflow, /\n  push:\n[\s\S]*?      - main\n/);
   assert.match(workflow, /fetch-depth: 0/);
-  for (const configuredWorkflow of [workflow, releaseWorkflow, securityWorkflow]) {
+  for (const configuredWorkflow of [
+    workflow,
+    releaseWorkflow,
+    securityWorkflow,
+    proxyCertification,
+    proxyRelease,
+  ]) {
     assert.match(configuredWorkflow, /node-version: 24/);
     assert.doesNotMatch(configuredWorkflow, /node-version: 22/);
   }
@@ -42,10 +52,27 @@ test('nightly and manual CI run isolated E2E and retain failure artifacts', asyn
     /if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
   );
   assert.match(workflow, /run: pnpm test:e2e/);
+  assert.match(workflow, /run: pnpm test:e2e:proxy-mock/);
   assert.match(workflow, /PLAYWRIGHT_CHANNEL: chromium/);
   assert.match(workflow, /if: failure\(\)[\s\S]*?uses: actions\/upload-artifact@v4/);
   assert.match(workflow, /playwright-report\//);
   assert.match(workflow, /test-results\//);
+});
+
+test('Proxy publication consumes a qualified macOS ARM64 certificate and never tag-builds', async () => {
+  const [certification, release] = await Promise.all([
+    readFile(proxyCertificationWorkflowUrl, 'utf8'),
+    readFile(proxyReleaseWorkflowUrl, 'utf8'),
+  ]);
+  assert.match(certification, /runs-on: \[self-hosted, macOS, ARM64, gian-proxy-certification\]/);
+  assert.match(certification, /pnpm verify:proxy --/);
+  assert.match(certification, /--stage release/);
+  assert.match(certification, /artifacts\/proxies/);
+  assert.match(release, /workflow_dispatch:/);
+  assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
+  assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
+  assert.match(release, /scripts\/verify-proxy-release-certificate\.mjs/);
+  assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
 });
 
 test('release and desktop packaging fail closed before expensive builds', async () => {

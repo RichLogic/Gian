@@ -24,7 +24,12 @@ import {
   saveHistoryScroll,
   useHistoryState,
 } from '../controllers/use-history.js';
-import { assignHistoryLanes, type HistoryGraphRow } from '../presentation/history-graph.js';
+import {
+  assignHistoryLanes,
+  graphRowWidth,
+  laneX,
+  type HistoryGraphRow,
+} from '../presentation/history-graph.js';
 import { relTime } from '../views/session-list-status.js';
 import {
   gitHistoryFetchEntityKey,
@@ -58,9 +63,8 @@ const I = {
   history: 'M3 3v5h5 M3.05 13A9 9 0 1 0 6 5.3L3 8 M12 7v5l4 2',
 };
 
-/* ---- graph geometry (38px gutter, 4 lanes, node center y=14) ---- */
-const LANE_X = [7, 15, 23, 31];
-const GW = 38;
+/* ---- graph geometry (node center y=14; lane x / widths live in
+ *  history-graph.ts so the lane model and its geometry stay together) ---- */
 /* Chain palette (Air-style): colors follow the branch chain, not the lane —
  * lane 0's main line is always --lane-1 (blue); each freshly claimed branch
  * chain takes the next entry and keeps it until its lane ends. Tokens per
@@ -73,48 +77,42 @@ const laneColor = (i: number): string => LANE_COLOR[i % LANE_COLOR.length]!;
 const CY = 14;
 const ROWH = 28;
 
-function laneStroke(dashed: boolean): string {
-  return dashed ? '3 2.5' : '';
-}
-
-function GraphCell({ row, head, selected }: { row: HistoryGraphRow; head: boolean; selected: boolean }) {
-  const x = LANE_X[row.lane]!;
+function GraphCell({ row, width, head, merge, selected }: { row: HistoryGraphRow; width: number; head: boolean; merge: boolean; selected: boolean }) {
+  const x = laneX(row.lane);
   const col = laneColor(row.color);
+  /* Air-style nodes: ordinary commits are solid dots in their chain color;
+   * only merges and the HEAD commit stay hollow rings (HEAD adds the outer
+   * ring). Selection always fills the node. */
+  const filled = selected || (!head && !merge);
   return (
-    <svg width={GW} height={ROWH} aria-hidden="true">
+    <svg width={width} height={ROWH} aria-hidden="true">
       {row.linesTop.map(l => (
-        <line key={`t${l.lane}`} x1={LANE_X[l.lane]} y1={0} x2={LANE_X[l.lane]} y2={CY}
-              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }}
-              strokeDasharray={laneStroke(l.dashed)} />
+        <line key={`t${l.lane}`} x1={laneX(l.lane)} y1={0} x2={laneX(l.lane)} y2={CY}
+              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }} />
       ))}
       {row.linesBottom.map(l => (
-        <line key={`b${l.lane}`} x1={LANE_X[l.lane]} y1={CY} x2={LANE_X[l.lane]} y2={ROWH}
-              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }}
-              strokeDasharray={laneStroke(l.dashed)} />
+        <line key={`b${l.lane}`} x1={laneX(l.lane)} y1={CY} x2={laneX(l.lane)} y2={ROWH}
+              style={{ stroke: laneColor(l.color), strokeWidth: 1.5 }} />
       ))}
       {row.curves.map((c, i) => c.dir === 'down' ? (
         <path key={i}
-              d={`M ${LANE_X[c.fromLane]} ${CY} L ${LANE_X[c.fromLane]} ${CY + 3} C ${LANE_X[c.fromLane]} ${CY + 10}, ${LANE_X[c.toLane]} ${ROWH - 7}, ${LANE_X[c.toLane]} ${ROWH}`}
-              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }}
-              strokeDasharray={laneStroke(c.dashed)} />
+              d={`M ${laneX(c.fromLane)} ${CY} L ${laneX(c.fromLane)} ${CY + 3} C ${laneX(c.fromLane)} ${CY + 10}, ${laneX(c.toLane)} ${ROWH - 7}, ${laneX(c.toLane)} ${ROWH}`}
+              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }} />
       ) : (
         <path key={i}
-              d={`M ${LANE_X[c.fromLane]} 0 C ${LANE_X[c.fromLane]} ${CY - 8}, ${LANE_X[c.toLane]} ${CY - 6}, ${LANE_X[c.toLane]} ${CY}`}
-              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }}
-              strokeDasharray={laneStroke(c.dashed)} />
+              d={`M ${laneX(c.fromLane)} 0 C ${laneX(c.fromLane)} ${CY - 8}, ${laneX(c.toLane)} ${CY - 6}, ${laneX(c.toLane)} ${CY}`}
+              style={{ fill: 'none', stroke: laneColor(c.color), strokeWidth: 1.5 }} />
       ))}
       {head && (
         <circle cx={x} cy={CY} r={6.2}
+                className="h-node head-ring"
                 style={{ fill: 'none', stroke: col, strokeOpacity: 0.45, strokeWidth: 1.5 }} />
       )}
       <circle cx={x} cy={CY} r={3.5}
-              style={{ fill: selected ? col : 'var(--surface)', stroke: col, strokeWidth: 1.5 }} />
+              className={`h-node ${filled ? 'fill' : 'hollow'}`}
+              style={{ fill: filled ? col : 'var(--surface)', stroke: col, strokeWidth: 1.5 }} />
     </svg>
   );
-}
-
-function refChipIcon(kind: GitHistoryRef['kind']): string {
-  return kind === 'local' ? I.branch : kind === 'remote' ? I.globe : I.tag;
 }
 
 interface Props {
@@ -253,6 +251,10 @@ export function HistoryInspector({
   }, [searchDraft, workingTreeId, ownerSessionId]);
 
   const graphRows = useMemo(() => assignHistoryLanes(state.items), [state.items]);
+  /* Each row's svg is exactly as wide as its own rightmost dot/curve
+   * (graphRowWidth) — lane x-positions are absolute, so dots stay aligned
+   * across rows while the subject text hugs its own row's dots instead of a
+   * shared gutter sized by the deepest merge anywhere in the list. */
 
   /* Infinite scroll: a sentinel below the list auto-fetches the next cursor
    * page when it scrolls into view (same IO pattern as the lazy file diffs).
@@ -296,7 +298,7 @@ export function HistoryInspector({
     }
   }
 
-  function refChips(commit: GitHistoryCommit): React.ReactNode {
+  function refChips(commit: GitHistoryCommit, chainColor: number): React.ReactNode {
     const isHead = headSha === commit.sha;
     const refs: Array<{ n: string; t: 'head' | GitHistoryRef['kind'] }> = [
       ...(isHead ? [{ n: 'HEAD', t: 'head' as const }] : []),
@@ -308,9 +310,9 @@ export function HistoryInspector({
     return (
       <>
         {shown.map(r => (
-          <span key={`${r.t}:${r.n}`} className={`h-ref ${r.t}`}
-                title={r.t === 'head' ? t('history.refs.head') : r.n}>
-            {r.t !== 'head' && <Icon d={refChipIcon(r.t)} size={9} stroke={1.8} />}
+          <span key={`${r.t}:${r.n}`}
+                className={`h-ref ${r.t === 'head' ? 'head' : `lane-${(chainColor % LANE_COLOR.length) + 1}`}`}
+                title={r.t === 'head' ? t('history.refs.head') : `${r.t} ref: ${r.n}`}>
             <span className="n">{r.n}</span>
           </span>
         ))}
@@ -420,7 +422,6 @@ export function HistoryInspector({
           <button className={`h-chip${state.ref ? ' on' : ''}`} aria-haspopup="menu"
                   aria-expanded={openMenu === 'ref'} title={t('history.filter.branchTitle')}
                   onClick={() => { setOpenMenu(m => (m === 'ref' ? null : 'ref')); setMenuSearch(''); }}>
-            <Icon d={I.branch} size={10} stroke={1.8} />
             <span className="v">{refLabel}</span>
             <span className="caret">▾</span>
           </button>
@@ -462,7 +463,6 @@ export function HistoryInspector({
           <button className={`h-chip${state.author ? ' on' : ''}`} aria-haspopup="menu"
                   aria-expanded={openMenu === 'author'} title={t('history.filter.authorTitle')}
                   onClick={() => { setOpenMenu(m => (m === 'author' ? null : 'author')); setMenuSearch(''); }}>
-            <Icon d={I.author} size={10} stroke={1.8} />
             <span className="v">{authorLabel}</span>
             <span className="caret">▾</span>
           </button>
@@ -574,14 +574,17 @@ export function HistoryInspector({
                 onFocus={() => setFocusState({ ownerKey, sha: commit.sha })}
               >
                 <span className="g">
-                  <GraphCell row={graphRows[i]!} head={headSha === commit.sha}
-                             selected={selectedSha === commit.sha} />
+                  <GraphCell row={graphRows[i]!} width={graphRowWidth(graphRows[i]!)} head={headSha === commit.sha}
+                             merge={commit.isMerge} selected={selectedSha === commit.sha} />
                 </span>
-                <span className="subject">{commit.subject}</span>
-                {(() => {
-                  const chips = refChips(commit);
-                  return chips ? <span className="refs">{chips}</span> : null;
-                })()}
+                <span className="l1">
+                  <span className="subject">{commit.subject}</span>
+                  {commit.bodyPreview ? <span className="desc">{commit.bodyPreview}</span> : null}
+                  {(() => {
+                    const chips = refChips(commit, graphRows[i]!.color);
+                    return chips ? <span className="refs">{chips}</span> : null;
+                  })()}
+                </span>
               </div>
             ))}
           </div>

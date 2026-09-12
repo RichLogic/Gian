@@ -1,6 +1,6 @@
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
+import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProductExecutor, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
 import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
 import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
@@ -23,6 +23,7 @@ import {
 import '../operations/context.js';
 import { ImageZoomContext } from '../transcript/items.js';
 import { publishScreenshotTarget } from '../screenshot-target.js';
+import { AgentLogo } from './AgentLogo.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
   CatalogOptionsMenu,
@@ -33,6 +34,7 @@ import {
   REFERENCE_ICONS,
   ReferencePopover,
   ReferencePopoverHead,
+  useHoverPreview,
 } from './composer/reference-popover.js';
 import type { ReferenceAnchor } from './composer/reference-popover.js';
 import {
@@ -590,6 +592,9 @@ export function Composer({
     anchor: ReferenceAnchor;
     anchorEl: HTMLElement;
   } | null>(null);
+  // Reference chips preview on hover AND click (2026-09-09 owner call):
+  // hover opens after a short delay; a click pins the popover open.
+  const referenceHover = useHoverPreview();
   const [resourcePicking, setResourcePicking] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -671,7 +676,7 @@ export function Composer({
         if (alive) setModels([]);
       });
     return () => { alive = false; };
-  }, [cliExecutor]);
+  }, [cliExecutor, agentId]);
 
   // Fetch the session-mode vocabulary lazily per executor; cached. Until it
   // resolves (or if it fails) the mode dropdown uses the built-in lists.
@@ -694,7 +699,7 @@ export function Composer({
         if (alive) setProxyModes([]);
       });
     return () => { alive = false; };
-  }, [cliExecutor]);
+  }, [cliExecutor, agentId]);
 
   useEffect(() => {
     const cached = getCatalogCached(executor, agentId);
@@ -713,7 +718,7 @@ export function Composer({
         setCatalog({ configOptions: [], input: [], slashCommands: [] });
       });
     return () => { alive = false; };
-  }, [executor]);
+  }, [executor, agentId]);
 
   useEffect(() => {
     if (canSteer !== undefined) {
@@ -1022,13 +1027,22 @@ export function Composer({
     ? composerModeOptions(executor, catalogModeList)
     : (cliExecutor ? composerModeOptions(cliExecutor, proxyModes) : []);
   const showModelChip = catalogReady
-    ? Boolean(catalogModelOption && optionVisible(catalogModelOption, configValues))
+    ? Boolean(
+        catalogModelOption?.binding === 'turn'
+        && optionVisible(catalogModelOption, configValues)
+      )
     : Boolean(cliExecutor);
   const showEffortChip = catalogReady
-    ? Boolean(catalogEffortOption && optionVisible(catalogEffortOption, configValues))
+    ? Boolean(
+        catalogEffortOption?.binding === 'turn'
+        && optionVisible(catalogEffortOption, configValues)
+      )
     : Boolean(cliExecutor);
   const showApprovalChip = catalogReady
-    ? Boolean(catalogApprovalOption && optionVisible(catalogApprovalOption, configValues))
+    ? Boolean(
+        catalogApprovalOption?.binding === 'turn'
+        && optionVisible(catalogApprovalOption, configValues)
+      )
     : Boolean(cliExecutor);
   const effortChoices = catalogEfforts.length > 0
     ? catalogEfforts
@@ -1269,7 +1283,7 @@ export function Composer({
       sessionConfig,
       turnConfig: nextTurn,
       sessionId: session.id,
-    }).then((resolved) => {
+    }, agentId).then((resolved) => {
       if (resolveGenerationRef.current !== generation) return;
       setResolvedOverlay({
         options: mergeTurnCatalog(resolved.configOptions, undefined),
@@ -1620,7 +1634,26 @@ export function Composer({
           </div>
         )}
 
-        <div className="composer-input-wrap">
+        <div
+          className="composer-input-wrap"
+          onMouseOver={event => {
+            const chip = (event.target as HTMLElement).closest?.('.composer-inline-reference') as HTMLElement | null;
+            if (chip?.dataset.referenceId && !(event.relatedTarget instanceof Node && chip.contains(event.relatedTarget))) {
+              const id = chip.dataset.referenceId;
+              referenceHover.scheduleOpen(() => setActiveReference({
+                id,
+                anchor: chip.getBoundingClientRect(),
+                anchorEl: chip,
+              }));
+            }
+          }}
+          onMouseOut={event => {
+            const chip = (event.target as HTMLElement).closest?.('.composer-inline-reference') as HTMLElement | null;
+            if (chip && !(event.relatedTarget instanceof Node && chip.contains(event.relatedTarget))) {
+              referenceHover.scheduleClose(() => setActiveReference(null));
+            }
+          }}
+        >
           <InlineComposerEditor
             ref={editorRef}
             initialDocument={initialDraft.document}
@@ -1631,9 +1664,15 @@ export function Composer({
             onChange={handleDocumentChange}
             onKeyDown={handleEditorKeyDown}
             onPaste={handlePaste}
-            onReferenceActivate={(id, _referenceType, anchorEl) => setActiveReference(previous => previous?.id === id
-              ? null
-              : { id, anchor: anchorEl.getBoundingClientRect(), anchorEl })}
+            onReferenceActivate={(id) => {
+              // 2026-09-10 owner call: chips preview on hover/focus only — a
+              // plain click performs no action, EXCEPT image chips, which go
+              // straight to the lightbox. (Remove stays on the hover popover.)
+              const file = pendingFiles.find(f => f.id === id);
+              if (file && isNativeImageMime(file.mime) && zoomImage) {
+                zoomImage(file.previewUrl, file.name);
+              }
+            }}
           />
         </div>
 
@@ -1646,6 +1685,8 @@ export function Composer({
             anchorEl={activeReference.anchorEl}
             onClose={() => setActiveReference(null)}
             onRemove={removeContextItem}
+            onMouseEnter={referenceHover.cancelClose}
+            onMouseLeave={() => referenceHover.scheduleClose(() => setActiveReference(null))}
           />
         )}
         {activeReference && activeFileReference && (
@@ -1653,6 +1694,8 @@ export function Composer({
             anchor={activeReference.anchor}
             anchorEl={activeReference.anchorEl}
             onClose={() => setActiveReference(null)}
+            onMouseEnter={referenceHover.cancelClose}
+            onMouseLeave={() => referenceHover.scheduleClose(() => setActiveReference(null))}
           >
             <ReferencePopoverHead
               icon={REFERENCE_ICONS.file}
@@ -1727,7 +1770,21 @@ export function Composer({
               {resolvedOverlay.error}
             </span>
           )}
-          {!fixed && <ContextUsageIndicator session={session} />}
+            {/* Agent identity leads the bar; the context-usage ring moved
+                after the model/thinking/fast chips (2026-09-10 owner call). */}
+            {!fixed && (
+              <span
+                className="composer-agent"
+                data-testid="composer-agent-icon"
+                title={session.agent_name || session.executor}
+              >
+                <AgentLogo
+                  proxy={session.executor as ProductExecutor | null}
+                  fallback={session.agent_name || session.executor}
+                  size={17}
+                />
+              </span>
+            )}
 
           {!fixed && extraTurnOptions.length > 0 && (
             <CatalogOptionsMenu
@@ -1930,6 +1987,15 @@ export function Composer({
                 disabled={disabled}
                 onClick={() => approvalDrop.setOpen(o => !o)}
               >
+                {/* shield-plus leads the mode label (2026-09-10 owner call). */}
+                <span className="cmp-approval-ico" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                       strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+                    <path d="M9 12h6" />
+                    <path d="M12 9v6" />
+                  </svg>
+                </span>
                 <span className="name">
                   {executor === 'claude' && oneShotBypass
                     ? t('composer.bypass.button')
@@ -2095,6 +2161,10 @@ export function Composer({
               )}
             </>
           )}
+
+          {/* The context-usage ring trails the right cluster (after the
+              mode chip and the attach "+", 2026-09-10 owner call). */}
+          {!fixed && <ContextUsageIndicator session={session} />}
 
           {/* Send / Stop */}
           {running ? (

@@ -59,6 +59,8 @@ test('openDatabase runs migrations and creates expected tables', () => {
     );
     assert.ok(sessionColumns.includes('detected_worktree_source'));
     assert.ok(sessionColumns.includes('detected_worktree_revision'));
+    assert.ok(sessionColumns.includes('proxy_plugin_id'));
+    assert.ok(sessionColumns.includes('proxy_binding_json'));
     for (const ownership of [
       'created_by_actor_kind',
       'created_by_actor_id',

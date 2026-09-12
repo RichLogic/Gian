@@ -601,6 +601,8 @@ interface ManagedSession {
   /** Pending approval callIds → toolName, indexed by MCP CallTool id. Used so
    *  respondPermission can locate the right ApprovalServer entry. */
   pendingCallIds: Set<string>;
+  /** Host-provided HTTP MCP servers retained only for this attached Session. */
+  mcpServers: import('../core/types.js').ClaudeMcpServer[];
 }
 
 function claudeExecutable() {
@@ -797,6 +799,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     cwd: string;
     model?: string | null;
     isResume: boolean;
+    mcpServers?: import('../core/types.js').ClaudeMcpServer[];
   }): Promise<void> {
     // Kill any existing process for this session.
     this.killSession(options.sessionId);
@@ -812,6 +815,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       hasHadFirstTurn: options.isResume,
       mcpConfigPath: null,
       pendingCallIds: new Set(),
+      mcpServers: structuredClone(options.mcpServers ?? []),
     });
 
     this.emit('debug', `[runtime] Session registered: ${options.sessionId} (claude: ${options.claudeSessionId})`);
@@ -865,8 +869,8 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // (CLI flag handles it). All other modes route through approval-server.
     const mode = options?.permissionMode ?? 'default';
     const useApprovalBridge = mode !== 'bypassPermissions';
-    if (useApprovalBridge) {
-      session.mcpConfigPath = await this.writeMcpConfig(session.sessionId);
+    if (useApprovalBridge || session.mcpServers.length > 0) {
+      session.mcpConfigPath = await this.writeMcpConfig(session, useApprovalBridge);
     } else {
       session.mcpConfigPath = null;
     }
@@ -1237,17 +1241,23 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     }
   }
 
-  private async writeMcpConfig(sessionId: string): Promise<string> {
-    const path = join(tmpdir(), `cc-proxy-mcp-${sessionId}-${process.pid}.json`);
+  private async writeMcpConfig(session: ManagedSession, includeApproval: boolean): Promise<string> {
+    const path = join(tmpdir(), `cc-proxy-mcp-${session.sessionId}-${process.pid}.json`);
+    const mcpServers = Object.fromEntries(session.mcpServers.map(server => [server.name, {
+      type: 'http',
+      url: server.url,
+      ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
+    }]));
     const config = {
       mcpServers: {
-        cc_approval: {
+        ...mcpServers,
+        ...(includeApproval ? { cc_approval: {
           type: 'sse',
-          url: this.approvalServer.urlForSession(sessionId),
-        },
+          url: this.approvalServer.urlForSession(session.sessionId),
+        } } : {}),
       },
     };
-    await writeFile(path, JSON.stringify(config), 'utf8');
+    await writeFile(path, JSON.stringify(config), { encoding: 'utf8', mode: 0o600 });
     return path;
   }
 
@@ -1314,6 +1324,7 @@ export function buildClaudeCliArgs(
   if (mode === 'bypassPermissions') {
     args.push('--dangerously-skip-permissions');
     args.push('--strict-mcp-config');
+    if (session.mcpConfigPath) args.push('--mcp-config', session.mcpConfigPath);
   } else {
     args.push('--permission-mode', mode);
     if (session.mcpConfigPath) {

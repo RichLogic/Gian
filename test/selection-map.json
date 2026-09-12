@@ -34,15 +34,23 @@
         "cc-proxy",
         "codex-proxy",
         "desktop",
+        "dsh-bridge",
+        "dsh-proxy",
         "grok-proxy",
         "host",
         "kimi-proxy",
+        "proxy-catalog-contract",
         "proxy-protocol",
         "scripts",
         "shared",
         "tool-cli",
         "tool-mcp",
-        "web"
+        "web",
+        "zcode-proxy",
+        "chat-ui",
+        "remote-protocol",
+        "remote-server",
+        "remote-web"
       ],
       "scopes": [
         "unit",
@@ -67,12 +75,16 @@
         "docs/**/*.md",
         ".agents/skills/**",
         "AGENTS.md",
-        "CLAUDE.md"
+        "CLAUDE.md",
+        "docs/mockups/**",
+        "design/**"
       ],
       "optionalPatterns": [
         "docs/**/*.md",
         "AGENTS.md",
-        "CLAUDE.md"
+        "CLAUDE.md",
+        "docs/mockups/**",
+        "design/**"
       ],
       "modules": [],
       "scopes": [],
@@ -80,7 +92,7 @@
         "quality:traceability",
         "quality:docs"
       ],
-      "reason": "Quality and project documentation must retain valid links and traceability."
+      "reason": "Quality, project documentation, and design review assets must retain valid links and traceability."
     },
     {
       "id": "scripts",
@@ -109,12 +121,16 @@
         "cc-proxy",
         "codex-proxy",
         "desktop",
+        "dsh-bridge",
+        "dsh-proxy",
         "grok-proxy",
         "host",
         "kimi-proxy",
         "proxy-protocol",
         "shared",
-        "web"
+        "web",
+        "zcode-proxy",
+        "chat-ui"
       ],
       "scopes": [
         "unit",
@@ -134,10 +150,12 @@
       "modules": [
         "cc-proxy",
         "codex-proxy",
+        "dsh-proxy",
         "grok-proxy",
         "host",
         "kimi-proxy",
-        "proxy-protocol"
+        "proxy-protocol",
+        "zcode-proxy"
       ],
       "scopes": [
         "unit",
@@ -148,6 +166,43 @@
         "typecheck"
       ],
       "reason": "Proxy protocol changes expand to every proxy consumer and Host routing."
+    },
+    {
+      "id": "proxy-catalog-contract",
+      "patterns": [
+        "packages/proxy-catalog-contract/**"
+      ],
+      "modules": [
+        "proxy-catalog-contract"
+      ],
+      "scopes": [
+        "unit"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Official Catalog Source/Bundle contract changes stay at the isolated contract package."
+    },
+    {
+      "id": "official-catalog-source",
+      "patterns": [
+        "catalog/official-source/**",
+        "scripts/compile-official-catalog.mjs",
+        "scripts/verify-official-catalog-source.mjs"
+      ],
+      "modules": [
+        "proxy-catalog-contract",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "catalog:verify"
+      ],
+      "reason": "Official Catalog source and compile/verify scripts must stay mapped; unknown-path full-suite fallback is forbidden."
     },
     {
       "id": "proxy-step-request-trace",
@@ -233,7 +288,11 @@
         "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
         "docs/adr/0044-authorize-gian-tool-by-role-and-direct-session-ownership.md",
         "docs/adr/0049-inject-session-scoped-gian-mcp.md",
-        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md"
+        "docs/adr/0050-create-view-only-worktrees-through-gian-tool.md",
+        "packages/host/migrations/072_queue_and_resource_revisions.sql",
+        "packages/host/migrations/073_remote_identity.sql",
+        "packages/host/src/remote/**",
+        "packages/host/test/remote-*.test.ts"
       ],
       "optionalPatterns": [
         "docs/adr/0043-authenticate-host-listened-gian-tool-mcp.md",
@@ -559,6 +618,189 @@
         "zcode-real-app-server-canary"
       ],
       "reason": "ZCode proxy implements gian.proxy/2.1 over the WP0-frozen ZCode Protocol v1 facts."
+    },
+    {
+      "id": "conversation-schedules",
+      "patterns": [
+        "packages/shared/src/schedule.ts",
+        "packages/shared/src/tool.ts",
+        "packages/shared/src/web.ts",
+        "packages/shared/src/operations.ts",
+        "packages/shared/test/schedule-contract.test.mjs",
+        "packages/shared/test/tool-contract.test.mjs",
+        "packages/host/src/schedule/**",
+        "packages/host/src/web/routes/schedules.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/session/repository.ts",
+        "packages/host/src/session/fork.ts",
+        "packages/host/src/tool/**",
+        "packages/host/src/web/app.ts",
+        "packages/host/src/web/watcher-bootstrap.ts",
+        "packages/host/migrations/069_conversation_schedules.sql",
+        "packages/host/test/schedule-*.test.ts",
+        "packages/host/test/gian-tool-schedule.test.ts",
+        "packages/tool-mcp/**"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "tool-mcp"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:traceability"
+      ],
+      "reason": "Conversation-bound schedules cross the shared contract, the Host schedule state machine, Session fork/send surfaces, the Gian Tool boundary, and migration 069."
+    },
+    {
+      "id": "chat-ui",
+      "patterns": [
+        "packages/chat-ui/**"
+      ],
+      "modules": [
+        "chat-ui",
+        "web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "The shared chat renderer is consumed by local Web (and later Remote Web); changes select the chat-ui component tests and the web transcript/interaction regressions."
+    },
+    {
+      "id": "remote-host",
+      "patterns": [
+        "packages/host/src/remote/**",
+        "packages/host/migrations/072_queue_and_resource_revisions.sql",
+        "packages/host/migrations/073_remote_identity.sql",
+        "packages/host/test/remote-*.test.ts",
+        "packages/host/test/gian-tool-queue-revision.test.ts",
+        "packages/desktop/src/remote-identity-*.ts",
+        "packages/desktop/src/managed-host.ts",
+        "packages/desktop/test/remote-identity-broker.test.ts",
+        "packages/desktop/test/managed-host.test.ts",
+        "packages/remote-protocol/src/**",
+        "docs/proposals/remote-web-v1-architecture-and-protocol.md",
+        "docs/data-model.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md",
+        "packages/host/migrations/077_remote_settings_lifecycle.sql"
+      ],
+      "optionalPatterns": [
+        "docs/proposals/remote-web-v1-architecture-and-protocol.md",
+        "docs/data-model.md",
+        "docs/operations/gian-tool-v0-api-and-implementation.md"
+      ],
+      "modules": [
+        "host",
+        "desktop",
+        "shared",
+        "remote-protocol"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:traceability",
+        "quality:docs"
+      ],
+      "reason": "Remote Web V1 Host identity, Queue revision, closed facade, and outbound connector share protocol types without copying schemas."
+    },
+    {
+      "id": "remote-protocol-contract",
+      "patterns": [
+        "packages/remote-protocol/**"
+      ],
+      "modules": [
+        "remote-protocol",
+        "remote-server"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Remote protocol is the frozen closed schema consumed by Remote Server."
+    },
+    {
+      "id": "remote-server-package",
+      "patterns": [
+        "packages/remote-server/**"
+      ],
+      "modules": [
+        "remote-server"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck"
+      ],
+      "reason": "Remote Server owns auth, pairing, presence, and opaque relay only."
+    },
+    {
+      "id": "remote-web",
+      "patterns": [
+        "packages/remote-web/**"
+      ],
+      "modules": [
+        "remote-web"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:docs"
+      ],
+      "reason": "Remote Web is the standalone remote UI; changes select its fixture-driven component tests. Shared chat rendering changes also flow through the chat-ui rule."
+    },
+    {
+      "id": "remote-settings-live",
+      "patterns": [
+        "packages/web/src/remote-settings/**",
+        "packages/web/src/components/SettingsRemotePage.tsx",
+        "packages/web/test/remote-settings*.test.*",
+        "packages/shared/src/remote-settings.ts",
+        "packages/host/src/remote/settings-routes.ts",
+        "packages/host/test/remote-settings.test.ts",
+        "packages/remote-web/src/pairing-link.ts",
+        "packages/remote-web/test/pairing-link.test.ts",
+        "docs/operations/remote-settings.md"
+      ],
+      "modules": [
+        "host",
+        "web",
+        "remote-web",
+        "remote-server",
+        "shared"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:traceability",
+        "quality:docs"
+      ],
+      "reason": "Production Settings and QR pairing cross the local Host, Remote Server, and browser authorization boundary.",
+      "optionalPatterns": [
+        "docs/operations/remote-settings.md"
+      ]
     }
   ]
 }

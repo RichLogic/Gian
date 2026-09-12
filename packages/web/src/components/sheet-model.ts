@@ -9,7 +9,6 @@ export type SheetTabKind =
   | 'commit'
   | 'text'
   | 'workspace'
-  | 'new-workspace'
   | 'browser';
 export type FileViewMode = 'source' | 'preview';
 

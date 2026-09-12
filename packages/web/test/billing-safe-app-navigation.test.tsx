@@ -20,6 +20,7 @@ const workspace: Workspace = {
 const claudeAgent: UserAgentStatus = {
   id: 'agent-claude-1',
   name: 'Claude Code',
+  pluginId: 'claude',
   proxy: 'claude',
   cliPath: '/bin/fake-claude',
   defaults: { model: '', thinking: '', mode: 'ask' },
@@ -92,6 +93,15 @@ describe('BILLING-001: read-only App navigation', () => {
       if (url === '/api/proxy/claude/capabilities') {
         return json({ protocolVersion: 'fixture-v1', models: [], modes: [], slashCommands: [] });
       }
+      if (url === '/api/proxies') {
+        return json({
+          proxies: [],
+          catalog: {
+            source: { id: null, sequence: null, state: 'empty', error: null },
+            items: [],
+          },
+        });
+      }
       if (url === `/api/proxy/claude/slash?workspace=${workspace.id}`) {
         return json({ commands: [] });
       }
@@ -107,8 +117,8 @@ describe('BILLING-001: read-only App navigation', () => {
     act(() => socket.fakeMessage({ type: 'auth_ok', user: 'fixture-user' }));
     act(() => socket.fakeMessage(sync));
 
-    await user.click(await screen.findByTestId('mode-button'));
-    await user.click(await screen.findByTestId('mode-option-sessions'));
+    await user.click(await screen.findByTestId('sb-list-switch'));
+    await user.click(await screen.findByTestId('sb-mode-project'));
     await user.click(await screen.findByTestId('session-row-claude-billing'));
     expect(await screen.findByRole('textbox', { name: 'Message…' })).toBeInTheDocument();
 
@@ -120,7 +130,13 @@ describe('BILLING-001: read-only App navigation', () => {
     await user.click(screen.getByTestId('dock-settings'));
     expect(await screen.findByTestId('settings-body')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'AI Agents' }));
-    expect(await screen.findByDisplayValue('Claude Code')).toBeInTheDocument();
+    // WP4: Settings keeps only a link-out; the management surface is the
+    // top-level Agents page (read-only GET loads: agents + proxy catalog).
+    expect(await screen.findByText(/moved to the Agents page/)).toBeInTheDocument();
+    await user.click(screen.getByTestId('settings-open-agents-page'));
+    expect(await screen.findByText(/My Agents · 1/)).toBeInTheDocument();
+    // The saved Agent card renders its name and its bound Proxy's name.
+    expect((await screen.findAllByText('Claude Code')).length).toBeGreaterThan(0);
 
     // Startup, Settings, and Composer may discover metadata, but this whole
     // read-only path must not cross either mutation boundary that can start a

@@ -16,7 +16,7 @@ import type {
   StartTurnParams,
   SteerTurnParams,
 } from './types.js';
-import type { Executor, ProxyCatalog, ProxySession } from '@gian/shared';
+import { type Executor, type ProxyCatalog, type ProxySession } from '@gian/shared';
 
 export function normalizeProtocolCatalog<T extends ProxyCatalog>(catalog: T): T {
   const slots = catalog.specialCatalogs;
@@ -39,7 +39,8 @@ export function normalizeProtocolCatalog<T extends ProxyCatalog>(catalog: T): T 
 export type NotificationHandler = (notification: ProxyNotification) => void;
 
 export interface ProtocolV2HostOptions extends ProtocolV2ClientOptions {
-  executor: Executor;
+  /** Present for official product launches; omitted for open pluginIds. */
+  executor?: Executor;
 }
 
 interface ReplayPage {
@@ -82,7 +83,11 @@ export class ProtocolV2Host {
     this.client.onExit((code) => this.notifyExit(code));
   }
 
-  get executor(): Executor {
+  get pluginId(): string {
+    return this.options.pluginId;
+  }
+
+  get executor(): Executor | undefined {
     return this.options.executor;
   }
 
@@ -110,9 +115,13 @@ export class ProtocolV2Host {
     return this.catalogResult;
   }
 
-  async request<T>(method: Parameters<ProtocolV2Client['request']>[0], params: unknown): Promise<T> {
+  async request<T>(
+    method: Parameters<ProtocolV2Client['request']>[0],
+    params: unknown,
+    options?: { timeoutMs?: number },
+  ): Promise<T> {
     if (method !== 'initialize') await this.initialize();
-    return this.client.request(method, params);
+    return this.client.request(method, params, options);
   }
 
   hasSessions(): boolean {
@@ -200,14 +209,14 @@ export class ProtocolV2Host {
       try {
         session.notifyHostExit(code);
       } catch (error) {
-        console.error(`[${this.executor}-proxy] session exit handler threw: ${String(error)}`);
+        console.error(`[${this.pluginId}] session exit handler threw: ${String(error)}`);
       }
     }
     for (const handler of this.exitHandlers) {
       try {
         handler(code);
       } catch (error) {
-        console.error(`[${this.executor}-proxy] host exit handler threw: ${String(error)}`);
+        console.error(`[${this.pluginId}] host exit handler threw: ${String(error)}`);
       }
     }
   }
@@ -239,7 +248,11 @@ export class ProtocolV2SessionClient implements ProxyClient {
     private readonly hostSessionId: string,
   ) {}
 
-  get executor(): Executor {
+  get pluginId(): string {
+    return this.host.pluginId;
+  }
+
+  get executor(): Executor | undefined {
     return this.host.executor;
   }
 
@@ -641,7 +654,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       try {
         handler(code);
       } catch (error) {
-        console.error(`[${this.executor}-proxy] exit handler threw: ${String(error)}`);
+        console.error(`[${this.pluginId}] exit handler threw: ${String(error)}`);
       }
     }
   }

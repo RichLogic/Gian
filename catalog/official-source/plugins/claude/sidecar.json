@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 4,
+  "id": "claude",
+  "displayName": "Claude Code",
+  "pluginVersion": "0.2.4",
+  "entry": "proxy.mjs",
+  "protocol": {
+    "name": "gian.proxy",
+    "range": ">=2.2 <3.0"
+  },
+  "process": {
+    "scope": "session"
+  },
+  "runtime": {
+    "kind": "external",
+    "id": "claude",
+    "displayName": "Claude Code",
+    "verifiedVersions": [
+      "2.1.159"
+    ]
+  },
+  "branding": {
+    "logo": {
+      "light": {
+        "path": "assets/logo-light.png",
+        "mediaType": "image/png",
+        "sha256": "a65c6427201ce17bea5c7aad8ec3b8ca9bd94102c660542081e8cf939da886de"
+      },
+      "dark": {
+        "path": "assets/logo-dark.png",
+        "mediaType": "image/png",
+        "sha256": "a65c6427201ce17bea5c7aad8ec3b8ca9bd94102c660542081e8cf939da886de"
+      }
+    }
+  }
+}

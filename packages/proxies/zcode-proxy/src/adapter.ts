@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 
+import { discoverZcodeRuntimes, probeZcodeRuntime } from './runtime/discover.js';
 import {
   capabilitiesFor,
   INNER_PROTOCOL_NAME,
@@ -86,12 +87,41 @@ interface PendingInteraction {
   resolved: boolean;
 }
 
+function customizationUnsupportedList(kind: string) {
+  return {
+    kind,
+    status: 'proxy_unsupported',
+    completeness: 'none',
+    observedAt: new Date().toISOString(),
+    items: [],
+    truncated: false,
+    diagnostics: [{
+      code: 'SOURCE_NOT_ENUMERABLE',
+      message: 'ZCode customization sources are not safely enumerable by this Proxy version.',
+    }],
+  };
+}
+
+function customizationUnavailableDetail(kind: string, id: string, message: string) {
+  return {
+    kind,
+    id,
+    status: 'unavailable',
+    observedAt: new Date().toISOString(),
+    text: '',
+    truncated: false,
+    diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message }],
+  };
+}
+
 const EMPTY_CATALOG: ProjectedCatalog = bootstrapCatalog('uninitialized');
 
 export class ZcodeV2Adapter {
   private initialized = false;
+  private protocolVersion: '2.1' | '2.2' | '2.3' = '2.1';
   private queue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
   private catalog: ProjectedCatalog = EMPTY_CATALOG;
+  private catalogState: InnerReadState | null = null;
   private readonly registry: SessionRegistry;
   private readonly turns = new TurnLedger();
   private readonly responses = new InteractionResponseLedger();
@@ -255,6 +285,28 @@ export class ZcodeV2Adapter {
       case 'session.close': return this.sessionClose(params);
       case 'session.native.list': return this.sessionNativeList(params);
       case 'session.replay': return this.sessionReplay(params);
+      case 'runtime.discover':
+        if (this.protocolVersion === '2.1') {
+          throw new ServiceError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
+        }
+        return discoverZcodeRuntimes();
+      case 'runtime.probe':
+        if (this.protocolVersion === '2.1') {
+          throw new ServiceError('METHOD_NOT_FOUND', 'runtime.probe requires gian.proxy/2.2.');
+        }
+        return probeZcodeRuntime(String(params.path ?? ''));
+      case 'customization.list':
+      case 'customization.detail':
+        if (this.protocolVersion !== '2.3') {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', `${method} requires gian.proxy/2.3.`);
+        }
+        return method === 'customization.list'
+          ? customizationUnsupportedList(String((params as Record<string, unknown>).kind ?? ''))
+          : customizationUnavailableDetail(
+              String((params as Record<string, unknown>).kind ?? ''),
+              String((params as Record<string, unknown>).id ?? ''),
+              'ZCode customization detail is not supported.',
+            );
       case 'shutdown': return this.shutdown();
       case 'session.rename':
       case 'session.native.delete':
@@ -298,16 +350,30 @@ export class ZcodeV2Adapter {
       throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'Expected gian.proxy protocol name.');
     }
     const versions = Array.isArray(protocol.versions) ? protocol.versions as unknown[] : [];
-    if (versions.includes('2.1') === false) {
-      throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'com.zhipu.zcode speaks gian.proxy/2.1 only.');
+    const selected = versions.includes('2.3')
+      ? '2.3'
+      : versions.includes('2.2')
+        ? '2.2'
+        : versions.includes('2.1')
+          ? '2.1'
+          : null;
+    if (selected === null) {
+      throw new ServiceError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1, 2.2, or 2.3 is required.');
     }
     this.initialized = true;
+    this.protocolVersion = selected;
     this.catalog = EMPTY_CATALOG;
+    const capabilities = capabilitiesFor({ interaction: this.options.interactionEnabled });
+    if (selected !== '2.1') {
+      capabilities['runtime.discover'] = 1;
+      capabilities['runtime.probe'] = 1;
+    }
+    if (selected === '2.3') capabilities['customization.list'] = 1;
     return {
-      protocol: { name: 'gian.proxy', version: '2.1' },
+      protocol: { name: 'gian.proxy', version: selected },
       plugin: { id: PLUGIN_ID, name: PLUGIN_NAME, version: PLUGIN_VERSION },
       process: { scope: 'shared' },
-      capabilities: capabilitiesFor({ interaction: this.options.interactionEnabled }),
+      capabilities,
     };
   }
 
@@ -337,6 +403,7 @@ export class ZcodeV2Adapter {
   private async catalogList(): Promise<unknown> {
     const state = await this.readState(this.options.catalogWorkspace);
     this.assertInnerProtocol(state);
+    this.catalogState = state;
     this.catalog = projectCatalog(this.runtimeKey(), state);
     return this.catalog;
   }
@@ -351,10 +418,13 @@ export class ZcodeV2Adapter {
       // names is impossible without cache; require a re-list.
       throw new ServiceError('CONFIG_VALUE_INVALID', 'Unknown catalogRevision; call catalog.list again.');
     }
+    if (this.catalogState === null) {
+      throw new ServiceError('CONFIG_VALUE_INVALID', 'catalog.resolve ran before catalog.list.');
+    }
     const sessionConfig = (params.sessionConfig ?? {}) as Record<string, unknown>;
     const turnConfig = (params.turnConfig ?? {}) as Record<string, unknown>;
     try {
-      return { ...this.catalog, ...resolveCatalog(this.catalog, { sessionConfig, turnConfig }) };
+      return resolveCatalog(this.runtimeKey(), this.catalogState, { sessionConfig, turnConfig });
     } catch (error) {
       if (error instanceof ConfigValueInvalidError) {
         throw new ServiceError('CONFIG_VALUE_INVALID', error.message);
@@ -571,11 +641,24 @@ export class ZcodeV2Adapter {
     // 1. Apply the full turn config snapshot (§7.4): model -> thinking ->
     // approval mode, verified step by step. Any failure never reaches send.
     const nativeSessionId = record.nativeSessionId;
-    const confirmed = { ...record.confirmedNativeSettings };
+    const previousConfirmed = {
+      ...record.confirmedNativeSettings,
+      ...(record.confirmedNativeSettings.model
+        ? { model: { ...record.confirmedNativeSettings.model } }
+        : {}),
+    };
+    const confirmed = {
+      ...previousConfirmed,
+      ...(previousConfirmed.model ? { model: { ...previousConfirmed.model } } : {}),
+    };
     try {
       const modelValue = config['model'];
       if (typeof modelValue === 'string') {
         const ref = decodeModelValue(modelValue);
+        const providerValue = config['provider'];
+        if (typeof providerValue === 'string' && providerValue !== ref.providerId) {
+          throw new ConfigValueInvalidError('Provider and model config values do not match.');
+        }
         if (confirmed.model?.providerId !== ref.providerId || confirmed.model?.modelId !== ref.modelId) {
           await this.transport.request('session/setModel', {
             sessionId: nativeSessionId, model: ref,
@@ -600,7 +683,8 @@ export class ZcodeV2Adapter {
     } catch (error) {
       // Restore the previously confirmed snapshot; the session MUST NOT run
       // with unknown config (§7.4).
-      await this.restoreConfirmed(record, confirmed).catch(() => undefined);
+      await this.restoreConfirmed(record, previousConfirmed).catch(() => undefined);
+      this.turns.forget(sessionId, streamId, turnId);
       if (error instanceof ConfigValueInvalidError) {
         throw new ServiceError('CONFIG_VALUE_INVALID', error.message);
       }

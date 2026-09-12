@@ -70,6 +70,8 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   }> = [];
   readonly injectCalls: Array<{ threadId: string; items: Array<Record<string, unknown>> }> = [];
   readonly archiveCalls: string[] = [];
+  readonly readThreadCalls: string[] = [];
+  failReadThreadRuntimeWide = false;
   nativeThreads: CodexNativeThreadSummary[] = [];
   readonly listNativeThreadsCalls: Array<string | undefined> = [];
 
@@ -152,6 +154,12 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   }
 
   async readThread(threadId: string) {
+    this.readThreadCalls.push(threadId);
+    if (this.failReadThreadRuntimeWide) {
+      const error = new Error('fixture oversized thread/read response');
+      this.emitRuntimeStopped(error);
+      throw error;
+    }
     const thread = this.threads.get(threadId);
     if (!thread) {
       throw new Error('thread missing');
@@ -304,6 +312,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
       },
     ];
     thread.preview = 'done';
+    return turn;
   }
 }
 
@@ -1363,7 +1372,7 @@ test('gian.proxy/2 exposes Codex capacity failures as retryable turn errors', as
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.12',
+    '0.2.15',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -1637,6 +1646,76 @@ test('Codex plan snapshots keep the native step statuses as checklist markdown',
   }
 });
 
+test('gian.proxy/2 accumulates Codex plan deltas into full snapshots', async () => {
+  const harness = await createHarness();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new CodexProtocolV2Adapter(
+    harness.service,
+    '0.2.15',
+    (method, params) => {
+      notifications.push({ method, params });
+      proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+    },
+  );
+  try {
+    await adapter.handle(v2Request('plan-init', 'initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.2'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    }));
+    const created = resultSchemas['session.create'].parse(await adapter.handle(v2Request(
+      'plan-create',
+      'session.create',
+      {
+        sessionId: 'host-plan-session',
+        workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] },
+        config: {},
+      },
+    )));
+    await adapter.handle(v2Request('plan-turn', 'turn.start', {
+      sessionId: 'host-plan-session',
+      streamId: created.session.streamId,
+      turnId: 'host-plan-turn',
+      input: [{ type: 'text', text: 'make a plan' }],
+      config: {},
+    }));
+    const nativeSessionId = created.session.nativeSession?.id;
+    assert.ok(nativeSessionId);
+    const nativeTurn = (harness.runtime.threads.get(nativeSessionId) as {
+      turns: Array<{ id: string }>;
+    }).turns.at(-1)!;
+
+    harness.runtime.emitNotification({
+      method: 'item/plan/delta',
+      params: {
+        threadId: nativeSessionId,
+        turnId: nativeTurn.id,
+        itemId: 'native-plan',
+        delta: '- [x] Inspect\n',
+      },
+    });
+    harness.runtime.emitNotification({
+      method: 'item/plan/delta',
+      params: {
+        threadId: nativeSessionId,
+        turnId: nativeTurn.id,
+        itemId: 'native-plan',
+        delta: '- [ ] Implement',
+      },
+    });
+    await waitFor(() => notifications.filter(event => event.method === 'plan.updated').length === 2);
+
+    const plans = notifications
+      .filter(event => event.method === 'plan.updated')
+      .map(event => event.params.data as { planId: string; title: string });
+    assert.deepEqual(plans, [
+      { planId: 'native-plan', title: '- [x] Inspect\n', steps: [] },
+      { planId: 'native-plan', title: '- [x] Inspect\n- [ ] Implement', steps: [] },
+    ]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('Codex collabAgentToolCall items preserve child thread identity and lifecycle', async () => {
   const harness = await createHarness();
   try {
@@ -1717,7 +1796,7 @@ test('Codex collabAgentToolCall items preserve child thread identity and lifecyc
   }
 });
 
-test('Codex subAgentActivity always supplies a non-empty activity description', async () => {
+test('Codex subAgentActivity supplies description and terminal lifecycle', async () => {
   const harness = await createHarness();
   try {
     const created = await harness.service.createSession({ cwd: '/tmp/work' });
@@ -1740,10 +1819,41 @@ test('Codex subAgentActivity always supplies a non-empty activity description', 
     });
     await waitFor(() => harness.events.some(event => event.method === 'codex.agent'));
 
-    const update = (harness.events.find(event => event.method === 'codex.agent')?.params.data as {
-      updates?: Array<{ description?: unknown }>;
-    }).updates?.[0];
-    assert.equal(update?.description, 'Agent');
+    harness.runtime.emitNotification({
+      method: 'item/completed',
+      params: {
+        threadId: created.session.threadId,
+        turnId: started.turn.id,
+        item: {
+          type: 'subAgentActivity',
+          agentThreadId: 'child-thread-without-path',
+          kind: 'completed',
+          message: 'Review complete.',
+        },
+      },
+    });
+    await waitFor(() => (
+      harness.events.filter(event => event.method === 'codex.agent').length === 2
+    ));
+
+    const updates = harness.events
+      .filter(event => event.method === 'codex.agent')
+      .map(event => (event.params.data as {
+        updates?: Array<{ description?: unknown; status?: unknown; output?: unknown }>;
+      }).updates?.[0]);
+    assert.deepEqual(updates, [
+      {
+        agentId: 'child-thread-without-path',
+        description: 'Agent',
+        status: 'running',
+      },
+      {
+        agentId: 'child-thread-without-path',
+        description: 'Agent',
+        status: 'done',
+        output: 'Review complete.',
+      },
+    ]);
   } finally {
     await harness.cleanup();
   }
@@ -2017,15 +2127,12 @@ test('turn completion emits a normalized summary with commands and file changes'
       sessionId: created.session.id,
       input: [{ type: 'text', text: 'finish task' }],
     }, 12);
-    harness.runtime.setCompletedTurn(created.session.threadId, turn.turn.id);
+    const completedTurn = harness.runtime.setCompletedTurn(created.session.threadId, turn.turn.id);
     harness.runtime.emitNotification({
       method: 'turn/completed',
       params: {
         threadId: created.session.threadId,
-        turn: {
-          id: turn.turn.id,
-          status: 'completed',
-        },
+        turn: completedTurn,
       },
     });
 
@@ -2037,9 +2144,67 @@ test('turn completion emits a normalized summary with commands and file changes'
     assert.equal(summary.assistantText, 'done');
     assert.equal(summary.commands.length, 1);
     assert.equal(summary.fileChanges.length, 1);
+    assert.deepEqual(
+      harness.runtime.readThreadCalls,
+      [],
+      'ordinary completion must not read the complete native thread history',
+    );
 
     const snapshot = await harness.service.sessionSnapshot({ sessionId: created.session.id });
     assert.equal(typeof (snapshot.thread as { preview?: unknown }).preview, 'string');
+    assert.deepEqual(harness.runtime.readThreadCalls, [created.session.threadId]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('large-history completion cannot stop an unrelated active session through thread/read', async () => {
+  const harness = await createHarness();
+  try {
+    const completedSession = await harness.service.createSession({ cwd: '/tmp/large-history' });
+    const survivorSession = await harness.service.createSession({ cwd: '/tmp/survivor' });
+    const completedTurn = await harness.service.startTurn({
+      sessionId: completedSession.session.id,
+      input: [{ type: 'text', text: 'finish the large session' }],
+    }, 70);
+    const survivorTurn = await harness.service.startTurn({
+      sessionId: survivorSession.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    }, 71);
+
+    const terminalTurn = harness.runtime.setCompletedTurn(
+      completedSession.session.threadId,
+      completedTurn.turn.id,
+    );
+    // This models the old blast radius: a completion-time full-history read
+    // crosses the app-server frame limit and stops the shared runtime.
+    harness.runtime.failReadThreadRuntimeWide = true;
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: {
+        threadId: completedSession.session.threadId,
+        turn: terminalTurn,
+      },
+    });
+
+    await waitFor(() => harness.events.some((entry) => (
+      entry.method === 'turn.completed'
+      && entry.params.sessionId === completedSession.session.id
+    )));
+
+    assert.deepEqual(harness.runtime.readThreadCalls, []);
+    assert.equal(
+      harness.service.getSession({ sessionId: survivorSession.session.id }).session.status,
+      'running',
+    );
+    assert.equal(
+      harness.events.some((entry) => (
+        entry.method === 'turn.failed'
+        && entry.params.sessionId === survivorSession.session.id
+        && entry.params.turnId === survivorTurn.turn.id
+      )),
+      false,
+    );
   } finally {
     await harness.cleanup();
   }

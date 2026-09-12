@@ -1,45 +1,35 @@
-import { createContext } from 'react';
+import type { Context } from 'react';
+import {
+  BrowserLinkOpenContext as ChatUiBrowserLinkOpenContext,
+  ChatPanelOpenContext as ChatUiChatPanelOpenContext,
+  type ChatUiPanelRequest,
+} from '@gian/chat-ui';
 import type { TraceItem } from '../trace/types.js';
 
+/**
+ * Panel-2 requests. The chat-ui kinds (agent / transcript-detail /
+ * event-feed) come from `@gian/chat-ui`; the web app widens the union with
+ * its own plan / trace-item / sidechat kinds. The CONTEXT OBJECT is shared
+ * with chat-ui (single identity) so components from either side see the same
+ * provider — only the type is widened here.
+ */
 export type ChatPanelRequest =
+  | ChatUiPanelRequest
   | { kind: 'plan'; id: string }
-  | { kind: 'agent'; id: string }
   | { kind: 'trace-item'; item: TraceItem }
-  | {
-      kind: 'transcript-detail';
-      title: string;
-      text: string;
-      sourceId?: string;
-    }
-  | {
-      /** The event box expanded into panel 2: the live process-event feed
-       *  of one turn, re-projected from the session's `items` by
-       *  ChatContextPanel (`eventFeedItems`), so it keeps updating in real
-       *  time while the turn runs. */
-      kind: 'event-feed';
-      turn: number;
-      /** Optional anchor: a transcript item identity
-       *  (`transcriptItemIdentity`) of one row of the turn. The feed expands
-       *  that row, scrolls it into view, and flashes it
-       *  (`.trow.is-anchor-flash`) — used by the turn work block, whose rows
-       *  jump to their feed counterpart. */
-      anchorId?: string;
-    }
   | {
       /** The Side Chat surface (gian.proxy/2.0 proposal §10.5): renders the
        *  active parent session's Side Chats as panel 2 via ChatContextPanel.
-      *  `sessionId` on the target is the PARENT session id. */
+       *  `sessionId` on the target is the PARENT session id. */
       kind: 'sidechat';
     };
 
 export type ChatPanelTarget = ChatPanelRequest & { sessionId: string };
 
 /** Opens detail that belongs to the chat, rather than to a workbench rail. */
-export const ChatPanelOpenContext = createContext<
+export const ChatPanelOpenContext = ChatUiChatPanelOpenContext as unknown as Context<
   ((request: ChatPanelRequest) => void) | null
->(null);
+>;
 
 /** Routes ordinary web links to the Browser rail. */
-export const BrowserLinkOpenContext = createContext<
-  ((url: string) => void) | null
->(null);
+export const BrowserLinkOpenContext = ChatUiBrowserLinkOpenContext;

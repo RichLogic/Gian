@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { drainProcessGroup, processGroupMembers } from './dev-process-group.mjs';
 import {
   DEV_HOST_URL,
   DEV_WEB_URL,
@@ -9,7 +10,6 @@ import {
   resolveRuntimePaths,
   rootDir,
   stackReadiness,
-  stopProcessGroup,
   writeJsonAtomic,
 } from './dev-runtime.mjs';
 
@@ -22,6 +22,7 @@ const startedAt = new Date().toISOString();
 let services = null;
 let stopping = false;
 let restartCount = 0;
+let draining = null;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -53,7 +54,9 @@ async function writeState(status, message, extra = {}) {
     hostUrl: DEV_HOST_URL,
     webUrl: DEV_WEB_URL,
     supervisorPid: process.pid,
+    supervisorStartedAt: processGroupMembers(process.pid).find(member => member.pid === process.pid)?.startedAt,
     servicesPid: services?.pid ?? null,
+    serviceGroupMembers: services?.pid ? processGroupMembers(services.pid) : [],
     status,
     message,
     startedAt,
@@ -64,18 +67,20 @@ async function writeState(status, message, extra = {}) {
 }
 
 async function runBuild() {
-  await writeState('building', 'building shared contracts and proxy entrypoints');
+  await writeState('building', 'building Host/Web workspace dependencies and proxy entrypoints');
+  if (stopping) return;
   const child = spawnGroup([
     '-r',
-    '--filter', '@gian/shared',
-    '--filter', '@gian/cc-proxy',
-    '--filter', '@gian/codex-proxy',
-    '--filter', '@gian/kimi-proxy',
-    '--filter', '@gian/grok-proxy',
+    '--filter', '@gian/host^...',
+    '--filter', '@gian/web^...',
+    // ZCode is launched by development discovery rather than a Host package
+    // dependency, so include its initial entry build explicitly.
+    '--filter', '@gian/zcode-proxy',
     'build',
   ]);
   services = child;
   const result = await waitForExit(child);
+  await stopServices();
   services = null;
   if (result.code !== 0) {
     throw new Error(`dependency build exited with ${result.code ?? result.signal}`);
@@ -89,6 +94,8 @@ async function waitUntilReady(timeoutMs = 60_000) {
       throw new Error('service group exited before readiness');
     }
     const readiness = await stackReadiness(identity.runtimeId);
+    if (stopping) break;
+    await writeState('starting', 'waiting for Host/Web readiness');
     if (readiness.hostOwned && readiness.web) return;
     await delay(300);
   }
@@ -99,7 +106,9 @@ async function waitUntilExitOrUnhealthy(child) {
   let failures = 0;
   while (!stopping && isProcessAlive(child.pid)) {
     const readiness = await stackReadiness(identity.runtimeId);
+    if (stopping || services !== child) return { unhealthy: false };
     failures = readiness.hostOwned && readiness.web ? 0 : failures + 1;
+    await writeState('ready', 'monitoring Host/Web and owned process group');
     if (failures >= 5) return { unhealthy: true };
     await delay(2_000);
   }
@@ -107,18 +116,22 @@ async function waitUntilExitOrUnhealthy(child) {
 }
 
 function stopServices() {
-  if (services?.pid) stopProcessGroup(services.pid);
+  const pid = services?.pid;
+  if (!pid) return Promise.resolve();
+  // The group remains owned even when pnpm (its leader) already exited.
+  draining ??= drainProcessGroup(pid).finally(() => { draining = null; });
+  return draining;
 }
 
 async function stop() {
   if (stopping) return;
   stopping = true;
   await writeState('stopping', 'received shutdown request');
-  stopServices();
+  await stopServices();
 }
 
-process.once('SIGINT', () => { void stop(); });
-process.once('SIGTERM', () => { void stop(); });
+process.once('SIGINT', () => { void stop().catch(reportFailure); });
+process.once('SIGTERM', () => { void stop().catch(reportFailure); });
 
 async function supervise() {
   await runBuild();
@@ -151,27 +164,30 @@ async function supervise() {
     }
     restartCount += 1;
     await writeState('degraded', `${reason}; bounded restart ${restartCount}/${maximumAttempts - 1}`);
-    stopServices();
-    await Promise.race([waitForExit(services), delay(5_000)]);
+    await stopServices();
     await delay(Math.min(5_000, restartCount * 1_500));
   }
 
   if (stopping) {
-    await delay(300);
+    await stopServices();
+    services = null;
     await writeState('stopped', 'stopped by dev:down');
     return;
   }
   throw new Error('service restart limit reached');
 }
 
-supervise().catch(async error => {
+async function reportFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   appendLogLine(paths.supervisorLog, `[gian-dev] supervisor failed: ${message}`);
   try {
+    await stopServices();
+    services = null;
     await writeState(stopping ? 'stopped' : 'degraded', stopping ? 'stopped by dev:down' : message);
   } catch {
     // The log still preserves the original failure when state persistence fails.
   }
-  stopServices();
-  process.exitCode = stopping ? 0 : 1;
-});
+  process.exitCode = stopping && !services ? 0 : 1;
+}
+
+supervise().catch(reportFailure);

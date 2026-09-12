@@ -12,16 +12,12 @@ import {
 } from '../operations/use-operations.js';
 import { AdoptDialog } from '../views/spaces-native-sessions.js';
 import { useT } from '../i18n/index.js';
-import { moveById, useDragReorder } from '../dnd-reorder.js';
 
 const ICONS = {
   archive: 'M21 8v13H3V8 M1 3h22v5H1z M10 12h4',
-  eyeOff: 'M3 3l18 18 M10.6 10.6a2 2 0 0 0 2.8 2.8 M9.9 5.1A10.6 10.6 0 0 1 12 5c6 0 10 7 10 7a18 18 0 0 1-2.1 2.9 M6.6 6.6C3.8 8.3 2 12 2 12s4 7 10 7c1.9 0 3.6-.5 5-1.3',
   refresh: 'M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7',
   search: 'M21 21l-4.3-4.3 M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0z',
   trash: 'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13',
-  // grip-vertical — the Settings > Workspaces drag affordance (2026-08-29).
-  grip: 'M9 5h.01 M15 5h.01 M9 12h.01 M15 12h.01 M9 19h.01 M15 19h.01',
 } as const;
 
 function Icon({ path, size = 16 }: { path: string; size?: number }) {
@@ -245,6 +241,8 @@ export function SettingsAdoptPage({
     if (workspaceId !== 'all' && entry.workspace.id !== workspaceId) return false;
     return true;
   });
+  const providers = [...new Set(entries.map(entry => entry.session.executor))]
+    .sort((left, right) => left.localeCompare(right));
   const grouped = workspaces
     .filter(workspace => filtered.some(entry => entry.workspace.id === workspace.id))
     .map(workspace => ({ workspace, entries: filtered.filter(entry => entry.workspace.id === workspace.id) }));
@@ -285,9 +283,9 @@ export function SettingsAdoptPage({
         <select value={provider} onChange={event => setProvider(event.target.value as 'none' | 'all' | Executor)} aria-label={t('settings.adopt.providerFilter')}>
           <option value="none">{t('settings.adopt.selectProvider')}</option>
           <option value="all">{t('settings.adopt.allProviders')}</option>
-          <option value="claude">Claude</option>
-          <option value="codex">Codex</option>
-          <option value="kimi">Kimi</option>
+          {providers.map(pluginId => (
+            <option key={pluginId} value={pluginId}>{pluginId}</option>
+          ))}
         </select>
         <select value={workspaceId} onChange={event => setWorkspaceId(event.target.value)} aria-label={t('settings.adopt.workspaceFilter')}>
           <option value="none">{t('settings.archive.selectWorkspace')}</option>
@@ -338,95 +336,6 @@ export function SettingsAdoptPage({
           }}
         />
       )}
-    </section>
-  );
-}
-
-export function SettingsWorkspacesPage({
-  workspaces,
-  onWorkspaceOpened,
-}: {
-  workspaces: Workspace[];
-  onWorkspaceOpened?: (workspaceId: string) => void;
-}) {
-  const t = useT();
-  const dispatch = useOperationDispatch();
-  const visible = workspaces.filter(workspace => workspace.name !== '__gian_root__' && workspace.hidden !== 1);
-  const hidden = workspaces.filter(workspace => workspace.name !== '__gian_root__' && workspace.hidden === 1);
-
-  // Drag reorder (2026-08-29, replaces the up/down arrows): visible rows drag
-  // to reorder; the dispatched id array always covers EVERY workspace (the
-  // host rewrites sort_order wholesale) — hidden/root rows keep their
-  // relative positions because moveById only relocates the dragged id.
-  const dnd = useDragReorder((dragId, targetId, place) => {
-    const current = workspaces.map(workspace => workspace.id);
-    const next = moveById(current, dragId, targetId, place);
-    if (next !== current) dispatch('workspace.reorder', { ids: next });
-  });
-
-  return (
-    <section className="settings-page workspaces-settings-page" data-testid="settings-workspaces-page">
-      <PageHeading title={t('settings.workspaces.title')} />
-      <div className="workspace-settings-section">
-        <div className="management-group-heading">
-          <strong>{t('settings.workspaces.active')}</strong>
-          <span>{visible.length}</span>
-        </div>
-        <div className="management-list">
-          {visible.length === 0 && <ManagementEmpty>{t('settings.workspaces.empty')}</ManagementEmpty>}
-          {visible.map(workspace => (
-            <div
-              className={`management-row workspace-management-row${dnd.rowClass(workspace.id)}`}
-              key={workspace.id}
-              data-testid={`ws-item-${workspace.id}`}
-              {...dnd.rowProps(workspace.id)}
-            >
-              <span className="management-drag-grip" aria-hidden>
-                <Icon path={ICONS.grip} />
-              </span>
-              <button
-                type="button"
-                className="management-row-copy ws-item-main"
-                onClick={() => onWorkspaceOpened?.(workspace.id)}
-              >
-                <strong>{workspace.name}</strong>
-                <span className="mono">{workspace.path}</span>
-              </button>
-              <button className="btn sm secondary" onClick={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: true })}>
-                <Icon path={ICONS.eyeOff} /> {t('settings.workspaces.hide')}
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="workspace-settings-section">
-        <div className="management-group-heading">
-          <strong>{t('settings.workspaces.hidden')}</strong>
-          <span>{hidden.length}</span>
-        </div>
-        <div className="management-list">
-          {hidden.length === 0 && <ManagementEmpty>{t('settings.workspaces.hiddenEmpty')}</ManagementEmpty>}
-          {hidden.map(workspace => (
-            <div
-              className="management-row workspace-management-row"
-              key={workspace.id}
-              data-testid={`ws-item-${workspace.id}`}
-            >
-              <button
-                type="button"
-                className="management-row-copy ws-item-main"
-                onClick={() => onWorkspaceOpened?.(workspace.id)}
-              >
-                <strong>{workspace.name}</strong>
-                <span className="mono">{workspace.path}</span>
-              </button>
-              <button className="btn sm secondary" onClick={() => dispatch('workspace.setHidden', { workspaceId: workspace.id, hidden: false })}>
-                {t('settings.workspaces.show')}
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
     </section>
   );
 }

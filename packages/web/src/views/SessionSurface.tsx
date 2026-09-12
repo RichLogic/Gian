@@ -34,8 +34,6 @@ interface SessionSurfaceProps {
   planStatus?: 'active' | 'paused' | 'completed';
   planTurn?: number;
   commands: SessionCommands;
-  workingTreeId: string | null;
-  branch: string | null;
   onOpenFile: (absolutePath: string, line?: number) => void;
   /** Click-time fallback for relative markdown links the render-time linkify
    *  pass didn't resolve (see RelativeLinkOpenContext). */
@@ -45,7 +43,6 @@ interface SessionSurfaceProps {
   onOpenChat: (request: ChatPanelRequest) => void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fileRehype: null | (() => (tree: any) => void);
-  onShowChanges: () => void;
   /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
   onShowLastTurnChanges: (turn: number, path: string) => void;
   onReopen?: () => void;
@@ -55,7 +52,6 @@ interface SessionSurfaceProps {
    *  lives on the Dock rail + panel 2). */
   forkAtTurnControl?: ActionControlState | null;
   sideChatControl?: ActionControlState | null;
-  originParentName?: string;
 }
 
 export function SessionSurface({
@@ -73,21 +69,17 @@ export function SessionSurface({
   planStatus,
   planTurn,
   commands,
-  workingTreeId,
-  branch,
   onOpenFile,
   onOpenRelativeFile,
   onOpenDiff,
   onOpenPlan,
   onOpenChat,
   fileRehype,
-  onShowChanges,
   onShowLastTurnChanges,
   onReopen,
   containerClassName,
   forkAtTurnControl,
   sideChatControl,
-  originParentName,
 }: SessionSurfaceProps) {
   const content = (
     <FileLinkOpenContext.Provider value={onOpenFile}>
@@ -143,13 +135,9 @@ export function SessionSurface({
                   })}
                 onDelete={() => commands.onDelete(session.id)}
                 onReopen={onReopen}
-                onShowChanges={onShowChanges}
                 onShowLastTurnChanges={onShowLastTurnChanges}
-                workingTreeId={workingTreeId}
-                branch={branch}
                 forkAtTurnControl={forkAtTurnControl}
                 sideChatControl={sideChatControl}
-                originParentName={originParentName}
               />
             </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>

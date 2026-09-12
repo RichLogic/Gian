@@ -85,7 +85,7 @@ export async function runDefaultKimiPreflight(binaryPath) {
 export async function activateDefaultKimiStore(binaryPath) {
   const preflight = await runDefaultKimiPreflight(binaryPath);
   const guardModule = await import(
-    join(rootDir, 'packages/host/dist/runtime/kimi-session-store.js')
+    join(rootDir, 'packages/proxies/kimi-proxy/dist/src/runtime/session-store.js')
   );
   const guard = new guardModule.KimiSessionStoreGuard(preflight.kimiCodeHome);
   await guard.assertCompatible(preflight.candidateVersion, preflight.candidateVersion);

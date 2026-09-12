@@ -286,7 +286,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.2.12' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.15' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
@@ -909,6 +909,19 @@ export class CodexAppServerClient extends EventEmitter implements CodexRuntime {
     return this.request('skills/list', {
       ...(cwd ? { cwds: [cwd] } : {}),
     }) as Promise<import('./types.js').SkillsListResponse>;
+  }
+
+  async listHooks(cwd?: string) {
+    const response = await this.request('hooks/list', {
+      ...(cwd ? { cwds: [cwd] } : {}),
+    });
+    if (!response || typeof response !== 'object' || Array.isArray(response)) {
+      throw new Error('Codex hooks/list returned an invalid response.');
+    }
+    if (!Array.isArray((response as { data?: unknown }).data)) {
+      throw new Error('Codex hooks/list response omitted its data array.');
+    }
+    return response as import('./types.js').HooksListResponse;
   }
 
   async listAllModels() {

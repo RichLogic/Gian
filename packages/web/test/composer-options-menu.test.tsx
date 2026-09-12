@@ -6,7 +6,7 @@ import type { Executor, Session } from '@gian/shared';
 import { Composer } from '../src/components/Composer.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
-import { loadResolvedProxyCatalog } from '../src/api.js';
+import { loadProxyCapabilities, loadResolvedProxyCatalog } from '../src/api.js';
 
 vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(async (executor: 'claude' | 'codex') => executor === 'codex'
@@ -187,7 +187,7 @@ describe('Composer independent catalog controls', () => {
     expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
   });
 
-  it('places the context ring first and approval on the right of the spacer', async () => {
+  it('places the context ring after the mode/attach cluster (2026-09-10 owner call)', async () => {
     renderComposer(makeSession('claude'));
 
     await waitFor(() => {
@@ -195,10 +195,15 @@ describe('Composer independent catalog controls', () => {
     });
     const approval = document.querySelector('.cmp-approval-btn');
     const ring = document.querySelector('.context-usage-anchor');
+    const attach = screen.getByRole('button', { name: 'Add context' });
     expect(approval).toBeTruthy();
     expect(ring).toBeTruthy();
+    // mode chip → attach "+" → ring.
     expect(
-      ring!.compareDocumentPosition(approval!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      approval!.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      attach.compareDocumentPosition(ring!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -239,5 +244,35 @@ describe('Composer independent catalog controls', () => {
       expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('opencode-DS V4 Flash');
       expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('Off');
     });
+  });
+
+  it('does not expose a Session-bound special option as a mutable next-Turn chip', async () => {
+    vi.mocked(loadProxyCapabilities).mockResolvedValueOnce({
+      catalogRevision: 'session-bound-model',
+      capabilities: {},
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'session',
+        role: 'model',
+        control: 'select',
+        required: true,
+        defaultValue: 'vision',
+        choices: [{ value: 'vision', displayName: 'Vision' }],
+      }],
+      specialCatalogs: { model: 'model' },
+      slashCommands: [],
+    });
+    renderComposer(makeSession('dsh', {
+      model: 'vision',
+      approval_mode: null,
+      thinking_effort: null,
+      executor_config: { schemaVersion: 1, values: { model: 'vision' } },
+      turn_config_options: [],
+    }));
+
+    await waitFor(() => expect(loadProxyCapabilities).toHaveBeenCalled());
+    expect(screen.queryByTestId('composer-model-chip')).toBeNull();
   });
 });

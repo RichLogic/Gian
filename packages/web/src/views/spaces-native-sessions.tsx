@@ -7,7 +7,7 @@ import type {
   UserAgentStatus,
   Workspace,
 } from '@gian/shared';
-import { usesNativeExecutorConfig } from '@gian/shared';
+import { productExecutorForPluginId } from '@gian/shared';
 import { loadAgents, loadNativeSessions } from '../api.js';
 import { confirm } from '../feedback.js';
 import {
@@ -115,6 +115,8 @@ export function NativeSessionsPane({
     if (status === 'available' && s.adoptedBy) return false;
     return true;
   });
+  const providers = [...new Set(sessions.map(session => session.executor))]
+    .sort((left, right) => left.localeCompare(right));
 
   async function handleDelete(s: NativeSession) {
     if (!(await confirm({
@@ -146,10 +148,15 @@ export function NativeSessionsPane({
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
         <div className="segm">
           <button className={`segm-item${executor === 'all' ? ' active' : ''}`} onClick={() => setExecutor('all')}>All</button>
-          <button className={`segm-item${executor === 'claude' ? ' active' : ''}`} onClick={() => setExecutor('claude')}>Claude</button>
-          <button className={`segm-item${executor === 'codex' ? ' active' : ''}`} onClick={() => setExecutor('codex')}>Codex</button>
-          <button className={`segm-item${executor === 'kimi' ? ' active' : ''}`} onClick={() => setExecutor('kimi')}>Kimi</button>
-          <button className={`segm-item${executor === 'zcode' ? ' active' : ''}`} onClick={() => setExecutor('zcode')}>ZCode</button>
+          {providers.map(pluginId => (
+            <button
+              key={pluginId}
+              className={`segm-item${executor === pluginId ? ' active' : ''}`}
+              onClick={() => setExecutor(pluginId)}
+            >
+              {pluginId}
+            </button>
+          ))}
         </div>
         <div className="segm">
           <button className={`segm-item${status === 'all' ? ' active' : ''}`} onClick={() => setStatus('all')}>All</button>
@@ -342,12 +349,16 @@ export function AdoptDialog({
   // the kind has several — never silently the first).
   const [kindAgents, setKindAgents] = useState<UserAgentStatus[]>([]);
   const [agentId, setAgentId] = useState<string | null>(null);
+  const legacyExecutor = productExecutorForPluginId(source.executor) ?? source.executor;
+  const supportsApprovalMode = legacyExecutor === 'claude' || legacyExecutor === 'codex';
   useEffect(() => {
     let alive = true;
     loadAgents()
       .then(list => {
         if (!alive) return;
-        const ofKind = list.filter(agent => agent.proxy === source.executor);
+        const ofKind = list.filter(agent => (
+          agent.pluginId === source.executor || agent.proxy === legacyExecutor
+        ));
         setKindAgents(ofKind);
         setAgentId(ofKind.length === 1 ? ofKind[0]!.id : null);
       })
@@ -388,7 +399,7 @@ export function AdoptDialog({
       request: {
         executor: source.executor,
         native_session_id: source.id,
-        ...(usesNativeExecutorConfig(source.executor) ? {} : { approval_mode: mode }),
+        ...(supportsApprovalMode ? { approval_mode: mode } : {}),
         ...(name.trim() ? { name: name.trim() } : {}),
         ...(agentId ? { agent_id: agentId } : {}),
       },
@@ -453,10 +464,10 @@ export function AdoptDialog({
             />
           </div>
 
-          {!usesNativeExecutorConfig(source.executor) && <div className="adopt-field">
+          {supportsApprovalMode && <div className="adopt-field">
             <label className="adopt-label">Approval mode</label>
             <div className="segm" style={{ width: 'fit-content' }}>
-              {(source.executor === 'codex'
+              {(legacyExecutor === 'codex'
                 ? ['custom', 'ask', 'auto', 'full-access']
                 : ['plan', 'ask', 'auto']
               ).map(m => (
@@ -470,7 +481,7 @@ export function AdoptDialog({
                     ? 'Custom'
                     : m === 'full-access'
                       ? 'Full access'
-                      : m === 'auto' && source.executor === 'codex'
+                      : m === 'auto' && legacyExecutor === 'codex'
                         ? 'Approve for me'
                         : m === 'plan'
                           ? 'Plan'

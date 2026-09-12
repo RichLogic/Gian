@@ -1,0 +1,72 @@
+name: Proxy Release Certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Preview comparison base; leave empty to use the parent commit
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-release-certification
+  cancel-in-progress: false
+
+jobs:
+  release-certificate:
+    runs-on: [self-hosted, macOS, ARM64, gian-proxy-certification]
+    timeout-minutes: 240
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Require candidate commit on main
+        run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install isolated Chromium runtime
+        run: pnpm exec playwright install chromium
+
+      - name: Issue full Release certificate
+        shell: bash
+        env:
+          GIAN_ALLOW_ELECTRON_PREVIEW: '1'
+          GIAN_ALLOW_PACKAGE: '1'
+          GIAN_ALLOW_REAL_AGENT_TURN: '1'
+          PLAYWRIGHT_CHANNEL: chromium
+        run: |
+          BASE_REF="${{ inputs.base_ref }}"
+          if [ -z "${BASE_REF}" ]; then BASE_REF="${GITHUB_SHA}^"; fi
+          pnpm verify:proxy -- \
+            --stage release \
+            --base "${BASE_REF}" \
+            --output output/proxy-certification/release
+
+      - name: Upload certificate, evidence, and exact tested Proxy artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-release-certification-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            output/proxy-certification/release
+            artifacts/proxies

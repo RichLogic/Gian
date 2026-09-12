@@ -81,4 +81,18 @@ describe('useViewNav', () => {
     expect(result.current.activeSessionId).toBe(null);
     expect(result.current.nav.canGoBack).toBe(false);
   });
+
+  it('covers the Timer mode in the top-level navigation history (Issue #51)', () => {
+    const { result } = renderHook(() => useHarness());
+    act(() => result.current.setMode('timer'));
+    expect(result.current.nav.canGoBack).toBe(true);
+
+    act(() => result.current.setActiveSessionId('s1'));
+    act(() => result.current.nav.navigate(-1));
+    expect(result.current.mode).toBe('timer');
+    expect(result.current.activeSessionId).toBe(null);
+
+    act(() => result.current.nav.navigate(-1));
+    expect(result.current.mode).toBe('tasks');
+  });
 });

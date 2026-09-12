@@ -91,6 +91,9 @@ input.on('line', (line) => {
     case 'skills/list':
       send({ id: message.id, result: { data: [] } });
       break;
+    case 'hooks/list':
+      send({ id: message.id, result: { data: [] } });
+      break;
     case 'thread/start':
       send({
         id: message.id,
@@ -120,41 +123,51 @@ input.on('line', (line) => {
         },
       });
       break;
-    case 'turn/start':
-      // Deliberately publish visible events before the native response. The
-      // real Proxy must still publish the Gian response first.
-      send({
-        method: 'item/agentMessage/delta',
-        params: { threadId, turnId, itemId: 'fake-message-1', delta: 'hello from fake codex' },
-      });
-      send({
-        method: 'item/started',
-        params: {
-          threadId,
-          turnId,
-          startedAtMs: 1_000,
-          item: {
-            type: 'mcpToolCall',
-            id: 'fake-tool-1',
-            server: 'fixture',
-            tool: 'inspect',
-            status: 'inProgress',
-            arguments: { target: 'trace' },
-            appContext: null,
-            pluginId: null,
-            result: null,
-            error: null,
-            durationMs: null,
+    case 'turn/start': {
+      // Test seam: GIAN_FAKE_TURN_DELAY_MS holds the turn/start response
+      // open (events still published afterwards) so concurrency tests can
+      // overlap a slow turn with an inspection scan deterministically.
+      const turnDelayMs = Number(process.env.GIAN_FAKE_TURN_DELAY_MS ?? '0');
+      void (async () => {
+        if (Number.isFinite(turnDelayMs) && turnDelayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, turnDelayMs));
+        }
+        // Deliberately publish visible events before the native response. The
+        // real Proxy must still publish the Gian response first.
+        send({
+          method: 'item/agentMessage/delta',
+          params: { threadId, turnId, itemId: 'fake-message-1', delta: 'hello from fake codex' },
+        });
+        send({
+          method: 'item/started',
+          params: {
+            threadId,
+            turnId,
+            startedAtMs: 1_000,
+            item: {
+              type: 'mcpToolCall',
+              id: 'fake-tool-1',
+              server: 'fixture',
+              tool: 'inspect',
+              status: 'inProgress',
+              arguments: { target: 'trace' },
+              appContext: null,
+              pluginId: null,
+              result: null,
+              error: null,
+              durationMs: null,
+            },
           },
-        },
-      });
-      send({
-        id: 700,
-        method: 'item/commandExecution/requestApproval',
-        params: { threadId, turnId, command: 'echo fake-approval' },
-      });
-      send({ id: message.id, result: { turn: { id: turnId, status: 'running' } } });
+        });
+        send({
+          id: 700,
+          method: 'item/commandExecution/requestApproval',
+          params: { threadId, turnId, command: 'echo fake-approval' },
+        });
+        send({ id: message.id, result: { turn: { id: turnId, status: 'running' } } });
+      })();
       break;
+    }
     case 'thread/unsubscribe':
     case 'thread/name/set':
       send({ id: message.id, result: {} });

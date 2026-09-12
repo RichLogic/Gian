@@ -1,10 +1,11 @@
 {
   "name": "@gian/zcode-proxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "com.zhipu.zcode — shared-scope Gian Proxy translating gian.proxy/2.1 over ZCode Protocol v1 (zcode.cjs app-server)",
+  "description": "com.zhipu.zcode \u2014 shared-scope Gian Proxy translating gian.proxy/2.1 over ZCode Protocol v1 (zcode.cjs app-server)",
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
+  "gianProxy": { "releaseId": "zcode", "shipping": true, "realAcceptance": { "binaryEnv": "ZCODE_BIN", "setup": "default" } },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",

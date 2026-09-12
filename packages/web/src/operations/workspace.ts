@@ -86,6 +86,12 @@ export interface WorkspaceCanonicalSink {
   applyOrder(ids: string[]): void;
   /** Reload the authoritative list (the pre-migration `onChange()`). */
   refetch(): void;
+  /** Reload the authoritative SESSION list — required after a workspace
+   *  delete: the Host's ON DELETE SET NULL orphans that workspace's sessions
+   *  (they surface in 无归属), and without a sessions refetch the client
+   *  keeps the stale workspace_id and renders a group named by the raw UUID
+   *  (2026-09-09 owner report). */
+  refetchSessions?(): void;
 }
 
 let workspaceCanonicalSink: WorkspaceCanonicalSink | null = null;
@@ -204,6 +210,10 @@ const workspaceDelete: OperationDefinition<WorkspaceIdInput, { workspaceId: stri
   reconcile: result => {
     workspaceCanonicalSink?.remove(result.workspaceId);
     workspaceCanonicalSink?.refetch();
+    // The Host orphans the workspace's sessions (ON DELETE SET NULL) — pull
+    // the canonical session list too, or the rail renders a UUID-named group
+    // for the orphaned workspace_id until the next full reload.
+    workspaceCanonicalSink?.refetchSessions?.();
   },
   // The view also renders the run's error inline (SpacesView deleteError);
   // no toast here — that would double-surface.

@@ -105,6 +105,20 @@ test('ERR-011: grok adopt requires a discoverable native session', async () => {
   }
 });
 
+test('ERR-011: canonical official pluginId reaches the bounded legacy native adapter', async () => {
+  const ctx = await setup();
+  try {
+    const res = await adoptBody(ctx, {
+      executor: 'com.zhipu.zcode',
+      native_session_id: 'missing-zcode-session',
+    });
+    const body = await res.json() as { error: string };
+    assert.doesNotMatch(body.error, /executor does not support native session adoption/);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('ERR-011: adopt rejects missing native_session_id with 400', async () => {
   const ctx = await setup();
   try {
@@ -198,10 +212,10 @@ test('ERR-011: adopt of a native session that exists for a DIFFERENT workspace r
 });
 
 // ---------------------------------------------------------------------------
-// Adopt — happy path sanity (anchors the negative tests above)
+// Adopt — exact binding boundary
 // ---------------------------------------------------------------------------
 
-test('ERR-011: adopt happy path returns the new gian session row when the native session exists in this workspace', async () => {
+test('ERR-011: a scanned native session is not published when adoption cannot establish a binding', async () => {
   const ctx = await setup();
   try {
     const sid = ctx.home.addClaudeSession({
@@ -213,17 +227,19 @@ test('ERR-011: adopt happy path returns the new gian session row when the native
       native_session_id: sid,
       name: 'Test adopted',
     });
-    assert.equal(res.status, 200,
-      'sanity: happy-path adopt must succeed — anchors the negative tests above');
-    const body = await res.json() as { session: { native_session_id: string; name: string } };
-    assert.equal(body.session.native_session_id, sid);
-    assert.equal(body.session.name, 'Test adopted');
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string };
+    assert.ok(body.error.length > 0);
+    const row = ctx.appCtx.db.prepare(
+      'SELECT id FROM sessions WHERE native_session_id = ?',
+    ).get(sid);
+    assert.equal(row, undefined, 'an Agent-less fallback must not publish an unbound Session');
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('ERR-011: concurrent adopts of one native session create exactly one Gian session', async () => {
+test('ERR-011: concurrent Agent-less adopts both fail without publishing a Session', async () => {
   const ctx = await setup();
   try {
     const sid = ctx.home.addClaudeSession({
@@ -235,18 +251,17 @@ test('ERR-011: concurrent adopts of one native session create exactly one Gian s
       adoptBody(ctx, { executor: 'claude', native_session_id: sid }),
     ]);
 
-    assert.deepEqual([first.status, second.status].sort(), [200, 409],
-      'the second mutation must observe the first adoption instead of inserting a duplicate');
+    assert.deepEqual([first.status, second.status], [400, 400]);
     const rows = ctx.appCtx.db.prepare(
       'SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?',
     ).all('claude', sid);
-    assert.equal(rows.length, 1, 'the database must contain one binding after the race');
+    assert.equal(rows.length, 0, 'the database must contain no unbound adoption after the race');
   } finally {
     await ctx.cleanup();
   }
 });
 
-test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
+test('ERR-011: native adopt delegates publication to the exact-binding service', async () => {
   const ctx = await setup();
   try {
     const sid = ctx.home.addClaudeSession({
@@ -259,14 +274,41 @@ test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
     registerNativeSessionRoutes(routeApp, {
       db: ctx.appCtx.db,
       sessions: {
-        getSession: (sessionId: string) => repository.get(sessionId),
         listPluginNativeSessions: async () => null,
-        resolveAdoptAgent: () => ({
-          agentId: null,
-          agentName: null,
-          agentColor: null,
-          cliPath: null,
-        }),
+        adoptPluginNativeSession: async (input: {
+          nativeSessionId: string;
+          name?: string;
+        }) => {
+          const id = randomUUID();
+          const now = new Date().toISOString();
+          ctx.appCtx.db.prepare(`
+            INSERT INTO sessions
+              (id, name, type, workspace_id, executor, proxy_plugin_id, proxy_binding_json,
+               model, approval_mode, active_channel, status, archived,
+               native_session_id, created_at, updated_at)
+            VALUES (?, ?, 'coding', ?, 'claude', 'claude', ?, NULL, 'ask',
+                    'web', 'new', 0, ?, ?, ?)
+          `).run(
+            id,
+            input.name ?? 'adopted',
+            ctx.workspaceId,
+            JSON.stringify({
+              schemaVersion: 1,
+              pluginId: 'claude',
+              pluginVersion: '1.0.0',
+              manifestSha256: 'a'.repeat(64),
+              protocolVersion: '2.2',
+              processScope: 'session',
+              runtimeProfile: null,
+            }),
+            input.nativeSessionId,
+            now,
+            now,
+          );
+          const session = repository.get(id);
+          messages.push({ type: 'session:created', session, origin: 'native-adopt' });
+          return { session, replay: { turns: 0, events: 0 } };
+        },
       } as unknown as SessionManager,
       broadcaster: {
         broadcast: (message: ServerToClientMessage) => messages.push(message),
@@ -282,6 +324,8 @@ test('ERR-011: native adopt broadcast identifies its Host origin', async () => {
       },
     ));
     assert.equal(res.status, 200);
+    const body = await res.json() as { session: { proxy_binding: unknown } };
+    assert.ok(body.session.proxy_binding, 'the service published an exact Proxy binding');
     const created = messages.find(message => message.type === 'session:created');
     assert.equal(created?.origin, 'native-adopt');
   } finally {
@@ -343,6 +387,33 @@ test('Grok native-session listing uses the plugin list capability', async () => 
   assert.deepEqual(listed, []);
 });
 
+test('native-session listing canonicalizes legacy aliases before the Web contract', async () => {
+  const service = new NativeSessionService(
+    {} as never,
+    {
+      getOrCreate: async () => ({
+        initialize: async () => ({ capabilities: { 'session.native.list': 1 } }),
+        listNativeSessions: async () => ({
+          sessions: [{
+            id: 'native-zcode',
+            displayName: 'ZCode session',
+            cwd: '/tmp/workspace',
+            updatedAt: '2026-09-04T00:00:00.000Z',
+          }],
+        }),
+      }),
+      dispose: async () => undefined,
+    } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+
+  const listed = await service.listPlugin('zcode', '/tmp/workspace');
+  assert.equal(listed?.[0]?.executor, 'com.zhipu.zcode');
+});
+
 test('ERR-011: delete rejects unsupported executor query param with 400', async () => {
   const ctx = await setup();
   try {
@@ -358,21 +429,27 @@ test('ERR-011: delete rejects unsupported executor query param with 400', async 
 test('ERR-011: delete rejects an adopted native session with 409 and points at the gian session', async () => {
   const ctx = await setup();
   try {
-    // Plant + adopt.
+    // Plant a native file and an already-adopted Gian row.
     const sid = ctx.home.addClaudeSession({
       workspacePath: ctx.workspacePath,
       sessionId: 'cc-bound',
     });
-    const adoptRes = await adoptBody(ctx, { executor: 'claude', native_session_id: sid });
-    assert.equal(adoptRes.status, 200);
-    const adoptBody2 = await adoptRes.json() as { session: { id: string } };
+    const gianSessionId = randomUUID();
+    const now = new Date().toISOString();
+    ctx.appCtx.db.prepare(`
+      INSERT INTO sessions
+        (id, name, type, workspace_id, executor, proxy_plugin_id, model, approval_mode,
+         active_channel, status, archived, native_session_id, created_at, updated_at)
+      VALUES (?, 'already adopted', 'coding', ?, 'claude', 'claude', NULL, 'ask',
+              'web', 'new', 0, ?, ?, ?)
+    `).run(gianSessionId, ctx.workspaceId, sid, now, now);
 
     const delRes = await deleteNative(ctx, 'claude', sid);
     assert.equal(delRes.status, 409,
       'deleting an adopted native session must 409 — user has to drop the gian session first');
     const body = await delRes.json() as { error: string; gian_session_id: string };
     assert.match(body.error, /currently adopted/);
-    assert.equal(body.gian_session_id, adoptBody2.session.id);
+    assert.equal(body.gian_session_id, gianSessionId);
   } finally {
     await ctx.cleanup();
   }
@@ -482,7 +559,7 @@ test('DSH capabilities route returns its Protocol 2 Catalog and unknown executor
   const app = new Hono();
   const sessions = {
     warmCapabilities: async (executor: string) => {
-      assert.equal(executor, 'dsh');
+      assert.equal(executor, 'ai.deepseek.harness');
       return catalog;
     },
     getProtocolCapabilities: () => ({ 'catalog.resolve': 1 }),
@@ -498,5 +575,69 @@ test('DSH capabilities route returns its Protocol 2 Catalog and unknown executor
 
   const unknown = await app.request('/api/proxy/other/capabilities');
   assert.equal(unknown.status, 400);
-  assert.deepEqual(await unknown.json(), { error: 'unknown executor' });
+  assert.deepEqual(await unknown.json(), { error: 'invalid pluginId' });
+});
+
+test('catalog.resolve derives the owning Agent path from an existing Session', async () => {
+  const app = new Hono();
+  const observedPaths: Array<string | null | undefined> = [];
+  const db = {
+    prepare: () => ({
+      get: (sessionId: string) => sessionId === 'session-zcode'
+        ? {
+            executor: 'zcode',
+            proxy_plugin_id: 'com.zhipu.zcode',
+            agent_id: 'agent-zcode',
+          }
+        : undefined,
+    }),
+  };
+  const sessions = {
+    warmCapabilities: async (_executor: string, cliPath?: string | null) => {
+      observedPaths.push(cliPath);
+      return { configOptions: [], input: [], slashCommands: [] };
+    },
+    getProtocolCapabilities: (_executor: string, cliPath?: string | null) => (
+      cliPath === '/Applications/ZCode.app/zcode.cjs' ? { 'catalog.resolve': 1 } : {}
+    ),
+    resolveCatalog: async (
+      _executor: string,
+      params: Record<string, unknown>,
+      sessionId?: string,
+      cliPath?: string | null,
+    ) => ({ ...params, sessionId, cliPath }),
+  } as unknown as SessionManager;
+  registerProxyRoutes(
+    app,
+    db as never,
+    sessions,
+    agentId => {
+      assert.equal(agentId, 'agent-zcode');
+      return {
+        pluginId: 'com.zhipu.zcode',
+        cliPath: '/Applications/ZCode.app/zcode.cjs',
+      };
+    },
+  );
+
+  const response = await app.request('/api/proxy/zcode/catalog/resolve', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      catalogRevision: 'zcode-revision',
+      sessionConfig: {},
+      turnConfig: { thinking: 'high' },
+      sessionId: 'session-zcode',
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(observedPaths, ['/Applications/ZCode.app/zcode.cjs']);
+  assert.deepEqual(await response.json(), {
+    catalogRevision: 'zcode-revision',
+    sessionConfig: {},
+    turnConfig: { thinking: 'high' },
+    sessionId: 'session-zcode',
+    cliPath: '/Applications/ZCode.app/zcode.cjs',
+  });
 });

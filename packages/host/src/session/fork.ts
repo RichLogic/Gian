@@ -46,10 +46,12 @@ export function persistedForkBoundaries(db: Db, sessionId: string): PersistedFor
 }
 
 export function nextForkSessionName(db: Db, source: ForkNameSource): string {
+  // Hidden schedule Forks carry their own names and never consume the
+  // user-facing "Fork N" ordinal sequence.
   const row = db.prepare(
     `SELECT COUNT(*) AS count
      FROM sessions
-     WHERE origin_kind = 'fork' AND origin_session_id = ?`,
+     WHERE origin_kind = 'fork' AND origin_session_id = ? AND hidden = 0`,
   ).get(source.id) as { count: number };
   const ordinal = row.count + 1;
   const sourceLabel = sanitizeTitle(source.name ?? '') || source.id.slice(0, 8);

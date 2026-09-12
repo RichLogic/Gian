@@ -8,6 +8,7 @@ import type {
   GianToolMethod,
   GianToolMethodData,
   GianToolMethodParams,
+  GianToolQueueEntry,
   GianToolResult,
   InteractionInput,
   Session,
@@ -27,12 +28,16 @@ import type { TaskManager } from '../task/manager.js';
 import type { SessionManager } from '../session/manager.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import { fail, toolError } from './errors.js';
+import type { ScheduleService } from '../schedule/service.js';
+import { ScheduleError } from '../schedule/errors.js';
 import {
   GianToolLedger,
+  remoteCommandExpired,
   toolInputHash,
   type ToolDeliveryRow,
   type ToolRequestRow,
 } from './ledger.js';
+import type { QueueEntry } from '../queue/manager.js';
 import type { GianToolActor } from './credentials.js';
 import {
   configOptionsByRole,
@@ -43,6 +48,7 @@ import {
   validateConfigValue,
 } from './projections.js';
 import { createAndBindWorktree } from './worktree.js';
+import type { BrowserToolClient } from './browser-broker.js';
 
 interface TurnRow {
   id: string;
@@ -61,6 +67,10 @@ interface ServiceDependencies {
   approvals: ApprovalManager;
   broadcaster: WsBroadcaster;
   agents?: AgentManager;
+  /** Conversation-bound schedule domain (ADR-0053); absent in minimal tests. */
+  schedule?: ScheduleService;
+  /** Desktop-owned Browser bridge; absent in headless Host tests and installs. */
+  browser?: BrowserToolClient;
 }
 
 type AnyData = GianToolMethodData[GianToolMethod];
@@ -156,6 +166,12 @@ export class GianToolService {
 
   constructor(private deps: ServiceDependencies) {
     this.ledger = new GianToolLedger(deps.db);
+    this.deps.sessions.setDeliveryLifecycle(this.ledger);
+    this.ledger.reconcileBoot();
+  }
+
+  lookupRequest(callerId: string, idempotencyKey: string): ToolRequestRow | null {
+    return this.ledger.requestByIdempotency(callerId, idempotencyKey);
   }
 
   async call(raw: unknown, context?: { actor: GianToolActor }): Promise<GianToolResult<AnyData>> {
@@ -171,6 +187,21 @@ export class GianToolService {
     }
     if (this.closing) {
       return { ok: false, request_id: call.request_id, error: toolError(new Error('service is shutting down')) };
+    }
+    if (
+      remoteCommandExpired(call.caller_id, call.request_id)
+      || (call.idempotency_key !== undefined
+        && remoteCommandExpired(call.caller_id, call.idempotency_key))
+    ) {
+      return {
+        ok: false,
+        request_id: call.request_id,
+        error: {
+          code: 'COMMAND_EXPIRED',
+          message: 'command_id is outside the 90-day window',
+          retryable: false,
+        },
+      };
     }
     if (!isGianToolMutation(call.method)) return this.executeRead(call, context);
 
@@ -272,9 +303,78 @@ export class GianToolService {
       );
       case 'session.wait': return this.sessionWait(params);
       case 'session.stop': return this.sessionStop(params);
+      case 'queue.update': return this.queueUpdate(params);
+      case 'queue.remove': return this.queueRemove(params);
+      case 'queue.clear': return this.queueClear(params);
+      case 'queue.send_now': return this.queueSendNow(params);
       case 'worktree.create_and_bind': return this.worktreeCreateAndBind(params, context?.actor);
+      case 'browser.tabs':
+      case 'browser.open':
+      case 'browser.snapshot':
+      case 'browser.click':
+      case 'browser.fill':
+      case 'browser.press':
+      case 'browser.wait':
+      case 'browser.evaluate':
+      case 'browser.screenshot':
+      case 'browser.go_back':
+      case 'browser.reload':
+      case 'browser.close': return this.browserCall(call.method, params, context?.actor);
       case 'interaction.list': return this.interactionList(params);
       case 'interaction.respond': return this.interactionRespond(params, request!);
+      case 'schedule.preview': return this.schedulePreview(params);
+      case 'schedule.create': return this.scheduleCreate(params, request!, context?.actor);
+      case 'schedule.list': return this.scheduleList(params);
+      case 'schedule.get': return this.scheduleGet(params);
+      case 'schedule.update': return this.scheduleUpdate(params);
+      case 'schedule.pause': return this.scheduleState(params, 'pause');
+      case 'schedule.resume': return this.scheduleState(params, 'resume');
+      case 'schedule.run_now': return this.scheduleRunNow(params, request!);
+      case 'schedule.archive': return this.scheduleState(params, 'archive');
+    }
+  }
+
+  private async browserCall<M extends GianToolMethod>(
+    method: M,
+    params: GianToolMethodParams[M],
+    actor: GianToolActor | undefined,
+  ): Promise<GianToolMethodData[M]> {
+    if (!actor || actor.kind !== 'internal_session') {
+      fail('PERMISSION_DENIED', 'Browser tools require an internal Gian Session');
+    }
+    if (!this.deps.browser) {
+      fail('CAPABILITY_NOT_SUPPORTED', 'Gian Browser bridge is not configured');
+    }
+    if (method === 'browser.screenshot') await this.approveBrowserCapture(actor, params);
+    return this.deps.browser.call(method, params, {
+      callerId: actor.callerId,
+      sessionId: actor.sessionId,
+    });
+  }
+
+  private async approveBrowserCapture(
+    actor: Extract<GianToolActor, { kind: 'internal_session' }>,
+    params: GianToolMethodParams[GianToolMethod],
+  ): Promise<void> {
+    const turn = this.deps.db.prepare(
+      `SELECT id, turn_number FROM turns
+        WHERE session_id = ? AND status = 'running'
+        ORDER BY turn_number DESC LIMIT 1`,
+    ).get(actor.sessionId) as { id: string; turn_number: number } | undefined;
+    if (!turn) fail('SESSION_CLOSED', 'Browser screenshot requires an active Gian turn');
+    const tabId = (params as Record<string, unknown>)['tab_id'];
+    const decision = await this.deps.approvals.request({
+      sessionId: actor.sessionId,
+      turnId: turn.id,
+      turnNumber: turn.turn_number,
+      category: 'browser_capture',
+      risk: 'high',
+      description: `Allow this Session to capture Browser tab ${String(tabId ?? '')}?`,
+      subject: typeof tabId === 'string' ? tabId : undefined,
+      payload: { localOnly: true },
+    });
+    if (decision === 'decline' || decision === 'keep_planning') {
+      fail('PERMISSION_DENIED', 'Browser screenshot was not approved');
     }
   }
 
@@ -288,6 +388,25 @@ export class GianToolService {
     const agents: GianToolCatalogAgent[] = [];
     for (const agent of this.deps.agents.listAgents()) {
       const status = await this.deps.agents.agentStatus(agent.id, params.refresh === true);
+      if (!agent.proxy) {
+        agents.push({
+          id: agent.id,
+          name: agent.name,
+          proxy: null,
+          ready: false,
+          defaults: {
+            model: agent.defaults.model || null,
+            thinking: agent.defaults.thinking || null,
+            mode: agent.defaults.mode || null,
+          },
+          models: [],
+          modes: [],
+          config_kind: 'gian',
+          session_config: [],
+          turn_config: [],
+        });
+        continue;
+      }
       const cliPath = this.deps.agents.agentRuntimePath(agent.id).cliPath;
       let catalog = this.deps.sessions.getCapabilities(agent.proxy, cliPath);
       if (params.refresh && status.ready) catalog = await this.deps.sessions.warmCapabilities(agent.proxy, cliPath);
@@ -385,7 +504,9 @@ export class GianToolService {
       session,
       resolved_config: resolvedConfig(session),
       active_turn: this.deps.sessions.getActiveTurn(session.id),
-      queue: this.deps.sessions.getQueue(session.id),
+      queue: this.deps.sessions.getQueue(session.id).map(entry => this.projectQueueEntry(entry)),
+      queue_revision: this.deps.sessions.getQueueRevision(session.id),
+      session_revision: this.deps.sessions.getResourceRevision(session.id),
       interactions: this.pendingInteractions(session.id),
       latest_delivery: this.deliveryProjection(delivery),
     };
@@ -468,6 +589,7 @@ export class GianToolService {
   private async sessionUpdate(
     params: GianToolMethodParams['session.update'],
   ): Promise<GianToolMethodData['session.update']> {
+    this.assertSessionRevision(params.session_id, params.expected_session_revision);
     const before = this.deps.sessions.getSession(params.session_id);
     const active = this.deps.sessions.getActiveTurn(params.session_id);
     const config = params.config;
@@ -508,8 +630,10 @@ export class GianToolService {
     }
     const session = this.deps.sessions.getSession(params.session_id);
     const configChanged = config !== undefined && Object.keys(config).length > 0;
+    const sessionRevision = this.deps.sessions.bumpResourceRevision(params.session_id);
     return {
       session,
+      session_revision: sessionRevision,
       effective_from: configChanged ? 'next_turn' : 'immediate',
       active_turn_unchanged: active !== null && configChanged,
       resolved_config: resolvedConfig(session),
@@ -557,15 +681,36 @@ export class GianToolService {
       if (active) {
         if ((params.busy ?? 'queue') === 'fail') fail('SESSION_BUSY', 'Session already has an active Turn');
         if (params.busy === 'steer') {
-          await this.deps.sessions.steerMessage(params.session_id, params.text);
-          delivery = this.ledger.updateDelivery(delivery.id, { state: 'steered', turnId: active.id });
+          const steered = await this.deps.sessions.steerMessage(
+            params.session_id,
+            params.text,
+            params.items,
+            params.context_items,
+            params.composer_document,
+          );
+          delivery = this.ledger.updateDelivery(delivery.id, { state: 'steered', turnId: steered.turnId });
           return this.deliveryProjection(delivery)!;
         }
-        const entry = this.deps.sessions.enqueueMessage(params.session_id, params.text, undefined, request.id);
+        const entry = this.deps.sessions.enqueueMessage(
+          params.session_id,
+          params.text,
+          params.items,
+          request.id,
+          params.context_items,
+          params.composer_document,
+        );
         delivery = this.ledger.updateDelivery(delivery.id, { state: 'queued', queueEntryId: entry.id });
         return this.deliveryProjection(delivery)!;
       }
-      const receipt = await this.deps.sessions.sendMessage(params.session_id, params.text, undefined, undefined, request.id);
+      const receipt = await this.deps.sessions.sendMessage(
+        params.session_id,
+        params.text,
+        params.items,
+        undefined,
+        request.id,
+        params.context_items,
+        params.composer_document,
+      );
       if (!receipt) fail('NOT_FOUND', `session not found: ${params.session_id}`);
       delivery = this.ledger.updateDelivery(delivery.id, { state: 'started', turnId: receipt.turnId, queueEntryId: null });
       return { ...this.deliveryProjection(delivery)!, turn_number: receipt.turnNumber, config_snapshot: receipt.configSnapshot as never };
@@ -649,10 +794,68 @@ export class GianToolService {
   }
 
   private async sessionStop(params: GianToolMethodParams['session.stop']): Promise<GianToolMethodData['session.stop']> {
+    this.assertSessionRevision(params.session_id, params.expected_session_revision);
     this.deps.sessions.getSession(params.session_id);
     const alreadyIdle = this.deps.sessions.getActiveTurn(params.session_id) === null;
     if (!alreadyIdle) await this.deps.sessions.stopTurn(params.session_id);
+    this.deps.sessions.bumpResourceRevision(params.session_id);
     return { already_idle: alreadyIdle };
+  }
+
+  private queueUpdate(params: GianToolMethodParams['queue.update']): GianToolMethodData['queue.update'] {
+    const entry = this.deps.sessions.updateQueueMessage(
+      params.session_id,
+      params.queue_id,
+      params.text,
+      params.expected_queue_revision,
+    );
+    return {
+      entry: this.projectQueueEntry(entry),
+      ...this.queueReplacement(params.session_id),
+    };
+  }
+
+  private queueRemove(params: GianToolMethodParams['queue.remove']): GianToolMethodData['queue.remove'] {
+    const removed = this.deps.sessions.removeFromQueue(
+      params.session_id,
+      params.queue_id,
+      params.expected_queue_revision,
+    );
+    return {
+      removed: this.projectQueueEntry(removed),
+      ...this.queueReplacement(params.session_id),
+    };
+  }
+
+  private queueClear(params: GianToolMethodParams['queue.clear']): GianToolMethodData['queue.clear'] {
+    const removed = this.deps.sessions.clearQueue(params.session_id, params.expected_queue_revision);
+    return {
+      removed: removed.map(entry => this.projectQueueEntry(entry)),
+      ...this.queueReplacement(params.session_id),
+    };
+  }
+
+  private async queueSendNow(
+    params: GianToolMethodParams['queue.send_now'],
+  ): Promise<GianToolMethodData['queue.send_now']> {
+    const receipt = await this.deps.sessions.sendQueuedNow(
+      params.session_id,
+      params.expected_queue_revision,
+    );
+    return {
+      mode: receipt.mode,
+      affected: receipt.affected.map(item => ({
+        queue_id: item.queueId,
+        ...(item.toolRequestId ? {
+          delivery_id: this.ledger.deliveryByRequest(item.toolRequestId)?.id,
+        } : {}),
+        state: item.state,
+        turn_id: item.turnId,
+        turn_number: item.turnNumber,
+      })),
+      queue: receipt.queue.map(entry => this.projectQueueEntry(entry)),
+      queue_revision: receipt.queueRevision,
+    };
   }
 
   private interactionList(params: GianToolMethodParams['interaction.list']): GianToolMethodData['interaction.list'] {
@@ -664,6 +867,7 @@ export class GianToolService {
     params: GianToolMethodParams['interaction.respond'],
     request: ToolRequestRow,
   ): Promise<GianToolMethodData['interaction.respond']> {
+    this.assertInteractionRevision(params.session_id, params.interaction_id, params.expected_interaction_revision);
     this.deps.sessions.getSession(params.session_id);
     const persisted = this.deps.db.prepare(
       'SELECT 1 FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
@@ -716,7 +920,65 @@ export class GianToolService {
       params.native_option_id,
       'tool',
     );
+    this.bumpInteractionRevision(params.session_id, params.interaction_id);
     return { interaction_id: params.interaction_id, resolved: true };
+  }
+
+  private assertSessionRevision(sessionId: string, expected?: string): void {
+    if (expected === undefined) return;
+    const current = this.deps.sessions.getResourceRevision(sessionId);
+    if (expected !== current) {
+      fail('PRECONDITION_FAILED', 'session revision mismatch', {
+        session_revision: current,
+      });
+    }
+  }
+
+  private assertInteractionRevision(sessionId: string, interactionId: string, expected?: string): void {
+    if (expected === undefined) return;
+    const current = this.interactionRevision(sessionId, interactionId);
+    if (expected !== current) {
+      fail('PRECONDITION_FAILED', 'interaction revision mismatch', {
+        interaction_revision: current,
+      });
+    }
+  }
+
+  private interactionRevision(sessionId: string, interactionId: string): string {
+    const row = this.deps.db.prepare(
+      'SELECT resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(sessionId, interactionId) as { resource_revision: number } | undefined;
+    return String(row?.resource_revision ?? 0);
+  }
+
+  private bumpInteractionRevision(sessionId: string, interactionId: string): string {
+    this.deps.db.prepare(
+      `UPDATE proxy_interactions
+          SET resource_revision = resource_revision + 1
+        WHERE session_id = ? AND interaction_id = ?`,
+    ).run(sessionId, interactionId);
+    return this.interactionRevision(sessionId, interactionId);
+  }
+
+  private queueReplacement(sessionId: string): { queue: GianToolQueueEntry[]; queue_revision: string } {
+    return {
+      queue: this.deps.sessions.getQueue(sessionId).map(entry => this.projectQueueEntry(entry)),
+      queue_revision: this.deps.sessions.getQueueRevision(sessionId),
+    };
+  }
+
+  private projectQueueEntry(entry: QueueEntry): GianToolQueueEntry {
+    const delivery = entry.toolRequestId ? this.ledger.deliveryByRequest(entry.toolRequestId) : null;
+    return {
+      id: entry.id,
+      session_id: entry.sessionId,
+      text: entry.text,
+      ...(entry.items ? { items: entry.items } : {}),
+      ...(entry.contextItems ? { context_items: entry.contextItems } : {}),
+      ...(entry.composerDocument ? { composer_document: entry.composerDocument } : {}),
+      created_at: new Date(entry.createdAt).toISOString(),
+      ...(delivery ? { delivery_id: delivery.id } : {}),
+    };
   }
 
   private pendingInteractions(sessionId?: string): GianToolInteraction[] {
@@ -733,13 +995,13 @@ export class GianToolService {
     try { return this.deps.sessions.getSession(id); } catch { return null; }
   }
 
-  private async readyAgent(agentId: string): Promise<UserAgent> {
+  private async readyAgent(agentId: string): Promise<UserAgent & { proxy: NonNullable<UserAgent['proxy']> }> {
     if (!this.deps.agents) fail('AGENT_NOT_READY', 'Agent catalog is unavailable');
     let agent: UserAgent;
     try { agent = this.deps.agents.getAgent(agentId); } catch { fail('NOT_FOUND', `agent not found: ${agentId}`); }
     const status = await this.deps.agents.agentStatus(agentId);
-    if (!status.ready) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
-    return agent;
+    if (!status.ready || !agent.proxy) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
+    return agent as UserAgent & { proxy: NonNullable<UserAgent['proxy']> };
   }
 
   private agentSnapshot(agent: UserAgent): GianToolMethodData['session.create']['agent'] {
@@ -753,6 +1015,7 @@ export class GianToolService {
 
   private async agentOptions(agent: UserAgent): Promise<ConfigOption[]> {
     if (!this.deps.agents) fail('AGENT_NOT_READY', 'Agent catalog is unavailable');
+    if (!agent.proxy) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
     const path = this.deps.agents.agentRuntimePath(agent.id).cliPath;
     const cached = this.deps.sessions.getCapabilities(agent.proxy, path);
     return (cached ?? await this.deps.sessions.warmCapabilities(agent.proxy, path)).configOptions;
@@ -875,12 +1138,119 @@ export class GianToolService {
     const turn = delivery.turnId ? this.turnById(delivery.turnId) : null;
     return {
       delivery_id: delivery.id,
-      state: delivery.state === 'pending' ? 'queued' : delivery.state,
+      state: delivery.state === 'pending' ? 'queued' : delivery.state === 'unknown' ? 'unknown' : delivery.state,
       session_id: delivery.sessionId,
       ...(delivery.turnId ? { turn_id: delivery.turnId } : {}),
       ...(turn ? { turn_number: turn.turn_number } : {}),
       ...(delivery.queueEntryId ? { queue_id: delivery.queueEntryId } : {}),
       ...(turn?.config_json ? { config_snapshot: parseConfig(turn.config_json) as never } : {}),
     };
+  }
+
+  // ── conversation-bound schedules (ADR-0053) ────────────────────────────────
+
+  private requireScheduleService(): ScheduleService {
+    if (!this.deps.schedule) fail('INTERNAL_ERROR', 'Schedule capability is not available');
+    return this.deps.schedule;
+  }
+
+  private schedulePreview(
+    params: GianToolMethodParams['schedule.preview'],
+  ): GianToolMethodData['schedule.preview'] {
+    return this.requireScheduleService().preview(params);
+  }
+
+  /** Tool create: derives the control Session from the credential, then
+   *  blocks on the Host-enforced user confirmation (contract L). The
+   *  Schedule commits only on approval; retries converge via the Tool
+   *  ledger's pre-allocated domain id and the confirmation's tool request. */
+  private async scheduleCreate(
+    params: GianToolMethodParams['schedule.create'],
+    request: ToolRequestRow,
+    actor?: GianToolActor,
+  ): Promise<GianToolMethodData['schedule.create']> {
+    const scheduleService = this.requireScheduleService();
+    if (!actor || actor.kind !== 'internal_session') {
+      fail('PERMISSION_DENIED', 'schedule.create requires an internal Gian Session');
+    }
+    let confirmation = scheduleService.confirmationForToolRequest(request.id);
+    if (!confirmation) {
+      confirmation = scheduleService.createConfirmation({
+        name: params.name,
+        prompt: params.prompt,
+        trigger: params.trigger,
+        timezone: params.timezone,
+        ...(params.misfire_policy !== undefined ? { misfire_policy: params.misfire_policy } : {}),
+        controlSessionId: actor.sessionId,
+        createdByActorId: actor.callerId,
+        scheduleDomainId: request.domainId,
+        toolRequestId: request.id,
+      });
+    }
+    const wait = await scheduleService.waitForConfirmation({
+      confirmationId: confirmation.id,
+      timeoutMs: params.confirmation_timeout_ms ?? 300_000,
+    });
+    if (wait.outcome === 'approved') {
+      return { schedule: wait.schedule, confirmation_id: confirmation.id };
+    }
+    if (wait.outcome === 'rejected') {
+      throw new ScheduleError('SCHEDULE_CREATE_REJECTED', 'the user rejected this schedule');
+    }
+    fail('TIMEOUT', 'the user did not confirm the schedule in time');
+  }
+
+  private scheduleList(
+    params: GianToolMethodParams['schedule.list'],
+  ): GianToolMethodData['schedule.list'] {
+    // The access controller forces control_session_id onto the actor's own
+    // Session; internal actors never see other conversations' Schedules.
+    return this.requireScheduleService().listSchedules({
+      ...(params.status !== undefined ? { statuses: params.status } : {}),
+      controlSessionId: params.control_session_id,
+      limit: params.limit,
+      cursor: params.cursor ?? null,
+    });
+  }
+
+  private scheduleGet(params: GianToolMethodParams['schedule.get']): GianToolMethodData['schedule.get'] {
+    const scheduleService = this.requireScheduleService();
+    const schedule = scheduleService.getSchedule(params.schedule_id);
+    const runs = params.include_runs === true
+      ? scheduleService.listRuns(params.schedule_id, { limit: 10 }).runs
+      : undefined;
+    return { schedule, ...(runs ? { runs } : {}) };
+  }
+
+  private async scheduleUpdate(
+    params: GianToolMethodParams['schedule.update'],
+  ): Promise<GianToolMethodData['schedule.update']> {
+    const schedule = await this.requireScheduleService().updateSchedule(params);
+    return { schedule };
+  }
+
+  private async scheduleState(
+    params: GianToolMethodParams['schedule.pause'] | GianToolMethodParams['schedule.resume'] | GianToolMethodParams['schedule.archive'],
+    action: 'pause' | 'resume' | 'archive',
+  ): Promise<GianToolMethodData['schedule.pause']> {
+    const scheduleService = this.requireScheduleService();
+    const options = { ...(params.expected_revision !== undefined ? { expectedRevision: params.expected_revision } : {}) };
+    const schedule = action === 'pause'
+      ? scheduleService.pauseSchedule(params.schedule_id, options)
+      : action === 'resume'
+        ? await scheduleService.resumeSchedule(params.schedule_id, options)
+        : scheduleService.archiveSchedule(params.schedule_id, options);
+    return { schedule };
+  }
+
+  private scheduleRunNow(
+    params: GianToolMethodParams['schedule.run_now'],
+    request: ToolRequestRow,
+  ): GianToolMethodData['schedule.run_now'] {
+    const run = this.requireScheduleService().runNow({
+      schedule_id: params.schedule_id,
+      domainId: request.domainId,
+    });
+    return { run };
   }
 }

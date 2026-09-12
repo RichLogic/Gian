@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
-import type { Session, TerminalPreferences, Workspace } from '@gian/shared';
+import type {
+  GianBrowserApi,
+  GianBrowserProjectTarget,
+  GianBrowserTabSnapshot,
+  GianBrowserTabsSnapshot,
+  Session,
+  TerminalPreferences,
+  Workspace,
+} from '@gian/shared';
 import {
   loadAbsoluteFile,
   loadAllFiles,
@@ -27,6 +35,11 @@ import type { DiffItem } from '../types.js';
 import { longestRootMatch } from '../utils/paths.js';
 import { resolveFilePanelRoute } from '../presentation/file-panel.js';
 import { desktopBridge } from '../desktop-bridge.js';
+import {
+  DEFAULT_BROWSER_TAB_NAME,
+  findBlankBrowserTab,
+  PENDING_BROWSER_TAB_URL,
+} from '../presentation/browser-tabs.js';
 import { readWtViewOverride, resolveViewedTreeId, writeWtViewOverride } from '../presentation/wt-view.js';
 import type { ChatPanelRequest, ChatPanelTarget } from '../presentation/chat-panel.js';
 import type { AppAuthStatus } from './use-app-auth.js';
@@ -35,7 +48,6 @@ import {
   terminalLaunchLabel,
 } from '../terminal-launch-profile.js';
 
-let browserTabSequence = 0;
 let terminalTabSequence = 0;
 
 type SessionRailId = Extract<RailId, 'files' | 'diffs' | 'history'>;
@@ -108,12 +120,12 @@ function railStateKey(rail: RailId, sessionId: string | null): string | null {
     : `global:${rail}`;
 }
 
-function createBrowserTab(existingCount: number): SheetTab {
-  browserTabSequence += 1;
+function browserSheetTab(snapshot: GianBrowserTabSnapshot, existingCount: number): SheetTab {
   return {
-    id: `tab-browser-${Date.now()}-${browserTabSequence}`,
+    id: snapshot.id,
     group: 'browser',
-    name: existingCount === 0 ? 'Browser' : `Browser #${existingCount + 1}`,
+    name: snapshot.state.title.trim()
+      || (existingCount === 0 ? DEFAULT_BROWSER_TAB_NAME : `${DEFAULT_BROWSER_TAB_NAME} #${existingCount + 1}`),
     kind: 'browser',
     icoKind: 'browser',
     ico: '◎',
@@ -329,9 +341,9 @@ export function useWorkbench({
   }, [authStatus]);
 
   // Resolve a Sheet file tab's absolute path back to a (working tree, rel)
-  // pair, then route it to the host's open endpoint. Falls back to the
-  // `vscode://` handler for paths outside any known tree (mirrors
-  // openFileInSheet's own fallback).
+  // pair, then route it to the host's open endpoint. Paths outside every
+  // known tree use the attachments-only absolute Open channel — never
+  // `vscode://`, which Electron drops.
   // Dispatch a resolved open target for a known (wt, rel) — Phase 3b: the
   // files.openExternal pending operation (a launch failure toasts from the
   // definition). Built-in Browser navigation stays a local desktop-view
@@ -350,10 +362,30 @@ export function useWorkbench({
       return;
     }
     if (target.name === 'gian-browser') {
-      openProjectInBrowser(wt.id, rel);
+      openBrowserPreview({ workingTreeId: wt.id, path: rel });
       return;
     }
     dispatch('files.openExternal', { workingTreeId: wt.id, path: rel, target: { kind: 'builtin', builtin: target.name } }); // 'default' | 'finder' | 'terminal'
+  }
+
+  function dispatchAbsoluteOpen(abs: string, target: SheetOpenWith): void {
+    if (target.kind === 'editor') {
+      dispatch('files.openExternal', { absolutePath: abs, target: { kind: 'editor', editorId: target.id } });
+      return;
+    }
+    if (target.kind === 'app') {
+      dispatch('files.openExternal', { absolutePath: abs, target: { kind: 'app', app: target.app } });
+      return;
+    }
+    if (target.name === 'browser') {
+      window.open(`/api/files/raw?path=${encodeURIComponent(abs)}`, '_blank', 'noopener');
+      return;
+    }
+    if (target.name === 'gian-browser') {
+      openBrowserPreview({ absolutePath: abs });
+      return;
+    }
+    dispatch('files.openExternal', { absolutePath: abs, target: { kind: 'builtin', builtin: target.name } });
   }
 
   function handleOpenWith(tab: SheetTab, target: SheetOpenWith): void {
@@ -365,7 +397,7 @@ export function useWorkbench({
     const wt = (tab.workingTreeId ? workingTrees.find(w => w.id === tab.workingTreeId) : undefined)
       ?? longestRootMatch(workingTrees, abs);
     if (!wt) {
-      window.open(`vscode://file/${encodeURI(abs)}`, '_blank', 'noopener');
+      dispatchAbsoluteOpen(abs, target);
       return;
     }
     const rel = abs.slice(wt.path.replace(/\/+$/, '').length).replace(/^\/+/, '');
@@ -402,6 +434,77 @@ export function useWorkbench({
     return () => { cancelled = true; };
   }, [activeSessionId, workingTrees, wtView]);
   const fileRehype = fileIndexAbs?.rehype ?? null;
+
+  // Last URL the native Browser reported per tab id ('' = blank). Feeds the
+  // blank-tab reuse in openBrowserPreview without async getState round-trips.
+  const browserTabUrlsRef = useRef(new Map<string, string>());
+  const browserTabsRevisionRef = useRef(-1);
+  useEffect(() => {
+    const browser = desktopBridge()?.browser;
+    if (!browser) return;
+    let active = true;
+    const synchronize = (registry: GianBrowserTabsSnapshot) => {
+      if (!active || registry.revision <= browserTabsRevisionRef.current) return;
+      browserTabsRevisionRef.current = registry.revision;
+      const snapshots = registry.tabs;
+      const ids = new Set(snapshots.map(snapshot => snapshot.id));
+      browserTabUrlsRef.current = new Map(
+        snapshots.map(snapshot => [snapshot.id, snapshot.state.url]),
+      );
+      setWbTabs(previous => {
+        const existing = new Map(
+          previous.filter(tab => tab.kind === 'browser').map(tab => [tab.id, tab]),
+        );
+        const projected = snapshots.map((snapshot, index) => {
+          const current = existing.get(snapshot.id);
+          const next = browserSheetTab(snapshot, index);
+          if (!current) return next;
+          const name = snapshot.state.title.trim() || current.name;
+          return name === current.name ? current : { ...current, name };
+        });
+        const next = [...previous.filter(tab => tab.kind !== 'browser'), ...projected];
+        return next.length === previous.length && next.every((tab, index) => tab === previous[index])
+          ? previous
+          : next;
+      });
+      setActiveTabsByOwner(previous => {
+        const global = { ...(previous[GLOBAL_TAB_OWNER] ?? {}) };
+        if (!global.browser || !ids.has(global.browser)) global.browser = snapshots[0]?.id ?? null;
+        return { ...previous, [GLOBAL_TAB_OWNER]: global };
+      });
+      if (snapshots.length === 0) {
+        setForeground(current => current.kind === 'global' && current.rail === 'browser'
+          ? { kind: 'none' }
+          : current);
+      }
+    };
+    const unsubscribe = browser.subscribeTabs(synchronize);
+    const unsubscribePresentation = browser.subscribePresentationRequested(tabId => {
+      setActiveTabsByOwner(previous => ({
+        ...previous,
+        [GLOBAL_TAB_OWNER]: {
+          ...(previous[GLOBAL_TAB_OWNER] ?? {}),
+          browser: tabId,
+        },
+      }));
+      setForeground({ kind: 'global', rail: 'browser' });
+      setViewState(current => current === 'main' ? 'both' : current);
+    });
+    void browser.listTabs().then(synchronize, () => {});
+    return () => {
+      active = false;
+      unsubscribe();
+      unsubscribePresentation();
+    };
+  }, []);
+
+  useEffect(() => {
+    const browser = desktopBridge()?.browser;
+    if (!browser) return;
+    return browser.subscribe((tabId, state) => {
+      browserTabUrlsRef.current.set(tabId, state.url);
+    });
+  }, []);
 
   // ─── Sheet (Workbench) actions ──────────────────────────────────────────
   // V2's openFileInSheet from design/gian-design-v2/js/app.jsx: single-click
@@ -445,7 +548,7 @@ export function useWorkbench({
     setViewState(v => v === 'main' ? 'both' : v);
   }
 
-  /** Diffs-rail entry (GitBadge, transcript "show changes" entries): opens
+  /** Diffs-rail entry (transcript "show changes" entries): opens
    *  the rail and puts the singleton Changes multi-diff tab in front,
    *  creating it on first use. The tab is a shell — its body reads the
    *  use-changes-diff store for the viewed working tree. */
@@ -519,6 +622,7 @@ export function useWorkbench({
           dispatch('term.close', { termId: id });
         }
         if (tab?.kind === 'browser') {
+          browserTabUrlsRef.current.delete(id);
           void desktopBridge()?.browser?.closeTab(id);
         }
         if (tab?.group === 'files' && activeTabByGroup.files === id) {
@@ -611,9 +715,7 @@ export function useWorkbench({
       return;
     }
     if (rail === 'browser' && !wbTabs.some(t => t.group === 'browser')) {
-      const tab = createBrowserTab(0);
-      setWbTabs(prev => [...prev, tab]);
-      revealSheetTab('browser', tab.id);
+      createAndRevealBrowserTab();
       return;
     }
     if (rail === 'diffs') {
@@ -622,12 +724,6 @@ export function useWorkbench({
       // a text detail the user is reading; showChangesDiff() is the stealing
       // entry and is called explicitly by the show-changes flows.
       ensureChangesTab();
-      return;
-    }
-    if (rail === 'history') {
-      // History keeps panel 2 mounted even with zero commit tabs (the empty
-      // state is designed, not absent) — make sure the workbench is visible.
-      setViewState(v => v === 'main' ? 'both' : v);
       return;
     }
     const group = GROUP_OF_RAIL[rail];
@@ -1167,10 +1263,26 @@ export function useWorkbench({
   /** Add an independent native Browser tab with its own WebContentsView and
    * navigation history, parallel to Terminal's additive tab behavior. */
   function addBrowserTab(): void {
-    const tab = createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
     setActiveRail('browser');
-    setWbTabs(prev => [...prev, tab]);
-    revealSheetTab('browser', tab.id);
+    createAndRevealBrowserTab();
+  }
+
+  function createAndRevealBrowserTab(
+    onCreated?: (browser: GianBrowserApi, tabId: string) => void,
+  ): void {
+    const browser = desktopBridge()?.browser;
+    if (!browser) return;
+    void browser.createTab({ sourceSessionId: activeSessionId, activate: true }).then(snapshot => {
+      if (!snapshot) return;
+      setWbTabs(previous => previous.some(tab => tab.id === snapshot.id)
+        ? previous
+        : [...previous, browserSheetTab(
+          snapshot,
+          previous.filter(tab => tab.kind === 'browser').length,
+        )]);
+      revealSheetTab('browser', snapshot.id);
+      onCreated?.(browser, snapshot.id);
+    });
   }
 
   function terminalLaunchProfile(): TerminalLaunchProfile {
@@ -1207,28 +1319,37 @@ export function useWorkbench({
     revealSheetTab('workspaces', tab.id);
   }
 
-  /** Open the "new workspace" form as a Workbench tab (singleton in the
-   *  workspaces group) instead of jumping to the now-hidden `spaces` mode. */
-  function openNewWorkspaceInSheet(): void {
-    setActiveRail('workspaces');
-    const tab: SheetTab = { id: 'tab-new-workspace', group: 'workspaces', name: 'New workspace', kind: 'new-workspace', icoKind: 'grid', ico: '+' };
-    setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
-    revealSheetTab('workspaces', tab.id);
+  /** Open one project HTML file in a desktop Browser tab. A blank,
+   *  never-navigated Browser tab is reused in place; a new tab is only minted
+   *  when every existing Browser tab already shows content, so a link jump
+   *  right after opening the Browser rail doesn't strand an empty tab. */
+  function openProjectInBrowser(workingTreeId: string, path: string): void {
+    openBrowserPreview({ workingTreeId, path });
   }
 
-  /** Open one project HTML file in a new desktop Browser tab. Reusing the
-   *  active tab would replace whatever the user was already previewing. */
-  function openProjectInBrowser(workingTreeId: string, path: string): void {
+  function openBrowserPreview(target: GianBrowserProjectTarget): void {
     const browser = desktopBridge()?.browser;
     if (!browser) {
-      window.open(`/api/working_trees/${encodeURIComponent(workingTreeId)}/raw?path=${encodeURIComponent(path)}`, '_blank', 'noopener');
+      const url = 'absolutePath' in target
+        ? `/api/files/raw?path=${encodeURIComponent(target.absolutePath)}`
+        : `/api/working_trees/${encodeURIComponent(target.workingTreeId)}/raw?path=${encodeURIComponent(target.path)}`;
+      window.open(url, '_blank', 'noopener');
       return;
     }
-    const tab = createBrowserTab(wbTabs.filter(item => item.kind === 'browser').length);
-    setWbTabs(prev => [...prev, tab]);
-    revealSheetTab('browser', tab.id);
+    const reusableId = findBlankBrowserTab(wbTabs, browserTabUrlsRef.current);
+    if (reusableId) {
+      // Claim the tab synchronously so a second open in the same tick cannot
+      // land on it before the navigation state event arrives.
+      browserTabUrlsRef.current.set(reusableId, PENDING_BROWSER_TAB_URL);
+      revealSheetTab('browser', reusableId);
+      setActiveRail('browser');
+      void browser.openProject(reusableId, target);
+      return;
+    }
     setActiveRail('browser');
-    void browser.openProject(tab.id, { workingTreeId, path });
+    createAndRevealBrowserTab((createdBrowser, tabId) => {
+      void createdBrowser.openProject(tabId, target);
+    });
   }
 
   return {
@@ -1269,7 +1390,6 @@ export function useWorkbench({
     addTerminalTab,
     addBrowserTab,
     openWorkspaceInSheet,
-    openNewWorkspaceInSheet,
     openProjectInBrowser,
   };
 }

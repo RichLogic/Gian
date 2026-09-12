@@ -93,6 +93,7 @@ test('Host-listened MCP authenticates, scopes tools, and dispatches canonical ca
     const client = new Client({ name: 'gian-http-test', version: '1.0.0' });
     await client.connect(mcpTransport(ctx, issued.token));
     try {
+      assert.equal(client.getInstructions(), undefined, 'read-only controller must not receive schedule-create instructions');
       const listed = await client.listTools();
       assert.deepEqual(listed.tools.map(tool => tool.name), [
         'task.list',
@@ -330,6 +331,59 @@ test('Host-listened MCP bounds concurrent waits', async () => {
       await second.close();
     }
   } finally {
+    await ctx.cleanup();
+  }
+});
+
+
+test('MCP schedule guidance and half-hour proposal reach Host confirmation before persistence', async () => {
+  const ctx = await makeTestApp();
+  let client: Client | undefined;
+  try {
+    seedSessions(ctx);
+    const issued = ctx.app.toolCredentials.issueInternalSession({
+      sessionId: 'session-1', grants: ['schedule.preview', 'schedule.create', 'schedule.list'], ttlMs: 60_000,
+    });
+    client = new Client({ name: 'schedule-flow-test', version: '1.0.0' });
+    await client.connect(mcpTransport(ctx, issued.token));
+    const instructions = client.getInstructions();
+    assert.ok(instructions, 'schedule-capable clients receive execution guidance during initialize');
+    assert.ok(instructions.includes('schedule.create'));
+    assert.ok(instructions.includes(Intl.DateTimeFormat().resolvedOptions().timeZone));
+    const listed = await client.listTools();
+    assert.ok(listed.tools.some(tool => tool.name === 'schedule.create'));
+    const trigger = { kind: 'interval', every_ms: 30 * 60_000, anchor_at: new Date().toISOString() };
+    const preview = await client.callTool({ name: 'schedule.preview', arguments: { trigger, timezone: 'Asia/Shanghai' } });
+    assert.equal(preview.isError, undefined);
+    const proposal = client.callTool({ name: 'schedule.create', arguments: {
+      idempotency_key: 'beijing-weather-every-half-hour',
+      name: '北京天气', prompt: '检查北京当前天气并回复在本对话。', trigger, timezone: 'Asia/Shanghai',
+      confirmation_timeout_ms: 5_000,
+    } });
+    // Poll only the public confirmation surface; no implicit approval by the
+    // MCP caller and no real scheduled execution or Provider runtime.
+    let confirmationId: string | undefined;
+    for (let attempt = 0; attempt < 100 && !confirmationId; attempt += 1) {
+      const response = await ctx.fetch('/api/schedule-confirmations?status=pending');
+      const data = await response.json() as { confirmations: Array<{ id: string }> };
+      confirmationId = data.confirmations[0]?.id;
+      if (!confirmationId) await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.ok(confirmationId, 'the request must produce a user-visible confirmation');
+    const before = await (await ctx.fetch('/api/schedules')).json() as { schedules: unknown[] };
+    assert.equal(before.schedules.length, 0, 'preview/proposal must not create a schedule silently');
+    const approved = await ctx.fetch(`/api/schedule-confirmations/${confirmationId}/resolve`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }),
+    });
+    assert.equal(approved.status, 200);
+    const created = await proposal;
+    assert.equal(created.isError, undefined, JSON.stringify(created.structuredContent));
+    const after = await (await ctx.fetch('/api/schedules')).json() as { schedules: Array<{ control_session_id: string; trigger: unknown }> };
+    assert.equal(after.schedules.length, 1);
+    assert.equal(after.schedules[0]?.control_session_id, 'session-1');
+    assert.deepEqual(after.schedules[0]?.trigger, trigger);
+  } finally {
+    await client?.close();
     await ctx.cleanup();
   }
 });

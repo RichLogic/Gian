@@ -22,6 +22,16 @@ const FULL_SETTINGS = {
         label: 'GLM-5.3',
         reasoning: { enabled: false, levels: [], defaultLevel: '' },
       },
+      {
+        ref: { providerId: 'zai', modelId: 'glm-5.1' },
+        label: 'GLM-5.1',
+        providerLabel: 'Z.AI Coding Plan',
+        reasoning: {
+          enabled: true,
+          levels: [{ value: 'enabled' }, { value: 'disabled' }],
+          defaultLevel: 'enabled',
+        },
+      },
     ],
   },
   thoughtLevel: { available: [{ value: 'low' }, { value: 'max' }], current: 'max', defaultLevel: 'max', enabled: true },
@@ -54,6 +64,9 @@ test('catalog.list resolves via workspace/readState with zero inner session/crea
     assert.equal(createCalls.length, 0, 'catalog.list must not create native sessions');
 
     const options = result.configOptions as Array<Record<string, unknown>>;
+    const provider = options.find((option) => option.id === 'provider');
+    assert.ok(provider, 'provider option projected independently');
+    assert.equal(provider.binding, 'turn');
     const model = options.find((option) => option.id === 'model');
     assert.ok(model, 'model option projected');
     for (const choice of model.choices as Array<{ value: string; displayName: string }>) {
@@ -174,7 +187,18 @@ test('resolve fills defaults only for missing keys and keeps explicit values', a
     assert.equal(resolved.kind, 'result');
     const defaults = ((resolved.payload as { result: Record<string, unknown> }).result.resolvedDefaults as { turnConfig: Record<string, string> }).turnConfig;
     assert.equal(defaults.model, explicitModel, 'explicit values are preserved verbatim');
+    assert.equal(defaults.provider, 'bigmodel', 'the model provider is explicit in resolved defaults');
     assert.equal(defaults.approval_mode, 'build', 'missing keys get defaults');
+
+    const invalidThinking = await harness.request('catalog.resolve', {
+      catalogRevision: revision,
+      sessionConfig: {},
+      turnConfig: { model: explicitModel, thinking: 'not-advertised' },
+    });
+    assert.equal(
+      ((invalidThinking.payload as { error: { data: { domainCode: string } } }).error.data?.domainCode),
+      'CONFIG_VALUE_INVALID',
+    );
 
     const unknownOption = await harness.request('catalog.resolve', {
       catalogRevision: revision,
@@ -201,6 +225,52 @@ test('settings with per-model reasoning hide thinking for models without it', as
     const thinking = options.find((option) => option.id === 'thinking');
     assert.ok(thinking, 'thinking option present for reasoning-capable default model');
     assert.equal((catalog.specialCatalogs as Record<string, string>).thinking, 'thinking');
+  } finally {
+    await harness.close();
+  }
+});
+
+test('provider selection resolves only that Provider models and its Thinking vocabulary', async () => {
+  const harness = startHarness({ scenario: { availableModels: FULL_SETTINGS.model.available } });
+  try {
+    await initialize(harness);
+    const listed = await harness.request('catalog.list', {});
+    const catalog = (listed.payload as { result: Record<string, unknown> }).result;
+    const options = catalog.configOptions as Array<Record<string, unknown>>;
+    const provider = options.find(option => option.id === 'provider');
+    assert.deepEqual(
+      (provider?.choices as Array<{ value: string }>).map(choice => choice.value),
+      ['bigmodel', 'zai'],
+    );
+    const staleModel = (options.find(option => option.id === 'model')
+      ?.choices as Array<{ value: string }>)[0]!.value;
+
+    const resolved = await harness.request('catalog.resolve', {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig: {},
+      turnConfig: {
+        provider: 'zai',
+        model: staleModel,
+        thinking: 'max',
+      },
+    });
+    assert.equal(resolved.kind, 'result');
+    const result = (resolved.payload as { result: Record<string, unknown> }).result;
+    const resolvedOptions = result.configOptions as Array<Record<string, unknown>>;
+    const models = resolvedOptions.find(option => option.id === 'model')
+      ?.choices as Array<{ value: string; displayName: string }>;
+    assert.deepEqual(models.map(model => model.displayName), ['GLM-5.1']);
+    const thinking = resolvedOptions.find(option => option.id === 'thinking');
+    assert.deepEqual(
+      (thinking?.choices as Array<{ value: string }>).map(choice => choice.value),
+      ['enabled', 'disabled'],
+    );
+    const defaults = (result.resolvedDefaults as {
+      turnConfig: Record<string, string>;
+    }).turnConfig;
+    assert.equal(defaults.provider, 'zai');
+    assert.equal(defaults.model, models[0]!.value);
+    assert.equal(defaults.thinking, 'enabled');
   } finally {
     await harness.close();
   }

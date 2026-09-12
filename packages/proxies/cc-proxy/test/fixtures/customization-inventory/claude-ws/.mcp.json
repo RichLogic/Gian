@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "project-db": {
+      "type": "stdio",
+      "command": "/usr/local/bin/db-tool",
+      "args": ["--password", "ws-mcp-pass-canary"],
+      "env": { "DB_PASSWORD": "ws-mcp-dbpw-canary" }
+    }
+  }
+}

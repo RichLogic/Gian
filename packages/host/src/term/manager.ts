@@ -18,6 +18,7 @@ import { basename, isAbsolute } from 'node:path';
 
 import type { IPty } from 'node-pty';
 import type { TerminalOptions } from '@gian/shared';
+import type { AgentProcessGroupReservation } from '../agents/update-lock.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 
 let nodePtyPromise: Promise<typeof import('node-pty')> | null = null;
@@ -42,6 +43,8 @@ interface WorkbenchTerminalRec {
   exited: boolean;
   exitCode: number | null;
   exitSignal: string | null;
+  targetCleanup: (() => Promise<void>) | null;
+  targetCleanupPromise: Promise<void> | null;
 }
 
 class RingBuffer {
@@ -90,7 +93,21 @@ export interface SpawnOptions {
   /** Optional override of the shell binary. Defaults to $SHELL → /bin/zsh
    *  → /bin/bash → /bin/sh. */
   shell?: string;
+  target?: { kind: 'agent_cli'; agentId: string };
 }
+
+export interface ResolvedTerminalTarget {
+  executable: string;
+  args: string[];
+  cwd: string;
+  env: Readonly<Record<string, string>>;
+  reservation: AgentProcessGroupReservation;
+  release: () => Promise<void>;
+}
+
+export type TerminalTargetResolver = (
+  target: NonNullable<SpawnOptions['target']>,
+) => Promise<ResolvedTerminalTarget>;
 
 /**
  * Indirection over `node-pty.spawn` so TERM-001 tests can inject a fake
@@ -116,6 +133,7 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
   constructor(
     private readonly broadcaster: WsBroadcaster,
     ptyFactory?: () => Promise<PtyFactory>,
+    private readonly targetResolver?: TerminalTargetResolver,
   ) {
     super();
     this.ptyFactory = ptyFactory ?? defaultPtyFactory;
@@ -142,19 +160,47 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
   async spawn(opts: SpawnOptions): Promise<{ replay: string[]; alive: boolean }> {
     await this.kill(opts.termId);
 
-    const cwd = resolveCwd(opts.cwd);
-    const shell = resolveShell(opts.shell);
+    if (opts.target && (opts.cwd !== undefined || opts.shell !== undefined)) {
+      throw new Error('A terminal target cannot accept a client cwd or shell override.');
+    }
+    const target = opts.target
+      ? await this.resolveTarget(opts.target)
+      : null;
+    const cwd = target?.cwd ?? resolveCwd(opts.cwd);
+    const shell = target?.executable ?? resolveShell(opts.shell);
+    const args = target?.args ?? [];
 
     const pty = await this.ptyFactory();
-    const proc = pty.spawn(shell, [], {
+    let proc: IPty;
+    try {
+      proc = pty.spawn(shell, args, {
       name: 'xterm-256color',
       cols: Math.max(1, Math.floor(opts.cols)),
       rows: Math.max(1, Math.floor(opts.rows)),
       cwd,
       // Pass through the user's env, but force TERM to xterm-256color so
       // colored output works no matter what TERM was set to in the parent.
-      env: { ...process.env, TERM: 'xterm-256color' },
-    });
+        env: { ...process.env, ...target?.env, TERM: 'xterm-256color' },
+      });
+    } catch (error) {
+      await target?.reservation.cancelBeforeSpawn();
+      await target?.release();
+      throw error;
+    }
+
+    if (target) {
+      try {
+        const registered = await target.reservation.register(proc.pid);
+        if (registered === 'already-empty') {
+          await target.reservation.releaseUnregistered(proc.pid);
+          await target.release();
+          throw new Error('Agent CLI terminal exited before its process identity was registered.');
+        }
+      } catch (error) {
+        try { proc.kill('SIGTERM'); } catch { /* already gone */ }
+        throw error;
+      }
+    }
 
     const ring = new RingBuffer(DEFAULT_RING_BUFFER_BYTES);
     const record: WorkbenchTerminalRec = {
@@ -168,6 +214,13 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
       exited: false,
       exitCode: null,
       exitSignal: null,
+      targetCleanup: target
+        ? async () => {
+          await target.reservation.release();
+          await target.release();
+        }
+        : null,
+      targetCleanupPromise: null,
     };
     this.terms.set(opts.termId, record);
 
@@ -187,6 +240,10 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
           : (signal ?? null);
       record.exitCode = exitCode ?? null;
       record.exitSignal = signalName;
+      void this.cleanupTarget(record).catch(() => {
+        // Fail closed: the claim file remains and startup recovery will not
+        // discard it without process-group absence evidence.
+      });
       this.emit('exited', opts.termId, record.exitCode, record.exitSignal);
     });
 
@@ -249,6 +306,25 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
 
   size(): number {
     return this.terms.size;
+  }
+
+  private async resolveTarget(target: NonNullable<SpawnOptions['target']>): Promise<ResolvedTerminalTarget> {
+    if (!this.targetResolver) throw new Error('Terminal target resolver is unavailable.');
+    const resolved = await this.targetResolver(target);
+    if (!isAbsolute(resolved.executable) || !existsSync(resolved.cwd)) {
+      await resolved.reservation.cancelBeforeSpawn();
+      await resolved.release();
+      throw new Error('Terminal target resolved an invalid executable or cwd.');
+    }
+    return resolved;
+  }
+
+  private cleanupTarget(record: WorkbenchTerminalRec): Promise<void> {
+    if (!record.targetCleanup) return Promise.resolve();
+    if (!record.targetCleanupPromise) {
+      record.targetCleanupPromise = record.targetCleanup();
+    }
+    return record.targetCleanupPromise;
   }
 }
 

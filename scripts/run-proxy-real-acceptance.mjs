@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   access,
@@ -17,9 +17,11 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import {
   HostProtocolValidator,
+  SUPPORTED_PROTOCOL_VERSIONS,
   parseProxyNotification,
 } from '../packages/proxy-protocol/dist/src/index.js';
 import {
@@ -30,35 +32,27 @@ import {
   loadProxyRealAcceptanceCatalog,
   validateProxyRealAcceptanceCatalog,
 } from './proxy-real-acceptance-catalog.mjs';
+import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
+import {
+  finalizeProviderScenarioResults,
+  realScenarioRequirement,
+} from './proxy-certification-policy.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const execFileAsync = promisify(execFile);
 const allowRealTurnEnvironment = 'GIAN_ALLOW_REAL_AGENT_TURN';
 const defaultTimeoutMs = 180_000;
-const providerIds = ['claude', 'codex', 'kimi', 'grok', 'dsh', 'zcode'];
-const proxyPaths = {
-  claude: join(rootDir, 'packages/proxies/cc-proxy/dist/src/cli/spawn.js'),
-  codex: join(rootDir, 'packages/proxies/codex-proxy/dist/src/cli/spawn.js'),
-  kimi: join(rootDir, 'packages/proxies/kimi-proxy/dist/src/cli/spawn.js'),
-  grok: join(rootDir, 'packages/proxies/grok-proxy/dist/src/cli/spawn.js'),
-  dsh: join(rootDir, 'packages/proxies/dsh-proxy/dist/src/cli/spawn.js'),
-  zcode: join(rootDir, 'packages/proxies/zcode-proxy/dist/src/cli/spawn.js'),
-};
-const binaryArguments = {
-  claude: [],
-  codex: binary => ['--codex-bin', binary],
-  kimi: binary => ['--kimi-bin', binary],
-  grok: binary => ['--grok-bin', binary],
-  dsh: [],
-  zcode: [],
-};
-const binaryEnvironment = {
-  claude: 'CLAUDE_BIN',
-  codex: 'CODEX_BIN',
-  kimi: 'KIMI_BIN',
-  grok: 'GROK_BIN',
-  dsh: 'DSH_BIN',
-  zcode: 'ZCODE_BIN',
-};
+const protocolOffers = [...SUPPORTED_PROTOCOL_VERSIONS];
+const providerIds = proxyDefinitions.map(definition => definition.id);
+const definitionByProvider = new Map(proxyDefinitions.map(definition => [definition.id, definition]));
+const proxyPaths = Object.fromEntries(proxyDefinitions.map(definition => [
+  definition.id,
+  join(rootDir, 'packages', 'proxies', definition.directory, 'dist/src/cli/spawn.js'),
+]));
+const binaryEnvironment = Object.fromEntries(proxyDefinitions.map(definition => [
+  definition.id,
+  definition.environment.runtimeBinary,
+]));
 
 function delay(ms) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, ms));
@@ -74,6 +68,8 @@ function parseArgs(argv) {
     scenarios: [],
     configOverrides: {},
     catalogOnly: false,
+    artifactDir: null,
+    allowUnverifiedCli: false,
     output: `output/proxy-real-acceptance/run-${timestampSlug()}`,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -81,6 +77,11 @@ function parseArgs(argv) {
     if (arg === '--provider') options.providers.push(argv[++index]);
     else if (arg === '--scenario') options.scenarios.push(argv[++index]);
     else if (arg === '--catalog-only') options.catalogOnly = true;
+    else if (arg === '--artifact-dir') {
+      options.artifactDir = argv[++index];
+      if (!options.artifactDir) throw new Error('--artifact-dir requires a value.');
+    }
+    else if (arg === '--allow-unverified-cli') options.allowUnverifiedCli = true;
     else if (arg === '--output') options.output = argv[++index];
     else if (arg === '--config') {
       const assignment = argv[++index] ?? '';
@@ -96,8 +97,8 @@ function parseArgs(argv) {
     }
     else throw new Error(`Unknown argument ${arg}.`);
   }
-  if (options.providers.length === 0) options.providers = [...providerIds];
-  if (options.providers.includes('all')) options.providers = [...providerIds];
+  if (options.providers.length === 0) options.providers = [...shippingProxyIds];
+  if (options.providers.includes('all')) options.providers = [...shippingProxyIds];
   for (const provider of options.providers) {
     if (!providerIds.includes(provider)) throw new Error(`Unsupported provider ${provider}.`);
   }
@@ -106,7 +107,7 @@ function parseArgs(argv) {
 
 function redact(text) {
   return String(text)
-    .replace(/(authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|set[_-]?cookie|cookie)(["'\s:=]+)([^\s,"'}]+)/giu, '$1$2[redacted]')
+    .replace(/(authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password)(["'\s:=]+)([^\s,"'}]+)/giu, '$1$2[redacted]')
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/giu, 'Bearer [redacted]');
 }
 
@@ -131,11 +132,40 @@ function stopProcessTree(child, signal) {
   }
 }
 
+function processGroupAlive(pgid) {
+  if (process.platform === 'win32' || !pgid) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessGroupExit(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processGroupAlive(pgid)) return true;
+    await delay(25);
+  }
+  return !processGroupAlive(pgid);
+}
+
+function killProcessGroup(pgid, signal) {
+  if (process.platform === 'win32' || !pgid) return;
+  try {
+    process.kill(-pgid, signal);
+  } catch {
+    // The group may exit between the liveness check and signal.
+  }
+}
+
 class ValidatedProxyClient extends EventEmitter {
-  constructor({ provider, providerConfig, binaryPath, dataDir, outputDir, timeoutMs, environment = {} }) {
+  constructor({ provider, providerConfig, proxyPath, binaryPath, dataDir, outputDir, timeoutMs, environment = {} }) {
     super();
     this.provider = provider;
     this.providerConfig = providerConfig;
+    this.proxyPath = proxyPath;
     this.binaryPath = binaryPath;
     this.dataDir = dataDir;
     this.outputDir = outputDir;
@@ -154,15 +184,16 @@ class ValidatedProxyClient extends EventEmitter {
     this.stderr = '';
     this.protocolFailure = null;
     this.child = null;
+    this.cleanupEvidence = null;
   }
 
   async start() {
     if (this.child) return;
-    const args = [proxyPaths[this.provider], ...(
-      typeof binaryArguments[this.provider] === 'function'
-        ? binaryArguments[this.provider](this.binaryPath)
-        : binaryArguments[this.provider]
-    )];
+    const binaryArgument = definitionByProvider.get(this.provider)?.qualification.binaryArgument;
+    const args = [
+      this.proxyPath,
+      ...(binaryArgument ? [binaryArgument, this.binaryPath] : []),
+    ];
     const child = spawn(process.execPath, args, {
       cwd: rootDir,
       detached: process.platform !== 'win32',
@@ -175,10 +206,10 @@ class ValidatedProxyClient extends EventEmitter {
         ...this.environment,
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
-          ? { GROK_DISABLE_AUTOUPDATER: '1', GIAN_PROTOCOL_VERSIONS: '2.1' }
-          : {}),
-        ...(this.provider === 'zcode'
-          ? { GIAN_PLUGIN_ID: 'com.zhipu.zcode' }
+          ? {
+              GROK_DISABLE_AUTOUPDATER: '1',
+              GIAN_PROTOCOL_VERSIONS: protocolOffers.join(','),
+            }
           : {}),
       },
     });
@@ -258,6 +289,31 @@ class ValidatedProxyClient extends EventEmitter {
     });
   }
 
+  async requestUnchecked(method, params, validationParams, timeoutMs = this.timeoutMs) {
+    await this.start();
+    if (this.protocolFailure) throw this.protocolFailure;
+    const id = `accept-${this.nextId++}`;
+    const validationMessage = { jsonrpc: '2.0', id, method, params: validationParams };
+    this.validator.registerRequest(validationMessage);
+    const message = { jsonrpc: '2.0', id, method, params };
+    this.requests.push({ at: new Date().toISOString(), message, unchecked: true });
+    return new Promise((resolveRequest, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Timed out waiting for unchecked ${method} after ${timeoutMs}ms.`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolveRequest, reject, timer, method });
+      this.child.stdin.write(`${JSON.stringify(message)}\n`, error => {
+        if (!error) return;
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        clearTimeout(pending.timer);
+        reject(error);
+      });
+    });
+  }
+
   notificationIndex() {
     return this.notifications.length;
   }
@@ -279,7 +335,7 @@ class ValidatedProxyClient extends EventEmitter {
 
   async stop() {
     const child = this.child;
-    if (!child) return;
+    if (!child) return { pid: null, lingeringAfterGraceful: false, cleanupSucceeded: true };
     if (child.exitCode === null && child.signalCode === null) {
       try {
         await this.request('shutdown', {}, 5_000);
@@ -290,6 +346,22 @@ class ValidatedProxyClient extends EventEmitter {
           stopProcessTree(child, 'SIGKILL');
         });
       }
+    }
+    if (!this.cleanupEvidence) {
+      const pid = child.pid ?? null;
+      const lingeringAfterGraceful = !await waitForProcessGroupExit(pid, 500);
+      if (lingeringAfterGraceful) {
+        killProcessGroup(pid, 'SIGTERM');
+        if (!await waitForProcessGroupExit(pid, 2_000)) {
+          killProcessGroup(pid, 'SIGKILL');
+          await waitForProcessGroupExit(pid, 2_000);
+        }
+      }
+      this.cleanupEvidence = {
+        pid,
+        lingeringAfterGraceful,
+        cleanupSucceeded: !processGroupAlive(pid),
+      };
     }
     await mkdir(this.outputDir, { recursive: true });
     await Promise.all([
@@ -305,17 +377,21 @@ class ValidatedProxyClient extends EventEmitter {
       ),
       writeFile(join(this.outputDir, 'proxy-stderr.log'), redact(this.stderr), 'utf8'),
     ]);
+    return this.cleanupEvidence;
   }
 }
 
 async function resolveBinary(provider, providerConfig) {
+  const setup = definitionByProvider.get(provider)?.qualification.setup;
   const configured = configuredProviderBinary(provider, providerConfig);
   if (configured && isAbsolute(configured)) return resolveProviderBinary(provider, configured);
-  if (provider === 'dsh' && configured) return resolveProviderBinary(provider, resolve(rootDir, configured));
-  if (provider === 'kimi') {
+  if (setup === 'dsh-profile' && configured) {
+    return resolveProviderBinary(provider, resolve(rootDir, configured));
+  }
+  if (setup === 'kimi-store') {
     return resolveProviderBinary(provider, process.env.KIMI_BIN ?? join(homedir(), '.kimi-code/bin/kimi'));
   }
-  return resolveProviderBinary(provider);
+  return resolveProviderBinary(provider, configured);
 }
 
 export function configuredProviderBinary(provider, providerConfig, environment = process.env) {
@@ -327,6 +403,90 @@ export function configuredProviderBinary(provider, providerConfig, environment =
     typeof providerConfig.binary === 'string' ? providerConfig.binary.trim() : ''
   );
   return configured ? configured.replace(/^~(?=\/)/, homedir()) : undefined;
+}
+
+export async function verifyWorkspaceToolOutcome(workspace) {
+  const finalText = await readFile(join(workspace, 'final.txt'), 'utf8').catch(() => null);
+  const obsoleteMissing = await access(join(workspace, 'obsolete.txt')).then(
+    () => false,
+    () => true,
+  );
+  return {
+    ok: finalText?.trim() === 'TOOL_FLOW_OK' && obsoleteMissing,
+    finalMarker: finalText?.trim() ?? null,
+    obsoleteMissing,
+  };
+}
+
+export function concurrencyHoldStrategy(providerConfig) {
+  return providerConfig.capabilities.includes('interaction')
+    ? 'interaction'
+    : 'running_activity';
+}
+
+export function reasoningExpectedFor(runtimeCatalog, turnConfig) {
+  const thinkingOption = runtimeCatalog.specialCatalogs?.thinking;
+  return typeof thinkingOption === 'string' && turnConfig[thinkingOption] !== 'off';
+}
+
+async function inspectCliCandidate(provider, binaryPath, allowUnverifiedCli) {
+  const definition = definitionByProvider.get(provider);
+  const { stdout, stderr } = await execFileAsync(binaryPath, ['--version'], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    timeout: 15_000,
+    maxBuffer: 64 * 1024,
+  });
+  const rawVersion = `${stdout}\n${stderr}`.trim();
+  const version = /(?:^|\s|v)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=\s|$)/u.exec(rawVersion)?.[1];
+  if (!version) throw new Error(`${provider} CLI --version did not expose a SemVer: ${rawVersion}`);
+  const verified = definition?.runtime.verifiedCliVersions.includes(version) ?? false;
+  if (!verified && !allowUnverifiedCli) {
+    throw new Error(
+      `${provider} CLI ${version} is not in runtime.verifiedCliVersions; use --allow-unverified-cli only for focused candidate diagnosis.`,
+    );
+  }
+  return { path: binaryPath, version, verified, rawVersion };
+}
+
+async function prepareProxyCandidate(provider, providerConfig, artifactDir, tempRoot) {
+  if (!artifactDir) {
+    return {
+      source: 'workspace-dist',
+      proxyPath: proxyPaths[provider],
+      proxyVersion: providerConfig.pluginVersion,
+      sha256: null,
+    };
+  }
+  const assetName = `gian-proxy-${provider}-${providerConfig.pluginVersion}-darwin-arm64.tar.gz`;
+  const assetPath = resolve(artifactDir, assetName);
+  const manifestPath = `${assetPath}.manifest.json`;
+  const checksumPath = `${assetPath}.sha256`;
+  const [asset, manifestText, checksumText] = await Promise.all([
+    readFile(assetPath),
+    readFile(manifestPath, 'utf8'),
+    readFile(checksumPath, 'utf8'),
+  ]);
+  const sha256 = createHash('sha256').update(asset).digest('hex');
+  const recordedChecksum = checksumText.trim().split(/\s+/u)[0];
+  assert.equal(recordedChecksum, sha256, `${provider} packaged checksum does not match the artifact`);
+  const manifest = JSON.parse(manifestText);
+  assert.equal(manifest.id, providerConfig.pluginId ?? provider);
+  assert.equal(manifest.pluginVersion, providerConfig.pluginVersion);
+  assert.equal(manifest.process?.scope, providerConfig.processScope);
+  const extractionDir = join(tempRoot, 'proxy-artifact');
+  await mkdir(extractionDir, { recursive: true });
+  await execFileAsync('/usr/bin/tar', ['-xzf', assetPath, '-C', extractionDir]);
+  const proxyPath = join(extractionDir, manifest.entry);
+  await access(proxyPath, fsConstants.X_OK);
+  return {
+    source: 'packaged-artifact',
+    proxyPath,
+    proxyVersion: manifest.pluginVersion,
+    assetPath,
+    manifestPath,
+    sha256,
+  };
 }
 
 async function prepareDshProfile(tempRoot, binaryPath) {
@@ -372,14 +532,10 @@ function splitConfig(catalog, cheapestConfig) {
   for (const [id, value] of Object.entries(cheapestConfig)) {
     const option = options.get(id);
     if (!option) throw new Error(`Current catalog has no cheapest config option ${id}.`);
-    const selected = value === '$catalog-default' ? option.defaultValue : value;
-    if (selected === undefined) {
-      throw new Error(`Current catalog has no default for ${id}.`);
+    if (option.choices && !option.choices.some(choice => Object.is(choice.value, value))) {
+      throw new Error(`Current catalog does not offer ${id}=${String(value)}.`);
     }
-    if (option.choices && !option.choices.some(choice => Object.is(choice.value, selected))) {
-      throw new Error(`Current catalog does not offer ${id}=${String(selected)}.`);
-    }
-    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = selected;
+    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
   }
   return { sessionConfig, turnConfig };
 }
@@ -452,7 +608,6 @@ function chooseAction(actions) {
 
 async function waitForTurn(client, session, turnId, from, options = {}) {
   const handled = new Set();
-  const responseDelays = [];
   const deadline = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
   while (Date.now() < deadline) {
     if (client.protocolFailure) throw client.protocolFailure;
@@ -487,12 +642,6 @@ async function waitForTurn(client, session, turnId, from, options = {}) {
         actionId: action.id,
         values: interactionValues(interaction.inputs),
       };
-      const interactionDelayMs = options.interactionDelayMs ?? 0;
-      if (interactionDelayMs > 0) {
-        const startedAt = Date.now();
-        await delay(interactionDelayMs);
-        responseDelays.push(Date.now() - startedAt);
-      }
       await client.request('interaction.respond', params);
       await client.request('interaction.respond', params);
     }
@@ -501,12 +650,7 @@ async function waitForTurn(client, session, turnId, from, options = {}) {
       && notification.params?.turnId === turnId
       && (notification.method === 'turn.completed' || notification.method === 'turn.failed')
     ));
-    if (terminal) return {
-      terminal,
-      notifications,
-      interactionsHandled: handled.size,
-      interactionResponseDelaysMs: responseDelays,
-    };
+    if (terminal) return { terminal, notifications, interactionsHandled: handled.size };
     await delay(25);
   }
   throw new Error(`Timed out waiting for turn ${turnId}.`);
@@ -532,30 +676,6 @@ function assembledContent(notifications) {
     }
   }
   return [...streams.values(), ...completed].join('\n');
-}
-
-export async function verifyWorkspaceToolOutcome(workspace) {
-  const finalText = await readFile(join(workspace, 'final.txt'), 'utf8').catch(() => null);
-  const obsoleteMissing = await access(join(workspace, 'obsolete.txt')).then(
-    () => false,
-    () => true,
-  );
-  return {
-    ok: finalText?.trim() === 'TOOL_FLOW_OK' && obsoleteMissing,
-    finalMarker: finalText?.trim() ?? null,
-    obsoleteMissing,
-  };
-}
-
-export function concurrencyHoldStrategy(providerConfig) {
-  return providerConfig.capabilities.includes('interaction')
-    ? 'interaction'
-    : 'running_activity';
-}
-
-export function reasoningExpectedFor(runtimeCatalog, turnConfig) {
-  const thinkingOption = runtimeCatalog.specialCatalogs?.thinking;
-  return typeof thinkingOption === 'string' && turnConfig[thinkingOption] !== 'off';
 }
 
 function assessScenario(catalog, provider, scenario, notifications, extra = {}) {
@@ -622,14 +742,11 @@ async function runPromptScenario(context, scenario, session) {
   });
   assert.equal(result.accepted, true);
   assert.equal(result.turnId, turnId);
-  const turn = await waitForTurn(client, session, turnId, from, {
-    interactionDelayMs: context.providerConfig.interactionDelayMs ?? 0,
-  });
+  const turn = await waitForTurn(client, session, turnId, from);
   const assessment = assessScenario(catalog, provider, scenario, turn.notifications, {
     turnId,
     expectedMarker: marker,
     interactionsHandled: turn.interactionsHandled,
-    interactionResponseDelaysMs: turn.interactionResponseDelaysMs,
     terminalMethod: turn.terminal.method,
     stopReason: turn.terminal.params.data.stopReason ?? null,
   });
@@ -639,19 +756,9 @@ async function runPromptScenario(context, scenario, session) {
       && notification.params.data.kind === 'reasoning'
     ));
     assessment.reasoningObserved = reasoning;
-    const reasoningExpected = reasoningExpectedFor(context.runtimeCatalog, turnConfig);
-    if (reasoningExpected && !reasoning) {
+    if (catalog.providers[provider].capabilities.includes('event.reasoning') && !reasoning) {
       assessment.status = 'UNOBSERVED';
       assessment.issues.push('event.reasoning advertised but no reasoning content was observed');
-    }
-    assessment.reasoningExpected = reasoningExpected;
-  }
-  if (scenario.id === 'activity.workspace_tools') {
-    const outcome = await verifyWorkspaceToolOutcome(workspace);
-    assessment.workspaceOutcome = outcome;
-    if (!outcome.ok) {
-      assessment.status = 'BEHAVIOR_FAIL';
-      assessment.issues.push('workspace tool filesystem outcome did not match the acceptance fixture');
     }
   }
   if (scenario.id === 'activity.subagent') {
@@ -683,6 +790,207 @@ function domainCode(error) {
     ?? error?.envelope?.error?.code
     ?? error?.code
     ?? null;
+}
+
+function optionValue(option) {
+  if (option.defaultValue !== undefined && option.defaultValue !== null) return option.defaultValue;
+  if (option.choices?.length) return option.choices[0].value;
+  if (option.control === 'boolean') return false;
+  if (option.control === 'number') return option.min ?? 0;
+  return 'acceptance';
+}
+
+function invalidOptionValue(option) {
+  if (option.choices?.length) {
+    let value = '__gian_invalid_choice__';
+    while (option.choices.some(choice => Object.is(choice.value, value))) value += '_x';
+    return value;
+  }
+  if (option.control === 'boolean') return 'not-a-boolean';
+  if (option.control === 'number') return (option.max ?? option.min ?? 0) + 1_000_000;
+  if (typeof option.maxLength === 'number') return 'x'.repeat(option.maxLength + 1);
+  return null;
+}
+
+async function captureDomainError(operation) {
+  try {
+    await operation();
+    return null;
+  } catch (error) {
+    return domainCode(error);
+  }
+}
+
+function assessCodes(codes, expected) {
+  const issues = [];
+  for (const [name, allowed] of Object.entries(expected)) {
+    if (!allowed.includes(codes[name])) {
+      issues.push(`${name} returned ${String(codes[name])}; expected ${allowed.join(' or ')}`);
+    }
+  }
+  return { status: issues.length === 0 ? 'PASS' : 'BEHAVIOR_FAIL', issues, codes };
+}
+
+async function runCatalogResolveScenario(context) {
+  const { client, runtimeCatalog, sessionConfig, turnConfig } = context;
+  const current = await client.request('catalog.resolve', {
+    catalogRevision: runtimeCatalog.catalogRevision,
+    sessionConfig,
+    turnConfig,
+  });
+  const staleCode = await captureDomainError(() => client.request('catalog.resolve', {
+    catalogRevision: `${runtimeCatalog.catalogRevision}-stale`,
+    sessionConfig,
+    turnConfig,
+  }));
+  const option = runtimeCatalog.configOptions[0];
+  let invalidConfigCode = null;
+  if (option) {
+    const actualSession = option.binding === 'session'
+      ? { ...sessionConfig, [option.id]: invalidOptionValue(option) }
+      : sessionConfig;
+    const actualTurn = option.binding === 'turn'
+      ? { ...turnConfig, [option.id]: invalidOptionValue(option) }
+      : turnConfig;
+    invalidConfigCode = await captureDomainError(() => client.requestUnchecked(
+      'catalog.resolve',
+      {
+        catalogRevision: runtimeCatalog.catalogRevision,
+        sessionConfig: actualSession,
+        turnConfig: actualTurn,
+      },
+      {
+        catalogRevision: runtimeCatalog.catalogRevision,
+        sessionConfig,
+        turnConfig,
+      },
+    ));
+  }
+  const assessment = assessCodes(
+    { staleRevision: staleCode, invalidConfig: invalidConfigCode },
+    {
+      staleRevision: ['CONFLICT'],
+      invalidConfig: ['CONFIG_VALUE_INVALID'],
+    },
+  );
+  assessment.resolvedDefaults = current.resolvedDefaults;
+  return assessment;
+}
+
+async function runConfigValidationScenario(context) {
+  const { client, runtimeCatalog, sessionConfig, turnConfig, workspace } = context;
+  const sessionOption = runtimeCatalog.configOptions.find(option => option.binding === 'session');
+  const turnOption = runtimeCatalog.configOptions.find(option => option.binding === 'turn');
+  const createParams = suffix => ({
+    sessionId: `${context.provider}-config-${suffix}-${randomUUID()}`,
+    workspace: { cwd: workspace, roots: [workspace] },
+    config: sessionConfig,
+  });
+  const codes = {};
+  const unknown = createParams('unknown');
+  codes.unknownSessionOption = await captureDomainError(() => client.requestUnchecked(
+    'session.create',
+    { ...unknown, config: { ...sessionConfig, __gian_unknown_option__: true } },
+    unknown,
+  ));
+  if (turnOption) {
+    const wrongBound = createParams('wrong-bound');
+    codes.turnOptionDuringCreate = await captureDomainError(() => client.requestUnchecked(
+      'session.create',
+      { ...wrongBound, config: { ...sessionConfig, [turnOption.id]: optionValue(turnOption) } },
+      wrongBound,
+    ));
+  }
+
+  const session = await createAttachedSession(context, 'config-turn');
+  const validTurn = turnId => ({
+    sessionId: session.id,
+    streamId: session.streamId,
+    turnId,
+    input: [{ type: 'text', text: 'Reply with exactly CONFIG_VALIDATION_OK.' }],
+    config: turnConfig,
+  });
+  if (sessionOption) {
+    const shadow = validTurn(randomUUID());
+    codes.sessionOptionDuringTurn = await captureDomainError(() => client.requestUnchecked(
+      'turn.start',
+      { ...shadow, config: { ...turnConfig, [sessionOption.id]: optionValue(sessionOption) } },
+      shadow,
+    ));
+  }
+  const invalid = turnOption ?? sessionOption;
+  if (invalid?.binding === 'turn') {
+    const shadow = validTurn(randomUUID());
+    codes.invalidChoice = await captureDomainError(() => client.requestUnchecked(
+      'turn.start',
+      { ...shadow, config: { ...turnConfig, [invalid.id]: invalidOptionValue(invalid) } },
+      shadow,
+    ));
+  } else if (invalid) {
+    const shadow = createParams('invalid-choice');
+    codes.invalidChoice = await captureDomainError(() => client.requestUnchecked(
+      'session.create',
+      { ...shadow, config: { ...sessionConfig, [invalid.id]: invalidOptionValue(invalid) } },
+      shadow,
+    ));
+  }
+  await client.request('session.close', { sessionId: session.id, streamId: session.streamId });
+  const expected = {
+    unknownSessionOption: ['CONFIG_VALUE_INVALID'],
+    ...(turnOption ? { turnOptionDuringCreate: ['CONFIG_BINDING_INVALID'] } : {}),
+    ...(sessionOption ? { sessionOptionDuringTurn: ['CONFIG_BINDING_INVALID'] } : {}),
+    ...(invalid ? { invalidChoice: ['CONFIG_VALUE_INVALID'] } : {}),
+  };
+  return assessCodes(codes, expected);
+}
+
+async function runSessionLifecycleScenario(context, scenario) {
+  const { client, initialized, workspace, sessionConfig } = context;
+  const sessionId = `${context.provider}-lifecycle-${randomUUID()}`;
+  const createParams = {
+    sessionId,
+    workspace: { cwd: workspace, roots: [workspace] },
+    config: sessionConfig,
+  };
+  const from = client.notificationIndex();
+  const created = await client.request('session.create', createParams);
+  const fetched = await client.request('session.get', { sessionId });
+  const repeated = await client.request('session.create', createParams);
+  const conflictCode = await captureDomainError(() => client.request('session.create', {
+    ...createParams,
+    workspace: { cwd: workspace, roots: [workspace, context.skillDir] },
+  }));
+  let renamed = false;
+  if (initialized.capabilities['session.rename'] !== undefined) {
+    await client.request('session.rename', {
+      sessionId,
+      streamId: created.session.streamId,
+      name: `Proxy acceptance ${context.provider}`,
+    });
+    renamed = true;
+  }
+  await client.request('session.close', { sessionId, streamId: created.session.streamId });
+  await client.request('session.close', { sessionId, streamId: created.session.streamId });
+  const notifications = client.notificationsSince(from);
+  const issues = [];
+  if (fetched.session.id !== sessionId || fetched.session.streamId !== created.session.streamId) {
+    issues.push('session.get returned a different attachment');
+  }
+  if (repeated.session.streamId !== created.session.streamId) {
+    issues.push('identical session.create changed streamId');
+  }
+  if (conflictCode !== 'CONFLICT') issues.push(`conflicting session.create returned ${String(conflictCode)}`);
+  if (renamed && !notifications.some(notification => (
+    notification.method === 'session.updated' && notification.params.sessionId === sessionId
+  ))) issues.push('session.rename emitted no session.updated notification');
+  return {
+    status: issues.length === 0 ? 'PASS' : 'BEHAVIOR_FAIL',
+    issues,
+    conflictCode,
+    renamed,
+    observedNotifications: [...new Set(notifications.map(notification => notification.method))],
+    expectedNotifications: expectedNotificationsFor(context.catalog, context.provider, scenario),
+  };
 }
 
 async function runSteerScenario(context, scenario) {
@@ -773,7 +1081,87 @@ async function runInterruptScenario(context, scenario) {
 }
 
 async function runConcurrencyScenario(context, scenario) {
-  const { client, catalog, provider, providerConfig, turnConfig } = context;
+  const { client, catalog, provider, turnConfig } = context;
+  if (context.providerConfig.processScope === 'session') {
+    const secondClient = context.clientFactory('concurrency-session-b');
+    let first = null;
+    let second = null;
+    try {
+      await secondClient.request('initialize', {
+        protocol: { name: 'gian.proxy', versions: protocolOffers },
+        host: { name: 'Gian Real Proxy Acceptance Session B', version: '0.5.0' },
+      });
+      await secondClient.request('catalog.list', {});
+      first = await createAttachedSession(context, 'isolated-process-a');
+      const secondCreated = await secondClient.request('session.create', {
+        sessionId: `${provider}-isolated-process-b-${randomUUID()}`,
+        workspace: { cwd: context.workspace, roots: [context.workspace] },
+        config: context.sessionConfig,
+      });
+      second = secondCreated.session;
+      const firstTurnId = randomUUID();
+      const secondTurnId = randomUUID();
+      const firstFrom = client.notificationIndex();
+      const secondFrom = secondClient.notificationIndex();
+      await client.request('turn.start', {
+        sessionId: first.id,
+        streamId: first.streamId,
+        turnId: firstTurnId,
+        input: [{ type: 'text', text: 'Run `node long-running.mjs` and wait for it to finish before replying.' }],
+        config: turnConfig,
+      });
+      await client.waitForNotification(
+        notification => notification.method === 'turn.started'
+          && notification.params.turnId === firstTurnId,
+        firstFrom,
+        'session-scoped turn A start',
+      );
+      await secondClient.request('turn.start', {
+        sessionId: second.id,
+        streamId: second.streamId,
+        turnId: secondTurnId,
+        input: [{ type: 'text', text: 'Reply with exactly CONCURRENT_B_OK. Do not use tools.' }],
+        config: turnConfig,
+      });
+      await client.request('turn.interrupt', {
+        sessionId: first.id,
+        streamId: first.streamId,
+        turnId: firstTurnId,
+      });
+      const [firstResult, secondResult] = await Promise.all([
+        waitForTurn(client, first, firstTurnId, firstFrom),
+        waitForTurn(secondClient, second, secondTurnId, secondFrom),
+      ]);
+      const issues = [];
+      if (client.child?.pid === secondClient.child?.pid) issues.push('session-scoped Sessions shared one Proxy PID');
+      if (firstResult.terminal.params.data.stopReason !== 'interrupted') {
+        issues.push('Session A did not terminate as interrupted');
+      }
+      if (secondResult.terminal.params.data.stopReason !== 'completed'
+        || !assembledContent(secondResult.notifications).includes('CONCURRENT_B_OK')) {
+        issues.push('Session B did not complete independently with CONCURRENT_B_OK');
+      }
+      return {
+        status: issues.length === 0 ? 'PASS' : 'BEHAVIOR_FAIL',
+        issues,
+        processScope: 'session',
+        firstProxyPid: client.child?.pid ?? null,
+        secondProxyPid: secondClient.child?.pid ?? null,
+        firstStopReason: firstResult.terminal.params.data.stopReason ?? null,
+        secondStopReason: secondResult.terminal.params.data.stopReason ?? null,
+      };
+    } finally {
+      if (first) await client.request('session.close', {
+        sessionId: first.id,
+        streamId: first.streamId,
+      }).catch(() => undefined);
+      if (second) await secondClient.request('session.close', {
+        sessionId: second.id,
+        streamId: second.streamId,
+      }).catch(() => undefined);
+      await secondClient.stop();
+    }
+  }
   const first = await createAttachedSession(context, 'concurrent-a');
   const second = await createAttachedSession(context, 'concurrent-b');
   const firstTurnId = randomUUID();
@@ -783,17 +1171,11 @@ async function runConcurrencyScenario(context, scenario) {
   if (provider === 'codex') {
     firstConfig.approval_mode = 'ask';
   }
-  const holdStrategy = concurrencyHoldStrategy(providerConfig);
   await client.request('turn.start', {
     sessionId: first.id,
     streamId: first.streamId,
     turnId: firstTurnId,
-    input: [{
-      type: 'text',
-      text: holdStrategy === 'interaction'
-        ? 'Write HOLD_SESSION_A to concurrency-hold.txt using a native file tool. Do not reply before the write succeeds.'
-        : 'Run `node long-running.mjs` and wait for it to finish before replying. Do not skip or background the command.',
-    }],
+    input: [{ type: 'text', text: 'Write HOLD_SESSION_A to concurrency-hold.txt using a native file tool. Do not reply before the write succeeds.' }],
     config: firstConfig,
   });
   await client.waitForNotification(
@@ -803,15 +1185,12 @@ async function runConcurrencyScenario(context, scenario) {
   );
   await client.waitForNotification(
     notification => (
-      notification.params.sessionId === first.id
+      notification.method === 'interaction.requested'
+      && notification.params.sessionId === first.id
       && notification.params.turnId === firstTurnId
-      && (holdStrategy === 'interaction'
-        ? notification.method === 'interaction.requested'
-        : notification.method === 'activity.updated'
-          && notification.params.data?.status === 'running')
     ),
     from,
-    holdStrategy === 'interaction' ? 'Session A approval hold' : 'Session A running activity hold',
+    'Session A approval hold',
     60_000,
   );
   await client.request('turn.start', {
@@ -846,7 +1225,6 @@ async function runConcurrencyScenario(context, scenario) {
     observedNotifications: [...new Set(notifications.map(notification => notification.method))],
     firstStopReason: firstResult.terminal.params.data.stopReason ?? null,
     secondStopReason: secondResult.terminal.params.data.stopReason ?? null,
-    holdStrategy,
   };
   await client.request('session.close', { sessionId: first.id, streamId: first.streamId });
   await client.request('session.close', { sessionId: second.id, streamId: second.streamId });
@@ -867,16 +1245,13 @@ async function runReplayScenario(context, scenario) {
   });
   const live = await waitForTurn(client, session, turnId, from);
   const nativeSessionId = session.nativeSession?.id;
-  // Native discovery intentionally excludes sessions currently owned by this
-  // Proxy. Detach first, then prove that the idle native session is
-  // discoverable and can be reattached for replay.
-  await client.request('session.close', { sessionId: session.id, streamId: session.streamId });
   let listed = { sessions: [], nextCursor: null };
   for (let attempt = 0; attempt < 25; attempt += 1) {
     listed = await client.request('session.native.list', { cwd: context.workspace });
     if (listed.sessions.some(native => native.id === nativeSessionId)) break;
     await delay(100);
   }
+  await client.request('session.close', { sessionId: session.id, streamId: session.streamId });
   const replayAttachment = await client.request('session.create', {
     sessionId: `${context.provider}-replay-import-${randomUUID()}`,
     workspace: { cwd: context.workspace, roots: [context.workspace] },
@@ -914,6 +1289,178 @@ async function runReplayScenario(context, scenario) {
   };
 }
 
+async function runSidechatForkScenario(context) {
+  const { client, initialized, turnConfig } = context;
+  const parent = await createAttachedSession(context, 'sidechat-parent');
+  const parentTurnId = randomUUID();
+  const parentFrom = client.notificationIndex();
+  await client.request('turn.start', {
+    sessionId: parent.id,
+    streamId: parent.streamId,
+    turnId: parentTurnId,
+    input: [{ type: 'text', text: 'Reply with exactly FORK_PARENT_OK. Do not use tools.' }],
+    config: turnConfig,
+  });
+  const parentTurn = await waitForTurn(client, parent, parentTurnId, parentFrom);
+  const sourceTurnId = parentTurn.terminal.params.sourceTurnId;
+  const issues = [];
+  if (!assembledContent(parentTurn.notifications).includes('FORK_PARENT_OK')) {
+    issues.push('parent terminal turn did not contain FORK_PARENT_OK');
+  }
+
+  const sidechatId = `${context.provider}-sidechat-${randomUUID()}`;
+  const createdSidechat = await client.request('sidechat.create', {
+    parentSessionId: parent.id,
+    parentStreamId: parent.streamId,
+    sidechatId,
+  });
+  const resumedSidechat = await client.request('sidechat.resume', {
+    sidechatId,
+    parentSessionId: parent.id,
+    resumeRef: createdSidechat.sidechat.resumeRef,
+  });
+  if (resumedSidechat.sidechat.id !== sidechatId
+    || resumedSidechat.sidechat.parentSessionId !== parent.id) {
+    issues.push('sidechat.resume changed the child or parent identity');
+  }
+  const child = resumedSidechat.sidechat;
+  const childTurnId = randomUUID();
+  const childFrom = client.notificationIndex();
+  await client.request('turn.start', {
+    sessionId: child.id,
+    streamId: child.streamId,
+    turnId: childTurnId,
+    input: [{ type: 'text', text: 'Reply with exactly SIDECHAT_CHILD_OK. Do not use tools.' }],
+    config: turnConfig,
+  });
+  const childTurn = await waitForTurn(client, child, childTurnId, childFrom);
+  if (!assembledContent(childTurn.notifications).includes('SIDECHAT_CHILD_OK')) {
+    issues.push('Side Chat turn did not contain SIDECHAT_CHILD_OK');
+  }
+  if (childTurn.notifications.some(notification => notification.params.sessionId !== child.id)) {
+    issues.push('Side Chat turn observation contained a parent Session event');
+  }
+  const closedSidechat = await client.request('sidechat.close', {
+    sidechatId,
+    streamId: child.streamId,
+    resumeRef: child.resumeRef,
+  });
+  const repeatedClose = await client.request('sidechat.close', {
+    sidechatId,
+    resumeRef: child.resumeRef,
+  });
+  if (JSON.stringify(closedSidechat) !== JSON.stringify(repeatedClose)) {
+    issues.push('idempotent sidechat.close changed its result');
+  }
+
+  const headForkId = `${context.provider}-fork-head-${randomUUID()}`;
+  const headFork = await client.request('session.fork', {
+    sourceSessionId: parent.id,
+    sourceStreamId: parent.streamId,
+    sessionId: headForkId,
+    anchor: { type: 'head' },
+  });
+  if (headFork.origin.sessionId !== parent.id
+    || headFork.origin.turnId !== parentTurnId
+    || headFork.origin.sourceTurnId !== sourceTurnId) {
+    issues.push('head Fork origin did not match the completed parent boundary');
+  }
+  const headReplay = await client.request('session.replay', {
+    sessionId: headForkId,
+    streamId: headFork.session.streamId,
+    cursor: null,
+    limit: 500,
+  });
+  if (!headReplay.events.some(event => event.sourceTurnId === sourceTurnId)) {
+    issues.push('head Fork replay did not inherit the parent terminal boundary');
+  }
+
+  let turnFork = null;
+  if (initialized.capabilities['session.fork.atTurn'] !== undefined) {
+    const turnForkId = `${context.provider}-fork-turn-${randomUUID()}`;
+    turnFork = await client.request('session.fork', {
+      sourceSessionId: parent.id,
+      sourceStreamId: parent.streamId,
+      sessionId: turnForkId,
+      anchor: { type: 'turn', turnId: parentTurnId, sourceTurnId },
+    });
+    if (turnFork.origin.turnId !== parentTurnId || turnFork.origin.sourceTurnId !== sourceTurnId) {
+      issues.push('exact-turn Fork origin changed the requested boundary');
+    }
+    await client.request('session.close', {
+      sessionId: turnForkId,
+      streamId: turnFork.session.streamId,
+    });
+  }
+
+  const durableNativeId = headFork.session.nativeSession?.id;
+  await client.request('session.close', {
+    sessionId: headForkId,
+    streamId: headFork.session.streamId,
+  });
+  await client.request('session.close', { sessionId: parent.id, streamId: parent.streamId });
+  await client.stop();
+
+  if (!durableNativeId) {
+    issues.push('head Fork returned no durable nativeSession.id');
+  } else {
+    const restarted = context.clientFactory('restart');
+    try {
+      await restarted.request('initialize', {
+        protocol: { name: 'gian.proxy', versions: protocolOffers },
+        host: { name: 'Gian Real Proxy Acceptance Restart', version: '0.5.0' },
+      });
+      await restarted.request('catalog.list', {});
+      const reattachedId = `${context.provider}-fork-reattach-${randomUUID()}`;
+      const reattached = await restarted.request('session.create', {
+        sessionId: reattachedId,
+        workspace: { cwd: context.workspace, roots: [context.workspace] },
+        nativeSession: { id: durableNativeId, history: 'replay' },
+        config: context.sessionConfig,
+      });
+      const replay = await restarted.request('session.replay', {
+        sessionId: reattachedId,
+        streamId: reattached.session.streamId,
+        cursor: null,
+        limit: 500,
+      });
+      if (!replay.events.some(event => event.sourceTurnId === sourceTurnId)) {
+        issues.push('restart reattach replay lost the inherited parent boundary');
+      }
+      await restarted.request('session.close', {
+        sessionId: reattachedId,
+        streamId: reattached.session.streamId,
+      });
+    } finally {
+      const restartCleanup = await restarted.stop();
+      if (restartCleanup.lingeringAfterGraceful) {
+        issues.push('restart Proxy process group survived graceful shutdown');
+      }
+      if (!restartCleanup.cleanupSucceeded) {
+        issues.push('restart Proxy process group survived bounded cleanup');
+      }
+    }
+  }
+  return {
+    status: issues.length === 0 ? 'PASS' : 'BEHAVIOR_FAIL',
+    issues,
+    parentTurnId,
+    sourceTurnId,
+    sidechatAnchor: createdSidechat.sidechat.anchor,
+    headForkOrigin: headFork.origin,
+    turnForkOrigin: turnFork?.origin ?? null,
+    durableNativeId: durableNativeId ?? null,
+  };
+}
+
+async function runControlScenario(context, scenario) {
+  if (scenario.id === 'catalog.resolve') return runCatalogResolveScenario(context, scenario);
+  if (scenario.id === 'config.validation') return runConfigValidationScenario(context, scenario);
+  if (scenario.id === 'session.lifecycle') return runSessionLifecycleScenario(context, scenario);
+  if (scenario.id === 'sidechat_fork.native_contract') return runSidechatForkScenario(context, scenario);
+  return { status: 'NOT_RUN', issues: ['real control handler is not implemented'] };
+}
+
 async function runRealControlScenario(context, scenario) {
   if (scenario.id === 'control.steer') return runSteerScenario(context, scenario);
   if (scenario.id === 'control.interrupt_busy') return runInterruptScenario(context, scenario);
@@ -922,37 +1469,97 @@ async function runRealControlScenario(context, scenario) {
   return { status: 'NOT_RUN', issues: ['real control handler is not implemented'] };
 }
 
-async function runProvider({ provider, providerConfig, scenarios, outputDir, catalog, configOverrides }) {
+async function runProvider({
+  provider,
+  providerConfig,
+  scenarios,
+  outputDir,
+  catalog,
+  configOverrides,
+  artifactDir,
+  allowUnverifiedCli,
+}) {
   const providerDir = join(outputDir, provider);
   const tempRoot = await mkdtemp(join(tmpdir(), `gian-proxy-acceptance-${provider}-`));
-  const dataDir = join(tempRoot, 'data');
-  await mkdir(dataDir, { recursive: true });
-  const { workspace, skillDir } = await createWorkspace(tempRoot);
-  const imagePath = scenarios.some(scenario => scenario.id === 'input.local_image')
-    ? await createImageFixture(workspace)
-    : null;
-  const binaryPath = await resolveBinary(provider, providerConfig);
-  const providerEnvironment = provider === 'dsh'
-    ? await prepareDshProfile(tempRoot, binaryPath)
-    : provider === 'claude'
-      ? await prepareClaudeEnvironment(binaryPath)
-      : {};
-  if (provider === 'kimi' && scenarios.some(scenario => scenario.trigger.includes('real'))) {
-    await activateDefaultKimiStore(binaryPath);
+  let bootstrap;
+  try {
+    const dataDir = join(tempRoot, 'data');
+    await mkdir(dataDir, { recursive: true });
+    const { workspace, skillDir } = await createWorkspace(tempRoot);
+    const imagePath = scenarios.some(scenario => scenario.id === 'input.local_image')
+      ? await createImageFixture(workspace)
+      : null;
+    const binaryPath = await resolveBinary(provider, providerConfig);
+    const proxyCandidate = await prepareProxyCandidate(provider, providerConfig, artifactDir, tempRoot);
+    const { proxyPath, ...proxyEvidence } = proxyCandidate;
+    const cliCandidate = await inspectCliCandidate(provider, binaryPath, allowUnverifiedCli);
+    const setup = definitionByProvider.get(provider)?.qualification.setup;
+    const providerEnvironment = setup === 'dsh-profile'
+      ? await prepareDshProfile(tempRoot, binaryPath)
+      : setup === 'claude-settings'
+        ? await prepareClaudeEnvironment(binaryPath)
+        : {};
+    if (setup === 'kimi-store' && scenarios.some(scenario => scenario.trigger.includes('real'))) {
+      await activateDefaultKimiStore(binaryPath);
+    }
+    bootstrap = {
+      dataDir,
+      workspace,
+      skillDir,
+      imagePath,
+      binaryPath,
+      proxyPath,
+      proxyEvidence,
+      cliCandidate,
+      providerEnvironment,
+    };
+  } catch (error) {
+    const finalized = finalizeProviderScenarioResults(provider, scenarios, [{
+      scenarioId: 'provider.bootstrap',
+      status: 'BLOCKED',
+      error: error instanceof Error ? error.message : String(error),
+    }]);
+    await mkdir(providerDir, { recursive: true });
+    await writeFile(
+      join(providerDir, 'results.json'),
+      `${JSON.stringify(finalized.results, null, 2)}\n`,
+      'utf8',
+    );
+    await rm(tempRoot, { recursive: true, force: true });
+    return {
+      provider,
+      status: finalized.status,
+      proxyCandidate: null,
+      cliCandidate: null,
+      results: finalized.results,
+    };
   }
-  const client = new ValidatedProxyClient({
+  const {
+    dataDir,
+    workspace,
+    skillDir,
+    imagePath,
+    binaryPath,
+    proxyPath,
+    proxyEvidence,
+    cliCandidate,
+    providerEnvironment,
+  } = bootstrap;
+  const clientFactory = suffix => new ValidatedProxyClient({
     provider,
     providerConfig,
+    proxyPath,
     binaryPath,
     dataDir,
-    outputDir: providerDir,
+    outputDir: suffix ? join(providerDir, suffix) : providerDir,
     timeoutMs: defaultTimeoutMs,
     environment: providerEnvironment,
   });
+  const client = clientFactory(null);
   const results = [];
   try {
     const initialized = await client.request('initialize', {
-      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      protocol: { name: 'gian.proxy', versions: protocolOffers },
       host: { name: 'Gian Real Proxy Acceptance', version: '0.5.0' },
     });
     const runtimeCatalog = await client.request('catalog.list', {});
@@ -960,7 +1567,8 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
     results.push({
       scenarioId: 'transport.initialize_catalog',
       status: 'PASS',
-      binaryPath,
+      proxyCandidate: proxyEvidence,
+      cliCandidate,
       initialized,
       catalog: runtimeCatalog,
     });
@@ -971,73 +1579,79 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
       if (!option) throw new Error(`Current ${provider} catalog has no override option ${id}.`);
       (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
     }
-    let selectedCatalog = runtimeCatalog;
-    if (initialized.capabilities['catalog.resolve'] === 1) {
-      selectedCatalog = await client.request('catalog.resolve', {
-        catalogRevision: runtimeCatalog.catalogRevision,
-        sessionConfig,
-        turnConfig,
-      });
-      const resolvedDefaults = selectedCatalog.resolvedDefaults ?? {};
-      Object.assign(sessionConfig, resolvedDefaults.sessionConfig ?? {});
-      Object.assign(turnConfig, resolvedDefaults.turnConfig ?? {});
-    }
     const context = {
       provider,
       providerConfig,
       client,
       catalog,
-      runtimeCatalog: selectedCatalog,
+      runtimeCatalog,
       initialized,
       sessionConfig,
       turnConfig,
       workspace,
       skillDir,
       imagePath,
+      clientFactory,
     };
     results[results.length - 1].selectedConfig = { sessionConfig, turnConfig };
-    results[results.length - 1].resolvedCatalog = selectedCatalog;
 
-    const promptScenarios = scenarios.filter(scenario => scenario.trigger === 'real_prompt');
-    if (promptScenarios.length > 0) {
-      const session = await createAttachedSession(context, 'prompt');
-      for (const scenario of promptScenarios) {
-        const status = scenario.providers[provider];
-        if (!['required', 'conditional', 'spec_gap'].includes(status)) continue;
-        try {
-          results.push({
-            scenarioId: scenario.id,
-            ...(await runPromptScenario(context, scenario, session)),
-          });
-        } catch (error) {
-          results.push({
-            scenarioId: scenario.id,
-            status: client.protocolFailure ? 'SCHEMA_FAIL' : 'BLOCKED',
-            error: error instanceof Error ? error.message : String(error),
-          });
-          if (client.protocolFailure) break;
-        }
-      }
-      await client.request('session.close', { sessionId: session.id, streamId: session.streamId })
-        .catch(() => undefined);
-    }
-
-    for (const scenario of scenarios.filter(candidate => candidate.trigger === 'real_control')) {
-      const status = scenario.providers[provider];
-      if (status !== 'required') continue;
+    const executeScenario = async (scenario, handler) => {
       try {
-        results.push({
-          scenarioId: scenario.id,
-          ...(await runRealControlScenario(context, scenario)),
-        });
+        results.push({ scenarioId: scenario.id, ...(await handler(context, scenario)) });
       } catch (error) {
         results.push({
           scenarioId: scenario.id,
           status: client.protocolFailure ? 'SCHEMA_FAIL' : 'BLOCKED',
           error: error instanceof Error ? error.message : String(error),
         });
+      }
+    };
+
+    const preTurnControls = scenarios.filter(scenario => (
+      scenario.trigger === 'control'
+      && ![
+        'transport.initialize_catalog',
+        'transport.invalid_frames',
+        'sidechat_fork.native_contract',
+        'shutdown.cleanup',
+      ].includes(scenario.id)
+      && realScenarioRequirement(scenario, provider) !== 'not_applicable'
+    ));
+    for (const scenario of preTurnControls) {
+      await executeScenario(scenario, runControlScenario);
+      if (client.protocolFailure) break;
+    }
+
+    const promptScenarios = scenarios.filter(scenario => (
+      scenario.trigger === 'real_prompt'
+      && realScenarioRequirement(scenario, provider) !== 'not_applicable'
+    ));
+    if (promptScenarios.length > 0) {
+      const session = await createAttachedSession(context, 'prompt');
+      for (const scenario of promptScenarios) {
+        await executeScenario(scenario, (current, candidate) => (
+          runPromptScenario(current, candidate, session)
+        ));
         if (client.protocolFailure) break;
       }
+      await client.request('session.close', { sessionId: session.id, streamId: session.streamId })
+        .catch(() => undefined);
+    }
+
+    for (const scenario of scenarios.filter(candidate => (
+      candidate.trigger === 'real_control'
+      && realScenarioRequirement(candidate, provider) !== 'not_applicable'
+    ))) {
+      await executeScenario(scenario, runRealControlScenario);
+      if (client.protocolFailure) break;
+    }
+
+    const sidechatFork = scenarios.find(scenario => (
+      scenario.id === 'sidechat_fork.native_contract'
+      && realScenarioRequirement(scenario, provider) !== 'not_applicable'
+    ));
+    if (sidechatFork && !client.protocolFailure) {
+      await executeScenario(sidechatFork, runControlScenario);
     }
   } catch (error) {
     results.push({
@@ -1046,12 +1660,32 @@ async function runProvider({ provider, providerConfig, scenarios, outputDir, cat
       error: error instanceof Error ? error.message : String(error),
     });
   } finally {
-    await client.stop();
+    const cleanup = await client.stop();
+    if (scenarios.some(scenario => scenario.id === 'shutdown.cleanup')) {
+      const cleanupIssues = [];
+      if (client.protocolFailure) cleanupIssues.push(client.protocolFailure.message);
+      if (cleanup.lingeringAfterGraceful) cleanupIssues.push('Proxy process group survived graceful shutdown');
+      if (!cleanup.cleanupSucceeded) cleanupIssues.push('Proxy process group survived bounded cleanup');
+      results.push({
+        scenarioId: 'shutdown.cleanup',
+        status: client.protocolFailure
+          ? 'SCHEMA_FAIL'
+          : cleanupIssues.length > 0
+            ? 'BEHAVIOR_FAIL'
+            : 'PASS',
+        issues: cleanupIssues,
+        cleanup,
+      });
+    }
+    const finalized = finalizeProviderScenarioResults(provider, scenarios, results);
+    results.length = 0;
+    results.push(...finalized.results);
     await mkdir(providerDir, { recursive: true });
     await writeFile(join(providerDir, 'results.json'), `${JSON.stringify(results, null, 2)}\n`, 'utf8');
     await rm(tempRoot, { recursive: true, force: true });
   }
-  return { provider, results };
+  const status = finalizeProviderScenarioResults(provider, scenarios, results).status;
+  return { provider, status, proxyCandidate: proxyEvidence, cliCandidate, results };
 }
 
 function renderRunHtml(catalog, run) {
@@ -1074,12 +1708,15 @@ export async function main(argv = process.argv.slice(2)) {
       : selectedIds.size === 0 || selectedIds.has(scenario.id)
   ));
   const realTurns = scenarios.some(scenario => (
-    scenario.trigger === 'real_prompt' || scenario.trigger === 'real_control'
+    scenario.trigger === 'real_prompt'
+    || scenario.trigger === 'real_control'
+    || scenario.id === 'sidechat_fork.native_contract'
   ));
   if (realTurns && process.env[allowRealTurnEnvironment] !== '1') {
     throw new Error(`Refusing real model turns without ${allowRealTurnEnvironment}=1.`);
   }
   const outputDir = resolve(rootDir, options.output);
+  const artifactDir = options.artifactDir ? resolve(rootDir, options.artifactDir) : null;
   await mkdir(outputDir, { recursive: true });
   const run = {
     version: 1,
@@ -1097,14 +1734,27 @@ export async function main(argv = process.argv.slice(2)) {
       outputDir,
       catalog,
       configOverrides: options.configOverrides,
+      artifactDir,
+      allowUnverifiedCli: options.allowUnverifiedCli,
     }));
   }
   run.completedAt = new Date().toISOString();
+  run.status = run.providers.some(provider => provider.status === 'FAIL')
+    ? 'FAIL'
+    : run.providers.some(provider => provider.status === 'BLOCKED')
+      ? 'BLOCKED'
+      : 'PASS';
+  run.candidateTuple = run.providers.map(provider => ({
+    provider: provider.provider,
+    proxy: provider.proxyCandidate,
+    cli: provider.cliCandidate,
+  }));
   await Promise.all([
     writeFile(join(outputDir, 'results.json'), `${JSON.stringify(run, null, 2)}\n`, 'utf8'),
     writeFile(join(outputDir, 'report.html'), renderRunHtml(catalog, run), 'utf8'),
   ]);
-  console.log(JSON.stringify({ outputDir, providers: run.providers }, null, 2));
+  console.log(JSON.stringify({ outputDir, status: run.status, providers: run.providers }, null, 2));
+  if (run.status !== 'PASS') process.exitCode = 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

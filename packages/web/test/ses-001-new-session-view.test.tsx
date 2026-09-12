@@ -65,6 +65,7 @@ function agent(kind: Executor, name: string, ready = true): UserAgentStatus {
   return {
     id: `agent-${kind}-1`,
     name,
+    pluginId: kind as UserAgentStatus['pluginId'],
     proxy: kind as UserAgentStatus['proxy'],
     cliPath: ready ? `/bin/${kind}` : null,
     defaults: { model: '', thinking: '', mode: '' },
@@ -206,16 +207,16 @@ describe('NewSessionView', () => {
     codex.runtimeProfile = {
       id: 'profile-unverified',
       agentId: codex.id,
-      proxy: 'codex',
-      cliPath: '/bin/codex',
-      cliVersion: '0.147.0',
+      pluginId: 'codex',
+      runtimeId: 'codex',
+      path: '/bin/codex',
+      version: '0.147.0',
       configHome: '/Users/test/.codex',
-      cliFingerprint: 'runtime-new',
-      proxyVersion: '0.2.8',
-      verifiedCliVersions: ['0.146.0'],
+      contentFingerprint: 'runtime-new',
+      verifiedVersions: ['0.146.0'],
       verification: 'unverified',
-      skill: { name: 'gian-session', version: '0.2.8', state: 'ready' },
     };
+    codex.skill = { name: 'gian-session', version: '0.2.8', state: 'ready' };
     vi.mocked(loadAgents).mockResolvedValue([codex]);
     renderView();
     expect(await screen.findByTestId('ns-runtime-unverified')).toHaveTextContent(
@@ -305,6 +306,15 @@ describe('NewSessionView', () => {
         defaultValue: 'mock-model',
         choices: [{ value: 'mock-model', displayName: 'Mock Model' }],
       },
+      {
+        id: 'workspace_policy',
+        displayName: 'Workspace Policy',
+        binding: 'session' as const,
+        control: 'select' as const,
+        required: false,
+        defaultValue: 'safe',
+        choices: [{ value: 'safe', displayName: 'Safe' }],
+      },
     ];
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
       protocolVersion: '2.0',
@@ -330,6 +340,7 @@ describe('NewSessionView', () => {
     await openAgentPicker();
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     const select = await screen.findByLabelText('Workspace Dynamic');
+    expect(await screen.findByLabelText('Workspace Policy')).toBeInTheDocument();
     const row = screen.getByTestId('ns-agent-row');
     const sessionConfig = screen.getByTestId('ns-session-config');
     expect(row).toContainElement(sessionConfig);
@@ -344,6 +355,69 @@ describe('NewSessionView', () => {
       sessionConfig: { workspace_mode: 'strict' },
       turnConfig: {},
     }, 'agent-codex-1'));
+  });
+
+  it('keeps an explicit session-bound special value and sends its resolved turn defaults', async () => {
+    const dsh = agent('dsh', 'DeepSeek Harness');
+    const options = [
+      {
+        id: 'workspace_mode', displayName: 'Workspace Mock', binding: 'session' as const,
+        control: 'select' as const, required: false, defaultValue: 'default',
+        choices: [
+          { value: 'default', displayName: 'Default' },
+          { value: 'strict', displayName: 'Strict' },
+        ],
+      },
+      {
+        id: 'model', displayName: 'Mock Model', binding: 'session' as const, role: 'model',
+        control: 'select' as const, required: true, defaultValue: 'mock-sonnet',
+        choices: [
+          { value: 'mock-sonnet', displayName: 'Mock Sonnet' },
+          { value: 'mock-vision', displayName: 'Mock Vision' },
+        ],
+      },
+      {
+        id: 'mock_trace', displayName: 'Mock Trace', binding: 'turn' as const,
+        control: 'boolean' as const, required: false, defaultValue: false,
+        visibleWhen: [{ optionId: 'model', oneOf: ['mock-vision'] }],
+      },
+    ];
+    vi.mocked(loadAgents).mockResolvedValue([dsh]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.3',
+      catalogRevision: 'catalog-session-model',
+      specialCatalogs: { model: 'model' },
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 },
+      models: [],
+      modes: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockResolvedValue({
+      catalogRevision: 'catalog-session-model',
+      specialCatalogs: { model: 'model' },
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      resolvedDefaults: { sessionConfig: {}, turnConfig: { mock_trace: true } },
+    });
+
+    const { onCreate } = renderView({ initialAgentId: dsh.id });
+    await userEvent.selectOptions(await screen.findByLabelText('Workspace Mock'), 'strict');
+    await userEvent.selectOptions(await screen.findByLabelText('Mock Model'), 'mock-vision');
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-catalog-options')).toHaveTextContent('Mock Trace: true');
+    });
+
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'inspect');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: dsh.id,
+      sessionConfig: { workspace_mode: 'strict', model: 'mock-vision' },
+      turnConfig: { mock_trace: true },
+      firstMessage: 'inspect',
+    }));
   });
 
   it('shows DSH Catalog controls with Settings defaults without making them explicit', async () => {
@@ -638,6 +712,23 @@ describe('NewSessionView', () => {
     expect(localStorage.getItem('gian.new-session.return.v1')).toBe('1');
   });
 
+  it('seeds the composer with a one-shot initialMessage when no draft exists', async () => {
+    renderView({ initialMessage: 'I want to create a Gian scheduled task.' });
+    expect(screen.getByTestId('ns-message-input'))
+      .toHaveTextContent('I want to create a Gian scheduled task.');
+  });
+
+  it('keeps a restored draft message over the one-shot initialMessage', async () => {
+    localStorage.setItem(newSessionDraftStorageKey({ kind: 'workspace', id: 'ws-2' }), JSON.stringify({
+      workspaceId: 'ws-2',
+      message: 'back from the sheet',
+    }));
+    renderView({ initialWorkspaceId: 'ws-2', initialMessage: 'I want to create a Gian scheduled task.' });
+    expect(screen.getByTestId('ns-message-input')).toHaveTextContent('back from the sheet');
+    expect(screen.getByTestId('ns-message-input'))
+      .not.toHaveTextContent('I want to create a Gian scheduled task.');
+  });
+
   it('restores the stashed draft on the return trip', async () => {
     const key = newSessionDraftStorageKey({ kind: 'workspace', id: 'ws-2' });
     localStorage.setItem(key, JSON.stringify({
@@ -859,8 +950,12 @@ describe('NewSessionView', () => {
     const pdf = new File([new Uint8Array([0x25])], 'notes.pdf', { type: 'application/pdf' });
     fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [pdf] } });
 
-    await userEvent.click(await screen.findByText('notes.pdf'));
-    const pop = screen.getByTestId('new-session-screenshots');
+    // 2026-09-10 owner call: chips preview on hover; a plain click is a no-op.
+    const chip = await screen.findByText('notes.pdf');
+    await userEvent.click(chip);
+    expect(screen.queryByTestId('new-session-screenshots')).toBeNull();
+    await userEvent.hover(chip);
+    const pop = await screen.findByTestId('new-session-screenshots');
     expect(pop.querySelector('.ref-pop-thumb')).toBeNull();
     expect(pop.querySelector('.ref-pop-meta')).toHaveTextContent('1 B');
   });
@@ -885,11 +980,14 @@ describe('NewSessionView', () => {
     const image = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'shot.png', { type: 'image/png' });
     fireEvent.change(screen.getByTestId('ns-file-input'), { target: { files: [image] } });
 
-    await userEvent.click(await screen.findByText('shot.png'));
-    const pop = screen.getByTestId('new-session-screenshots');
-    // The thumbnail appears once the async Blob preview resolves.
-    const thumb = await within(pop).findByRole('img', { name: 'shot.png' });
-    await userEvent.click(thumb);
+    // 2026-09-10 owner call: a chip click zooms straight to the lightbox once
+    // the blob preview has resolved (hover first to await it).
+    const chip = await screen.findByText('shot.png');
+    await userEvent.hover(chip);
+    const pop = await screen.findByTestId('new-session-screenshots');
+    await within(pop).findByRole('img', { name: 'shot.png' });
+    await userEvent.unhover(chip);
+    await userEvent.click(chip);
     expect(zoomImage).toHaveBeenCalledWith('blob:new-session-screenshot', 'shot.png');
   });
 

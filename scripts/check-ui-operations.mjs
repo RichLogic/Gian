@@ -90,6 +90,7 @@ export const REST_MUTATION_TO_OPERATION = {
   openFileWith: ['files.openExternal'],
   openFileWithApp: ['files.openExternal'],
   openFileBuiltin: ['files.openExternal'],
+  openAbsoluteFile: ['files.openExternal'],
   revealWorkingTree: ['files.openExternal'],
   adoptNativeSession: ['native.adopt'],
   deleteNativeSession: ['native.delete'],
@@ -102,10 +103,21 @@ export const REST_MUTATION_TO_OPERATION = {
   updateAgent: ['agent.patch', 'agent.setPath', 'agent.switchProxy'],
   deleteAgent: ['agent.delete'],
   pickAgentCliPath: ['agent.pickCliPath'],
+  pickAgentHome: ['agent.pickHome'],
+  syncProxyCatalog: ['catalog.sync'],
+  installCatalogProxy: ['catalog.installProxy'],
+  updateCatalogProxy: ['catalog.updateProxy'],
+  rollbackCatalogProxy: ['catalog.rollbackProxy'],
+  discoverProxyRuntime: ['catalog.discoverRuntime'],
+  probeProxyRuntime: ['catalog.probeRuntime'],
   saveOnboardingProjectRoot: ['onboarding.saveProjectRoot'],
   completeOnboarding: ['onboarding.complete'],
   login: ['auth.login'],
   logout: ['auth.logout'],
+  // Conversation-bound Schedules (Issue #51 / ADR-0053): Timer mutations.
+  updateSchedule: ['schedule.update'],
+  scheduleAction: ['schedule.pause', 'schedule.resume', 'schedule.runNow', 'schedule.archive'],
+  resolveScheduleConfirmation: ['schedule.resolveConfirmation'],
 };
 
 /** Files whose `ws.send`/`fetch` use is transport-private by design (§4.1). */

@@ -16,10 +16,8 @@ import {
   discardComposerDraft,
 } from '../components/Composer.js';
 import { loadSessionTrace, loadAgents } from '../api.js';
-import { GitBadge } from '../components/GitBadge.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
-import { ForkOriginBanner } from '../components/ForkControls.js';
 import type { ActionControlState } from '../components/action-gating.js';
 import { TurnDiffChip } from '../components/TurnDiffChip.js';
 import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
@@ -106,20 +104,19 @@ export interface SessionMainProps {
   onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
   onDelete: () => void;
   onReopen?: () => void;
-  onShowChanges: () => void;
   /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
   onShowLastTurnChanges: (turn: number, path: string) => void;
-  workingTreeId: string | null;
-  branch: string | null;
   /** Session Fork standard controls (proposal §10.6): `forkAtTurnControl`
    *  gates the per-turn transcript affordance (`session.fork.atTurn`) —
    *  always rendered when provided, greyed never hidden (§15). The head-fork
-   *  entry lives in the session dropdown menu (PathBreadcrumb), not here.
-   *  `originParentName` is the caller-resolved parent session name for the
-   *  origin banner. */
+   *  entry lives in the session dropdown menu (PathBreadcrumb), not here. */
   forkAtTurnControl?: ActionControlState | null;
   sideChatControl?: ActionControlState | null;
-  originParentName?: string;
+  /** Timer "open the Run's Turn" request (Issue #51): when set, the
+   *  Transcript scrolls to the scheduled user message of this run and then
+   *  reports consumption. */
+  scheduleFocus?: { runId: string } | null;
+  onConsumeScheduleFocus?: () => void;
 }
 
 export function SessionMain({
@@ -154,13 +151,11 @@ export function SessionMain({
   onSetTurnConfig,
   onDelete,
   onReopen,
-  onShowChanges,
   onShowLastTurnChanges,
-  workingTreeId,
-  branch,
   forkAtTurnControl,
   sideChatControl,
-  originParentName,
+  scheduleFocus,
+  onConsumeScheduleFocus,
 }: SessionMainProps) {
   const t = useT();
   const dispatch = useOperationDispatchOptional();
@@ -247,9 +242,6 @@ export function SessionMain({
       });
     }
   }
-  const [gitRefreshKey, setGitRefreshKey] = useState(0);
-  const previousPendingRef = useRef(pending);
-
   // Chat / Trace tab. Core's persisted projection is authoritative because it
   // contains protocol-only step/request evidence that Transcript cannot carry.
   // The local projection keeps older/offline sessions readable while the Host
@@ -300,15 +292,10 @@ export function SessionMain({
     };
   }, [hydrated, items, running, session.id, sessionView]);
 
-  useEffect(() => {
-    if (previousPendingRef.current && !pending) {
-      setGitRefreshKey(key => key + 1);
-    }
-    previousPendingRef.current = pending;
-  }, [pending]);
-
   return (
     <main className="main">
+      {/* The top-right +N/-N Git badge was removed (2026-09-09 owner call);
+          changes open from the Diffs rail or the transcript's change chips. */}
       <div className="main-head session-chat-head">
         <div className="segm session-view-tabs" data-testid="session-view-tabs">
           <button
@@ -324,21 +311,7 @@ export function SessionMain({
             {t('trace.tab.trace')}
           </button>
         </div>
-        <div className="main-head-r">
-          <GitBadge
-            workingTreeId={workingTreeId}
-            branch={branch}
-            refreshKey={gitRefreshKey}
-            onClick={onShowChanges}
-          />
-        </div>
       </div>
-      {/* Fork lineage (proposal §10.6): a forked session is a normal
-          persistent session — the banner only names its parent and boundary.
-          No auto-switch, no source-session side effects. */}
-      {session.origin?.kind === 'fork' && (
-        <ForkOriginBanner origin={session.origin} parentName={originParentName} />
-      )}
       {terminal && (
         <div className={`session-banner ${session.worktree_outcome}`}>
           <span>
@@ -393,6 +366,8 @@ export function SessionMain({
             forkAtTurn={forkAtTurnControl
               ? { sourceSessionId: session.id, state: forkAtTurnControl }
               : null}
+            scheduleFocus={scheduleFocus}
+            onConsumeScheduleFocus={onConsumeScheduleFocus}
           />
         )}
       </div>

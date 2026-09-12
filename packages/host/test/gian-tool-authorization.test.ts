@@ -19,6 +19,7 @@ const ALL_METHODS: GianToolMethod[] = [
   'session.list', 'session.get', 'session.read', 'session.create', 'session.update',
   'session.assign_task', 'session.set_subtask_state', 'session.archive', 'session.send',
   'session.cancel_delivery', 'session.wait', 'session.stop',
+  'queue.update', 'queue.remove', 'queue.clear', 'queue.send_now',
   'worktree.create_and_bind',
   'interaction.list', 'interaction.respond',
 ];
@@ -183,6 +184,8 @@ function call(
       || method === 'session.send' || method === 'session.cancel_delivery'
       || method === 'session.stop' || method === 'worktree.create_and_bind'
       || method === 'interaction.respond'
+      || method === 'queue.update' || method === 'queue.remove'
+      || method === 'queue.clear' || method === 'queue.send_now'
       ? { idempotency_key: `${method}:${fixture.calls.length}` }
       : {}),
   });

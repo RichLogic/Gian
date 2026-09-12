@@ -1,5 +1,22 @@
 import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+
+const isolatedKimiHome = mkdtempSync(join(tmpdir(), 'gian-kimi-service-home-'));
+mkdirSync(join(isolatedKimiHome, '.kimi-code'), { recursive: true });
+process.env.HOME = isolatedKimiHome;
+process.env.KIMI_CODE_HOME = join(isolatedKimiHome, '.kimi-code');
+
+const fakeKimiCli = join(
+  fileURLToPath(new URL('../..', import.meta.url)),
+  'test',
+  'fixtures',
+  'fake-kimi-cli.mjs',
+);
+chmodSync(fakeKimiCli, 0o755);
 
 import {
   AgentSideConnection,
@@ -12,7 +29,9 @@ import {
   type PromptResponse,
 } from '@agentclientprotocol/sdk';
 
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
+import { KimiDataVersionError } from '../src/runtime/session-store.js';
 import { KimiProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
 import { proxyNotificationSchema, replayEventSchemaUnion, resultSchemas } from '@gian/proxy-protocol';
 import {
@@ -158,7 +177,7 @@ test('captures pre-response command updates and load replay without emitting pro
     },
   } as unknown as Agent;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return agent;
@@ -208,7 +227,7 @@ test('captures pre-response command updates and load replay without emitting pro
 test('a failed native load leaves no attached proxy row', async () => {
   let attempts = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       loadSession: async () => {
@@ -239,7 +258,7 @@ test('a failed native load leaves no attached proxy row', async () => {
 
 test('maps ACP auth_required to the stable proxy AUTH_REQUIRED code', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -257,7 +276,7 @@ test('maps ACP auth_required to the stable proxy AUTH_REQUIRED code', async () =
       && 'code' in error
       && error.code === 'AUTH_REQUIRED'
       && 'message' in error
-      && String(error.message).includes("'/managed/kimi' login")
+      && String(error.message).includes('login')
     ),
   );
 
@@ -269,7 +288,7 @@ test('allows concurrent prompts across sessions but rejects a second prompt in o
   const turns = new Map<string, Deferred<PromptResponse>>();
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -344,7 +363,7 @@ test('suppresses hidden /status output and refreshes context after compact', asy
   let remote!: AgentSideConnection;
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -495,7 +514,7 @@ test('suppresses hidden /status output and refreshes context after compact', asy
 test('enriches sparse ACP tool updates with the original tool metadata', async () => {
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-tools' }),
@@ -562,7 +581,7 @@ test('round-trips the exact opaque permission option', async () => {
   const permissionIssued = deferred<void>();
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-approval' }),
@@ -635,7 +654,7 @@ test('surfaces the AskUserQuestion text from the toolCall content block', async 
   const permissionIssued = deferred<void>();
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-question' }),
@@ -693,7 +712,7 @@ test('resumes the same native session after the shared ACP process restarts', as
   let generation = 0;
   let resumeCount = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => {
       generation += 1;
       return {
@@ -729,7 +748,7 @@ test('resumes the same native session after the shared ACP process restarts', as
 
 test('close reports detach when the negotiated agent has no session/close capability', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-detached' }),
@@ -778,7 +797,7 @@ const MODE_CONFIG_OPTIONS = [
 test('capabilities probes a throwaway session to advertise mode choices (cached)', async () => {
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -810,7 +829,7 @@ test('capabilities probes a throwaway session to advertise mode choices (cached)
 test('capabilities reuses an attached session\'s configOptions instead of probing', async () => {
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -866,7 +885,7 @@ const FULL_CONFIG_OPTIONS = [
 
 test('capabilities probes model and thinking choices from configOptions', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-probe', configOptions: FULL_CONFIG_OPTIONS }),
@@ -947,7 +966,7 @@ test('capabilities probes per-model thinking on a throwaway session', async () =
   const setConfigCalls: Array<{ sessionId: string; configId: string; value: unknown }> = [];
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -1006,7 +1025,7 @@ test('capabilities never mutates a live session while probing other models', asy
   const setConfigCalls: Array<{ sessionId: string; configId: string; value: unknown }> = [];
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -1048,7 +1067,7 @@ test('capabilities never mutates a live session while probing other models', asy
 
 test('capabilities reports no models when configOptions have no model option', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-probe', configOptions: MODE_CONFIG_OPTIONS }),
@@ -1066,7 +1085,7 @@ test('capabilities reports no models when configOptions have no model option', a
 
 test('capabilities reports empty modes and models when the probe session fails', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -1088,10 +1107,66 @@ function v2Request(id: string, method: string, params: Record<string, unknown>):
   return { id, method, params };
 }
 
+test('Kimi gian.proxy/2 advertises and maps HTTP hostServices when ACP supports them', async () => {
+  let newRequest: Record<string, unknown> | null = null;
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory(() => ({
+      initialize: async () => {
+        const response = initializeResponse();
+        return {
+          ...response,
+          agentCapabilities: {
+            ...response.agentCapabilities,
+            mcpCapabilities: { http: true },
+          },
+        };
+      },
+      newSession: async (params: Record<string, unknown>) => {
+        newRequest = params;
+        return { sessionId: 'native-browser' };
+      },
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.8', () => undefined);
+  const initialized = await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.3'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  })) as { capabilities: Record<string, unknown> };
+  assert.equal(initialized.capabilities['integration.mcp.streamableHttp'], 1);
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-browser',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+    hostServices: [{
+      id: 'gian',
+      protocol: 'mcp',
+      transport: {
+        type: 'streamable-http',
+        url: 'http://127.0.0.1:8991/internal/mcp',
+        headers: { Authorization: 'Bearer private' },
+      },
+    }],
+  }));
+  assert.equal(JSON.stringify(created).includes('Bearer private'), false);
+  assert.deepEqual(newRequest, {
+    cwd: '/tmp',
+    mcpServers: [{
+      type: 'http',
+      name: 'gian',
+      url: 'http://127.0.0.1:8991/internal/mcp',
+      headers: [{ name: 'Authorization', value: 'Bearer private' }],
+    }],
+  });
+  await service.close();
+});
+
 test('Kimi gian.proxy/2 translates ACP text, tools, usage, and Host ids', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -1208,7 +1283,7 @@ test('Kimi gian.proxy/2 translates ACP text, tools, usage, and Host ids', async 
 test('Kimi gian.proxy/2 projects TodoList tools as one deduplicated plan snapshot', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -1317,10 +1392,188 @@ test('Kimi gian.proxy/2 projects TodoList tools as one deduplicated plan snapsho
   await service.close();
 });
 
+test('Kimi gian.proxy/2 projects Agent, file edits, and plan-file writes semantically', async () => {
+  let remote!: AgentSideConnection;
+  const planPath = '/Users/demo/.kimi-code/sessions/wd_demo/session_native/agents/main/plans/repair.md';
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-semantic-tools' }),
+        prompt: async (params: { sessionId: string }) => {
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'agent-call-1',
+              title: 'Agent',
+              kind: 'other',
+              status: 'in_progress',
+              rawInput: {
+                description: 'Review the status reducer',
+                prompt: 'Inspect the reducer and report failures.',
+              },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-call-1',
+              status: 'completed',
+              rawOutput: { output: 'Reducer review complete.' },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'edit-call-1',
+              title: 'Edit',
+              kind: 'edit',
+              status: 'in_progress',
+              locations: [{ path: '/workspace/src/status.ts' }],
+              rawInput: {
+                path: '/workspace/src/status.ts',
+                old_string: 'old\nline',
+                new_string: 'new\nline\nextra',
+              },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'edit-call-1',
+              status: 'completed',
+              rawOutput: { output: 'Updated.' },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'plan-write-1',
+              title: `Writing ${planPath}`,
+              kind: 'edit',
+              status: 'in_progress',
+              locations: [{ path: planPath }],
+              rawInput: {
+                path: planPath,
+                content: '## Repair plan\n\n- [x] Inspect\n- [ ] Implement',
+              },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'plan-write-1',
+              status: 'completed',
+              rawOutput: { output: 'Written.' },
+            } as never,
+          });
+          return { stopReason: 'end_turn' };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.9', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('semantic-init', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.2'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('semantic-create', 'session.create', {
+    sessionId: 'host-semantic-tools',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('semantic-turn', 'turn.start', {
+    sessionId: 'host-semantic-tools',
+    streamId: created.session.streamId,
+    turnId: 'host-semantic-turn',
+    input: [{ type: 'text', text: 'repair the cards' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'turn.completed'),
+    'semantic tool turn did not complete',
+  );
+
+  const activityData = (activityId: string) => notifications
+    .filter(item => item.method === 'activity.updated')
+    .map(item => item.params.data as Record<string, unknown>)
+    .filter(data => data.activityId === activityId);
+  const agents = activityData('agent-call-1');
+  assert.equal(agents.length, 2);
+  assert.deepEqual(agents.map(data => ({
+    title: data.title,
+    status: data.status,
+    presentation: data.presentation,
+  })), [
+    {
+      title: 'Review the status reducer',
+      status: 'running',
+      presentation: {
+        type: 'agent',
+        data: { agentId: 'agent-call-1', state: 'running' },
+      },
+    },
+    {
+      title: 'Review the status reducer',
+      status: 'succeeded',
+      presentation: {
+        type: 'agent',
+        data: {
+          agentId: 'agent-call-1',
+          state: 'completed',
+          output: 'Reducer review complete.',
+        },
+      },
+    },
+  ]);
+
+  const edits = activityData('edit-call-1');
+  assert.equal(edits.length, 2);
+  assert.deepEqual((edits[1]?.presentation as { data?: unknown }).data, {
+    path: '/workspace/src/status.ts',
+    operation: 'write',
+    added: 3,
+    removed: 2,
+  });
+  const plan = notifications.find(item => item.method === 'plan.updated');
+  const planData = plan?.params.data as {
+    planId: string;
+    title: string;
+    steps: unknown[];
+  };
+  assert.match(planData.planId, /^plan:kimi-turn-/);
+  assert.deepEqual({ title: planData.title, steps: planData.steps }, {
+    title: '## Repair plan\n\n- [x] Inspect\n- [ ] Implement',
+    steps: [],
+  });
+  assert.equal(
+    activityData('plan-write-1').every(data => (
+      (data.presentation as { type?: unknown }).type === 'file'
+    )),
+    true,
+    'the plan file write must remain visible as a file change',
+  );
+  await service.close();
+});
+
 test('Kimi config updates cannot emit Turn activity before turn.started', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -1384,7 +1637,7 @@ test('Kimi config updates cannot emit Turn activity before turn.started', async 
 test('Kimi gian.proxy/2 rejects session-bound config before any native session exists', async () => {
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -1426,7 +1679,7 @@ test('Kimi gian.proxy/2 rejects session-bound config before any native session e
 test('Kimi gian.proxy/2 returns Replay Events on one synthetic stream', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -1488,7 +1741,7 @@ test('Kimi gian.proxy/2 validates turn config before touching the runtime', asyn
   const configCalls: Array<{ configId: string; value: unknown }> = [];
   let promptCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-cfg', configOptions: MODE_CONFIG_OPTIONS }),
@@ -1571,7 +1824,7 @@ test('Kimi gian.proxy/2 validates turn config before touching the runtime', asyn
 
 test('Kimi gian.proxy/2 advertises catalog.resolve and rebuilds thinking per model', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({
@@ -1635,7 +1888,7 @@ test('Kimi gian.proxy/2 validates thinking against the requested model', async (
   let promptCalls = 0;
   let newSessionCalls = 0;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => {
@@ -1708,7 +1961,7 @@ test('Kimi gian.proxy/2 validates thinking against the requested model', async (
 
 test('Kimi gian.proxy/2 session.create is idempotent and conflicts on different payloads', async () => {
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-idem' }),
@@ -1759,7 +2012,7 @@ test('Kimi gian.proxy/2 interaction.respond keeps native IDs and is responseId-i
   const permissionIssued = deferred<void>();
   const endGate = deferred<void>();
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -1891,7 +2144,7 @@ test('Kimi gian.proxy/2 interaction.respond keeps native IDs and is responseId-i
 test('Kimi gian.proxy/2 maps native stop reasons to contract stopReasons', async () => {
   const reasons = ['max_tokens', 'max_turn_requests', 'refusal', 'cancelled'];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-stops' }),
@@ -1942,7 +2195,7 @@ test('Kimi gian.proxy/2 maps native stop reasons to contract stopReasons', async
 test('Kimi gian.proxy/2 reports interrupted only after a host-accepted interrupt', async () => {
   const promptGate = deferred<void>();
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-interrupt' }),
@@ -2008,7 +2261,7 @@ test('Kimi gian.proxy/2 reports interrupted only after a host-accepted interrupt
 test('Kimi gian.proxy/2 degrades unknown ACP updates to generic activities', async () => {
   let remote!: AgentSideConnection;
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -2150,7 +2403,7 @@ test('Kimi gian.proxy/2 mirrors a shared-runtime crash and resumes on the next t
     };
   };
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: crashFactory,
   });
   const service = new KimiProxyService({ runtime });
@@ -2274,9 +2527,29 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
         rawOutput: { text: 'source' },
       },
     });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'agent-stable',
+        title: 'Agent',
+        kind: 'other',
+        status: 'in_progress',
+        rawInput: { description: 'Review replay parity' },
+      } as never,
+    });
+    await remote.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-stable',
+        status: 'completed',
+        rawOutput: { output: 'Replay is stable.' },
+      } as never,
+    });
   };
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
       remote = client;
       return {
@@ -2363,6 +2636,26 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
               status: 'completed',
               rawOutput: { text: 'source' },
             },
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'agent-stable',
+              title: 'Agent',
+              kind: 'other',
+              status: 'in_progress',
+              rawInput: { description: 'Review replay parity' },
+            } as never,
+          });
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'agent-stable',
+              status: 'completed',
+              rawOutput: { output: 'Replay is stable.' },
+            } as never,
           });
           return { stopReason: 'end_turn', usage: ACP_V0_23_PROMPT_USAGE.usage };
         },
@@ -2481,6 +2774,7 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
   assert.deepEqual(replayIds('plan.updated'), liveIds('plan.updated'));
   assert.equal(new Set(replayIds('plan.updated')).size, 2, 'each plan update needs its own eventId');
   const isStableTool = (data: Record<string, unknown>) => data.activityId === 'tool-stable';
+  const isStableAgent = (data: Record<string, unknown>) => data.activityId === 'agent-stable';
   assert.deepEqual(replayIds('activity.updated', isStableTool), liveIds('activity.updated', isStableTool));
   assert.equal(
     new Set(replayIds('activity.updated', isStableTool)).size,
@@ -2491,6 +2785,8 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
   assert.deepEqual(replayData('content.delta'), liveData('content.delta'));
   assert.deepEqual(replayData('content.completed'), liveData('content.completed'));
   assert.deepEqual(replayData('activity.updated', isStableTool), liveData('activity.updated', isStableTool));
+  assert.deepEqual(replayIds('activity.updated', isStableAgent), liveIds('activity.updated', isStableAgent));
+  assert.deepEqual(replayData('activity.updated', isStableAgent), liveData('activity.updated', isStableAgent));
   assert.deepEqual(replayData('turn.completed'), liveData('turn.completed'));
 
   const occurrenceFloor = (adapter as unknown as {
@@ -2522,7 +2818,7 @@ test('auto-cancels a permission request that carries no options', async () => {
   let permissionResponse: unknown;
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-empty-perm' }),
@@ -2564,7 +2860,7 @@ test('Kimi gian.proxy/2 auto-cancels a permission request whose options have no 
   let permissionResponse: unknown;
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-no-ids' }),
@@ -2627,7 +2923,7 @@ test('Kimi gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
   let nextNativeId = 1;
   const forkCalls: string[] = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory(() => ({
       initialize: async () => ({
         protocolVersion: 1,
@@ -2736,7 +3032,7 @@ test('Kimi gian.proxy/2 relays ACP permission kinds in context and keeps optionI
   const permissionIssued = deferred<void>();
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
-    binaryPath: '/managed/kimi',
+    binaryPath: fakeKimiCli,
     transportFactory: transportFactory((remote) => ({
       initialize: async () => initializeResponse(),
       newSession: async () => ({ sessionId: 'native-kinds' }),
@@ -2763,7 +3059,7 @@ test('Kimi gian.proxy/2 relays ACP permission kinds in context and keeps optionI
   });
   const service = new KimiProxyService({ runtime });
   await service.initialize();
-  const adapter = new KimiProtocolV2Adapter(service, '0.2.7', (method, params) => {
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.9', (method, params) => {
     notifications.push({ method, params });
     // The context extension must survive the strict gian.proxy/2 schema.
     proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -2834,4 +3130,142 @@ test('Kimi gian.proxy/2 relays ACP permission kinds in context and keeps optionI
   });
 
   await service.close();
+});
+
+function countingKimiService(nativeCalls: { newSession: number; loadSession: number }) {
+  const agent = {
+    async initialize() {
+      return {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true },
+        agentInfo: { name: 'kimi', version: '0.38.0' },
+      } as InitializeResponse;
+    },
+    async newSession() {
+      nativeCalls.newSession += 1;
+      return { sessionId: `native-${nativeCalls.newSession}` };
+    },
+    async loadSession() {
+      nativeCalls.loadSession += 1;
+      return {};
+    },
+    async authenticate() { return {}; },
+    async prompt() { return { stopReason: 'end_turn' } as PromptResponse; },
+    async cancel() { return; },
+  } as unknown as Agent;
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory(() => agent),
+  });
+  return new KimiProxyService({ runtime });
+}
+
+test('Kimi activation rejects corrupt metadata before any native Session exists', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'gian-kimi-corrupt-'));
+  const previousHome = process.env.HOME;
+  const previousKimi = process.env.KIMI_CODE_HOME;
+  process.env.HOME = home;
+  process.env.KIMI_CODE_HOME = join(home, '.kimi-code');
+  t.after(() => {
+    process.env.HOME = previousHome;
+    if (previousKimi === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previousKimi;
+  });
+  await mkdir(join(home, '.kimi-code', '.gian-session-store-compat'), { recursive: true });
+  await writeFile(join(home, '.kimi-code', '.gian-session-store-compat', 'v2'), '');
+  const nativeCalls = { newSession: 0, loadSession: 0 };
+  const service = countingKimiService(nativeCalls);
+  await assert.rejects(
+    () => service.createSession({ cwd: '/workspace/corrupt' }),
+    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_UNKNOWN_SCHEMA',
+  );
+  await assert.rejects(
+    () => service.createSession({
+      cwd: '/workspace/corrupt-load',
+      nativeSessionId: 'native-existing',
+      resumeMode: 'load',
+    }),
+    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_UNKNOWN_SCHEMA',
+  );
+  assert.deepEqual(nativeCalls, { newSession: 0, loadSession: 0 });
+  await service.close();
+});
+
+test('Kimi activation rejects a write failure before any native Session exists', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'gian-kimi-writefail-'));
+  const previousHome = process.env.HOME;
+  const previousKimi = process.env.KIMI_CODE_HOME;
+  process.env.HOME = home;
+  process.env.KIMI_CODE_HOME = join(home, '.kimi-code');
+  t.after(() => {
+    process.env.HOME = previousHome;
+    if (previousKimi === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previousKimi;
+  });
+  const versionRoot = join(home, '.kimi-code', '.gian-session-store-compat', 'v1');
+  await mkdir(versionRoot, { recursive: true });
+  await chmod(join(home, '.kimi-code', '.gian-session-store-compat'), 0o555);
+  await chmod(versionRoot, 0o555);
+  const nativeCalls = { newSession: 0, loadSession: 0 };
+  const service = countingKimiService(nativeCalls);
+  await assert.rejects(
+    () => service.createSession({ cwd: '/workspace/write-fail' }),
+    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_ACTIVATION_WRITE_FAILED',
+  );
+  assert.equal(nativeCalls.newSession, 0);
+  await service.close();
+});
+
+test('Kimi activation rejects a downgrade before any native Session exists', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'gian-kimi-downgrade-'));
+  const previousHome = process.env.HOME;
+  const previousKimi = process.env.KIMI_CODE_HOME;
+  process.env.HOME = home;
+  process.env.KIMI_CODE_HOME = join(home, '.kimi-code');
+  t.after(() => {
+    process.env.HOME = previousHome;
+    if (previousKimi === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previousKimi;
+  });
+  const versionRoot = join(home, '.kimi-code', '.gian-session-store-compat', 'v1');
+  await mkdir(versionRoot, { recursive: true });
+  await writeFile(join(versionRoot, '9.9.9'), '');
+  const nativeCalls = { newSession: 0, loadSession: 0 };
+  const service = countingKimiService(nativeCalls);
+  await assert.rejects(
+    () => service.createSession({ cwd: '/workspace/downgrade' }),
+    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_DOWNGRADE',
+  );
+  assert.equal(nativeCalls.newSession, 0);
+  await service.close();
+});
+
+test('valid concurrent Kimi activation stays monotonic', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'gian-kimi-monotonic-'));
+  const previousHome = process.env.HOME;
+  const previousKimi = process.env.KIMI_CODE_HOME;
+  process.env.HOME = home;
+  process.env.KIMI_CODE_HOME = join(home, '.kimi-code');
+  t.after(() => {
+    process.env.HOME = previousHome;
+    if (previousKimi === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previousKimi;
+  });
+  const firstCalls = { newSession: 0, loadSession: 0 };
+  const secondCalls = { newSession: 0, loadSession: 0 };
+  const first = countingKimiService(firstCalls);
+  const second = countingKimiService(secondCalls);
+  await Promise.all([
+    first.createSession({ cwd: '/workspace/one' }),
+    second.createSession({ cwd: '/workspace/two' }),
+  ]);
+  assert.equal(firstCalls.newSession, 1);
+  assert.equal(secondCalls.newSession, 1);
+  const thirdCalls = { newSession: 0, loadSession: 0 };
+  const third = countingKimiService(thirdCalls);
+  await third.createSession({ cwd: '/workspace/three' });
+  assert.equal(thirdCalls.newSession, 1);
+  await first.close();
+  await second.close();
+  await third.close();
 });

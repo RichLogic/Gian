@@ -157,7 +157,7 @@ describe('P1 running rows', () => {
     // Layout regression (2026-08-27): the cursor must follow the output as
     // an inline-block at the END of the text — the stylesheet rule is a
     // plain block, never the old top-aligned flex row.
-    const css = readFileSync('src/styles/events.css', 'utf8');
+    const css = readFileSync('../chat-ui/styles/chat-ui.css', 'utf8');
     const rule = css.match(/\.cmd-stream\s*\{([^}]*)\}/);
     expect(rule).not.toBeNull();
     expect(rule![1]).toContain('display: block');

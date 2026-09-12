@@ -1,0 +1,565 @@
+/* Timer / conversation-bound Schedules (Issue #51 / ADR-0053) — a quiet,
+   compact management surface: fixed five-column list, the detail in the
+   shared panel 2 (`.p2`), and the create-confirmation card. Loaded after
+   tasks-v3 so the timer rules win on shared shells (.view / .sidebar /
+   .main-head). */
+
+/* ── List filters ───────────────────────────────────────────────────────── */
+
+.timer-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hairline-2);
+}
+
+.timer-filter {
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-2);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: var(--fz-11);
+  cursor: pointer;
+}
+
+.timer-filter.on {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.timer-filter:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* ── Main: head + states + the five-column table ────────────────────────── */
+
+.timer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timer-title {
+  font-weight: 600;
+  font-size: var(--fz-15);
+}
+
+.timer-head-spacer {
+  flex: 1;
+}
+
+.timer-offline {
+  margin: 8px 16px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--warn-soft);
+  color: var(--text-2);
+  font-size: var(--fz-12);
+}
+
+.timer-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 16px;
+  color: var(--text-3);
+  font-size: var(--fz-12);
+}
+
+/* Empty state (design 07-B): alarm glyph + title + the Gian-held semantics
+   paragraph + the primary create CTA, centered in the scroll area. */
+.timer-empty .e-ico { display: inline-flex; color: var(--text-3); opacity: .7; }
+.timer-empty .e-t { font-size: var(--fz-13); font-weight: 600; color: var(--text-2); }
+.timer-empty .e-d { font-size: var(--fz-12); max-width: 400px; }
+.timer-empty .btn { margin-top: 6px; }
+
+/* Horizontal scroll container: narrow windows scroll the table instead of
+   overlapping column text. */
+.timer-table-wrap {
+  overflow-x: auto;
+  padding: 4px 12px 12px;
+}
+
+.timer-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: var(--fz-12);
+}
+
+.timer-col-name { width: 30%; }
+.timer-col-status { width: 15%; }
+.timer-col-conversation { width: 27%; }
+.timer-col-next { width: 15%; }
+.timer-col-actions { width: 13%; }
+
+.timer-table th {
+  text-align: left;
+  color: var(--text-3);
+  font-weight: 500;
+  font-size: var(--fz-11);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+.timer-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--hairline-2);
+  vertical-align: top;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.timer-row {
+  cursor: pointer;
+}
+
+.timer-row:hover td {
+  background: var(--surface-2);
+}
+
+.timer-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.timer-cell-name .timer-name,
+.timer-cell-conversation .timer-conversation {
+  display: block;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.timer-trigger,
+.timer-owner {
+  display: block;
+  color: var(--text-3);
+  font-size: var(--fz-11);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.timer-cell-next {
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.timer-status {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: var(--fz-10);
+  white-space: nowrap;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+
+.timer-status.is-active { background: var(--ok-soft); color: var(--ok); }
+.timer-status.is-paused { background: var(--warn-soft); color: var(--warn); }
+.timer-status.is-archived { color: var(--text-3); }
+
+.timer-status-reason {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: var(--fz-10);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Run statuses reuse the same pill; failures stand out. */
+.timer-status.run-failed,
+.timer-status.run-unknown { background: var(--danger-soft); color: var(--danger); }
+.timer-status.run-succeeded { background: var(--ok-soft); color: var(--ok); }
+.timer-status.run-running,
+.timer-status.run-starting,
+.timer-status.run-waiting_interaction { background: var(--accent-soft); color: var(--accent-text); }
+.timer-status.run-skipped_overlap,
+.timer-status.run-missed { background: var(--warn-soft); color: var(--warn); }
+
+/* Row actions: icon buttons visible on hover/focus (same affordance as the
+   session rail's .ri-act). */
+.timer-actions {
+  position: static;
+  inset: auto;
+  transform: none;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.timer-row .timer-actions .ri-act {
+  opacity: 0;
+}
+
+.timer-row:hover .timer-actions .ri-act,
+.timer-row:focus-within .timer-actions .ri-act,
+.timer-actions .ri-act:focus-visible,
+.timer-actions .ri-act:disabled {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .timer-row .timer-actions .ri-act {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.ri-act.danger:hover {
+  color: var(--danger);
+}
+
+.timer-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
+}
+
+/* ── Detail: panel-2 (`.p2`) head, tabs, Definition form, Runs table ────────
+   The detail lives in the shared panel-2 shell (clamp 440–640px, same as the
+   Agents/Custom details), never on a full `.main` surface: `.p2-head`/
+   `.p2-body` come from agents-page.css; the rules below only adapt schedule
+   specifics. */
+
+.schedule-detail-head {
+  /* Name + status + three action buttons + close can exceed the panel's
+     440px floor, so the head wraps instead of overflowing. */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  height: auto;
+  min-height: var(--panel-header-h);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.schedule-detail-name {
+  font-weight: 600;
+  font-size: var(--fz-13);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.schedule-detail-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.schedule-tabs {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.schedule-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  padding: 7px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.schedule-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.schedule-tab:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.schedule-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule-label {
+  font-size: var(--fz-11);
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.schedule-static {
+  font-size: var(--fz-12);
+  color: var(--text-2);
+}
+
+.schedule-input {
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fz-12);
+  padding: 6px 9px;
+  font-family: inherit;
+}
+
+.schedule-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+.schedule-input:disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.schedule-prompt {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.5;
+}
+
+.schedule-trigger-kinds {
+  display: inline-flex;
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.schedule-trigger-kind {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.schedule-trigger-kind + .schedule-trigger-kind {
+  border-left: 1px solid var(--hairline);
+}
+
+.schedule-trigger-kind.active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.schedule-trigger-kind:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.schedule-interval {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-interval-value {
+  width: 90px;
+}
+
+.schedule-hint {
+  color: var(--warn);
+  font-size: var(--fz-11);
+}
+
+.schedule-form-error,
+.schedule-conflict {
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: var(--fz-12);
+}
+
+.schedule-form-error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.schedule-conflict {
+  background: var(--warn-soft);
+  color: var(--text-2);
+}
+
+.schedule-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.schedule-runs-table {
+  min-width: 720px;
+}
+
+.schedule-run-result {
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.schedule-run-row {
+  cursor: default;
+}
+
+/* ── Create-confirmation card (contract L) ──────────────────────────────── */
+
+.schedule-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: oklch(0.22 0.02 280 / 0.28);
+  z-index: 60;
+}
+
+.schedule-confirm-card {
+  width: min(520px, calc(100vw - 32px));
+  max-height: 76vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: 8px;
+  box-shadow: var(--shadow-2);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.schedule-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-confirm-title {
+  font-weight: 600;
+  font-size: var(--fz-13);
+}
+
+.schedule-confirm-more {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: var(--fz-11);
+}
+
+.schedule-confirm-body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.schedule-confirm-row {
+  display: flex;
+  gap: 12px;
+  font-size: var(--fz-12);
+}
+
+.schedule-confirm-row dt {
+  flex: 0 0 96px;
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+.schedule-confirm-row dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.schedule-confirm-prompt-toggle {
+  border: none;
+  background: transparent;
+  color: var(--accent-text);
+  font-size: var(--fz-11);
+  cursor: pointer;
+  padding: 0 0 3px;
+}
+
+.schedule-confirm-prompt {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: var(--fz-12);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.schedule-confirm-occurrences {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-2);
+}
+
+.schedule-confirm-risk {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--warn-soft);
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  line-height: 1.5;
+}
+
+.schedule-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ── Transcript provenance tag ("sent by a schedule") ───────────────────── */
+
+.msg-schedule-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 10.5px;
+  padding: 1px 8px;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+button.msg-schedule-tag:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-ring);
+}
+
+.msg-schedule-tag:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.msg-schedule-tag-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

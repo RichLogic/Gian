@@ -49,10 +49,10 @@ test('execution plan uses exact catalog files and selected scopes', () => {
 
 test('root typecheck builds declaration dependencies before recursive checks', () => {
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.match(
-    packageJson.scripts.typecheck,
-    /@gian\/shared build.*@gian\/proxy-protocol build.*@gian\/tool-cli build.*@gian\/tool-mcp build.*pnpm -r typecheck/,
-  );
+  assert.equal(packageJson.scripts.typecheck, 'node scripts/run-verification.mjs typecheck');
+  const source = readFileSync(new URL('./typecheck.mjs', import.meta.url), 'utf8');
+  assert.match(source, /'shared', 'proxy-protocol', 'proxy-catalog-contract', 'remote-protocol', 'chat-ui', 'tool-cli', 'tool-mcp', null/);
+  assert.match(source, /\['-r', 'typecheck'\]/);
 });
 
 function git(cwd, args) {

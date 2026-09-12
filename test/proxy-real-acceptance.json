@@ -1,7 +1,18 @@
 {
   "version": 1,
-  "protocol": "gian.proxy/2.1",
-  "description": "Real Provider acceptance catalog for every Proxy behavior implemented in Gian 0.5.2.",
+  "protocol": "gian.proxy/2.3",
+  "description": "Version-independent Proxy qualification catalog for deterministic and real Provider evidence.",
+  "certification": {
+    "schemaVersion": 1,
+    "shippingSource": "scripts/build-proxy-artifacts.mjs#shippingProxyIds",
+    "requiredResult": "PASS",
+    "realEvidenceMaxAgeHours": 72,
+    "stages": {
+      "development": ["catalog", "affected-deterministic"],
+      "nightly": ["catalog", "full-deterministic", "proxy-ui"],
+      "release": ["catalog", "full-deterministic", "proxy-ui", "preview", "package", "real-provider"]
+    }
+  },
   "resultSchemas": {
     "initialize": "initializeResultSchema",
     "catalog.list": "catalogResultSchema",
@@ -16,6 +27,10 @@
     "sidechat.resume": "sidechatResultSchema",
     "sidechat.close": "sidechatCloseResultSchema",
     "session.fork": "sessionForkResultSchema",
+    "runtime.discover": "runtimeDiscoverResultSchema",
+    "runtime.probe": "runtimeProbeResultSchema",
+    "customization.list": "customizationListResultSchema",
+    "customization.detail": "customizationDetailResultSchema",
     "turn.start": "turnStartResultSchema",
     "turn.interrupt": "turnControlResultSchema",
     "turn.steer": "turnControlResultSchema",
@@ -114,7 +129,7 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.2.3",
+      "pluginVersion": "0.2.4",
       "processScope": "session",
       "binary": "/Users/richlogic/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -155,7 +170,7 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.12",
+      "pluginVersion": "0.2.15",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
@@ -203,7 +218,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.7",
+      "pluginVersion": "0.2.9",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -242,7 +257,7 @@
     },
     "grok": {
       "displayName": "Grok Build",
-      "pluginVersion": "0.3.2",
+      "pluginVersion": "0.3.3",
       "processScope": "session",
       "binary": "grok",
       "cheapestConfig": {
@@ -285,15 +300,16 @@
       ]
     },
     "dsh": {
-      "displayName": "DeepSeek Harness Bridge",
+      "displayName": "DeepSeek Harness",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.5",
+      "pluginVersion": "0.1.6",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
       "cheapestConfig": {
         "provider": "opencode-go",
-        "model": "deepseek-v4-flash"
+        "model": "deepseek-v4-flash",
+        "permission_preset": "$catalog-default"
       },
       "capabilities": [
         "catalog.resolve",
@@ -301,7 +317,8 @@
         "event.reasoning",
         "event.usage",
         "event.step",
-        "event.request"
+        "event.request",
+        "interaction"
       ],
       "implementedNotifications": [
         "turn.started",
@@ -316,17 +333,20 @@
         "step.updated",
         "request.updated",
         "usage.updated",
-        "catalog.changed"
+        "catalog.changed",
+        "interaction.requested",
+        "interaction.resolved"
       ]
     },
     "zcode": {
       "displayName": "ZCode",
       "pluginId": "com.zhipu.zcode",
-      "pluginVersion": "0.1.0",
+      "pluginVersion": "0.1.1",
       "processScope": "shared",
       "binary": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       "interactionDelayMs": 25000,
       "cheapestConfig": {
+        "provider": "$catalog-default",
         "model": "$catalog-default",
         "thinking": "$catalog-default",
         "approval_mode": "$catalog-default"
@@ -662,6 +682,60 @@
       "notifications": ["interaction.resolved", "activity.updated", "session.updated"],
       "steps": ["close active and idle sessions", "shutdown", "repeat shutdown", "sample process group until empty"],
       "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
-    }
+    },
+    {
+      "id": "runtime.bootstrap_discovery",
+      "category": "runtime",
+      "trigger": "control",
+      "purpose": "Validate the Manifest v4 no-Runtime bootstrap and Proxy-owned runtime discovery/probe contract without creating a Provider Session.",
+      "methods": ["runtime.discover", "runtime.probe"],
+      "notifications": [],
+      "steps": [
+        "start packaged Proxy with the Host bootstrap marker",
+        "initialize at exact gian.proxy/2.2",
+        "discover bounded Runtime candidates",
+        "probe one candidate and verify the echoed path/profile",
+        "shutdown without creating a Session"
+      ],
+      "providers": {
+        "claude": "contract_only",
+        "codex": "contract_only",
+        "kimi": "contract_only",
+        "grok": "contract_only",
+        "dsh": "contract_only",
+        "zcode": "contract_only"
+      }
+    },
+    {
+      "id": "customization.read_only_inventory",
+    "category": "customization",
+    "trigger": "control",
+    "purpose": "Customization Inventory (gian.proxy/2.3): read-only per-kind listing with no session creation, no model turn, no MCP connection, no hook execution and no config writes.",
+    "methods": ["customization.list"],
+    "notifications": [],
+    "steps": [
+      "start proxy",
+      "initialize (offer 2.3)",
+      "customization.list for each kind with the workspace cwd",
+      "assert structurally complete Result per kind"
+    ],
+    "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
+  },
+  {
+    "id": "customization.lazy_detail",
+    "category": "customization",
+    "trigger": "control",
+    "purpose": "Customization Inventory detail: lazy per-item read by stable id; MCP/Hook views are sanitized config, no secrets on the wire.",
+    "methods": ["customization.detail"],
+    "notifications": [],
+    "steps": [
+      "start proxy",
+      "initialize (offer 2.3)",
+      "customization.list",
+      "customization.detail for a listed stable item id",
+      "assert sanitized view and no credential material"
+    ],
+    "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
+  }
   ]
 }

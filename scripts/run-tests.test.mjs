@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
   builtPackageTestPlan,
   parseRunOptions,
   sanitizedTestEnv,
   selectCatalogEntries,
+  scriptsNeedProxyProtocol,
 } from './run-tests.mjs';
 
 test('sanitizedTestEnv removes inherited Gian production configuration', () => {
@@ -83,4 +85,33 @@ test('compiled package tests run from their package root', () => {
       paths: [join(packageRoot, 'dist/test/protocol-v1-cli.test.js')],
     },
   );
+});
+
+test('root Proxy artifact tests request a clean Proxy Protocol build first', () => {
+  assert.equal(scriptsNeedProxyProtocol(['scripts/build-proxy-artifacts.test.mjs']), true);
+  assert.equal(scriptsNeedProxyProtocol(['scripts/proxy-real-acceptance-catalog.test.mjs']), true);
+  assert.equal(scriptsNeedProxyProtocol(['scripts/check-ui-operations.test.mjs']), false);
+});
+
+test('Host integration runs after compiled Proxy package runners', async () => {
+  const source = await readFile(new URL('./run-tests.mjs', import.meta.url), 'utf8');
+  const hostRun = source.lastIndexOf("entriesForRunner(selected, 'host-node-tsx')");
+  for (const runner of [
+    'cc-proxy-node',
+    'codex-proxy-node',
+    'kimi-proxy-node',
+    'grok-proxy-node',
+    'dsh-proxy-node',
+    'zcode-proxy-node',
+  ]) {
+    assert.ok(source.indexOf(`'${runner}'`) < hostRun, `${runner} must build before Host tests`);
+  }
+  assert.match(source, /runPnpm\(\['--filter', '\.\/packages\/proxies\/\*\*', 'build'\], env\)/);
+});
+
+
+test('isolated Host-only runs build both Remote and Catalog contracts', async () => {
+  const source = await readFile(new URL('./run-tests.mjs', import.meta.url), 'utf8');
+  assert.match(source, /entry.runner === 'host-node-tsx' \|\| entry.runner === 'remote-protocol-node'/);
+  assert.match(source, /hostSelected && !selected.some\(entry => entry.runner === 'proxy-catalog-contract-node'\)/);
 });

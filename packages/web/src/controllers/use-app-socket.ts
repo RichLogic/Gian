@@ -11,6 +11,8 @@ import type {
   Workspace,
 } from '@gian/shared';
 import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
+import { hydrateScheduleConfirmations, upsertScheduleConfirmation } from './schedule-confirmations.js';
+import { notifyScheduleChanged, notifyScheduleResync } from '../presentation/schedule-sync.js';
 import {
   invalidateSlashCacheForWorkspace,
   SLASH_CACHE_INVALIDATED_EVENT,
@@ -243,6 +245,74 @@ export function useAppSocket(input: UseAppSocketInput): void {
       });
     };
 
+    const projectLocalBrowserApproval = (approval: {
+      id: string;
+      session_id: string;
+      category: string;
+      description?: string;
+      command?: string;
+      status: string;
+      turn_number?: number;
+    }) => {
+      if (approval.category !== 'browser_capture'
+        || approval.status !== 'pending'
+        || !Number.isInteger(approval.turn_number)
+        || (approval.turn_number ?? 0) <= 0) return;
+      const session = latest.current.sessionsRef.current
+        .find(candidate => candidate.id === approval.session_id);
+      const description = approval.description || 'Allow this Session to capture the current Browser page?';
+      handleEnvelope({
+        session_id: approval.session_id,
+        turn: approval.turn_number!,
+        call_id: `browser-capture:${approval.id}`,
+        event: 'approval.requested',
+        ts: Date.now(),
+        data: {},
+        display: {
+          type: 'interaction.approval',
+          data: {
+            approvalId: approval.id,
+            category: 'browser_capture',
+            risk: 'high',
+            title: 'Browser screenshot',
+            description,
+            subject: approval.command || '',
+            scopeOptions: ['once', 'session'],
+          },
+        },
+      }, session?.executor ?? 'claude');
+    };
+
+    const resolveLocalBrowserApproval = (approval: {
+      id: string;
+      session_id?: string;
+      turn_number?: number;
+      decision?: string;
+    }) => {
+      if (!approval.session_id
+        || !Number.isInteger(approval.turn_number)
+        || (approval.turn_number ?? 0) <= 0) return;
+      const decision = approval.decision === 'allow_session'
+        ? 'allow_session'
+        : approval.decision === 'decline' || approval.decision === 'keep_planning'
+          ? 'decline'
+          : 'allow_once';
+      const session = latest.current.sessionsRef.current
+        .find(candidate => candidate.id === approval.session_id);
+      handleEnvelope({
+        session_id: approval.session_id,
+        turn: approval.turn_number!,
+        call_id: `browser-capture-resolved:${approval.id}`,
+        event: 'approval.resolved',
+        ts: Date.now(),
+        data: {},
+        display: {
+          type: 'interaction.resolved',
+          data: { approvalId: approval.id, decision, auto: false },
+        },
+      }, session?.executor ?? 'claude');
+    };
+
     /**
      * Side Chat snapshot projection (Host contract, proposal §10.5): the Host
      * does NOT forward Side Chat events as `event` envelopes — it appends the
@@ -284,6 +354,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
             type: 'events:subscribe',
             session_id: current.activeSessionIdRef.current,
           });
+          // App start AND every reconnect: re-pull pending schedule create
+          // confirmations so the cards survive any socket drop (contract L).
+          void hydrateScheduleConfirmations();
           return;
         case 'state_sync':
           current.setWorkspaces(message.workspaces);
@@ -318,6 +391,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
             return next;
           });
           current.setTasks(message.tasks);
+          for (const approval of message.approvals) projectLocalBrowserApproval(approval);
           // Complete replacement of the Side Chat read-model set (proposal
           // §10.5.2/§10.5.3); Hosts predating the amendment omit the field.
           const syncSideChats = message.sidechats ?? [];
@@ -342,6 +416,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
           });
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
+          // state_sync is the reconnect authority — schedule views re-pull
+          // their REST state even if schedule:changed frames were missed.
+          notifyScheduleResync();
           // A reconnect may have missed workspace:git-updated broadcasts.
           // Force a fresh scan whenever the Host sends authoritative state.
           current.refreshWorkingTrees?.();
@@ -628,8 +705,21 @@ export function useAppSocket(input: UseAppSocketInput): void {
             [message.session_id]: message.queue,
           }));
           return;
+        case 'schedule:changed':
+          // Coarse invalidation only (contract N): the Timer list/detail
+          // controllers re-fetch via the schedules REST API.
+          notifyScheduleChanged(message);
+          return;
+        case 'schedule:confirmation':
+          // Host-enforced create confirmation (contract L) — upsert into the
+          // persistent pending store; never routed through proxy approvals.
+          upsertScheduleConfirmation(message.confirmation);
+          return;
         case 'approval:created':
+          projectLocalBrowserApproval(message.approval);
+          return;
         case 'approval:updated':
+          resolveLocalBrowserApproval(message.approval);
           return;
         case 'event': {
           // Side Chat events never arrive here: their route's notifications

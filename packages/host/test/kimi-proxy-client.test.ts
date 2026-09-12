@@ -24,7 +24,7 @@ test('Kimi host negotiates gian.proxy/2 and routes catalog, slash, and turns', a
   const host = makeHost();
   try {
     const initialized = await host.initialize();
-    assert.equal(initialized.protocol.version, '2.0');
+    assert.equal(initialized.protocol.version, '2.2');
     assert.equal(initialized.plugin.version, '0.2.0');
 
     const catalog = await host.catalog();

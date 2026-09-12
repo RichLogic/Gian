@@ -116,6 +116,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     task_id: null,
     workspace_id: 'workspace-1',
     executor: 'kimi',
+    agent_id: 'agent-kimi-1',
     model: 'model-a',
     approval_mode: null,
     thinking_effort: 'stale-a',
@@ -145,6 +146,7 @@ function composerElement(session: Session) {
       <Composer
         session={session}
         executor={session.executor}
+        agentId={session.agent_id}
         workspaceId={session.workspace_id}
         disabled={false}
         running={false}
@@ -194,6 +196,11 @@ describe('Composer model resolve fencing (Finding: missing web evidence)', () =>
     await waitFor(() => expect(resolveCalls.length).toBe(1));
     // The stale effort of model-a must not ride along with the model change.
     expect(resolveCalls[0]!.params.turnConfig).toEqual({ model: 'model-b' });
+    expect(loadResolvedProxyCatalogMock).toHaveBeenCalledWith(
+      'kimi',
+      expect.objectContaining({ sessionId: 'session-1' }),
+      'agent-kimi-1',
+    );
   });
 
   it('an older resolve response arriving late cannot override the newer menu', async () => {

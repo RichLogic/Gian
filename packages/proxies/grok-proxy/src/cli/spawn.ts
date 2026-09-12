@@ -4,8 +4,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+
 import { GrokProxyService } from '../core/service.js';
 import { GrokProtocolV2Adapter } from '../protocol/v2-adapter.js';
+import { discoverGrokRuntimes, probeGrokRuntime } from '../runtime/discover.js';
 import {
   createProtocolWriter,
   parseRequestLine,
@@ -37,7 +40,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.2';
+  return '0.3.3';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -45,7 +48,7 @@ const PLUGIN_VERSION = readPluginVersion();
 function runSelfTest(argv: string[]): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
   process.stdout.write(`${JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 4,
     id: 'grok',
     pluginVersion: PLUGIN_VERSION,
     ok: true,
@@ -80,6 +83,17 @@ function parseArgs(argv: string[]) {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (runSelfTest(argv)) return;
+  if (isRuntimeBootstrapOffer()) {
+    await serveRuntimeBootstrap({
+      pluginId: process.env.GIAN_PLUGIN_ID ?? 'grok',
+      pluginName: 'Grok Build',
+      pluginVersion: PLUGIN_VERSION,
+      processScope: 'session',
+      discover: discoverGrokRuntimes,
+      probe: probeGrokRuntime,
+    });
+    return;
+  }
   const options = parseArgs(argv);
   const writer = createProtocolWriter(process.stdout);
 

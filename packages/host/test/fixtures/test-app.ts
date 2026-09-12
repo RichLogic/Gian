@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { openDatabase, type Db } from '../../src/storage/db.js';
 import { loadConfig } from '../../src/storage/config.js';
 import { createApp, type AppHandle } from '../../src/web/app.js';
+import { MemoryRemoteIdentity } from '../../src/remote/identity.js';
 import type { OpenCommand } from '../../src/web/open-with.js';
 import type { GianToolMethod } from '@gian/shared';
 
@@ -29,6 +30,7 @@ export interface TestAppCtx {
   app: AppHandle;
   db: Db;
   dataDir: string;
+  remoteIdentity: MemoryRemoteIdentity;
   openedCommands: Array<{ mode: 'sync' | 'detached'; command: OpenCommand }>;
   fetch: (path: string, init?: RequestInit) => Promise<Response>;
   cleanup: () => Promise<void>;
@@ -52,17 +54,13 @@ export async function makeTestApp(options: TestAppOptions = {}): Promise<TestApp
   const config = loadConfig(db);
   options.beforeCreateApp?.(db);
   const openedCommands: Array<{ mode: 'sync' | 'detached'; command: OpenCommand }> = [];
+  const remoteIdentity = new MemoryRemoteIdentity();
 
   const app = createApp({
     db,
     config,
     dataDir,
-    // Point at the local dist (the entry doesn't need to exist for routes
-    // that don't spawn a proxy). Tests that call /api/proxy/.../models or
-    // anything that triggers proxy spawn will fail; that's a routing test
-    // we don't run here.
-    ccProxyEntry: join(dataDir, 'cc-proxy-not-used.js'),
-    codexProxyEntry: join(dataDir, 'codex-proxy-not-used.js'),
+    remoteIdentity,
     applicationRouteOptions: {
       platform: options.platform,
       runOpenSync: options.runOpenSync ?? (command => {
@@ -85,6 +83,7 @@ export async function makeTestApp(options: TestAppOptions = {}): Promise<TestApp
     app,
     db,
     dataDir,
+    remoteIdentity,
     openedCommands,
     fetch,
     cleanup: async () => {

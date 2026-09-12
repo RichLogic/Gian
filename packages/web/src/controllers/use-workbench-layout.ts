@@ -35,17 +35,12 @@ export function useWorkbenchLayout({
   const railGroupHasTabs = activeGroup
     ? tabs.some(tab => tab.group === activeGroup)
     : false;
-  /* The history rail keeps panel 2 mounted even with zero commit tabs — its
-   *  renderEmpty slot ("select a commit to review") is the designed resting
-   *  state, not an absent panel (git-history design §3.1). Other rails keep
-   *  the old hide-when-empty behavior. */
-  const historyEmptySlot = activeRail === 'history';
-  const sheetMounted = tabs.length > 0 || historyEmptySlot;
+  const sheetMounted = tabs.length > 0;
   const sheetVisible = workbenchActive
     && chatPanel === null
     && viewState !== 'main'
     && activeRail !== null
-    && (railGroupHasTabs || historyEmptySlot);
+    && railGroupHasTabs;
   const inspectorKind: 'files' | 'changes' | 'history' | null =
     activeRail === 'files' ? 'files'
     : activeRail === 'diffs' ? 'changes'

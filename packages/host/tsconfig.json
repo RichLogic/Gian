@@ -9,7 +9,9 @@
   },
   "include": ["src/**/*"],
   "references": [
+    { "path": "../proxy-catalog-contract" },
     { "path": "../proxy-protocol" },
+    { "path": "../remote-protocol" },
     { "path": "../shared" },
     { "path": "../tool-mcp" }
   ]

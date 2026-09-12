@@ -156,7 +156,7 @@ test('validator rejects a notification stream with a sequence gap', async () => 
     id: 'i',
     result: {
       protocol: { name: 'gian.proxy', version: '2.1' },
-      plugin: { id: 'com.zhipu.zcode', name: 'ZCode', version: '0.1.0' },
+      plugin: { id: 'com.zhipu.zcode', name: 'ZCode', version: '0.1.1' },
       process: { scope: 'shared' },
       capabilities: {},
     },

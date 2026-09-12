@@ -170,6 +170,7 @@ function workspaceSink(): WorkspaceCanonicalSink & { calls: string[] } {
     remove: id => calls.push(`remove:${id}`),
     applyOrder: ids => calls.push(`order:${ids.join(',')}`),
     refetch: () => calls.push('refetch'),
+    refetchSessions: () => calls.push('refetchSessions'),
   };
 }
 
@@ -333,12 +334,12 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     vi.mocked(createSubtask).mockResolvedValue(session);
 
     const run = dispatcher.dispatch('task.createSubtask', {
-      taskId: 't1', workspaceId: 'w1', executor: 'codex', name: 'Sub', serviceTier: 'fast',
+      taskId: 't1', workspaceId: 'w1', agentId: 'agent-codex', executor: 'codex', name: 'Sub', serviceTier: 'fast',
     });
     expect(run.phase).toBe('pending');
     expect(run.entityKey.startsWith('pending:task.createSubtask:')).toBe(true);
     expect(createSubtask).toHaveBeenCalledWith('t1', {
-      workspace_id: 'w1', executor: 'codex', name: 'Sub', service_tier: 'fast',
+      workspace_id: 'w1', agent_id: 'agent-codex', name: 'Sub', service_tier: 'fast',
     });
 
     await vi.waitFor(() => expect(store.getRun(run.id)?.phase).toBe('confirmed'));
@@ -352,13 +353,14 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     dispatcher.dispatch('task.createSubtask', {
       taskId: 't1',
       workspaceId: 'w1',
+      agentId: 'agent-dsh',
       executor: 'dsh',
       approvalMode: 'ask',
     });
 
     expect(createSubtask).toHaveBeenCalledWith('t1', {
       workspace_id: 'w1',
-      executor: 'dsh',
+      agent_id: 'agent-dsh',
     });
   });
 
@@ -366,7 +368,12 @@ describe('subtask REST operations (proposal §8, product definitions)', () => {
     const { store, dispatcher } = setup();
     vi.mocked(createSubtask).mockResolvedValue(null);
 
-    const run = dispatcher.dispatch('task.createSubtask', { taskId: 't1', workspaceId: 'w1', executor: 'codex' });
+    const run = dispatcher.dispatch('task.createSubtask', {
+      taskId: 't1',
+      workspaceId: 'w1',
+      agentId: 'agent-codex',
+      executor: 'codex',
+    });
     await vi.waitFor(() => expect(store.getRun(run.id)?.phase).toBe('failed'));
     expect(store.getRun(run.id)?.error).toBe('create subtask failed');
   });
@@ -505,13 +512,16 @@ describe('workspace REST operations (proposal §8, product definitions)', () => 
     await vi.waitFor(() => expect(store.getRun(first.id)?.phase).toBe('failed'));
     expect(store.getRun(first.id)?.error).toBe('still has sessions');
 
-    // Success path: canonical remove + refetch via the reconcile sink.
+    // Success path: canonical remove + refetch via the reconcile sink —
+    // including the sessions refetch that moves the deleted workspace's
+    // orphaned sessions into 无归属 (2026-09-09 owner report: a UUID-named
+    // group lingered without it).
     const sink = workspaceSink();
     wireWorkspaceCanonicalSink(sink);
     vi.mocked(deleteWorkspace).mockResolvedValue({ ok: true });
     const second = dispatcher.dispatch('workspace.delete', { workspaceId: 'w1' });
     await vi.waitFor(() => expect(store.getRun(second.id)?.phase).toBe('confirmed'));
-    expect(sink.calls).toEqual(['remove:w1', 'refetch']);
+    expect(sink.calls).toEqual(['remove:w1', 'refetch', 'refetchSessions']);
   });
 
   it('workspace.create runs pending on a fresh key; the workspace is the run result; failure keeps the form error', async () => {

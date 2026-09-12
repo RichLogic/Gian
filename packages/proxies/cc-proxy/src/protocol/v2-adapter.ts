@@ -5,7 +5,13 @@ import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
 import { AppError } from '../core/errors.js';
 import { normalizeInputItems } from '../core/input.js';
 import { buildPrompt, CcProxyService } from '../core/service.js';
-import type { InputItem, ModelCapabilities, PermissionMode } from '../core/types.js';
+import type {
+  ClaudeMcpServer,
+  InputItem,
+  ModelCapabilities,
+  PermissionMode,
+} from '../core/types.js';
+import { discoverClaudeRuntimes, probeClaudeRuntime } from '../runtime/discover.js';
 import { ClaudeProtocolError, type DomainCode } from '../transport/protocol.js';
 import {
   ClaudeNativeHistoryWatcher,
@@ -216,7 +222,13 @@ interface ServiceSessionShape {
 
 const PROTOCOL_NAME = 'gian.proxy';
 const PROTOCOL_V2 = '2.1';
+const PROTOCOL_V22 = '2.2';
+const PROTOCOL_V23 = '2.3';
 const MAX_ACTIVITY_JSON_BYTES = 1024 * 1024;
+
+const CUSTOMIZATION_CAPABILITIES = {
+  'customization.list': 1,
+} as const;
 
 const CAPABILITIES = {
   'input.localFile': 1,
@@ -228,10 +240,41 @@ const CAPABILITIES = {
   sidechat: 1,
   'session.fork': 1,
   'session.fork.atTurn': 1,
+  'integration.mcp.streamableHttp': 1,
   interaction: 1,
   'event.reasoning': 1,
   'event.usage': 1,
 } as const;
+
+export function claudeHostServiceMcpServers(value: unknown): ClaudeMcpServer[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const names = new Set<string>();
+  const servers: ClaudeMcpServer[] = [];
+  for (const raw of value) {
+    const service = requireRecord(raw, 'hostServices entry');
+    const name = nonEmptyString(service.id);
+    const transport = requireRecord(service.transport, 'hostServices transport');
+    const url = nonEmptyString(transport.url);
+    if (!name || name === 'cc_approval' || names.has(name)
+      || service.protocol !== 'mcp' || transport.type !== 'streamable-http' || !url) {
+      throw new ClaudeProtocolError(
+        'INVALID_PARAMS',
+        'hostServices contains an invalid or duplicate Streamable HTTP MCP descriptor.',
+      );
+    }
+    const rawHeaders = requireRecord(transport.headers ?? {}, 'hostServices headers');
+    const headers: Record<string, string> = {};
+    for (const [key, headerValue] of Object.entries(rawHeaders)) {
+      if (typeof headerValue !== 'string') {
+        throw new ClaudeProtocolError('INVALID_PARAMS', 'hostServices transport headers must be strings.');
+      }
+      headers[key] = headerValue;
+    }
+    names.add(name);
+    servers.push({ name, url, headers });
+  }
+  return servers;
+}
 
 const FALLBACK_PERMISSION_MODES = ['manual', 'acceptEdits', 'bypassPermissions'] as const;
 
@@ -534,6 +577,10 @@ export class ClaudeProtocolV2Adapter {
   private readonly terminalOrderBySession = new Map<string, Array<{ turnId: string; sourceTurnId: string }>>();
   private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private initialized = false;
+  private protocolVersion:
+    | typeof PROTOCOL_V2
+    | typeof PROTOCOL_V22
+    | typeof PROTOCOL_V23 = PROTOCOL_V2;
   private catalogRevision = '';
   private deferDepth = 0;
   private readonly deferredNotifications: DeferredNotification[] = [];
@@ -575,6 +622,27 @@ export class ClaudeProtocolV2Adapter {
             'CAPABILITY_NOT_SUPPORTED',
             `${request.method} is not advertised by Claude Proxy.`,
           );
+        case 'runtime.discover':
+          if (this.protocolVersion === PROTOCOL_V2) {
+            throw new ClaudeProtocolError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
+          }
+          return await discoverClaudeRuntimes();
+        case 'runtime.probe':
+          if (this.protocolVersion === PROTOCOL_V2) {
+            throw new ClaudeProtocolError('METHOD_NOT_FOUND', 'runtime.probe requires gian.proxy/2.2.');
+          }
+          return await probeClaudeRuntime(String(request.params.path ?? ''));
+        case 'customization.list':
+        case 'customization.detail':
+          if (this.protocolVersion !== PROTOCOL_V23) {
+            throw new ClaudeProtocolError(
+              'CAPABILITY_NOT_SUPPORTED',
+              `${request.method} requires gian.proxy/2.3.`,
+            );
+          }
+          return request.method === 'customization.list'
+            ? await this.service.inspectCustomizations(request.params as never)
+            : await this.service.customizationDetail(request.params as never);
         case 'shutdown': return { ok: true };
         default:
           throw new ClaudeProtocolError('METHOD_NOT_FOUND', `Unknown method "${request.method}".`);
@@ -600,8 +668,15 @@ export class ClaudeProtocolV2Adapter {
     const versions = Array.isArray(protocol.versions)
       ? protocol.versions.filter((item): item is string => typeof item === 'string' && item.length > 0)
       : [];
-    if (protocol.name !== PROTOCOL_NAME || !versions.includes(PROTOCOL_V2)) {
-      throw new ClaudeProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1 is required.');
+    const selected = versions.includes(PROTOCOL_V23)
+      ? PROTOCOL_V23
+      : versions.includes(PROTOCOL_V22)
+        ? PROTOCOL_V22
+        : versions.includes(PROTOCOL_V2)
+          ? PROTOCOL_V2
+          : null;
+    if (protocol.name !== PROTOCOL_NAME || selected === null) {
+      throw new ClaudeProtocolError('INCOMPATIBLE_PROTOCOL', 'gian.proxy/2.1, 2.2, or 2.3 is required.');
     }
     const host = requireRecord(params.host, 'host');
     if (typeof host.name !== 'string' || host.name.length === 0
@@ -609,11 +684,21 @@ export class ClaudeProtocolV2Adapter {
       throw new ClaudeProtocolError('INVALID_PARAMS', 'initialize.params.host is required.');
     }
     this.initialized = true;
+    this.protocolVersion = selected;
     return {
-      protocol: { name: PROTOCOL_NAME, version: PROTOCOL_V2 },
+      protocol: { name: PROTOCOL_NAME, version: selected },
       plugin: { id: 'claude', name: 'Claude Code', version: this.pluginVersion },
       process: { scope: 'session' as const },
-      capabilities: CAPABILITIES,
+      capabilities: selected === PROTOCOL_V23
+        ? {
+            ...CAPABILITIES,
+            'runtime.discover': 1,
+            'runtime.probe': 1,
+            ...CUSTOMIZATION_CAPABILITIES,
+          }
+        : selected === PROTOCOL_V22
+          ? { ...CAPABILITIES, 'runtime.discover': 1, 'runtime.probe': 1 }
+          : CAPABILITIES,
     };
   }
 
@@ -933,12 +1018,7 @@ export class ClaudeProtocolV2Adapter {
     if (roots.length === 0) {
       throw new ClaudeProtocolError('INVALID_PARAMS', 'workspace.roots must contain at least one path.');
     }
-    if (params.hostServices !== undefined) {
-      throw new ClaudeProtocolError(
-        'CAPABILITY_NOT_SUPPORTED',
-        'Claude Proxy does not advertise integration.mcp.streamableHttp.',
-      );
-    }
+    const mcpServers = claudeHostServiceMcpServers(params.hostServices);
 
     let nativeSessionId: string | null = null;
     let history: 'none' | 'replay' = 'none';
@@ -976,6 +1056,7 @@ export class ClaudeProtocolV2Adapter {
     const result = await this.service.createSession({
       cwd,
       ...(nativeSessionId ? { claudeSessionId: nativeSessionId } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
     });
     const serviceSession = result.session;
     const session: AttachedSession = {
@@ -1059,6 +1140,7 @@ export class ClaudeProtocolV2Adapter {
       cwd: parent.cwd,
       claudeSessionId: nativeSessionId,
       resumeExisting: anchor.type === 'turn',
+      mcpServers: this.service.mcpServers(parent.serviceSessionId),
     });
     const session = this.attachForkedSession(sidechatId, created.session as ServiceSessionShape);
     const createdAt = new Date().toISOString();
@@ -1111,6 +1193,7 @@ export class ClaudeProtocolV2Adapter {
       cwd: parent.cwd,
       claudeSessionId: payload.nativeSessionId,
       resumeExisting: countReplayableNativeTurns(payload.nativeSessionId, parent.cwd) > 0,
+      mcpServers: this.service.mcpServers(parent.serviceSessionId),
     });
     const session = this.attachForkedSession(sidechatId, resumed.session as ServiceSessionShape, payload.sessionConfig);
     const sidechat: SidechatRecord = {
@@ -1169,7 +1252,12 @@ export class ClaudeProtocolV2Adapter {
     if (!sourceSessionId || !sourceStreamId || !sessionId || (anchor.type !== 'head' && anchor.type !== 'turn')) {
       throw new ClaudeProtocolError('INVALID_PARAMS', 'sourceSessionId, sourceStreamId, sessionId, and anchor are required.');
     }
-    const fingerprint = JSON.stringify({ sourceSessionId, sourceStreamId, anchor });
+    const fingerprint = JSON.stringify({
+      sourceSessionId,
+      sourceStreamId,
+      anchor,
+      hostServices: params.hostServices,
+    });
     const previous = this.forkResults.get(sessionId);
     if (previous) {
       if (previous.fingerprint !== fingerprint) {
@@ -1193,6 +1281,7 @@ export class ClaudeProtocolV2Adapter {
       cwd: source.cwd,
       claudeSessionId: nativeSessionId,
       resumeExisting: true,
+      mcpServers: claudeHostServiceMcpServers(params.hostServices) ?? [],
     });
     const child = this.attachForkedSession(sessionId, created.session as ServiceSessionShape);
     this.attachNativeReplay(child, true);

@@ -2,8 +2,7 @@ import type { Hono } from 'hono';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
-import { loadConfig } from '../../storage/config.js';
+import { join, resolve, sep } from 'node:path';
 import type { Db } from '../../storage/db.js';
 import { resolveDataDir } from '../../storage/paths.js';
 import {
@@ -15,15 +14,8 @@ import {
   withRepoMutationLock,
 } from '../../workspace/async-command.js';
 import { resolveWithinWorkspace } from '../../workspace/safe-path.js';
-import {
-  appOpenerArgs,
-  buildEditorArgs,
-  defaultOpenerArgs,
-  revealArgs,
-  runOpen,
-  terminalArgs,
-  type OpenCommand,
-} from '../open-with.js';
+import { runOpen, type OpenCommand } from '../open-with.js';
+import { respondResolvedOpen } from '../open-launch.js';
 
 export interface WorkingTreeTarget {
   path: string;
@@ -324,71 +316,11 @@ export function registerApplicationRoutes(
       return c.json({ error: 'file not found' }, 404);
     }
 
-    let cmd: OpenCommand;
-    if (body.editor_id) {
-      const cfg = loadConfig(db);
-      const editor = cfg.external_editors.find(e => e.id === body.editor_id);
-      if (!editor) return c.json({ error: 'editor not found' }, 404);
-      cmd = buildEditorArgs(editor, absPath);
-    } else if (body.app) {
-      // "Open with…" → a named macOS application (LaunchServices). The app
-      // list itself comes from GET /api/apps, so this is macOS-only.
-      if (platform !== 'darwin') {
-        return c.json({ error: 'open-with-app is macOS only' }, 400);
-      }
-      cmd = appOpenerArgs(body.app, absPath);
-    } else if (body.builtin) {
-      // Fixed system openers from the "Open with…" menu. `default` works on
-      // every platform; `finder` (reveal) and `terminal` (open Terminal at the
-      // file's folder) are macOS-only. ('browser' is handled client-side.)
-      if (body.builtin === 'default') {
-        let defaultCmd: OpenCommand;
-        try {
-          defaultCmd = defaultOpenerArgs(platform, absPath);
-        } catch (err) {
-          return c.json({ error: String((err as Error).message) }, 500);
-        }
-        // Default opener is the one place where "no handler" is a real, common
-        // outcome the web wants to fall back on. On macOS, `open <file>` exits
-        // non-zero ("No application knows how to open …") when nothing claims
-        // the type — so run it AWAITED here and report 422 on failure instead of
-        // returning a fire-and-forget 200. Other platforms keep the existing
-        // detached runOpen path below.
-        if (platform === 'darwin') {
-          try {
-            runOpenSync(defaultCmd);
-          } catch {
-            return c.json({ error: 'no-app' }, 422);
-          }
-          return c.json({ ok: true });
-        }
-        cmd = defaultCmd;
-      } else if (platform !== 'darwin') {
-        return c.json({ error: 'this opener is macOS only' }, 400);
-      } else if (body.builtin === 'finder') {
-        cmd = revealArgs(absPath);
-      } else if (body.builtin === 'terminal') {
-        cmd = terminalArgs(dirname(absPath));
-      } else {
-        return c.json({ error: 'unknown builtin opener' }, 400);
-      }
-    } else {
-      try {
-        cmd = defaultOpenerArgs(platform, absPath);
-      } catch (err) {
-        return c.json({ error: String((err as Error).message) }, 500);
-      }
-    }
-
-    return new Promise<Response>(resolve => {
-      const timer = setTimeout(
-        () => resolve(c.json({ ok: true }) as unknown as Response),
-        50,
-      );
-      runOpenDetached(cmd, err => {
-        clearTimeout(timer);
-        resolve(c.json({ error: String(err.message) }, 500) as unknown as Response);
-      });
+    return respondResolvedOpen(c, absPath, body, {
+      platform,
+      db,
+      runOpenSync,
+      runOpenDetached,
     });
   });
 }

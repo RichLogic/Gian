@@ -4,9 +4,18 @@ import type { Session, Task, Workspace } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { useResizableWidth, RailSplitter } from '../components/RailLayout.js';
 import type { RailLayoutController } from '../components/RailLayout.js';
-import { ModeDropdown } from '../components/ModeDropdown.js';
+import {
+  GROUP_INITIAL_SHOWN,
+  GROUP_SHOW_MORE_STEP,
+  LeftRail,
+  SidebarListSwitch,
+  SidebarNavRows,
+  SidebarSection,
+  type SidebarListMode,
+} from '../components/SidebarChrome.js';
 import type { Mode } from '../components/Topbar.js';
-import { StatusIcon, statusGlyphShown, relTime } from './session-list-status.js';
+import { StatusIcon, statusGlyphShown } from './session-list-status.js';
+import { SessionRow, SessionHoverCard, useSessionHoverCard } from '../components/SessionsSidebar.js';
 import { clearNewSessionDraft, NewSessionView } from './new-session-view.js';
 import type { CreateSessionInput } from './new-session-view.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
@@ -31,8 +40,6 @@ const I = {
   check: 'M5 12l5 5L20 7',
   caretRight: 'M9 6l6 6-6 6',
   caretDown: 'M6 9l6 6 6-6',
-  // pushpin — pin / unpin (same glyph as the Sessions rail pin).
-  pin: 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z',
   // kebab (horizontal ⋯) — the per-task "more actions" menu trigger.
   kebab: 'M5 12.01v-.02 M12 12.01v-.02 M19 12.01v-.02',
   // list-todo — the expanded task-group icon (2026-08-03, replaces
@@ -67,14 +74,14 @@ function Icon({ d, size = 14, stroke = 1.8, filled = false }: { d: string; size?
   );
 }
 
-/** A Subtask is a Session with type==='subtask' and a matching task_id. Open
- *  subtasks come first — pinned ones float to the top (pinned_at DESC), the
- *  rest follow the manual drag order (migration 067 `task_order`; NULL =
- *  never dragged — those keep the stable "steps" order (created_at DESC,
- *  decided 2026-07-01) ABOVE the manual range, so a fresh subtask still lands
- *  on top). User-completed subtasks (`completed_at`) sink to the bottom
- *  (created_at DESC); they can't be pinned. ISO-8601 strings compare
- *  lexicographically in time order. */
+/** A Subtask is a Session with type==='subtask' and a matching task_id.
+ *  Order (2026-09-06 owner call): open subtasks follow the manual drag order
+ *  (migration 067 `task_order`; NULL = never dragged — those keep creation
+ *  order (created_at ASC) ABOVE the manual range); user-completed subtasks
+ *  (`completed_at`) sink to the bottom. There is NO pin concept in the Tasks
+ *  rail — a session pinned in Projects keeps its pinned_at data but it does
+ *  not reorder this list. ISO-8601 strings compare lexicographically in time
+ *  order. */
 export function subtasksFor(sessions: Session[], taskId: string): Session[] {
   return sessions
     .filter(s => s.task_id === taskId && s.type === 'subtask')
@@ -83,26 +90,21 @@ export function subtasksFor(sessions: Session[], taskId: string): Session[] {
       const bd = b.completed_at != null ? 1 : 0;
       if (ad !== bd) return ad - bd;
       if (!ad) {
-        const ap = a.pinned_at, bp = b.pinned_at;
-        if (ap && bp) return bp.localeCompare(ap);
-        if (ap) return -1;
-        if (bp) return 1;
         const am = a.task_order != null ? 1 : 0;
         const bm = b.task_order != null ? 1 : 0;
         if (am !== bm) return am - bm;
         if (am && bm) return a.task_order! - b.task_order!;
       }
-      return b.created_at.localeCompare(a.created_at);
+      return a.created_at.localeCompare(b.created_at);
     });
 }
 
-/** The subtask rows the user can drag (2026-08-29): open AND unpinned. Pinned
- *  rows keep their pinned_at order above the draggable range; completed rows
- *  stay sunk at the bottom. The `session.reorder` overlay/endpoint covers
- *  exactly this subset. */
+/** The subtask rows the user can drag (2026-08-29): every open row; completed
+ *  rows stay sunk at the bottom. The `session.reorder` overlay/endpoint
+ *  covers exactly this subset. */
 export function reorderableSubtasks(sessions: Session[], taskId: string): Session[] {
   return subtasksFor(sessions, taskId)
-    .filter(s => s.completed_at == null && s.pinned_at == null);
+    .filter(s => s.completed_at == null);
 }
 
 /** Task ordering: manual drag order (migration 067 `sort_order`) wins; tasks
@@ -127,13 +129,19 @@ export function TasksView({
   workspaces,
   activeTaskId,
   activeSubtaskId,
+  activeSessionId,
+  onSelectSession,
+  onPinSession,
+  onArchiveSession,
   subtaskMain,
   onSelectSubtask,
   onNewWorkspace,
   onSetPendingFirstMessage,
+  openNewForTaskId,
+  onConsumeOpenNewForTaskId,
   railLayout,
 }: {
-  /** Top-level app mode — the sidebar's mode dropdown reads/drives this. */
+  /** Top-level app mode — the persistent sidebar navigation reads/drives this. */
   mode: Mode;
   onSetMode: (mode: Mode) => void;
   tasks: Task[];
@@ -141,6 +149,12 @@ export function TasksView({
   workspaces: Workspace[];
   activeTaskId: string | null;
   activeSubtaskId: string | null;
+  /** The 未分配 (untasked) Sessions group selects/pins/archives through the
+   *  same App handlers the Project rail uses (2026-09-06). */
+  activeSessionId: string | null;
+  onSelectSession: (id: string) => void;
+  onPinSession: (sessionId: string, pinned: boolean) => void;
+  onArchiveSession: (sessionId: string) => void;
   /** A Subtask IS a Session: when one is selected, App builds the full
    *  <SessionSurface> element (the same one CodingView renders in Sessions
    *  mode, wired to the same App-level handlers rebound to the subtask's id)
@@ -149,13 +163,16 @@ export function TasksView({
    *  subtask is selected. */
   subtaskMain: React.ReactNode;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
-  /** Open the Workspaces "New workspace" sheet tab (the task-context
-   *  new-session page's workspace drop "+ New workspace" row). */
+  /** Open the New Repo dialog (the task-context new-session page's workspace
+   *  drop "+ New Repo" row). */
   onNewWorkspace: () => void;
   /** App-owned pendingFirstMessage channel: the first composer message is
    *  stashed before create and auto-sent by the session:created socket
    *  handler. Pass null to clear a stashed message after a failed create. */
   onSetPendingFirstMessage: (pending: PendingFirstMessage | null) => void;
+  /** App request from a Tasks sidebar shown beside another primary page. */
+  openNewForTaskId?: string | null;
+  onConsumeOpenNewForTaskId?: () => void;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }) {
@@ -235,6 +252,12 @@ export function TasksView({
     setNewForTaskId(taskId);
   }
 
+  useEffect(() => {
+    if (!openNewForTaskId) return;
+    openNewForTask(openNewForTaskId);
+    onConsumeOpenNewForTaskId?.();
+  }, [openNewForTaskId, onConsumeOpenNewForTaskId]);
+
   function selectSubtask(taskId: string, subtaskId: string) {
     // A draft is background state, never a navigation lock. Hide the form
     // immediately and let the selected Session surface take over; reopening
@@ -245,6 +268,7 @@ export function TasksView({
   }
 
   function submitNewSubtask(taskId: string, input: CreateSessionInput) {
+    if (!input.agentId) return;
     // Stash the first message before dispatching: the session:created socket
     // frame (origin 'task-create') consumes it and auto-sends once the
     // subtask session exists — same channel as the plain session create.
@@ -260,7 +284,7 @@ export function TasksView({
     const run = dispatch('task.createSubtask', {
       taskId,
       workspaceId: input.workspaceId,
-      ...(input.agentId ? { agentId: input.agentId } : {}),
+      agentId: input.agentId,
       executor: input.executor,
       ...(input.name ? { name: input.name } : {}),
       ...(input.model ? { model: input.model } : {}),
@@ -280,17 +304,33 @@ export function TasksView({
       className={`view${rail.collapsed ? ' rail-collapsed' : ''}`}
       style={{ '--rail-w': `${rail.width}px` } as React.CSSProperties}
     >
-      {/* The rail stays mounted while collapsed so its width can transition
-          (phase 6); `.view.rail-collapsed` shrinks it to zero. */}
-      <TasksList
-        mode={mode}
-        onSetMode={onSetMode}
-        tasks={tasks}
-        sessions={sessions}
-        activeSubtaskId={activeSubtaskId}
-        onSelectSubtask={selectSubtask}
-        onNewSession={openNewForTask}
-      />
+      {/* Collapsed (2026-08-31 redesign): the full sidebar swaps for the 38px
+          icon rail (Agents / Timer / Custom / 消息). */}
+      {rail.collapsed ? (
+        <LeftRail
+          mode={mode}
+          listMode="tasks"
+          onSetMode={onSetMode}
+          onExpand={() => rail.setCollapsed(false)}
+        />
+      ) : (
+        <TasksSidebar
+          mode={mode}
+          onSetMode={onSetMode}
+          listMode="tasks"
+          onSetListMode={onSetMode}
+          tasks={tasks}
+          sessions={sessions}
+          workspaces={workspaces}
+          activeSubtaskId={activeSubtaskId}
+          activeSessionId={activeSessionId}
+          onSelectSubtask={selectSubtask}
+          onSelectSession={onSelectSession}
+          onPinSession={onPinSession}
+          onArchiveSession={onArchiveSession}
+          onNewSession={openNewForTask}
+        />
+      )}
       <RailSplitter onMouseDown={rail.onMouseDown} ariaLabel="Resize tasks list" />
       {newForTask ? (
         <NewSessionView
@@ -453,7 +493,7 @@ function TaskMenu({
         aria-expanded={open}
         onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
       >
-        <Icon d={I.kebab} size={13} stroke={2.6} />
+        <Icon d={I.kebab} size={14} stroke={2.6} />
       </button>
       {open && createPortal(
         <span
@@ -596,21 +636,42 @@ function TaskRenameInput({
   );
 }
 
-function TasksList({
+/** localStorage key for the Tasks rail's collapsed SECTIONS (进行中 /
+ *  未分配 / 完成). Distinct from `gian.tasks.collapsed` (per-task subtask
+ *  groups). Value: string[] of collapsed section keys; default `['done']`. */
+const TASKS_SECTIONS_KEY = 'gian.tasks.sections.collapsed';
+
+export function TasksSidebar({
   mode,
   onSetMode,
+  listMode,
+  onSetListMode,
   tasks,
   sessions,
+  workspaces,
   activeSubtaskId,
+  activeSessionId,
   onSelectSubtask,
+  onSelectSession,
+  onPinSession,
+  onArchiveSession,
   onNewSession,
 }: {
   mode: Mode;
   onSetMode: (mode: Mode) => void;
+  listMode: SidebarListMode;
+  onSetListMode: (mode: SidebarListMode) => void;
   tasks: Task[];
   sessions: Session[];
+  workspaces: Workspace[];
   activeSubtaskId: string | null;
+  activeSessionId: string | null;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
+  /** Untasked sessions (未分配 group, 2026-09-06) select like Project rows —
+   *  App hands them to the Project conversation surface. */
+  onSelectSession: (id: string) => void;
+  onPinSession: (sessionId: string, pinned: boolean) => void;
+  onArchiveSession: (sessionId: string) => void;
   /** Open the task-context new-session form (task-row "+"). */
   onNewSession: (taskId: string) => void;
 }) {
@@ -622,10 +683,53 @@ function TasksList({
     window.addEventListener('gian:new-task', open);
     return () => window.removeEventListener('gian:new-task', open);
   }, []);
-  // Section collapse (2026-08-03 two-group layout): 完成 collapsed by
-  // default, not persisted. The open group has no section header (2026-08-03:
-  // the "In Progress" label was dropped — open tasks are the default list).
-  const [doneOpen, setDoneOpen] = useState(false);
+  // Section collapse (2026-09-07 Codex-style refactor): every section label
+  // (进行中 / 未分配 / 完成) collapses its group, persisted in localStorage so
+  // switching to the Repos tab and back (which unmounts this rail) keeps the
+  // state. Default: 完成 collapsed, the rest expanded.
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(TASKS_SECTIONS_KEY);
+      return new Set<string>(raw ? JSON.parse(raw) : ['done']);
+    } catch { return new Set(['done']); }
+  });
+  const toggleSection = (key: string) => {
+    setCollapsedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      try { localStorage.setItem(TASKS_SECTIONS_KEY, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  };
+  // Display caps (2026-09-08 owner call): every Tasks rail list except the
+  // Doing tasks' OPEN subtasks shows 5 rows up front; 显示更多 reveals 10
+  // more per click. View-only, ephemeral (same as the Repos rail groups).
+  const [unassignedShown, setUnassignedShown] = useState(GROUP_INITIAL_SHOWN);
+  const [doneShown, setDoneShown] = useState(GROUP_INITIAL_SHOWN);
+  // T2 (2026-09-06): session rows drag between lists for assignment. An
+  // unassigned row dropped on an open task's header files it there; a task's
+  // subtask dropped on another task's header moves it, and dropped on the
+  // 未分配 section header releases it back to standalone. The row's own list
+  // reorder controller still owns same-list drops.
+  const [assignDrag, setAssignDrag] = useState<{ id: string; taskId: string | null } | null>(null);
+  const unassignedDrag = (id: string): { props: RowDragProps; className: string } => ({
+    className: assignDrag?.id === id ? ' dnd-dragging' : '',
+    props: {
+      draggable: true,
+      onDragStart: event => {
+        if ((event.target as HTMLElement).closest('button, input, textarea, a, [contenteditable]')) {
+          event.preventDefault();
+          return;
+        }
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', id);
+        setAssignDrag({ id, taskId: null });
+      },
+      onDragOver: () => undefined,
+      onDrop: () => undefined,
+      onDragEnd: () => setAssignDrag(null),
+    },
+  });
   // Per-task subtask collapse (Codex-style, 2026-07-01). Default = expanded
   // (empty set); clicking the task's group header toggles it. Persisted so the
   // choice survives reloads.
@@ -677,6 +781,21 @@ function TasksList({
     [visible],
   );
 
+  // 未分配 (2026-09-06): untasked standalone Sessions — Tasks mode must reach
+  // EVERY conversation, not just task-bound subtasks. Hidden-workspace
+  // sessions stay reachable here exactly like the Project rail's 无归属.
+  // Creation order (oldest first) — the Tasks rail's global rule.
+  const wsById = useMemo(() => new Map(workspaces.map(w => [w.id, w])), [workspaces]);
+  const unassigned = useMemo(
+    () => sessions
+      .filter(s => s.task_id === null
+        && s.archived === 0
+        && s.type !== 'manager'
+        && !(s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+    [sessions, wsById],
+  );
+
   // Task drag reorder (2026-08-29): the open group is the draggable range;
   // the 完成 section keeps its automatic order. While the `task.reorder` run
   // is in flight its whole-list overlay (the dragged id order) wins over the
@@ -719,34 +838,31 @@ function TasksList({
   // subtask rows drag within the task (the group's own controller).
 
   return (
-    <aside className="sidebar">
-      <div className="sb-head">
-        <div className="sb-toprow">
-          <ModeDropdown mode={mode} onSetMode={onSetMode} />
-          <span className="sb-toprow-spacer" />
-          <button
-            type="button"
-            className={`sb-iconbtn${creating ? ' active' : ''}`}
-            data-testid="sb-new-task"
-            title={t('tasks.new')}
-            aria-label={t('tasks.new')}
-            onClick={() => setCreating(c => !c)}
-          >
-            <Icon d={I.plus} />
-          </button>
-        </div>
-      </div>
-
-      {/* Open tasks render directly (no section header); 完成 keeps its
-          collapsible section, collapsed by default. */}
+    <aside className="sidebar tasks-rail">
+      {/* 2026-08-31 redesign: nav rows scroll away with the list. 2026-09-08:
+          the sticky [Tasks|Repos] segmented switch became the list-switch
+          dropdown nav row under Timer — the ROW still sticks to the scroll
+          top (New stays on the section headers' hover "+", 2026-09-07). */}
       <div className="sb-scroll">
+        <SidebarNavRows mode={mode} onSetMode={onSetMode} />
+        <SidebarListSwitch listMode={listMode} onSetListMode={onSetListMode} />
         {creating && (
           <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}
         {visible.length === 0 && !creating && (
           <p className="tasks-list-empty">{t('tasks.empty')}</p>
         )}
-        {openOrdered.map(task => (
+        {/* 进行中 always renders — even with zero open tasks — so its hover
+            "+" (new task) stays reachable. */}
+        <SidebarSection
+          label={t('tasks.group.doing')}
+          collapsed={collapsedSections.has('doing')}
+          onToggle={() => toggleSection('doing')}
+          onAdd={() => setCreating(true)}
+          addTitle={t('tasks.new')}
+          testid="tasks-section-doing"
+        />
+        {!collapsedSections.has('doing') && openOrdered.map(task => (
           <OpenTaskGroup
             key={task.id}
             task={task}
@@ -758,27 +874,83 @@ function TasksList({
             deleting={deletingTaskIds.has(task.id)}
             dragProps={taskDnd.rowProps(task.id)}
             dragClass={taskDnd.rowClass(task.id)}
+            wsById={wsById}
             onToggleCollapsed={() => toggleTaskCollapsed(task.id)}
             onToggleCompletedSessions={() => toggleCompletedSessions(task.id)}
             onRenameDone={() => setRenamingTaskId(null)}
             onSelectSubtask={onSelectSubtask}
             onNewSession={onNewSession}
             taskActions={taskActions}
+            assignDragActive={assignDrag !== null && assignDrag.taskId !== task.id}
+            onAssignDragStart={(sessionId, taskId) => setAssignDrag({ id: sessionId, taskId })}
+            onAssignDragEnd={() => setAssignDrag(null)}
+            onAssignDrop={() => {
+              if (assignDrag) {
+                dispatch('session.assignTask', { sessionId: assignDrag.id, taskId: task.id });
+              }
+              setAssignDrag(null);
+            }}
           />
         ))}
+        {unassigned.length > 0 && (
+          <>
+            <SidebarSection
+              label={t('tasks.group.unassigned')}
+              collapsed={collapsedSections.has('unassigned')}
+              onToggle={() => toggleSection('unassigned')}
+              testid="tasks-section-unassigned"
+              className={assignDrag?.taskId != null ? ' dnd-assign-target' : ''}
+              dropProps={{
+                // Drop target for releasing a task-bound row back to standalone.
+                onDragOver: assignDrag?.taskId != null
+                  ? event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
+                  : undefined,
+                onDrop: assignDrag?.taskId != null
+                  ? event => {
+                      event.preventDefault();
+                      dispatch('session.assignTask', { sessionId: assignDrag.id, taskId: null });
+                      setAssignDrag(null);
+                    }
+                  : undefined,
+              }}
+            />
+            {!collapsedSections.has('unassigned') && unassigned.slice(0, unassignedShown).map(s => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                active={s.id === activeSessionId}
+                hideAge
+                hidePin
+                workspaceName={s.workspace_id != null ? wsById.get(s.workspace_id)?.name : undefined}
+                drag={unassignedDrag(s.id)}
+                onSelect={() => onSelectSession(s.id)}
+                onPin={pinned => onPinSession(s.id, pinned)}
+                onArchive={() => onArchiveSession(s.id)}
+              />
+            ))}
+            {/* Display cap (2026-09-08 owner call): everything except the
+                Doing tasks' OPEN subtasks caps at 5 rows + 显示更多. */}
+            {!collapsedSections.has('unassigned') && unassigned.length > unassignedShown && (
+              <button
+                type="button"
+                className="sb-showmore"
+                data-testid="sb-showmore-unassigned"
+                onClick={() => setUnassignedShown(n => n + GROUP_SHOW_MORE_STEP)}
+              >
+                {t('coding.sidebar.showMore').replace('{n}', String(unassigned.length - unassignedShown))}
+              </button>
+            )}
+          </>
+        )}
         {done.length > 0 && (
           <>
-            <button
-              className="sb-section"
-              onClick={() => setDoneOpen(o => !o)}
-              aria-expanded={doneOpen}
-              data-testid="tasks-section-done"
-            >
-              <Icon d={doneOpen ? I.caretDown : I.caretRight} size={12} />
-              <span className="sb-section-label">{t('tasks.group.done')}</span>
-              <span className="count">{done.length}</span>
-            </button>
-            {doneOpen && done.map(task => (
+            <SidebarSection
+              label={t('tasks.group.done')}
+              collapsed={collapsedSections.has('done')}
+              onToggle={() => toggleSection('done')}
+              testid="tasks-section-done"
+            />
+            {!collapsedSections.has('done') && done.slice(0, doneShown).map(task => (
               <DoneTaskRow
                 key={task.id}
                 task={task}
@@ -797,6 +969,16 @@ function TasksList({
                 )}
               />
             ))}
+            {!collapsedSections.has('done') && done.length > doneShown && (
+              <button
+                type="button"
+                className="sb-showmore"
+                data-testid="sb-showmore-done"
+                onClick={() => setDoneShown(n => n + GROUP_SHOW_MORE_STEP)}
+              >
+                {t('coding.sidebar.showMore').replace('{n}', String(done.length - doneShown))}
+              </button>
+            )}
           </>
         )}
       </div>
@@ -826,12 +1008,17 @@ function OpenTaskGroup({
   deleting,
   dragProps,
   dragClass,
+  wsById,
   onToggleCollapsed,
   onToggleCompletedSessions,
   onRenameDone,
   onSelectSubtask,
   onNewSession,
   taskActions,
+  assignDragActive,
+  onAssignDragStart,
+  onAssignDragEnd,
+  onAssignDrop,
 }: {
   task: Task;
   sessions: Session[];
@@ -843,12 +1030,22 @@ function OpenTaskGroup({
   /** Task-level drag (owned by TasksList's controller) on the group header. */
   dragProps: RowDragProps;
   dragClass: string;
+  /** T3 hover-card context (project names) for the subtask rows. */
+  wsById: Map<string, Workspace>;
   onToggleCollapsed: () => void;
   onToggleCompletedSessions: () => void;
   onRenameDone: () => void;
   onSelectSubtask: (taskId: string, subtaskId: string) => void;
   onNewSession: (taskId: string) => void;
   taskActions: ReturnType<typeof useTaskActions>;
+  /** T2: true while a row from ANOTHER list is being dragged; the header then
+   *  accepts the drop as a `session.assignTask` into this task. */
+  assignDragActive: boolean;
+  /** Subtask rows also start the cross-list assign drag (composed with their
+   *  own reorder drag — same-list drops still reorder). */
+  onAssignDragStart: (sessionId: string, taskId: string | null) => void;
+  onAssignDragEnd: () => void;
+  onAssignDrop: () => void;
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
@@ -860,31 +1057,46 @@ function OpenTaskGroup({
     const base = subtasksFor(sessions, task.id)
       .filter(session => !completedSessionsHidden || session.completed_at == null);
     if (!orderOverlay) return base;
-    const sortable = base.filter(s => s.completed_at == null && s.pinned_at == null);
+    const sortable = base.filter(s => s.completed_at == null);
     return [
-      ...base.filter(s => s.completed_at == null && s.pinned_at != null),
       ...orderByIds(sortable, orderOverlay),
       ...base.filter(s => s.completed_at != null),
     ];
   }, [sessions, task.id, completedSessionsHidden, orderOverlay]);
   const subDnd = useDragReorder((dragId, targetId, place) => {
     const current = rows
-      .filter(s => s.completed_at == null && s.pinned_at == null)
+      .filter(s => s.completed_at == null)
       .map(s => s.id);
     const next = moveById(current, dragId, targetId, place);
     if (next !== current) {
       dispatch('session.reorder', { scope: 'task', parentId: task.id, ids: next });
     }
   });
+  // Display cap (2026-09-08 owner call): OPEN subtasks always render in
+  // full; only the completed tail (shown via the ⋯ menu) caps at 5 rows +
+  // 显示更多. View-only — the drag order is unaffected.
+  const [completedShown, setCompletedShown] = useState(GROUP_INITIAL_SHOWN);
+  const completedCount = rows.length - rows.filter(s => s.completed_at == null).length;
+  const visibleRows = rows.filter(s => s.completed_at == null)
+    .concat(rows.filter(s => s.completed_at != null).slice(0, completedShown));
 
   return (
     <div className="tasks-list-task">
       <div
-        className={`sb-group task-group${isCollapsed ? '' : ' open'}${dragClass}`}
+        className={`sb-group task-group${isCollapsed ? '' : ' open'}${dragClass}${assignDragActive ? ' dnd-assign-target' : ''}`}
         onClick={onToggleCollapsed}
         {...dragProps}
+        // T2 drop target: while an unassigned-group row is dragged, this
+        // header accepts it as a `session.assignTask` (the row's own list
+        // drag controller is untouched by the cross-list gesture).
+        onDragOver={assignDragActive
+          ? event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
+          : dragProps.onDragOver}
+        onDrop={assignDragActive
+          ? event => { event.preventDefault(); onAssignDrop(); }
+          : dragProps.onDrop}
       >
-        <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={14} /></span>
+        <span className="sb-group-ico"><Icon d={isCollapsed ? I.listCollapse : I.listTodo} size={17} /></span>
         {renaming ? (
           <TaskRenameInput task={task} onDone={onRenameDone} />
         ) : (
@@ -915,22 +1127,57 @@ function OpenTaskGroup({
             title={t('tasks.menu.newSession')}
             onClick={e => { e.stopPropagation(); onNewSession(task.id); }}
           >
-            <Icon d={I.plus} size={13} />
+            <Icon d={I.plus} size={14} />
           </button>
         </span>
         )}
       </div>
-      {!isCollapsed && rows.map(st => (
+      {!isCollapsed && visibleRows.map(st => {
+        // Compose the reorder drag with the cross-list assign drag: the row
+        // starts both; same-list drops reorder (subDnd), a drop on another
+        // task's header or the 未分配 section header assigns.
+        const reorderDrag = st.completed_at == null
+          ? subDnd.rowProps(st.id)
+          : null;
+        return (
         <SubtaskRow
           key={st.id}
           subtask={st}
           active={st.id === activeSubtaskId}
+          workspaceName={st.workspace_id != null ? wsById.get(st.workspace_id)?.name : undefined}
           onSelect={() => onSelectSubtask(task.id, st.id)}
-          drag={st.completed_at == null && st.pinned_at == null
-            ? { props: subDnd.rowProps(st.id), className: subDnd.rowClass(st.id) }
+          drag={reorderDrag
+            ? {
+                className: subDnd.rowClass(st.id),
+                props: {
+                  ...reorderDrag,
+                  onDragStart: event => {
+                    reorderDrag.onDragStart(event);
+                    if (!event.defaultPrevented) onAssignDragStart(st.id, task.id);
+                  },
+                  onDragEnd: event => {
+                    reorderDrag.onDragEnd(event);
+                    onAssignDragEnd();
+                  },
+                },
+              }
             : undefined}
         />
-      ))}
+        );
+      })}
+      {!isCollapsed && completedCount > completedShown && (
+        <button
+          type="button"
+          className="sb-showmore"
+          data-testid={`sb-showmore-completed-${task.id}`}
+          onClick={event => {
+            event.stopPropagation();
+            setCompletedShown(n => n + GROUP_SHOW_MORE_STEP);
+          }}
+        >
+          {t('coding.sidebar.showMore').replace('{n}', String(completedCount - completedShown))}
+        </button>
+      )}
     </div>
   );
 }
@@ -957,7 +1204,7 @@ function DoneTaskRow({ task, needsAttention, renaming, deleting, onRenameDone, m
   const t = useT();
   return (
     <div className="sb-group task-group done-task-group">
-      <span className="sb-group-ico"><Icon d={I.listChecks} size={14} /></span>
+      <span className="sb-group-ico"><Icon d={I.listChecks} size={17} /></span>
       {renaming ? (
         <TaskRenameInput task={task} onDone={onRenameDone} />
       ) : (
@@ -990,20 +1237,22 @@ function DoneTaskRow({ task, needsAttention, renaming, deleting, onRenameDone, m
 function SubtaskRow({
   subtask,
   active,
+  workspaceName,
   onSelect,
   drag,
 }: {
   subtask: Session;
   active: boolean;
+  /** T3 hover-card context (2026-09-06). */
+  workspaceName?: string;
   onSelect: () => void;
-  /** Drag-reorder wiring (OpenTaskGroup's controller); absent for pinned and
-   *  completed rows, which are outside the draggable range. */
+  /** Drag-reorder wiring (OpenTaskGroup's controller); absent for completed
+   *  rows, which sit outside the draggable range. */
   drag?: { props: RowDragProps; className: string };
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
   const done = subtask.completed_at != null;
-  const pinned = subtask.pinned_at != null;
   const running = subtask.status === 'running';
   // Pending complete/reopen run (Phase 3a): disables the toggle and blocks
   // duplicate submission while the REST call is in flight.
@@ -1011,55 +1260,47 @@ function SubtaskRow({
     sessionEntityKey(subtask.id),
     done ? 'task.reopenSubtask' : 'task.completeSubtask',
   );
+  const hover = useSessionHoverCard();
   return (
     <div
-      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}${drag?.className ?? ''}`}
+      className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}${statusGlyphShown(subtask.status, subtask.unread === 1) ? ' has-status' : ''}${drag?.className ?? ''}`}
       role="button"
       tabIndex={0}
       onClick={onSelect}
+      onMouseEnter={hover.onMouseEnter}
+      onMouseLeave={hover.onMouseLeave}
       onKeyDown={e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); }
       }}
       {...(drag?.props ?? {})}
     >
+      {hover.rect && (
+        <SessionHoverCard
+          session={subtask}
+          rect={hover.rect}
+          workspaceName={workspaceName}
+          keepOpen={hover.keepOpen}
+          scheduleClose={hover.onMouseLeave}
+          close={hover.close}
+        />
+      )}
       <div className="ri-body">
         <div className="ri-row1">
           <span className="ri-title">{subtask.name || t('coding.session.untitled')}</span>
-          {/* Row-end = status glyph when there is one (unread shows even on the
-              active row, for immediate "Mark as unread" feedback), else the
-              compact relative time. */}
-          {statusGlyphShown(subtask.status, subtask.unread === 1)
-            ? <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
-            : <span className={`ri-age ${subtask.executor}`}>{relTime(subtask.updated_at)}</span>}
+          {/* Row-end: the status glyph only (T4, 2026-09-06 — the Tasks rail
+              dropped the relative-time stamp; the 38px reservation is scoped
+              away in tasks-v3.css and comes back only on glyph-carrying rows
+              via `has-status`, so a long title never runs under the glyph). */}
+          {statusGlyphShown(subtask.status, subtask.unread === 1) && (
+            <StatusIcon status={subtask.status} unread={subtask.unread === 1} />
+          )}
         </div>
-        {/* Compact single-line layout: executor is carried by the time tint. */}
       </div>
-      {/* Hover actions: pin / complete toggle. They cover the row-end glyph on
-          hover (CSS) — EXCEPT while a turn is running: then the complete
-          toggle is not rendered at all (a disabled check next to the spinner
-          read as "done"), and the pin shifts left to sit BESIDE the running
-          ring instead of covering it (`.is-running` rules in tasks-v3.css).
-          A completed subtask can't be pinned (it sorts to the bottom of its
-          task anyway); neither action stays visible off-hover — an always-on
-          glyph would overlap the row-end time (2026-08-03). */}
+      {/* Hover action: the complete toggle only (the Tasks rail has no pin
+          concept, 2026-09-06). It covers the row-end glyph on hover (CSS) —
+          EXCEPT while a turn is running: then it is not rendered at all (a
+          disabled check next to the spinner read as "done"). */}
       <span className="ri-acts">
-        {!done && (
-          <button
-            type="button"
-            className={`ri-act${pinned ? ' on' : ''}`}
-            data-testid={`subtask-pin-${subtask.id}`}
-            aria-label={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
-            title={t(pinned ? 'coding.session.unpin' : 'coding.session.pin')}
-            onClick={e => {
-              e.stopPropagation();
-              // Pin routes through the operation layer (Phase 2a): the row
-              // re-sorts immediately via the pinned_at overlay.
-              dispatch('session.pin', { sessionId: subtask.id, pinned: !pinned });
-            }}
-          >
-            <Icon d={I.pin} size={13} filled={pinned} />
-          </button>
-        )}
         {!running && (
           <button
             type="button"
@@ -1077,7 +1318,7 @@ function SubtaskRow({
               dispatch(done ? 'task.reopenSubtask' : 'task.completeSubtask', { sessionId: subtask.id });
             }}
           >
-            <Icon d={done ? I.lockOpen : I.check} size={13} stroke={2.2} />
+            <Icon d={done ? I.lockOpen : I.check} size={14} stroke={2.2} />
           </button>
         )}
       </span>
@@ -1097,6 +1338,10 @@ function TaskDetail({
   const t = useT();
 
   if (!task) {
+    // A standalone (未分配) session selected from the Tasks rail opens in
+    // place — no jump to Project mode (2026-09-06 owner call). App builds
+    // the same <SessionSurface> as for a subtask.
+    if (!subtask && subtaskMain) return <>{subtaskMain}</>;
     return (
       <main className="main tasks-detail-empty">
         <p>{t('tasks.detail.empty')}</p>

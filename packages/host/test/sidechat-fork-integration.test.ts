@@ -926,8 +926,8 @@ test('Fork INSERT failure reports leftover Provider cleanup', async () => {
     const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
     seedTerminalTurn(ctx.db, parent.id, 't1', 'src-1', 1);
     ctx.db.prepare(
-      `INSERT INTO sessions (id, workspace_id, executor, native_session_id, created_at, updated_at)
-       VALUES ('other-session', ?, 'claude', 'native-fork-conflict', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')`,
+      `INSERT INTO sessions (id, workspace_id, executor, proxy_plugin_id, native_session_id, created_at, updated_at)
+       VALUES ('other-session', ?, 'claude', 'claude', 'native-fork-conflict', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')`,
     ).run(ctx.wsId);
     ctx.proxyMgr.client.forkSession = async (params) => {
       const result = stubForkResult(parent.id, params.sessionId, ctx.proxyMgr.client);

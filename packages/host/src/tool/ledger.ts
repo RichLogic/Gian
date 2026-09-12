@@ -1,11 +1,32 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { COMMAND_RETENTION_MS, uuidV7TimestampMs } from '@gian/remote-protocol';
 import type {
   GianToolCall,
   GianToolError,
   GianToolMethod,
 } from '@gian/shared';
+import type { QueueEntry } from '../queue/manager.js';
+import type {
+  DeliveryLifecycleSink,
+  SteerReceipt,
+  TurnReceipt,
+} from '../session/delivery-lifecycle.js';
 import type { Db } from '../storage/db.js';
 import { fail } from './errors.js';
+
+const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function isRemoteToolCaller(callerId: string): boolean {
+  return callerId.startsWith('remote:');
+}
+
+export function remoteCommandExpired(callerId: string, requestId: string, now = Date.now()): boolean {
+  if (!isRemoteToolCaller(callerId)) return false;
+  // attempt_id / Tool request_id may be any canonical UUID. Only a UUIDv7
+  // command identity participates in the 90-day Remote retention window.
+  if (!UUID_V7_RE.test(requestId)) return false;
+  return now - uuidV7TimestampMs(requestId) > COMMAND_RETENTION_MS;
+}
 
 export interface ToolRequestRow {
   id: string;
@@ -27,7 +48,7 @@ export interface ToolDeliveryRow {
   sessionId: string;
   queueEntryId: string | null;
   turnId: string | null;
-  state: 'pending' | 'started' | 'queued' | 'steered' | 'completed' | 'error' | 'stopped' | 'cancelled';
+  state: 'pending' | 'started' | 'queued' | 'steered' | 'completed' | 'error' | 'stopped' | 'cancelled' | 'unknown';
   createdAt: string;
   updatedAt: string;
 }
@@ -103,12 +124,15 @@ function deliveryRow(row: StoredDeliveryRow): ToolDeliveryRow {
 }
 
 function preallocatedDomainId(method: GianToolMethod): string | null {
+  // schedule.create pre-allocates the Schedule id so an interrupted create's
+  // confirmation commit and its retries converge on one canonical row.
   return method === 'task.create' || method === 'session.create' || method === 'session.send'
+    || method === 'schedule.create' || method === 'schedule.run_now'
     ? randomUUID()
     : null;
 }
 
-export class GianToolLedger {
+export class GianToolLedger implements DeliveryLifecycleSink {
   constructor(private db: Db) {}
 
   claim(call: GianToolCall): ToolRequestRow {
@@ -235,14 +259,124 @@ export class GianToolLedger {
     this.db.prepare('DELETE FROM tool_deliveries WHERE id = ?').run(id);
   }
 
+  requestByIdempotency(callerId: string, idempotencyKey: string): ToolRequestRow | null {
+    const row = this.db.prepare(
+      `SELECT * FROM tool_requests WHERE caller_id = ? AND idempotency_key = ?`,
+    ).get(callerId, idempotencyKey) as StoredRequestRow | undefined;
+    return row ? requestRow(row) : null;
+  }
+
+  queueRemoved(entry: QueueEntry, reason: 'queue_removed' | 'queue_cleared'): void {
+    if (!entry.toolRequestId) return;
+    this.writeTombstone(entry, reason);
+    const delivery = this.deliveryByRequest(entry.toolRequestId);
+    if (!delivery || (delivery.state !== 'queued' && delivery.state !== 'pending')) return;
+    this.updateDelivery(delivery.id, { state: 'cancelled', queueEntryId: null });
+  }
+
+  queueStarted(entry: QueueEntry, receipt: TurnReceipt): void {
+    if (!entry.toolRequestId) return;
+    const delivery = this.deliveryByRequest(entry.toolRequestId);
+    if (!delivery) return;
+    this.updateDelivery(delivery.id, {
+      state: 'started',
+      turnId: receipt.turnId,
+      queueEntryId: null,
+    });
+  }
+
+  queueSteered(entry: QueueEntry, receipt: SteerReceipt): void {
+    if (!entry.toolRequestId) return;
+    const delivery = this.deliveryByRequest(entry.toolRequestId);
+    if (!delivery) return;
+    this.updateDelivery(delivery.id, {
+      state: 'steered',
+      turnId: receipt.turnId,
+      queueEntryId: null,
+    });
+  }
+
+  queueRestored(entry: QueueEntry): void {
+    if (!entry.toolRequestId) return;
+    const delivery = this.deliveryByRequest(entry.toolRequestId);
+    if (!delivery) return;
+    this.updateDelivery(delivery.id, {
+      state: 'queued',
+      queueEntryId: entry.id,
+      turnId: null,
+    });
+  }
+
+  reconcileBoot(): void {
+    const rows = this.db.prepare(
+      `SELECT d.*, r.caller_id
+         FROM tool_deliveries d JOIN tool_requests r ON r.id = d.request_id
+        WHERE d.state IN ('pending', 'queued')`,
+    ).all() as StoredDeliveryRow[];
+    for (const row of rows) {
+      const delivery = deliveryRow(row);
+      const queued = this.db.prepare(
+        'SELECT id FROM queue_entries WHERE tool_request_id = ?',
+      ).get(delivery.requestId) as { id: string } | undefined;
+      if (queued) {
+        if (delivery.queueEntryId !== queued.id || delivery.state !== 'queued') {
+          this.updateDelivery(delivery.id, { queueEntryId: queued.id, state: 'queued' });
+        }
+        continue;
+      }
+      const turn = delivery.turnId
+        ? this.db.prepare('SELECT id, status FROM turns WHERE id = ?').get(delivery.turnId) as { id: string; status: string } | undefined
+        : this.db.prepare('SELECT id, status FROM turns WHERE tool_request_id = ?').get(delivery.requestId) as { id: string; status: string } | undefined;
+      if (turn) {
+        const state = turn.status === 'running' ? 'started' : turn.status as ToolDeliveryRow['state'];
+        this.updateDelivery(delivery.id, { turnId: turn.id, queueEntryId: null, state });
+        continue;
+      }
+      const tombstone = this.db.prepare(
+        'SELECT 1 FROM queue_delivery_tombstones WHERE tool_request_id = ?',
+      ).get(delivery.requestId);
+      if (tombstone) {
+        this.updateDelivery(delivery.id, { state: 'cancelled', queueEntryId: null });
+        continue;
+      }
+      this.updateDelivery(delivery.id, { state: 'unknown', queueEntryId: null });
+    }
+  }
+
+  private writeTombstone(entry: QueueEntry, reason: string): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO queue_delivery_tombstones
+        (queue_entry_id, session_id, tool_request_id, reason, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(entry.id, entry.sessionId, entry.toolRequestId ?? null, reason, new Date().toISOString());
+  }
+
   private prune(maxRows = 10_000): void {
+    const cutoff = new Date(Date.now() - COMMAND_RETENTION_MS).toISOString();
     this.db.prepare(
       `DELETE FROM tool_requests
         WHERE id IN (
-          SELECT id FROM tool_requests
-           WHERE status IN ('succeeded', 'failed')
-           ORDER BY updated_at DESC LIMIT -1 OFFSET ?
+          SELECT r.id FROM tool_requests r
+           WHERE r.status IN ('succeeded', 'failed')
+             AND r.caller_id NOT LIKE 'remote:%'
+             AND NOT EXISTS (
+               SELECT 1 FROM tool_deliveries d
+                WHERE d.request_id = r.id
+                  AND d.state IN ('pending', 'queued', 'started', 'steered', 'unknown')
+             )
+           ORDER BY r.updated_at DESC LIMIT -1 OFFSET ?
         )`,
     ).run(maxRows);
+    this.db.prepare(
+      `DELETE FROM tool_requests
+        WHERE status IN ('succeeded', 'failed')
+          AND caller_id LIKE 'remote:%'
+          AND updated_at < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tool_deliveries d
+             WHERE d.request_id = tool_requests.id
+               AND d.state IN ('pending', 'queued', 'started', 'steered', 'unknown')
+          )`,
+    ).run(cutoff);
   }
 }

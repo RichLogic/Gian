@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyGianIconAppearance,
@@ -6,22 +8,34 @@ import {
   gianIconGradient,
 } from '../src/brand-icon.js';
 
-describe('accent-aware Gian icon', () => {
+// 2026-09-08 owner call: the brand gradient is FIXED to the former Plum
+// accent's hues; the logo no longer follows the accent setting.
+describe('Plum-fixed Gian icon', () => {
   afterEach(() => {
     document.querySelectorAll('link[rel~="icon"]').forEach(link => link.remove());
     delete window.gianDesktop;
   });
 
-  it('derives the same warm ember stops as the status gradient tokens', () => {
-    expect(gianIconGradient('warm', 'ember')).toEqual([
-      'oklch(0.64 0.18 -11)',
-      'oklch(0.73 0.20 43)',
-      'oklch(0.56 0.18 95)',
+  it('derives the Plum stops per theme (hue 320, chroma 0.14)', () => {
+    expect(gianIconGradient('warm')).toEqual([
+      'oklch(0.64 0.18 274)',
+      'oklch(0.73 0.20 328)',
+      'oklch(0.56 0.18 380)',
+    ]);
+    expect(gianIconGradient('light')).toEqual([
+      'oklch(0.66 0.18 274)',
+      'oklch(0.74 0.20 328)',
+      'oklch(0.58 0.18 380)',
+    ]);
+    expect(gianIconGradient('dark')).toEqual([
+      'oklch(0.7 0.18 274)',
+      'oklch(0.8 0.20 328)',
+      'oklch(0.62 0.18 380)',
     ]);
   });
 
   it('builds the selected eye-free Dragon-G mark', () => {
-    const svg = buildGianIconSvg('dark', 'plum');
+    const svg = buildGianIconSvg('dark');
     expect(svg).toContain('oklch(0.7 0.18 274)');
     expect(svg).toContain('oklch(0.8 0.20 328)');
     expect(svg).toContain('oklch(0.62 0.18 380)');
@@ -32,25 +46,42 @@ describe('accent-aware Gian icon', () => {
     expect(svg).not.toContain('data-gian-dev-badge');
   });
 
+  it('keeps every static default icon on the warm Plum gradient', () => {
+    const expectedStops = gianIconGradient('warm');
+    const iconPaths = [
+      resolve(process.cwd(), 'public/gian-icon.svg'),
+      resolve(process.cwd(), '../desktop/renderer/gian-icon.svg'),
+      resolve(process.cwd(), '../../.github/assets/readme/gian-icon.svg'),
+    ];
+    const icons = iconPaths.map(path => readFileSync(path, 'utf8'));
+
+    expect(new Set(icons).size).toBe(1);
+    for (const icon of icons) {
+      for (const stop of expectedStops) expect(icon).toContain(`stop-color="${stop}"`);
+      expect(icon).not.toContain('oklch(0.64 0.18 -11)');
+      expect(icon).not.toContain('data-gian-dev-badge');
+    }
+  });
+
   it('adds a DEV badge only when the development variant is requested', () => {
-    const development = buildGianIconSvg('warm', 'ember', true);
-    const production = buildGianIconSvg('warm', 'ember');
+    const development = buildGianIconSvg('warm', true);
+    const production = buildGianIconSvg('warm');
     expect(development).toContain('data-gian-dev-badge="true"');
     expect(development).toContain('>DEV</text>');
     expect(production).not.toContain('data-gian-dev-badge');
   });
 
   it('updates the browser favicon when appearance changes', () => {
-    applyGianIconAppearance('light', 'azure');
+    applyGianIconAppearance('light');
     const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
     expect(link?.type).toBe('image/svg+xml');
     expect(link?.href).toContain('data:image/svg+xml');
-    expect(decodeURIComponent(link?.href ?? '')).toContain('oklch(0.66 0.17 184)');
+    expect(decodeURIComponent(link?.href ?? '')).toContain('oklch(0.66 0.18 274)');
   });
 
   it('reads the development identity from the desktop bridge', () => {
     window.gianDesktop = { appVariant: 'development' };
-    applyGianIconAppearance('warm', 'ember');
+    applyGianIconAppearance('warm');
     const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
     expect(decodeURIComponent(link?.href ?? '')).toContain('data-gian-dev-badge="true"');
   });

@@ -39,6 +39,7 @@ playwright/.cache/
 output/playwright/
 output/quality/
 output/proxy-real-acceptance/
+output/proxy-certification/
 .DS_Store
 
 # Desktop packaging

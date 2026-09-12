@@ -1,4 +1,8 @@
 import { tmpdir } from 'node:os';
+import {
+  KimiCustomizationScanner,
+  ScanTimeoutError,
+} from './customization.js';
 import { resolve } from 'node:path';
 
 import type {
@@ -27,6 +31,7 @@ import type {
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
 import { KimiAcpClient } from '../runtime/kimi-acp-client.js';
+import { recordSelectedKimiActivation } from '../runtime/discover.js';
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
@@ -317,6 +322,7 @@ export function parseKimiStatusContext(
 
 export class KimiProxyService {
   private readonly runtime: KimiAcpClient;
+  private readonly customization: KimiCustomizationScanner;
   private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
   private readonly proxyIdByNativeId = new Map<string, string>();
@@ -335,6 +341,7 @@ export class KimiProxyService {
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
     this.emitEvent = options.emitEvent ?? (() => undefined);
+    this.customization = new KimiCustomizationScanner();
     this.runtime.setPermissionHandler((request) => this.handlePermissionRequest(request));
     this.runtime.on('sessionUpdate', (notification) => {
       this.handleSessionUpdate(notification);
@@ -353,6 +360,14 @@ export class KimiProxyService {
 
   supportsFork(): boolean {
     return this.runtime.negotiated?.agentCapabilities?.sessionCapabilities?.fork != null;
+  }
+
+  supportsHttpMcp(): boolean {
+    return this.runtime.negotiated?.agentCapabilities?.mcpCapabilities?.http === true;
+  }
+
+  mcpServers(sessionId: string): SessionRecord['mcpServers'] {
+    return structuredClone(this.requireSession(sessionId).mcpServers);
   }
 
   setEventSink(handler: ProxyEventSink): void {
@@ -489,6 +504,7 @@ export class KimiProxyService {
     const createdAt = nowIso();
 
     if (!nativeSessionId) {
+      await recordSelectedKimiActivation(this.runtime.binaryPath);
       try {
         const response = await this.runtime.newSession({ cwd, mcpServers });
         const session = this.makeSession({
@@ -512,6 +528,7 @@ export class KimiProxyService {
       }
     }
 
+    await recordSelectedKimiActivation(this.runtime.binaryPath);
     const session = this.makeSession({
       id: proxySessionId,
       cwd,
@@ -553,7 +570,7 @@ export class KimiProxyService {
     }
   }
 
-  async forkSession(params: { sessionId: string }) {
+  async forkSession(params: { sessionId: string; mcpServers?: SessionRecord['mcpServers'] }) {
     const source = this.requireSession(params.sessionId);
     if (source.activeTurnId) {
       throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
@@ -562,17 +579,18 @@ export class KimiProxyService {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Kimi ACP does not advertise session/fork.');
     }
     try {
+      const mcpServers = params.mcpServers ?? source.mcpServers;
       const response = await this.runtime.forkSession({
         sessionId: source.nativeSessionId,
         cwd: source.cwd,
-        mcpServers: source.mcpServers,
+        mcpServers,
       });
       const createdAt = nowIso();
       const session = this.makeSession({
         id: randomId('sess'),
         cwd: source.cwd,
         nativeSessionId: response.sessionId,
-        mcpServers: source.mcpServers,
+        mcpServers,
         configOptions: response.configOptions ?? source.configOptions,
         createdAt,
       });
@@ -793,6 +811,54 @@ export class KimiProxyService {
       detached: !nativeCloseSupported,
     };
   }
+  async inspectCustomizations(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationListResult> {
+    try {
+      return await this.customization.list(params.kind, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return {
+          kind: params.kind,
+          status: 'unavailable',
+          completeness: 'none',
+          observedAt: new Date().toISOString(),
+          items: [],
+          truncated: false,
+          diagnostics: [{
+            code: 'PROVIDER_INSPECTION_FAILED',
+            message: `Kimi ${params.kind} scan exceeded its inspection bound.`,
+          }],
+        };
+      }
+      throw error;
+    }
+  }
+
+  async customizationDetail(params: {
+    kind: import('@gian/proxy-protocol').CustomizationKind;
+    id: string;
+    cwd?: string;
+  }): Promise<import('@gian/proxy-protocol').CustomizationDetailResult> {
+    try {
+      return await this.customization.detail(params.kind, params.id, params.cwd ?? null);
+    } catch (error) {
+      if (error instanceof ScanTimeoutError) {
+        return {
+          kind: params.kind,
+          id: params.id,
+          status: 'unavailable',
+          observedAt: new Date().toISOString(),
+          text: '',
+          truncated: false,
+          diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message: 'Kimi detail scan exceeded its inspection bound.' }],
+        };
+      }
+      throw error;
+    }
+  }
+
 
   async close(): Promise<void> {
     for (const approval of [...this.approvalsById.values()]) {
@@ -1271,11 +1337,11 @@ export class KimiProxyService {
   }
 
   private serializeSession(session: SessionRecord) {
+    const { mcpServers: _mcpServers, ...publicSession } = session;
     return {
-      ...session,
+      ...publicSession,
       configOptions: [...session.configOptions],
       slashCommands: [...session.slashCommands],
-      mcpServers: [...session.mcpServers],
     };
   }
 

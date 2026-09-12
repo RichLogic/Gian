@@ -1,9 +1,10 @@
 {
   "name": "@gian/cc-proxy",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
+  "gianProxy": { "releaseId": "claude", "shipping": true, "realAcceptance": { "binaryEnv": "CLAUDE_BIN", "setup": "claude-settings" } },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
@@ -14,11 +15,11 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "devDependencies": {
-    "@gian/proxy-protocol": "workspace:*",
     "@types/node": "^24.12.2",
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@gian/proxy-protocol": "workspace:*",
     "@gian/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"

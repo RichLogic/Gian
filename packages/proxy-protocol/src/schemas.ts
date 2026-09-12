@@ -24,14 +24,33 @@ import {
   PLAN_STEP_STATUSES,
   PRESENTATION_TONES,
   PROCESS_SCOPES,
+  KNOWN_PROTOCOL_VERSIONS,
+  MANIFEST_V4_PROTOCOL_RANGE_PATTERN,
+  MAX_MANIFEST_V4_PROTOCOL_RANGE_CHARS,
+  MAX_MANIFEST_V4_VERIFIED_VERSIONS,
+  MAX_RUNTIME_CANDIDATES,
+  MAX_RUNTIME_CODE_CHARS,
+  MAX_RUNTIME_CONTENT_ROOTS,
+  MAX_RUNTIME_ID_CHARS,
+  MAX_RUNTIME_LABEL_CHARS,
+  MAX_RUNTIME_MESSAGE_CHARS,
+  MAX_RUNTIME_PATH_CHARS,
+  MAX_RUNTIME_SETUP_ACTIONS,
+  MAX_RUNTIME_URL_CHARS,
   PROTOCOL_NAME,
-  PROTOCOL_V2,
-  PROTOCOL_V2_LEGACY,
+  isManifestV4ExclusiveProtocolRange,
+  RUNTIME_CANDIDATE_SOURCES,
   REQUEST_REASONS,
   SESSION_STATES,
   STEP_STATUSES,
   STOP_REASONS,
 } from './constants.js';
+import {
+  customizationDetailParamsSchema,
+  customizationDetailResultSchema,
+  customizationListParamsSchema,
+  customizationListResultSchema,
+} from './customization.js';
 
 export type JsonValue =
   | string
@@ -85,7 +104,7 @@ export const extensionsSchema = z.record(
   }),
 );
 
-const manifestFields = {
+const manifestIdentityFields = {
   id: pluginIdSchema,
   displayName: nonEmptyStringSchema,
   pluginVersion: semverSchema,
@@ -99,15 +118,6 @@ const manifestFields = {
   process: z.strictObject({
     scope: z.enum(PROCESS_SCOPES),
   }),
-  runtime: z.strictObject({
-    id: nonEmptyStringSchema,
-    displayName: nonEmptyStringSchema,
-    verifiedCliVersions: z.array(semverSchema).min(1).optional(),
-    /** Legacy diagnostic field. New built-in Proxy packages use the exact
-     * verified list above; retained so an older immutable package remains
-     * readable during upgrade. */
-    recommendedCliVersion: semverSchema.optional(),
-  }).optional(),
   skills: z.array(z.strictObject({
     name: nonEmptyStringSchema,
     path: nonEmptyStringSchema
@@ -120,9 +130,20 @@ const manifestFields = {
   })).optional(),
 };
 
+const legacyRuntimeSchema = z.strictObject({
+  id: nonEmptyStringSchema,
+  displayName: nonEmptyStringSchema,
+  verifiedCliVersions: z.array(semverSchema).min(1).optional(),
+  /** Legacy diagnostic field. New built-in Proxy packages use the exact
+   * verified list above; retained so an older immutable package remains
+   * readable during upgrade. */
+  recommendedCliVersion: semverSchema.optional(),
+}).optional();
+
 export const manifestV2Schema = z.strictObject({
   schemaVersion: z.literal(2),
-  ...manifestFields,
+  ...manifestIdentityFields,
+  runtime: legacyRuntimeSchema,
 });
 
 const logoAssetSchema = z.strictObject({
@@ -136,20 +157,69 @@ const logoAssetSchema = z.strictObject({
   sha256: z.string().regex(/^[a-f0-9]{64}$/, 'Expected a lowercase SHA-256 digest.'),
 });
 
+const brandingSchema = z.strictObject({
+  logo: z.strictObject({
+    light: logoAssetSchema,
+    dark: logoAssetSchema.optional(),
+  }),
+});
+
 export const manifestV3Schema = z.strictObject({
   schemaVersion: z.literal(3),
-  ...manifestFields,
-  branding: z.strictObject({
-    logo: z.strictObject({
-      light: logoAssetSchema,
-      dark: logoAssetSchema.optional(),
-    }),
+  ...manifestIdentityFields,
+  runtime: legacyRuntimeSchema,
+  branding: brandingSchema,
+});
+
+const uniqueExactSemverListSchema = z.array(semverSchema)
+  .min(1)
+  .max(MAX_MANIFEST_V4_VERIFIED_VERSIONS)
+  .superRefine((values, context) => {
+    if (new Set(values).size !== values.length) {
+      context.addIssue({
+        code: 'custom',
+        message: 'verifiedVersions must be unique.',
+      });
+    }
+  });
+
+export const manifestV4RuntimeSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('none'),
   }),
+  z.strictObject({
+    kind: z.literal('external'),
+    id: z.string()
+      .min(1)
+      .max(MAX_RUNTIME_ID_CHARS)
+      .regex(/^[a-z][a-z0-9-]{0,63}$/, 'Expected a lowercase runtime id.'),
+    displayName: z.string().min(1).max(MAX_RUNTIME_LABEL_CHARS),
+    verifiedVersions: uniqueExactSemverListSchema,
+  }),
+]);
+
+export const manifestV4Schema = z.strictObject({
+  schemaVersion: z.literal(4),
+  ...manifestIdentityFields,
+  protocol: z.strictObject({
+    name: z.literal(PROTOCOL_NAME),
+    range: z.string()
+      .min(1)
+      .max(MAX_MANIFEST_V4_PROTOCOL_RANGE_CHARS)
+      .regex(MANIFEST_V4_PROTOCOL_RANGE_PATTERN, 'Expected a bounded ASCII protocol range.')
+      .refine(
+        isManifestV4ExclusiveProtocolRange,
+        'Manifest v4 protocol.range must include 2.2 and must not include 2.1 or 2.0',
+      ),
+  }),
+  runtime: manifestV4RuntimeSchema,
+  branding: brandingSchema,
 });
 
 export const manifestSchema = z.discriminatedUnion('schemaVersion', [
   manifestV2Schema,
   manifestV3Schema,
+  manifestV4Schema,
 ]);
 
 export const capabilitiesSchema = z.record(
@@ -172,7 +242,7 @@ export const initializeParamsSchema = z.strictObject({
 export const initializeResultSchema = z.strictObject({
   protocol: z.strictObject({
     name: z.literal(PROTOCOL_NAME),
-    version: z.enum([PROTOCOL_V2, PROTOCOL_V2_LEGACY]),
+    version: z.enum(KNOWN_PROTOCOL_VERSIONS),
   }),
   plugin: z.strictObject({
     id: pluginIdSchema,
@@ -621,6 +691,120 @@ const interactionRespondParamsSchema = interruptParamsSchema.extend({
   values: z.record(nonEmptyStringSchema, interactionValueSchema),
 });
 
+function isHttpsOnlyUrl(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_RUNTIME_URL_CHARS) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'https:'
+    && url.username === ''
+    && url.password === ''
+    && url.hostname.length > 0;
+}
+
+function isAbsoluteHostPath(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_RUNTIME_PATH_CHARS) return false;
+  if (/[\x00-\x1f\x7f]/.test(value)) return false;
+  if (value.split(/[\\/]/).some((part) => part === '..')) return false;
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+const runtimeWireIdSchema = z.string()
+  .min(1)
+  .max(MAX_RUNTIME_ID_CHARS)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/, 'Expected a bounded runtime identifier.');
+const runtimeLabelSchema = z.string().min(1).max(MAX_RUNTIME_LABEL_CHARS);
+const absoluteHostPathSchema = z.string()
+  .min(1)
+  .max(MAX_RUNTIME_PATH_CHARS)
+  .refine(isAbsoluteHostPath, 'Expected an absolute Host path.');
+const httpsOnlyUrlSchema = z.string()
+  .min(1)
+  .max(MAX_RUNTIME_URL_CHARS)
+  .refine(isHttpsOnlyUrl, 'Expected an HTTPS URL without credentials.');
+
+export const runtimeSetupActionSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    id: runtimeWireIdSchema,
+    kind: z.literal('open_url'),
+    label: runtimeLabelSchema,
+    url: httpsOnlyUrlSchema,
+  }),
+  z.strictObject({
+    id: runtimeWireIdSchema,
+    kind: z.literal('select_file'),
+    label: runtimeLabelSchema,
+  }),
+]);
+
+export const runtimeCandidateSchema = z.strictObject({
+  path: absoluteHostPathSchema,
+  source: z.enum(RUNTIME_CANDIDATE_SOURCES),
+  label: runtimeLabelSchema.optional(),
+});
+
+export const runtimeDiscoverParamsSchema = z.strictObject({});
+
+export const runtimeDiscoverResultSchema = z.strictObject({
+  candidates: z.array(runtimeCandidateSchema).max(MAX_RUNTIME_CANDIDATES),
+  setupActions: z.array(runtimeSetupActionSchema).max(MAX_RUNTIME_SETUP_ACTIONS),
+}).superRefine((value, context) => {
+  const candidatePaths = value.candidates.map((candidate) => candidate.path);
+  if (new Set(candidatePaths).size !== candidatePaths.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['candidates'],
+      message: 'runtime.discover candidate paths must be unique.',
+    });
+  }
+  const actionIds = value.setupActions.map((action) => action.id);
+  if (new Set(actionIds).size !== actionIds.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['setupActions'],
+      message: 'runtime.discover setupAction ids must be unique.',
+    });
+  }
+});
+
+export const runtimeProbeParamsSchema = z.strictObject({
+  path: absoluteHostPathSchema,
+});
+
+export const runtimeContentRootSchema = z.strictObject({
+  path: absoluteHostPathSchema,
+  mode: z.enum(['file', 'directory']),
+});
+
+export const runtimeProbeResultSchema = z.strictObject({
+  runtimeId: runtimeWireIdSchema,
+  displayName: runtimeLabelSchema,
+  path: absoluteHostPathSchema,
+  version: semverSchema,
+  configHome: z.union([absoluteHostPathSchema, z.null()]),
+  contentRoots: z.array(runtimeContentRootSchema).min(1).max(MAX_RUNTIME_CONTENT_ROOTS),
+  readinessIssue: z.strictObject({
+    code: z.string()
+      .min(1)
+      .max(MAX_RUNTIME_CODE_CHARS)
+      .regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/, 'Expected a bounded runtime readiness code.'),
+    message: z.string().min(1).max(MAX_RUNTIME_MESSAGE_CHARS),
+    repairable: z.boolean(),
+  }).optional(),
+}).superRefine((value, context) => {
+  const paths = value.contentRoots.map((root) => root.path);
+  if (new Set(paths).size !== paths.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['contentRoots'],
+      message: 'runtime.probe contentRoots paths must be unique.',
+    });
+  }
+});
+
 const emptyParamsSchema = z.strictObject({});
 
 function requestSchema<M extends string, S extends z.ZodType>(
@@ -668,6 +852,10 @@ export const proxyRequestSchema = z.discriminatedUnion('method', [
   requestSchema('sidechat.resume', sidechatResumeParamsSchema),
   requestSchema('sidechat.close', sidechatCloseParamsSchema),
   requestSchema('session.fork', sessionForkParamsSchema),
+  requestSchema('runtime.discover', runtimeDiscoverParamsSchema),
+  requestSchema('runtime.probe', runtimeProbeParamsSchema),
+  requestSchema('customization.list', customizationListParamsSchema),
+  requestSchema('customization.detail', customizationDetailParamsSchema),
 ]);
 
 export const runtimeErrorSchema = z.strictObject({
@@ -1215,11 +1403,23 @@ export const resultSchemas = {
   'sidechat.resume': sidechatResultSchema,
   'sidechat.close': sidechatCloseResultSchema,
   'session.fork': sessionForkResultSchema,
+  'runtime.discover': runtimeDiscoverResultSchema,
+  'runtime.probe': runtimeProbeResultSchema,
+  'customization.list': customizationListResultSchema,
+  'customization.detail': customizationDetailResultSchema,
 } as const;
 
 export type ManifestV2 = z.infer<typeof manifestV2Schema>;
 export type ManifestV3 = z.infer<typeof manifestV3Schema>;
+export type ManifestV4 = z.infer<typeof manifestV4Schema>;
+export type ManifestV4Runtime = z.infer<typeof manifestV4RuntimeSchema>;
 export type ProxyManifest = z.infer<typeof manifestSchema>;
+export type RuntimeDiscoverParams = z.infer<typeof runtimeDiscoverParamsSchema>;
+export type RuntimeDiscoverResult = z.infer<typeof runtimeDiscoverResultSchema>;
+export type RuntimeProbeParams = z.infer<typeof runtimeProbeParamsSchema>;
+export type RuntimeProbeResult = z.infer<typeof runtimeProbeResultSchema>;
+export type RuntimeSetupAction = z.infer<typeof runtimeSetupActionSchema>;
+export type RuntimeCandidate = z.infer<typeof runtimeCandidateSchema>;
 export type InitializeParams = z.infer<typeof initializeParamsSchema>;
 export type InitializeResult = z.infer<typeof initializeResultSchema>;
 export type ProxyRequest = z.infer<typeof proxyRequestSchema>;
@@ -1241,3 +1441,4 @@ export type ForkAnchor = z.infer<typeof forkAnchorSchema>;
 export type ForkOrigin = z.infer<typeof forkOriginSchema>;
 export type SidechatCloseResult = z.infer<typeof sidechatCloseResultSchema>;
 export type SessionForkResult = z.infer<typeof sessionForkResultSchema>;
+export type { CustomizationItem, CustomizationKind, CustomizationListParams, CustomizationDetailParams, CustomizationListResult, CustomizationDetailResult, CustomizationListStatus, InventoryCompleteness, CustomizationActivation, CustomizationDiagnosticCode, RuleEffectStatus, RuleCustomizationItem } from './customization.js';

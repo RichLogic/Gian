@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { proxyDefinitions } from './build-proxy-artifacts.mjs';
+
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const APP_MANIFESTS = [
   'package.json',
+  'packages/chat-ui/package.json',
   'packages/desktop/package.json',
   'packages/host/package.json',
   'packages/shared/package.json',
@@ -13,12 +16,12 @@ export const APP_MANIFESTS = [
 ];
 export const INDEPENDENT_MANIFESTS = [
   'packages/proxy-protocol/package.json',
-  'packages/proxies/cc-proxy/package.json',
-  'packages/proxies/codex-proxy/package.json',
-  'packages/proxies/kimi-proxy/package.json',
-  'packages/proxies/grok-proxy/package.json',
   'packages/proxies/dsh-bridge/package.json',
-  'packages/proxies/dsh-proxy/package.json',
+  ...proxyDefinitions.map(definition => (
+    `packages/proxies/${definition.directory}/package.json`
+  )),
+  'packages/remote-protocol/package.json',
+  'packages/remote-server/package.json',
 ];
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-hotfix)?$/;
 const INDEPENDENT_VERSION_RE = /^\d+\.\d+\.\d+$/;

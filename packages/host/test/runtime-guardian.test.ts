@@ -1,27 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RuntimeGuardian } from '../src/runtime/guardian.js';
 
-test('runtime guardian single-flights checks and retires changed executors', async () => {
+import { RuntimeGuardian } from '../src/runtime/guardian.js';
+import { RuntimeReadinessCache } from '../src/runtime/readiness-cache.js';
+import type { RuntimeObservation } from '../src/runtime/resolver.js';
+
+test('runtime guardian single-flights checks and invalidates before close', async () => {
   let detectCalls = 0;
   let allowDetection!: () => void;
   const detectionGate = new Promise<void>(resolve => { allowDetection = resolve; });
   const closed: string[] = [];
   const invalidated: string[] = [];
-  const runtimes = {
-    async detectExternalChanges() {
-      detectCalls += 1;
-      await detectionGate;
-      return ['codex'] as const;
-    },
-    invalidate(cli: string) {
-      invalidated.push(cli);
-      return true;
-    },
-  };
+  const cache = new RuntimeReadinessCache();
+  cache.publish({
+    pluginId: 'codex',
+    pluginVersion: '0.2.13',
+    selectedPath: '/tmp/codex',
+    profileIdentity: 'id',
+    state: 'ready',
+    displayName: 'Codex CLI',
+  });
   const guardian = new RuntimeGuardian({
-    runtimes: runtimes as never,
-    closeRuntimeOwner: async cli => { closed.push(cli); },
+    resolver: {
+      async detectExternalChanges() {
+        detectCalls += 1;
+        await detectionGate;
+        return ['codex'];
+      },
+      invalidate(pluginId: string) {
+        invalidated.push(`resolver:${pluginId}`);
+        return true;
+      },
+    } as never,
+    readinessCache: cache,
+    closeRuntimeOwner: async pluginId => { closed.push(pluginId); },
   });
 
   const first = guardian.checkNow();
@@ -31,16 +43,26 @@ test('runtime guardian single-flights checks and retires changed executors', asy
   await first;
   assert.equal(detectCalls, 1);
   assert.deepEqual(closed, ['codex']);
-  assert.deepEqual(invalidated, ['codex']);
+  assert.equal(cache.isInvalidated('codex', '0.2.13'), true);
+  assert.deepEqual(invalidated, ['resolver:codex']);
 });
 
-test('runtime guardian leaves a changed generation active when owner shutdown fails', async () => {
-  let invalidations = 0;
+test('runtime guardian invalidates readiness even when owner shutdown fails', async () => {
+  const cache = new RuntimeReadinessCache();
+  cache.publish({
+    pluginId: 'claude',
+    pluginVersion: '0.2.4',
+    selectedPath: '/tmp/claude',
+    profileIdentity: 'id',
+    state: 'ready',
+    displayName: 'Claude Code',
+  });
   const guardian = new RuntimeGuardian({
-    runtimes: {
-      async detectExternalChanges() { return ['claude'] as const; },
-      invalidate() { invalidations += 1; return true; },
+    resolver: {
+      async detectExternalChanges() { return ['claude']; },
+      invalidate() { return true; },
     } as never,
+    readinessCache: cache,
     closeRuntimeOwner: async () => { throw new Error('controlled close failure'); },
   });
 
@@ -49,24 +71,25 @@ test('runtime guardian leaves a changed generation active when owner shutdown fa
     error => error instanceof AggregateError
       && error.errors.some(cause => String(cause).includes('controlled close failure')),
   );
-  assert.equal(invalidations, 0);
+  assert.equal(cache.isInvalidated('claude', '0.2.4'), true);
+  assert.equal(cache.get('claude', '0.2.4')?.state, 'invalid');
 });
 
-test('runtime guardian isolates owner shutdown failures between executors', async () => {
+test('runtime guardian maps DSH/ZCode owners and isolates close failures', async () => {
   const closed: string[] = [];
-  const invalidated: string[] = [];
   const guardian = new RuntimeGuardian({
-    runtimes: {
-      async detectExternalChanges() { return ['claude', 'codex'] as const; },
-      invalidate(cli: string) { invalidated.push(cli); return true; },
+    resolver: {
+      async detectExternalChanges(_extra?: readonly RuntimeObservation[]) {
+        return ['ai.deepseek.harness', 'com.zhipu.zcode'];
+      },
+      invalidate() { return true; },
     } as never,
-    closeRuntimeOwner: async cli => {
-      closed.push(cli);
-      if (cli === 'claude') throw new Error('claude close failed');
+    closeRuntimeOwner: async pluginId => {
+      closed.push(pluginId);
+      if (pluginId === 'ai.deepseek.harness') throw new Error('dsh close failed');
     },
   });
 
   await assert.rejects(guardian.checkNow(), AggregateError);
-  assert.deepEqual(closed, ['claude', 'codex']);
-  assert.deepEqual(invalidated, ['codex']);
+  assert.deepEqual(closed, ['ai.deepseek.harness', 'com.zhipu.zcode']);
 });

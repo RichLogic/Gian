@@ -18,6 +18,10 @@ export function reviewFileIndexAtAnchor(fileTops: readonly number[], anchorTop: 
 export function useReviewFileNavigation(
   rootRef: RefObject<HTMLDivElement | null>,
   paths: readonly string[],
+  /** Invoked with the target path before scrolling so a collapsed file block
+   *  expands first (the `.cs-file` wrapper stays mounted, so the synchronous
+   *  scroll below still lands on its header). */
+  expandFile?: (path: string) => void,
 ) {
   const [activeIndex, setActiveIndex] = useState(0);
   const pathKey = paths.join('\u0000');
@@ -53,9 +57,10 @@ export function useReviewFileNavigation(
     const next = Math.max(0, Math.min(activeIndex + delta, paths.length - 1));
     const target = fileElement(root, paths[next]!);
     if (!target) return;
+    expandFile?.(paths[next]!);
     target.scrollIntoView({ block: 'start' });
     setActiveIndex(next);
-  }, [activeIndex, paths, rootRef]);
+  }, [activeIndex, paths, rootRef, expandFile]);
 
   return {
     activeIndex,

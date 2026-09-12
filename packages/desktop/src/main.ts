@@ -27,6 +27,7 @@ import type {
   GianScreenshotErrorCode,
   GianScreenshotTarget,
 } from '@gian/shared';
+import { officialCatalogSourcePolicy } from '@gian/shared';
 import electronUpdater from 'electron-updater';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -56,6 +57,12 @@ import {
   resolveGitHubReleaseBrokerSocketPath,
 } from './github-request-broker.js';
 import {
+  REMOTE_IDENTITY_BROKER_SOCKET_ENV,
+  RemoteIdentityBroker,
+  resolveRemoteIdentityBrokerSocketPath,
+} from './remote-identity-broker.js';
+import { FileRemoteIdentityStore } from './remote-identity-store.js';
+import {
   DESKTOP_TOKEN_HEADER,
   resolveManagedHostPaths,
   resolveUnpackedAppPath,
@@ -68,6 +75,18 @@ import {
 } from './managed-host-shutdown.js';
 import { retireLegacyHostLaunchAgent } from './legacy-host-retirement.js';
 import { BrowserController, registerBrowserScheme } from './browser-controller.js';
+import { BrowserAutomationService } from './browser-automation.js';
+import {
+  BROWSER_USE_BROKER_SOCKET_ENV,
+  BrowserUseBroker,
+  resolveBrowserUseBrokerSocketPath,
+} from './browser-use-broker.js';
+import { FileBrowserStateStore } from './browser-state.js';
+import { resolveBrowserSmokeDownloadDirectory } from './browser-download.js';
+import {
+  FileBrowserExtensionStore,
+  resolveBrowserSmokeExtensionDirectory,
+} from './browser-extension.js';
 import {
   AppUpdateController,
   type AppUpdateState,
@@ -150,6 +169,8 @@ const desktopInstanceId = app.isPackaged ? randomUUID() : null;
 
 let mainWindow: BrowserWindow | null = null;
 let browserController: BrowserController | null = null;
+let browserAutomationService: BrowserAutomationService | null = null;
+let browserUseBroker: BrowserUseBroker | null = null;
 let screenshotController: ScreenshotController | null = null;
 let screenshotPreferencesStore: FileScreenshotPreferenceStore | null = null;
 let screenshotPreferences: ScreenshotPreferences = { ...DEFAULT_SCREENSHOT_PREFERENCES };
@@ -157,6 +178,7 @@ let managedHost: ChildProcess | null = null;
 let legacyHostRetirement: Promise<void> | null = null;
 let githubAuthService: GitHubAuthService | null = null;
 let githubReleaseBroker: GitHubReleaseMetadataBroker | null = null;
+let remoteIdentityBroker: RemoteIdentityBroker | null = null;
 let loadingSurface:
   | { window: BrowserWindow; promise: Promise<boolean> }
   | null = null;
@@ -250,6 +272,7 @@ async function startGitHubReleaseBroker(): Promise<void> {
   const broker = new GitHubReleaseMetadataBroker({
     socketPath: githubReleaseBrokerSocketPath(),
     allowedRepository: releaseRepository(),
+    allowedCatalogRepository: officialCatalogSourcePolicy().repository,
     fetchReleaseMetadata: (request, signal) => service.fetchReleaseMetadata(request, signal),
   });
   await broker.start();
@@ -263,6 +286,65 @@ async function ensureGitHubReleaseBroker(): Promise<void> {
     // The app remains usable offline and the Host retains its anonymous
     // GitHub fallback when the local credential broker cannot start.
     console.error('[desktop] GitHub release broker failed to start', error);
+  }
+}
+
+function remoteIdentityBrokerSocketPath(): string {
+  const developmentSocket = !app.isPackaged
+    ? process.env[REMOTE_IDENTITY_BROKER_SOCKET_ENV]?.trim()
+    : undefined;
+  return developmentSocket || resolveRemoteIdentityBrokerSocketPath(
+    desktopInstanceId ?? applicationIdentity.userDataPath ?? app.getPath('userData'),
+  );
+}
+
+async function startRemoteIdentityBroker(): Promise<void> {
+  if (remoteIdentityBroker) return;
+  const broker = new RemoteIdentityBroker({
+    socketPath: remoteIdentityBrokerSocketPath(),
+    store: new FileRemoteIdentityStore({
+      path: join(app.getPath('userData'), 'remote-identity.json'),
+      encryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: value => safeStorage.decryptString(value),
+    }),
+  });
+  await broker.start();
+  remoteIdentityBroker = broker;
+}
+
+async function ensureRemoteIdentityBroker(): Promise<void> {
+  try {
+    await startRemoteIdentityBroker();
+  } catch (error) {
+    console.error('[desktop] Remote identity broker failed to start', error);
+  }
+}
+
+function browserUseBrokerSocketPath(): string {
+  const developmentSocket = !app.isPackaged
+    ? process.env[BROWSER_USE_BROKER_SOCKET_ENV]?.trim()
+    : undefined;
+  return developmentSocket || resolveBrowserUseBrokerSocketPath(
+    desktopInstanceId ?? applicationIdentity.userDataPath ?? app.getPath('userData'),
+  );
+}
+
+async function startBrowserUseBroker(): Promise<void> {
+  if (browserUseBroker) return;
+  const broker = new BrowserUseBroker({
+    socketPath: browserUseBrokerSocketPath(),
+    handler: () => browserAutomationService,
+  });
+  await broker.start();
+  browserUseBroker = broker;
+}
+
+async function ensureBrowserUseBroker(): Promise<void> {
+  try {
+    await startBrowserUseBroker();
+  } catch (error) {
+    console.error('[desktop] Browser Use broker failed to start', error);
   }
 }
 
@@ -306,6 +388,8 @@ function startProductionHost(): void {
     desktopToken,
     instanceId: desktopInstanceId,
     githubBrokerSocket: githubReleaseBrokerSocketPath(),
+    remoteBrokerSocket: remoteIdentityBrokerSocketPath(),
+    browserBrokerSocket: browserUseBrokerSocketPath(),
     env: {
       ...process.env,
       GIAN_RELEASE_VERSION: app.getVersion(),
@@ -766,6 +850,8 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
       await legacyHostRetirement;
     }
     await ensureGitHubReleaseBroker();
+    await ensureRemoteIdentityBroker();
+    await ensureBrowserUseBroker();
     const readiness = await ensureHostAvailable({
       healthUrl: targets.healthUrl,
       manageHost: targets.manageHost,
@@ -934,10 +1020,83 @@ async function createMainWindow(): Promise<BrowserWindow> {
     window,
     hostUrl: targets.hostUrl,
     desktopToken,
+    stateStore: new FileBrowserStateStore(join(app.getPath('userData'), 'browser-state.json')),
+    extensionStore: new FileBrowserExtensionStore(
+      join(app.getPath('userData'), 'browser-extensions.json'),
+    ),
+    pickExtensionDirectory: async () => {
+      const smokeExtension = resolveBrowserSmokeExtensionDirectory({
+        packaged: app.isPackaged,
+        userDataPath: app.getPath('userData'),
+        candidate: process.env.GIAN_DESKTOP_SMOKE_EXTENSION_DIR,
+      });
+      if (smokeExtension) return smokeExtension;
+      const result = await dialog.showOpenDialog(window, {
+        title: 'Load unpacked Browser extension',
+        properties: ['openDirectory'],
+      });
+      return result.canceled ? null : result.filePaths[0] ?? null;
+    },
+    prepareDownload: (item, filename) => {
+      const smokeTarget = resolveBrowserSmokeDownloadDirectory({
+        packaged: app.isPackaged,
+        userDataPath: app.getPath('userData'),
+        candidate: process.env.GIAN_DESKTOP_SMOKE_DOWNLOAD_DIR,
+      });
+      if (smokeTarget) {
+        item.setSavePath(join(smokeTarget, filename));
+        return;
+      }
+      item.setSaveDialogOptions({
+        title: 'Save Download',
+        defaultPath: join(app.getPath('downloads'), filename),
+      });
+    },
+    revealPath: path => shell.showItemInFolder(path),
     openExternalUrl: openExternal,
+    onTabsChanged: tabs => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:tabs', tabs);
+      }
+    },
     onState: (tabId, state) => {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
         window.webContents.send('desktop:browser:state', tabId, state);
+      }
+    },
+    onFind: (tabId, result) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:find-result', tabId, result);
+      }
+    },
+    onFindRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:find-requested', tabId);
+      }
+    },
+    onAddressRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:address-requested', tabId);
+      }
+    },
+    onDownloadsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:downloads', snapshot);
+      }
+    },
+    onPermissionsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:permissions', snapshot);
+      }
+    },
+    onExtensionsChanged: snapshot => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:extensions', snapshot);
+      }
+    },
+    onPresentationRequested: tabId => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('desktop:browser:presentation-requested', tabId);
       }
     },
     onElement: (tabId, capture) => {
@@ -947,6 +1106,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
     },
   });
   browserController = controller;
+  browserAutomationService = new BrowserAutomationService(controller);
 
   hardenWebContents(window.webContents);
   installDesktopTitlebar(window.webContents);
@@ -987,6 +1147,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
   window.on('closed', () => {
     screenshotController?.invalidateTarget();
     controller.destroy();
+    if (browserAutomationService) browserAutomationService = null;
     if (browserController === controller) browserController = null;
     if (mainWindow === window) mainWindow = null;
     if (mainWindow === null) {
@@ -1215,11 +1376,86 @@ const EMPTY_BROWSER_STATE: GianBrowserState = {
   canGoForward: false,
   canOpenExternal: false,
   inspecting: false,
+  zoomFactor: 1,
 };
 
 ipcMain.handle('desktop:browser:get-state', (event, tabId: unknown) => {
   if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
   return browserController?.getState(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.handle('desktop:browser:create-tab', (event, input: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserCreateTabInput(input)) return null;
+  return browserController?.createTab(input ?? {}) ?? null;
+});
+
+ipcMain.handle('desktop:browser:list-tabs', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, tabs: [] };
+  return browserController?.listTabs() ?? { revision: 0, tabs: [] };
+});
+
+ipcMain.handle('desktop:browser:list-downloads', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, downloads: [] };
+  return browserController?.listDownloads() ?? { revision: 0, downloads: [] };
+});
+
+ipcMain.handle('desktop:browser:cancel-download', (event, downloadId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(downloadId)) return false;
+  return browserController?.cancelDownload(downloadId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:reveal-download', (event, downloadId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(downloadId)) return false;
+  return browserController?.revealDownload(downloadId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:list-permission-requests', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, requests: [] };
+  return browserController?.listPermissionRequests() ?? { revision: 0, requests: [] };
+});
+
+ipcMain.handle(
+  'desktop:browser:respond-permission',
+  (event, requestId: unknown, decision: unknown) => {
+    if (!isMainWindowSender(event.sender)
+      || !isBrowserTabId(requestId)
+      || typeof decision !== 'string'
+      || !['allow_once', 'allow_always', 'deny'].includes(decision)) return false;
+    return browserController?.respondPermission(
+      requestId,
+      decision as import('@gian/shared').GianBrowserPermissionDecision,
+    ) ?? false;
+  },
+);
+
+ipcMain.handle('desktop:browser:list-extensions', event => {
+  if (!isMainWindowSender(event.sender)) return { revision: 0, extensions: [] };
+  return browserController?.listExtensions() ?? { revision: 0, extensions: [] };
+});
+
+ipcMain.handle('desktop:browser:install-extension', async event => {
+  if (!isMainWindowSender(event.sender)) return null;
+  return browserController?.installExtension() ?? null;
+});
+
+ipcMain.handle(
+  'desktop:browser:set-extension-enabled',
+  async (event, extensionKey: unknown, enabled: unknown) => {
+    if (!isMainWindowSender(event.sender)
+      || !isBrowserTabId(extensionKey)
+      || typeof enabled !== 'boolean') return false;
+    return browserController?.setExtensionEnabled(extensionKey, enabled) ?? false;
+  },
+);
+
+ipcMain.handle('desktop:browser:remove-extension', async (event, extensionKey: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(extensionKey)) return false;
+  return browserController?.removeExtension(extensionKey) ?? false;
+});
+
+ipcMain.handle('desktop:browser:configure', (event, preferences: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserPreferences(preferences)) return false;
+  return browserController?.configure(preferences) ?? false;
 });
 
 ipcMain.handle('desktop:browser:navigate', async (event, tabId: unknown, url: unknown) => {
@@ -1251,9 +1487,33 @@ ipcMain.handle('desktop:browser:reload', (event, tabId: unknown) => {
   return browserController?.reload(tabId) ?? EMPTY_BROWSER_STATE;
 });
 
+ipcMain.handle('desktop:browser:recover', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  return browserController?.recover(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
 ipcMain.handle('desktop:browser:stop', (event, tabId: unknown) => {
   if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
   return browserController?.stop(tabId) ?? EMPTY_BROWSER_STATE;
+});
+
+ipcMain.on('desktop:browser:find', (event, tabId: unknown, text: unknown, options: unknown) => {
+  if (!isMainWindowSender(event.sender)
+    || !isBrowserTabId(tabId)
+    || typeof text !== 'string'
+    || text.length > 2_048
+    || !isBrowserFindOptions(options)) return;
+  browserController?.findInPage(tabId, text, options ?? {});
+});
+
+ipcMain.handle('desktop:browser:stop-find', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.stopFindInPage(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:open-devtools', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  return browserController?.openDevTools(tabId) ?? false;
 });
 
 ipcMain.handle('desktop:browser:set-layout', (event, tabId: unknown, bounds: unknown, visible: unknown) => {
@@ -1266,6 +1526,18 @@ ipcMain.handle('desktop:browser:set-layout', (event, tabId: unknown, bounds: unk
 ipcMain.handle('desktop:browser:open-external', async (event, tabId: unknown) => {
   if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
   return browserController?.openExternal(tabId) ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-background', (event, tabId: unknown, color: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
+  if (typeof color !== 'string' || color.length === 0 || color.length > 128) return false;
+  return browserController?.setBackground(tabId, color) ?? false;
+});
+
+ipcMain.handle('desktop:browser:set-zoom', (event, tabId: unknown, factor: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return EMPTY_BROWSER_STATE;
+  if (typeof factor !== 'number' || !Number.isFinite(factor)) return EMPTY_BROWSER_STATE;
+  return browserController?.setZoom(tabId, factor) ?? EMPTY_BROWSER_STATE;
 });
 
 ipcMain.handle('desktop:browser:close-tab', (event, tabId: unknown) => {
@@ -1378,6 +1650,9 @@ app.on('before-quit', event => {
     const broker = githubReleaseBroker;
     githubReleaseBroker = null;
     if (broker) void broker.close();
+    const browserBroker = browserUseBroker;
+    browserUseBroker = null;
+    if (browserBroker) void browserBroker.close();
   };
   const preventQuit = managedHostQuitGate.intercept(managedHost, {
     onReleased: () => {
@@ -1422,12 +1697,62 @@ function navigationTargetsEqual(
 }
 
 function isBrowserTabId(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 256;
+  return typeof value === 'string'
+    && value === value.trim()
+    && value.length > 0
+    && value.length <= 256;
+}
+
+function isBrowserCreateTabInput(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserCreateTabInput | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some(key => !['tabId', 'activate', 'sourceSessionId'].includes(key))) return false;
+  if (input.tabId !== undefined && !isBrowserTabId(input.tabId)) return false;
+  if (input.activate !== undefined && typeof input.activate !== 'boolean') return false;
+  return input.sourceSessionId === undefined
+    || input.sourceSessionId === null
+    || isBrowserTabId(input.sourceSessionId);
+}
+
+function isBrowserFindOptions(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserFindOptions | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const options = value as Record<string, unknown>;
+  if (Object.keys(options).some(key => !['forward', 'findNext', 'matchCase'].includes(key))) return false;
+  return Object.values(options).every(item => typeof item === 'boolean');
+}
+
+function isBrowserPreferences(
+  value: unknown,
+): value is import('@gian/shared').GianBrowserPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const preferences = value as Record<string, unknown>;
+  if (Object.keys(preferences).some(key => ![
+    'home_page',
+    'restore_last_page',
+    'external_links',
+  ].includes(key))) return false;
+  return typeof preferences.home_page === 'string'
+    && preferences.home_page.length <= 4_096
+    && typeof preferences.restore_last_page === 'boolean'
+    && (preferences.external_links === 'gian' || preferences.external_links === 'system');
 }
 
 function isBrowserProjectTarget(value: unknown): value is GianBrowserProjectTarget {
   if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<GianBrowserProjectTarget>;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.absolutePath === 'string') {
+    return candidate.absolutePath.length > 0
+      && candidate.absolutePath.length <= 16_384
+      && candidate.absolutePath.startsWith('/')
+      && candidate.workingTreeId === undefined
+      && candidate.path === undefined;
+  }
   return typeof candidate.workingTreeId === 'string'
     && candidate.workingTreeId.length > 0
     && candidate.workingTreeId.length <= 512

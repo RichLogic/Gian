@@ -9,8 +9,12 @@ import type {
   Task,
   Workspace,
 } from './model.js';
-import { EXECUTOR_IDS } from './executors.js';
+import { isProxyPluginId } from './plugin-id.js';
 import type { UserAgent } from './agents.js';
+import type { ComposerDocument, MessageContextItem } from './context.js';
+import type { InputItem } from './proxy.js';
+import { isScheduleTrigger } from './schedule.js';
+import type { GianBrowserTabSnapshot } from './browser.js';
 
 export const GIAN_TOOL_METHODS = [
   'catalog.get_create_options',
@@ -30,9 +34,34 @@ export const GIAN_TOOL_METHODS = [
   'session.cancel_delivery',
   'session.wait',
   'session.stop',
+  'queue.update',
+  'queue.remove',
+  'queue.clear',
+  'queue.send_now',
   'worktree.create_and_bind',
+  'browser.tabs',
+  'browser.open',
+  'browser.snapshot',
+  'browser.click',
+  'browser.fill',
+  'browser.press',
+  'browser.wait',
+  'browser.evaluate',
+  'browser.screenshot',
+  'browser.go_back',
+  'browser.reload',
+  'browser.close',
   'interaction.list',
   'interaction.respond',
+  'schedule.preview',
+  'schedule.create',
+  'schedule.list',
+  'schedule.get',
+  'schedule.update',
+  'schedule.pause',
+  'schedule.resume',
+  'schedule.run_now',
+  'schedule.archive',
 ] as const;
 
 export type GianToolMethod = (typeof GIAN_TOOL_METHODS)[number];
@@ -48,8 +77,25 @@ export const GIAN_TOOL_MUTATION_METHODS = [
   'session.send',
   'session.cancel_delivery',
   'session.stop',
+  'queue.update',
+  'queue.remove',
+  'queue.clear',
+  'queue.send_now',
   'worktree.create_and_bind',
+  'browser.open',
+  'browser.click',
+  'browser.fill',
+  'browser.press',
+  'browser.go_back',
+  'browser.reload',
+  'browser.close',
   'interaction.respond',
+  'schedule.create',
+  'schedule.update',
+  'schedule.pause',
+  'schedule.resume',
+  'schedule.run_now',
+  'schedule.archive',
 ] as const satisfies readonly GianToolMethod[];
 
 export type GianToolMutationMethod = (typeof GIAN_TOOL_MUTATION_METHODS)[number];
@@ -71,6 +117,10 @@ export const GIAN_TOOL_ERROR_CODES = [
   'INVALID_INTERACTION_RESPONSE',
   'DELIVERY_NOT_CANCELABLE',
   'IDEMPOTENCY_CONFLICT',
+  'PRECONDITION_FAILED',
+  'UNKNOWN_OUTCOME',
+  'COMMAND_EXPIRED',
+  'SCHEDULE_CREATE_REJECTED',
   'TIMEOUT',
   'INTERNAL_ERROR',
 ] as const;
@@ -196,12 +246,39 @@ export interface GianToolInteraction {
 
 export interface GianToolDelivery {
   delivery_id: string;
-  state: 'started' | 'queued' | 'steered' | 'completed' | 'error' | 'stopped' | 'cancelled';
+  state: 'started' | 'queued' | 'steered' | 'completed' | 'error' | 'stopped' | 'cancelled' | 'unknown';
   session_id: string;
   turn_id?: string;
   turn_number?: number;
   queue_id?: string;
   config_snapshot?: GianToolResolvedSessionConfig;
+}
+
+export interface GianToolQueueEntry {
+  id: string;
+  session_id: string;
+  text: string;
+  items?: InputItem[];
+  context_items?: MessageContextItem[];
+  composer_document?: ComposerDocument;
+  created_at: string;
+  delivery_id?: string;
+}
+
+export interface GianToolQueueReplacement {
+  queue: GianToolQueueEntry[];
+  queue_revision: string;
+}
+
+export interface GianToolSendQueuedNowReceipt extends GianToolQueueReplacement {
+  mode: 'noop' | 'started' | 'steered';
+  affected: Array<{
+    queue_id: string;
+    delivery_id?: string;
+    state: 'started' | 'steered';
+    turn_id: string;
+    turn_number: number;
+  }>;
 }
 
 export interface GianToolMethodParams {
@@ -243,11 +320,19 @@ export interface GianToolMethodParams {
     session_id: string;
     name?: string;
     config?: GianToolSessionConfigInput;
+    expected_session_revision?: string;
   };
   'session.assign_task': { session_id: string; task_id: string };
   'session.set_subtask_state': { session_id: string; state: 'completed' | 'open' };
   'session.archive': { session_id: string; archived: boolean };
-  'session.send': { session_id: string; text: string; busy?: 'queue' | 'fail' | 'steer' };
+  'session.send': {
+    session_id: string;
+    text: string;
+    busy?: 'queue' | 'fail' | 'steer';
+    items?: InputItem[];
+    context_items?: MessageContextItem[];
+    composer_document?: ComposerDocument;
+  };
   'session.cancel_delivery': { delivery_id: string };
   'session.wait': {
     session_id: string;
@@ -255,12 +340,39 @@ export interface GianToolMethodParams {
     until?: Array<'interaction' | 'turn_terminal'>;
     timeout_ms?: number;
   };
-  'session.stop': { session_id: string };
+  'session.stop': { session_id: string; expected_session_revision?: string };
+  'queue.update': {
+    session_id: string;
+    queue_id: string;
+    text: string;
+    expected_queue_revision?: string;
+  };
+  'queue.remove': { session_id: string; queue_id: string; expected_queue_revision?: string };
+  'queue.clear': { session_id: string; expected_queue_revision?: string };
+  'queue.send_now': { session_id: string; expected_queue_revision?: string };
   'worktree.create_and_bind': { branch: string; base_ref?: string };
+  'browser.tabs': Record<string, never>;
+  'browser.open': { url: string; tab_id?: string; activate?: boolean };
+  'browser.snapshot': { tab_id: string; max_nodes?: number };
+  'browser.click': { tab_id: string; snapshot_id: string; ref: string };
+  'browser.fill': { tab_id: string; snapshot_id: string; ref: string; text: string };
+  'browser.press': { tab_id: string; key: string; snapshot_id?: string; ref?: string };
+  'browser.wait': {
+    tab_id: string;
+    condition?: 'load' | 'text';
+    text?: string;
+    timeout_ms?: number;
+  };
+  'browser.evaluate': { tab_id: string; expression: string };
+  'browser.screenshot': { tab_id: string; max_width?: number };
+  'browser.go_back': { tab_id: string };
+  'browser.reload': { tab_id: string; ignore_cache?: boolean };
+  'browser.close': { tab_id: string };
   'interaction.list': { session_id?: string };
   'interaction.respond': {
     session_id: string;
     interaction_id: string;
+    expected_interaction_revision?: string;
     decision?:
       | 'allow_once'
       | 'allow_session'
@@ -271,6 +383,43 @@ export interface GianToolMethodParams {
     answers?: Record<string, string | boolean | string[]>;
     native_option_id?: string;
   };
+  'schedule.preview': {
+    trigger: import('./schedule.js').ScheduleTrigger;
+    timezone: string;
+    after?: string;
+    limit?: number;
+  };
+  'schedule.create': {
+    name: string;
+    prompt: string;
+    trigger: import('./schedule.js').ScheduleTrigger;
+    timezone: string;
+    misfire_policy?: 'skip' | 'run_once';
+    /** How long the Tool call waits for the user's decision (5 min default). */
+    confirmation_timeout_ms?: number;
+  };
+  'schedule.list': {
+    status?: Array<'active' | 'paused' | 'completed' | 'archived'>;
+    limit?: number;
+    cursor?: string;
+    /** Host-internal: the access controller forces this onto the caller's
+     *  own Session. Explicit values from actors are denied before here. */
+    control_session_id?: string;
+  };
+  'schedule.get': { schedule_id: string; include_runs?: boolean };
+  'schedule.update': {
+    schedule_id: string;
+    expected_revision: number;
+    name?: string;
+    prompt?: string;
+    trigger?: import('./schedule.js').ScheduleTrigger;
+    timezone?: string;
+    misfire_policy?: 'skip' | 'run_once';
+  };
+  'schedule.pause': { schedule_id: string; expected_revision?: number };
+  'schedule.resume': { schedule_id: string; expected_revision?: number };
+  'schedule.run_now': { schedule_id: string };
+  'schedule.archive': { schedule_id: string; expected_revision?: number };
 }
 
 export interface GianToolMethodData {
@@ -295,6 +444,10 @@ export interface GianToolMethodData {
   'session.cancel_delivery': GianToolDelivery;
   'session.wait': Record<string, unknown>;
   'session.stop': { already_idle: boolean };
+  'queue.update': { entry: GianToolQueueEntry } & GianToolQueueReplacement;
+  'queue.remove': { removed: GianToolQueueEntry } & GianToolQueueReplacement;
+  'queue.clear': { removed: GianToolQueueEntry[] } & GianToolQueueReplacement;
+  'queue.send_now': GianToolSendQueuedNowReceipt;
   'worktree.create_and_bind': {
     session_id: string;
     workspace_id: string;
@@ -304,8 +457,49 @@ export interface GianToolMethodData {
     base_ref: string;
     created: boolean;
   };
+  'browser.tabs': { revision: number; tabs: GianBrowserTabSnapshot[] };
+  'browser.open': { tab: GianBrowserTabSnapshot };
+  'browser.snapshot': {
+    tab_id: string;
+    page_generation: number;
+    snapshot_id: string;
+    url: string;
+    title: string;
+    tree: string;
+    truncated: boolean;
+  };
+  'browser.click': { tab_id: string; clicked: true };
+  'browser.fill': { tab_id: string; filled: true };
+  'browser.press': { tab_id: string; pressed: string };
+  'browser.wait': { tab_id: string; condition: 'load' | 'text'; satisfied: true };
+  'browser.evaluate': { tab_id: string; value: unknown };
+  'browser.screenshot': {
+    tab_id: string;
+    mime_type: 'image/png';
+    base64: string;
+    width: number;
+    height: number;
+  };
+  'browser.go_back': { tab: GianBrowserTabSnapshot };
+  'browser.reload': { tab: GianBrowserTabSnapshot };
+  'browser.close': { tab_id: string; closed: true };
   'interaction.list': { interactions: GianToolInteraction[] };
   'interaction.respond': { interaction_id: string; resolved: true };
+  'schedule.preview': import('./schedule.js').SchedulePreviewResponse;
+  'schedule.create': {
+    schedule: import('./schedule.js').Schedule;
+    confirmation_id: string;
+  };
+  'schedule.list': import('./schedule.js').ScheduleListResponse;
+  'schedule.get': {
+    schedule: import('./schedule.js').Schedule;
+    runs?: import('./schedule.js').ScheduleRun[];
+  };
+  'schedule.update': { schedule: import('./schedule.js').Schedule };
+  'schedule.pause': { schedule: import('./schedule.js').Schedule };
+  'schedule.resume': { schedule: import('./schedule.js').Schedule };
+  'schedule.run_now': { run: import('./schedule.js').ScheduleRun };
+  'schedule.archive': { schedule: import('./schedule.js').Schedule };
 }
 
 const METHODS = new Set<string>(GIAN_TOOL_METHODS);
@@ -313,7 +507,6 @@ const MUTATIONS = new Set<string>(GIAN_TOOL_MUTATION_METHODS);
 const ERROR_CODES = new Set<string>(GIAN_TOOL_ERROR_CODES);
 const TASK_STATUSES = new Set(['open', 'done', 'archived']);
 const SESSION_STATUSES = new Set(['new', 'running', 'pending', 'error', 'done']);
-const EXECUTORS = new Set(EXECUTOR_IDS);
 const APPROVAL_MODES = new Set(['plan', 'ask', 'auto', 'custom', 'full-access']);
 const DECISIONS = new Set([
   'allow_once',
@@ -402,6 +595,69 @@ function requireId(input: Record<string, unknown>, key: string, label = 'params'
   string(input[key], `${label}.${key}`);
 }
 
+function inputItems(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 32) invalid(`${label} must be an array of at most 32 items`);
+  for (const [index, item] of value.entries()) {
+    const entry = record(item, `${label}[${index}]`);
+    const type = entry['type'];
+    if (type === 'text') {
+      exact(entry, ['type', 'text'], `${label}[${index}]`);
+      string(entry['text'], `${label}[${index}].text`, false);
+    } else if (type === 'localImage' || type === 'localFile') {
+      exact(entry, ['type', 'path', 'name', 'mime', 'size'], `${label}[${index}]`);
+      string(entry['path'], `${label}[${index}].path`);
+      optionalString(entry['name'], `${label}[${index}].name`);
+      optionalString(entry['mime'], `${label}[${index}].mime`);
+      if (entry['size'] !== undefined && (!Number.isInteger(entry['size']) || (entry['size'] as number) < 0)) {
+        invalid(`${label}[${index}].size must be a non-negative integer`);
+      }
+    } else if (type === 'skill') {
+      exact(entry, ['type', 'name', 'path'], `${label}[${index}]`);
+      string(entry['name'], `${label}[${index}].name`);
+      string(entry['path'], `${label}[${index}].path`);
+    } else {
+      invalid(`${label}[${index}].type is invalid`);
+    }
+  }
+}
+
+function contextItems(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 16) invalid(`${label} must be an array of at most 16 items`);
+  for (const [index, item] of value.entries()) {
+    const entry = record(item, `${label}[${index}]`);
+    const type = entry['type'];
+    if (type === 'pastedText') {
+      exact(entry, ['type', 'id', 'text', 'lineCount', 'byteSize', 'origin'], `${label}[${index}]`);
+      string(entry['id'], `${label}[${index}].id`);
+      string(entry['text'], `${label}[${index}].text`, false);
+      finiteInteger(entry['lineCount'], `${label}[${index}].lineCount`, 0, Number.MAX_SAFE_INTEGER);
+      finiteInteger(entry['byteSize'], `${label}[${index}].byteSize`, 0, Number.MAX_SAFE_INTEGER);
+      if (entry['origin'] !== undefined && entry['origin'] !== 'selection') {
+        invalid(`${label}[${index}].origin is invalid`);
+      }
+    } else if (type === 'folder') {
+      exact(entry, ['type', 'id', 'path', 'name'], `${label}[${index}]`);
+      string(entry['id'], `${label}[${index}].id`);
+      string(entry['path'], `${label}[${index}].path`);
+      string(entry['name'], `${label}[${index}].name`);
+    } else if (type === 'browserElement') {
+      if (typeof entry['id'] !== 'string') invalid(`${label}[${index}].id must be a string`);
+    } else {
+      invalid(`${label}[${index}].type is invalid`);
+    }
+  }
+}
+
+function composerDocument(value: unknown, label: string): void {
+  if (value === undefined) return;
+  const entry = record(value, label);
+  exact(entry, ['version', 'segments'], label);
+  if (entry['version'] !== 1) invalid(`${label}.version is invalid`);
+  if (!Array.isArray(entry['segments'])) invalid(`${label}.segments must be an array`);
+}
+
 export function isGianToolMutation(method: GianToolMethod): method is GianToolMutationMethod {
   return MUTATIONS.has(method);
 }
@@ -442,7 +698,9 @@ export function validateGianToolParams<M extends GianToolMethod>(
       optionalString(input['task_id'], 'params.task_id', true);
       optionalString(input['workspace_id'], 'params.workspace_id', true);
       optionalString(input['agent_id'], 'params.agent_id', true);
-      if (input['proxy'] !== undefined) enumValue(input['proxy'], EXECUTORS, 'params.proxy');
+      if (input['proxy'] !== undefined && !isProxyPluginId(input['proxy'])) {
+        invalid('params.proxy must be a valid pluginId');
+      }
       if (input['status'] !== undefined) enumArray(input['status'], SESSION_STATUSES, 'params.status');
       if (input['archived'] !== undefined) enumValue(input['archived'], new Set(['active', 'archived', 'all']), 'params.archived');
       if (input['limit'] !== undefined) finiteInteger(input['limit'], 'params.limit', 1, 200);
@@ -464,10 +722,13 @@ export function validateGianToolParams<M extends GianToolMethod>(
       sessionConfig(input['config'], 'params.config');
       break;
     case 'session.update':
-      exact(input, ['session_id', 'name', 'config'], 'params'); requireId(input, 'session_id');
+      exact(input, ['session_id', 'name', 'config', 'expected_session_revision'], 'params'); requireId(input, 'session_id');
       optionalString(input['name'], 'params.name');
       sessionConfig(input['config'], 'params.config');
-      if (Object.keys(input).length === 1) invalid('session.update requires a field to update');
+      optionalString(input['expected_session_revision'], 'params.expected_session_revision');
+      if (Object.keys(input).filter(key => key !== 'expected_session_revision').length === 1) {
+        invalid('session.update requires a field to update');
+      }
       break;
     case 'session.assign_task':
       exact(input, ['session_id', 'task_id'], 'params'); requireId(input, 'session_id'); requireId(input, 'task_id');
@@ -481,8 +742,12 @@ export function validateGianToolParams<M extends GianToolMethod>(
       if (typeof input['archived'] !== 'boolean') invalid('params.archived must be a boolean');
       break;
     case 'session.send':
-      exact(input, ['session_id', 'text', 'busy'], 'params'); requireId(input, 'session_id'); requireId(input, 'text');
+      exact(input, ['session_id', 'text', 'busy', 'items', 'context_items', 'composer_document'], 'params');
+      requireId(input, 'session_id'); requireId(input, 'text');
       if (input['busy'] !== undefined) enumValue(input['busy'], new Set(['queue', 'fail', 'steer']), 'params.busy');
+      inputItems(input['items'], 'params.items');
+      contextItems(input['context_items'], 'params.context_items');
+      composerDocument(input['composer_document'], 'params.composer_document');
       break;
     case 'session.cancel_delivery':
       exact(input, ['delivery_id'], 'params'); requireId(input, 'delivery_id');
@@ -494,7 +759,26 @@ export function validateGianToolParams<M extends GianToolMethod>(
       if (input['timeout_ms'] !== undefined) finiteInteger(input['timeout_ms'], 'params.timeout_ms', 0, 45_000);
       break;
     case 'session.stop':
-      exact(input, ['session_id'], 'params'); requireId(input, 'session_id');
+      exact(input, ['session_id', 'expected_session_revision'], 'params'); requireId(input, 'session_id');
+      optionalString(input['expected_session_revision'], 'params.expected_session_revision');
+      break;
+    case 'queue.update':
+      exact(input, ['session_id', 'queue_id', 'text', 'expected_queue_revision'], 'params');
+      requireId(input, 'session_id'); requireId(input, 'queue_id'); requireId(input, 'text');
+      optionalString(input['expected_queue_revision'], 'params.expected_queue_revision');
+      break;
+    case 'queue.remove':
+      exact(input, ['session_id', 'queue_id', 'expected_queue_revision'], 'params');
+      requireId(input, 'session_id'); requireId(input, 'queue_id');
+      optionalString(input['expected_queue_revision'], 'params.expected_queue_revision');
+      break;
+    case 'queue.clear':
+      exact(input, ['session_id', 'expected_queue_revision'], 'params'); requireId(input, 'session_id');
+      optionalString(input['expected_queue_revision'], 'params.expected_queue_revision');
+      break;
+    case 'queue.send_now':
+      exact(input, ['session_id', 'expected_queue_revision'], 'params'); requireId(input, 'session_id');
+      optionalString(input['expected_queue_revision'], 'params.expected_queue_revision');
       break;
     case 'worktree.create_and_bind': {
       exact(input, ['branch', 'base_ref'], 'params');
@@ -506,12 +790,80 @@ export function validateGianToolParams<M extends GianToolMethod>(
       }
       break;
     }
+    case 'browser.tabs':
+      exact(input, [], 'params');
+      break;
+    case 'browser.open':
+      exact(input, ['url', 'tab_id', 'activate'], 'params');
+      string(input['url'], 'params.url');
+      optionalString(input['tab_id'], 'params.tab_id');
+      optionalBoolean(input['activate'], 'params.activate');
+      if ((input['url'] as string).length > 8_192) invalid('params.url must be at most 8192 characters');
+      break;
+    case 'browser.snapshot':
+      exact(input, ['tab_id', 'max_nodes'], 'params');
+      requireId(input, 'tab_id');
+      if (input['max_nodes'] !== undefined) finiteInteger(input['max_nodes'], 'params.max_nodes', 20, 1_000);
+      break;
+    case 'browser.click':
+      exact(input, ['tab_id', 'snapshot_id', 'ref'], 'params');
+      requireId(input, 'tab_id'); requireId(input, 'snapshot_id'); requireId(input, 'ref');
+      break;
+    case 'browser.fill':
+      exact(input, ['tab_id', 'snapshot_id', 'ref', 'text'], 'params');
+      requireId(input, 'tab_id'); requireId(input, 'snapshot_id'); requireId(input, 'ref');
+      string(input['text'], 'params.text', false);
+      if ((input['text'] as string).length > 100_000) invalid('params.text must be at most 100000 characters');
+      break;
+    case 'browser.press': {
+      exact(input, ['tab_id', 'key', 'snapshot_id', 'ref'], 'params');
+      requireId(input, 'tab_id'); requireId(input, 'key');
+      optionalString(input['snapshot_id'], 'params.snapshot_id');
+      optionalString(input['ref'], 'params.ref');
+      if ((input['snapshot_id'] === undefined) !== (input['ref'] === undefined)) {
+        invalid('browser.press requires snapshot_id and ref together');
+      }
+      if ((input['key'] as string).length > 100) invalid('params.key must be at most 100 characters');
+      break;
+    }
+    case 'browser.wait':
+      exact(input, ['tab_id', 'condition', 'text', 'timeout_ms'], 'params');
+      requireId(input, 'tab_id');
+      if (input['condition'] !== undefined) enumValue(input['condition'], new Set(['load', 'text']), 'params.condition');
+      optionalString(input['text'], 'params.text');
+      if ((input['condition'] ?? 'load') === 'text' && input['text'] === undefined) {
+        invalid('browser.wait with condition=text requires text');
+      }
+      if (input['timeout_ms'] !== undefined) finiteInteger(input['timeout_ms'], 'params.timeout_ms', 100, 30_000);
+      break;
+    case 'browser.evaluate':
+      exact(input, ['tab_id', 'expression'], 'params');
+      requireId(input, 'tab_id');
+      string(input['expression'], 'params.expression');
+      if ((input['expression'] as string).length > 100_000) invalid('params.expression must be at most 100000 characters');
+      break;
+    case 'browser.screenshot':
+      exact(input, ['tab_id', 'max_width'], 'params');
+      requireId(input, 'tab_id');
+      if (input['max_width'] !== undefined) finiteInteger(input['max_width'], 'params.max_width', 320, 2_000);
+      break;
+    case 'browser.go_back':
+    case 'browser.close':
+      exact(input, ['tab_id'], 'params');
+      requireId(input, 'tab_id');
+      break;
+    case 'browser.reload':
+      exact(input, ['tab_id', 'ignore_cache'], 'params');
+      requireId(input, 'tab_id');
+      optionalBoolean(input['ignore_cache'], 'params.ignore_cache');
+      break;
     case 'interaction.list':
       exact(input, ['session_id'], 'params'); optionalString(input['session_id'], 'params.session_id');
       break;
     case 'interaction.respond': {
-      exact(input, ['session_id', 'interaction_id', 'decision', 'answers', 'native_option_id'], 'params');
+      exact(input, ['session_id', 'interaction_id', 'decision', 'answers', 'native_option_id', 'expected_interaction_revision'], 'params');
       requireId(input, 'session_id'); requireId(input, 'interaction_id');
+      optionalString(input['expected_interaction_revision'], 'params.expected_interaction_revision');
       if (input['decision'] !== undefined) enumValue(input['decision'], DECISIONS, 'params.decision');
       optionalString(input['native_option_id'], 'params.native_option_id');
       if (input['answers'] !== undefined) {
@@ -526,6 +878,67 @@ export function validateGianToolParams<M extends GianToolMethod>(
       }
       if (input['decision'] === undefined && input['answers'] === undefined && input['native_option_id'] === undefined) {
         invalid('interaction.respond requires a decision, answers, or native_option_id');
+      }
+      break;
+    }
+    case 'schedule.preview': {
+      exact(input, ['trigger', 'timezone', 'after', 'limit'], 'params');
+      isScheduleTrigger(input['trigger']) || invalid('params.trigger is invalid');
+      string(input['timezone'], 'params.timezone');
+      optionalString(input['after'], 'params.after');
+      if (input['limit'] !== undefined) finiteInteger(input['limit'], 'params.limit', 3, 10);
+      break;
+    }
+    case 'schedule.create': {
+      exact(input, ['name', 'prompt', 'trigger', 'timezone', 'misfire_policy', 'confirmation_timeout_ms'], 'params');
+      string(input['name'], 'params.name');
+      string(input['prompt'], 'params.prompt');
+      isScheduleTrigger(input['trigger']) || invalid('params.trigger is invalid');
+      string(input['timezone'], 'params.timezone');
+      if (input['misfire_policy'] !== undefined) {
+        enumValue(input['misfire_policy'], new Set(['skip', 'run_once']), 'params.misfire_policy');
+      }
+      if (input['confirmation_timeout_ms'] !== undefined) {
+        finiteInteger(input['confirmation_timeout_ms'], 'params.confirmation_timeout_ms', 5_000, 1_800_000);
+      }
+      break;
+    }
+    case 'schedule.list':
+      exact(input, ['status', 'limit', 'cursor', 'control_session_id'], 'params');
+      if (input['status'] !== undefined) {
+        enumArray(input['status'], new Set(['active', 'paused', 'completed', 'archived']), 'params.status');
+      }
+      if (input['limit'] !== undefined) finiteInteger(input['limit'], 'params.limit', 1, 200);
+      optionalString(input['cursor'], 'params.cursor');
+      optionalString(input['control_session_id'], 'params.control_session_id');
+      break;
+    case 'schedule.get':
+      exact(input, ['schedule_id', 'include_runs'], 'params');
+      requireId(input, 'schedule_id');
+      optionalBoolean(input['include_runs'], 'params.include_runs');
+      break;
+    case 'schedule.update': {
+      exact(input, ['schedule_id', 'expected_revision', 'name', 'prompt', 'trigger', 'timezone', 'misfire_policy'], 'params');
+      requireId(input, 'schedule_id');
+      finiteInteger(input['expected_revision'], 'params.expected_revision', 1, Number.MAX_SAFE_INTEGER);
+      if (input['name'] !== undefined) string(input['name'], 'params.name');
+      if (input['prompt'] !== undefined) string(input['prompt'], 'params.prompt');
+      if (input['trigger'] !== undefined) isScheduleTrigger(input['trigger']) || invalid('params.trigger is invalid');
+      optionalString(input['timezone'], 'params.timezone');
+      if (input['misfire_policy'] !== undefined) {
+        enumValue(input['misfire_policy'], new Set(['skip', 'run_once']), 'params.misfire_policy');
+      }
+      if (Object.keys(input).length === 2) invalid('schedule.update requires a field to update');
+      break;
+    }
+    case 'schedule.pause':
+    case 'schedule.resume':
+    case 'schedule.run_now':
+    case 'schedule.archive': {
+      exact(input, ['schedule_id', 'expected_revision'], 'params');
+      requireId(input, 'schedule_id');
+      if (input['expected_revision'] !== undefined) {
+        finiteInteger(input['expected_revision'], 'params.expected_revision', 1, Number.MAX_SAFE_INTEGER);
       }
       break;
     }

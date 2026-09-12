@@ -13,6 +13,7 @@ import { SessionManager } from '../src/session/manager.js';
 import type { ProtocolV2SessionClient } from '../src/proxy/protocol-v2-session-client.js';
 import { openDatabase } from '../src/storage/db.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
+import { legacyProxyManagerConfig } from './helpers/legacy-proxy-manager.js';
 
 const FAKE_ENTRY = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -43,12 +44,12 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
   const db = openDatabase(dir);
   db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
     .run('ws-sys', 'sys', '/tmp/sidechat-sys');
-  const proxy = new ProxyManager({
+  const proxy = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(dir, 'proxy-data'),
     hostVersion: '0.5.0-test',
     ccProxyEntry: FAKE_ENTRY,
     claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
-  });
+  }));
   const broadcaster = new CapturingBroadcaster();
   const sessions = new SessionManager(
     db,
@@ -236,12 +237,12 @@ test('Fake Proxy can withhold Provider deletion and keep Side Chat out of native
   const db = openDatabase(dir);
   db.prepare('INSERT INTO workspaces (id, name, path) VALUES (?, ?, ?)')
     .run('ws-sys', 'sys', '/tmp/sidechat-sys');
-  const proxy = new ProxyManager({
+  const proxy = new ProxyManager(legacyProxyManagerConfig({
     dataDir: join(dir, 'proxy-data'),
     hostVersion: '0.5.0-test',
     ccProxyEntry: FAKE_ENTRY,
     claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' },
-  });
+  }));
   t.after(() => proxy.closeAll().catch(() => undefined));
   const broadcaster = new CapturingBroadcaster();
   const sessions = new SessionManager(

@@ -3,8 +3,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
+import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
+
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const defaultCatalogPath = resolve(rootDir, 'test/proxy-real-acceptance.json');
+const selectionMap = JSON.parse(await readFile(resolve(rootDir, 'test/selection-map.json'), 'utf8'));
+const selectionRules = new Map(selectionMap.rules.map(rule => [rule.id, rule]));
 
 function unwrapExpression(node) {
   let current = node;
@@ -133,9 +137,53 @@ export async function loadProxyRealAcceptanceCatalog(path = defaultCatalogPath) 
 
 export function validateProxyRealAcceptanceCatalog(catalog) {
   requireRecord(catalog, 'catalog');
+  const certification = requireRecord(catalog.certification, 'certification');
+  if (certification.schemaVersion !== 1) {
+    throw new Error('certification.schemaVersion must be 1.');
+  }
+  if (certification.shippingSource !== 'scripts/build-proxy-artifacts.mjs#shippingProxyIds') {
+    throw new Error('certification.shippingSource must point to shippingProxyIds.');
+  }
+  if (certification.requiredResult !== 'PASS') {
+    throw new Error('certification.requiredResult must be PASS.');
+  }
+  if (!Number.isInteger(certification.realEvidenceMaxAgeHours)
+    || certification.realEvidenceMaxAgeHours < 1) {
+    throw new Error('certification.realEvidenceMaxAgeHours must be a positive integer.');
+  }
+  const stages = requireRecord(certification.stages, 'certification.stages');
+  if (!sameMembers(Object.keys(stages), ['development', 'nightly', 'release'])) {
+    throw new Error('certification.stages must define development, nightly, and release.');
+  }
+  for (const stage of Object.keys(stages)) {
+    requireStringArray(stages[stage], `certification.stages.${stage}`);
+  }
   const providers = requireRecord(catalog.providers, 'providers');
   const providerIds = Object.keys(providers);
-  if (providerIds.length < 6) throw new Error('Catalog must include every shipping-candidate Gian Proxy.');
+  const definedProviderIds = proxyDefinitions.map(definition => definition.id);
+  if (!sameMembers(providerIds, definedProviderIds)) {
+    throw new Error('Catalog providers must match every Proxy definition exactly.');
+  }
+  for (const providerId of shippingProxyIds) {
+    if (!providerIds.includes(providerId)) {
+      throw new Error(`Shipping Proxy ${providerId} is missing from the certification catalog.`);
+    }
+  }
+  for (const ruleId of [
+    'root-test-infrastructure',
+    'shared-contract',
+    'proxy-protocol-contract',
+  ]) {
+    const rule = selectionRules.get(ruleId);
+    if (!rule) throw new Error(`Selection map is missing ${ruleId}.`);
+    for (const definition of proxyDefinitions.filter(candidate => candidate.shipping)) {
+      if (!rule.modules.includes(definition.directory)) {
+        throw new Error(
+          `${ruleId} must select shipping Proxy module ${definition.directory}.`,
+        );
+      }
+    }
+  }
 
   const resultSchemas = requireRecord(catalog.resultSchemas, 'resultSchemas');
   if (!sameMembers(Object.keys(resultSchemas), PROXY_METHODS)) {
@@ -154,6 +202,25 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
   const knownNotifications = new Set(PROXY_NOTIFICATION_METHODS);
   for (const [providerId, rawProvider] of Object.entries(providers)) {
     const provider = requireRecord(rawProvider, `providers.${providerId}`);
+    const definition = proxyDefinitions.find(candidate => candidate.id === providerId);
+    if (!definition) throw new Error(`${providerId} has no Proxy definition.`);
+    if (provider.displayName !== definition.manifest.displayName) {
+      throw new Error(`${providerId}.displayName must match the Proxy Manifest.`);
+    }
+    if ((provider.pluginId ?? providerId) !== definition.pluginId) {
+      throw new Error(`${providerId}.pluginId must match the Proxy Manifest.`);
+    }
+    if (provider.pluginVersion !== definition.pluginVersion) {
+      throw new Error(
+        `${providerId}.pluginVersion ${String(provider.pluginVersion)} does not match package ${definition.pluginVersion}.`,
+      );
+    }
+    if (provider.processScope !== definition.manifest.process.scope) {
+      throw new Error(`${providerId}.processScope must match the Proxy Manifest.`);
+    }
+    if (typeof provider.binary !== 'string' || !provider.binary) {
+      throw new Error(`${providerId}.binary must be a non-empty command or path.`);
+    }
     const capabilities = requireStringArray(provider.capabilities, `${providerId}.capabilities`);
     const notifications = requireStringArray(
       provider.implementedNotifications,

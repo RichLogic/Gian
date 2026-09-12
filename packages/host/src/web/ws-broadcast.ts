@@ -12,6 +12,12 @@ export class WsBroadcaster {
   private clients = new Set<WSContext>();
   private eventSubscriptions = new Map<WSContext, string | null>();
   private clientModes = new Map<WSContext, WsClientMode>();
+  private listeners = new Set<(message: ServerToClientMessage) => void>();
+
+  onBroadcast(listener: (message: ServerToClientMessage) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   add(client: WSContext, mode: WsClientMode = 'full'): void {
     this.clients.add(client);
@@ -40,6 +46,13 @@ export class WsBroadcaster {
   }
 
   broadcast(message: ServerToClientMessage): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(message);
+      } catch (error) {
+        console.error('[ws] broadcast listener failed', error);
+      }
+    }
     const clients = Array.from(this.clients).filter(client => {
       if (this.clientModes.get(client) === 'attention') {
         return message.type === 'attention';

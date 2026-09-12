@@ -55,11 +55,11 @@ jobs:
         run: pnpm build
 
   e2e:
-    name: Isolated browser E2E
+    name: Browser and Proxy qualification E2E
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: source
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -86,6 +86,11 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chromium
 
+      - name: Run every shipping Proxy through the Host/Web UI
+        run: pnpm test:e2e:proxy-mock
+        env:
+          PLAYWRIGHT_CHANNEL: chromium
+
       - name: Upload E2E failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -97,3 +102,4 @@ jobs:
             playwright-report/
             test-results/
             output/playwright/
+            output/proxy-certification/

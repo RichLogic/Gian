@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentRuntimeProfile, ApprovalMode, Executor, NativeSession, Session } from '@gian/shared';
+import type { ApprovalMode, Executor, NativeSession, Session, SessionRuntimeProfile } from '@gian/shared';
+import { resolvePluginIdInput, sessionRuntimeCliPath, sessionRuntimeProxyVersion } from '@gian/shared';
+import type { PreparedSessionLaunch, SessionBindingPlanner } from './binding-planner.js';
+import { existingNativeSessionSql, isUniqueConstraintError, pluginIdForSessionIdentity } from './compatibility-executor.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { Db } from '../storage/db.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
@@ -44,6 +47,7 @@ export class NativeSessionService {
     private callbacks: NativeSessionCallbacks,
     /** Fallback runtime path when an operation does not name an Agent. */
     private resolveKindCliPath?: (executor: Executor) => string | null,
+    private bindingPlanner?: SessionBindingPlanner,
   ) {}
 
   async listKimi(cwd: string, cliPath?: string | null): Promise<NativeSession[]> {
@@ -104,7 +108,7 @@ export class NativeSessionService {
           : typeof item.title === 'string' ? item.title : '';
         return [{
           id: nativeId,
-          executor,
+          executor: resolvePluginIdInput(executor) ?? executor,
           filePath: '',
           cwd: typeof item.cwd === 'string' ? item.cwd : cwd,
           updatedAt: typeof item.updatedAt === 'string'
@@ -160,11 +164,16 @@ export class NativeSessionService {
     cliPath?: string | null;
     agentId?: string | null;
     agentName?: string | null;
-    runtimeProfile?: AgentRuntimeProfile | null;
+    runtimeProfile?: SessionRuntimeProfile | null;
+    agent?: import('@gian/shared').UserAgent;
   }): Promise<{ session: Session; replay: { turns: number; events: number } }> {
+    const pluginId = pluginIdForSessionIdentity({
+      pluginId: input.runtimeProfile?.pluginId ?? input.agent?.pluginId ?? null,
+      executor: input.executor,
+    });
     const duplicate = this.db
-      .prepare('SELECT id FROM sessions WHERE executor = ? AND native_session_id = ?')
-      .get(input.executor, input.nativeSessionId) as { id: string } | undefined;
+      .prepare(existingNativeSessionSql())
+      .get(input.nativeSessionId, pluginId, input.executor) as { id: string } | undefined;
     if (duplicate) {
       throw Object.assign(
         new Error(`${input.executor} session is already adopted as ${duplicate.id}`),
@@ -173,6 +182,14 @@ export class NativeSessionService {
     }
 
     const sessionId = randomUUID();
+    let preparedLaunch: PreparedSessionLaunch | undefined;
+    if (this.bindingPlanner && input.agent) {
+      preparedLaunch = await this.bindingPlanner.prepareCurrent({
+        agent: input.agent,
+        selectedPath: sessionRuntimeCliPath(input.runtimeProfile) ?? input.cliPath ?? null,
+        runtimeProfile: input.runtimeProfile,
+      });
+    }
     let broughtUp: Awaited<ReturnType<ProxySessionCoordinator['bringUp']>>;
     try {
       broughtUp = await this.proxySessions.bringUp({
@@ -180,13 +197,14 @@ export class NativeSessionService {
         executor: input.executor,
         cwd: input.cwd,
         model: null,
-        cliPath: input.runtimeProfile?.cliPath
+        cliPath: sessionRuntimeCliPath(input.runtimeProfile)
           ?? input.cliPath
           ?? this.resolveKindCliPath?.(input.executor)
           ?? null,
-        proxyVersion: input.runtimeProfile?.proxyVersion ?? null,
+        proxyVersion: sessionRuntimeProxyVersion(input.runtimeProfile),
         nativeSessionId: input.nativeSessionId,
         resumeMode: 'load',
+        ...(preparedLaunch ? { preparedLaunch } : {}),
         ...(input.executor === 'codex'
           ? {
               hostServiceIdentity: {
@@ -212,14 +230,15 @@ export class NativeSessionService {
         this.db
           .prepare(
             `INSERT INTO sessions
-              (id, name, type, workspace_id, executor, agent_id, agent_name,
+              (id, name, type, workspace_id, executor, proxy_plugin_id, proxy_binding_json,
+               agent_id, agent_name,
                runtime_profile_json,
                model, approval_mode,
                executor_config_json, active_channel, status, archived,
                worktree_path, branch, base_branch, worktree_outcome,
                native_session_id, created_at, updated_at)
              VALUES
-              (?, ?, 'coding', ?, ?, ?, ?, ?, NULL, ?, ?, 'web', 'new', 0,
+               (?, ?, 'coding', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'web', 'new', 0,
                NULL, NULL, NULL, NULL, ?, ?, ?)`,
           )
           .run(
@@ -227,9 +246,13 @@ export class NativeSessionService {
             name,
             input.workspaceId,
             input.executor,
+            pluginId,
+            preparedLaunch ? JSON.stringify(preparedLaunch.sessionBinding) : null,
             input.agentId ?? null,
             input.agentName ?? null,
-            input.runtimeProfile ? JSON.stringify(input.runtimeProfile) : null,
+            (preparedLaunch?.sessionBinding.runtimeProfile ?? input.runtimeProfile)
+              ? JSON.stringify(preparedLaunch?.sessionBinding.runtimeProfile ?? input.runtimeProfile)
+              : null,
             input.executor === 'kimi' || input.executor === 'grok' ? null : input.approvalMode ?? 'ask',
             JSON.stringify(executorConfigFromOptions(broughtUp.configOptions)),
             input.nativeSessionId,
@@ -248,6 +271,15 @@ export class NativeSessionService {
       await this.proxy.dispose(sessionId).catch(() => undefined);
       this.proxySessions.forget(sessionId);
       this.sessions.forget(sessionId);
+      if (isUniqueConstraintError(error)) {
+        const conflict = this.db
+          .prepare(existingNativeSessionSql())
+          .get(input.nativeSessionId, pluginId, input.executor) as { id: string } | undefined;
+        throw Object.assign(
+          new Error(`${input.executor} session is already adopted as ${conflict?.id ?? 'existing'}`),
+          { code: 'SESSION_ALREADY_EXISTS', sessionId: conflict?.id },
+        );
+      }
       throw error;
     }
 

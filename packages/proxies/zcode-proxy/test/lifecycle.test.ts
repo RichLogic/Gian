@@ -428,6 +428,52 @@ test('invalid model config fails the turn before send and restores state', async
   }
 });
 
+test('a partial config failure restores the previous model and leaves the turn retryable', async () => {
+  const previousModel = { providerId: 'bigmodel', modelId: 'GLM-5.3-Flash' };
+  const nextModel = { providerId: 'zai', modelId: 'glm-5.1' };
+  const harness = startHarness({
+    scenario: {
+      initialModel: previousModel,
+      availableModels: [
+        { ref: previousModel, label: 'GLM-5.3-Flash' },
+        { ref: nextModel, label: 'GLM-5.1' },
+      ],
+      behavior: { failThoughtLevel: 'broken' },
+    },
+  });
+  try {
+    await initialize(harness);
+    await createSession(harness);
+    const snapshot = await harness.request('session.get', { sessionId: 's_1' });
+    const streamId = ((snapshot.payload as { result: { session: { streamId: string } } }).result.session.streamId);
+    const model = `zmodel:v1:${Buffer.from(JSON.stringify([nextModel.providerId, nextModel.modelId])).toString('base64url')}`;
+
+    const failed = await harness.request('turn.start', {
+      sessionId: 's_1', streamId, turnId: 't_retryable',
+      input: [{ type: 'text', text: 'go' }],
+      config: { provider: nextModel.providerId, model, thinking: 'broken' },
+    });
+    assert.equal(failed.kind, 'error');
+    const setModels = harness.fakeLog().filter(entry => entry.method === 'session/setModel');
+    assert.deepEqual((setModels.at(-1)?.params as { model?: unknown } | undefined)?.model, previousModel);
+
+    const retried = await harness.request('turn.start', {
+      sessionId: 's_1', streamId, turnId: 't_retryable',
+      input: [{ type: 'text', text: 'go' }],
+      config: {
+        provider: previousModel.providerId,
+        model: `zmodel:v1:${Buffer.from(JSON.stringify([previousModel.providerId, previousModel.modelId])).toString('base64url')}`,
+        thinking: 'max',
+        approval_mode: 'build',
+      },
+    });
+    assert.equal(retried.kind, 'result', JSON.stringify(retried.payload));
+    assert.equal(harness.fakeLog().filter(entry => entry.method === 'session/send').length, 1);
+  } finally {
+    await harness.close();
+  }
+});
+
 test('native list filters owned sessions and paginates', async () => {
   const harness = startHarness({
     scenario: {

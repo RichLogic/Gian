@@ -17,6 +17,10 @@
     "./conformance": {
       "types": "./dist/src/conformance.d.ts",
       "default": "./dist/src/conformance.js"
+    },
+    "./node": {
+      "types": "./dist/src/node.d.ts",
+      "default": "./dist/src/node.js"
     }
   },
   "scripts": {

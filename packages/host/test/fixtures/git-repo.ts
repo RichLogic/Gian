@@ -76,6 +76,10 @@ export function createGitRepo(opts: GitRepoOptions = {}): GitRepo {
   const root = mkdtempSync(join(tmpdir(), 'gian-gitfx-'));
 
   run(root, ['init', '--initial-branch', initialBranch]);
+  // Production Git operations do not inherit this helper's per-call env.
+  // Persist fixture-only identity so merge commits work without global config.
+  run(root, ['config', 'user.name', 'Gian Test']);
+  run(root, ['config', 'user.email', 'gian-test@example.invalid']);
   run(root, ['config', 'core.hooksPath', '/dev/null']);
   run(root, ['config', 'commit.gpgsign', 'false']);
   run(root, ['config', 'tag.gpgsign', 'false']);

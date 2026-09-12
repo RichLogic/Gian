@@ -27,6 +27,8 @@ export interface StartManagedHostOptions {
   desktopToken: string;
   instanceId: string;
   githubBrokerSocket: string;
+  remoteBrokerSocket: string;
+  browserBrokerSocket: string;
   env?: NodeJS.ProcessEnv;
   spawnProcess?: typeof spawn;
 }
@@ -71,6 +73,8 @@ export function buildManagedHostEnv({
   desktopToken,
   instanceId,
   githubBrokerSocket,
+  remoteBrokerSocket,
+  browserBrokerSocket,
   env = process.env,
 }: Omit<StartManagedHostOptions, 'electronExecutable' | 'spawnProcess'>): NodeJS.ProcessEnv {
   return {
@@ -83,6 +87,8 @@ export function buildManagedHostEnv({
     GIAN_DESKTOP_TOKEN: desktopToken,
     GIAN_DESKTOP_INSTANCE_ID: instanceId,
     GIAN_DESKTOP_GITHUB_BROKER_SOCKET: githubBrokerSocket,
+    GIAN_DESKTOP_REMOTE_BROKER_SOCKET: remoteBrokerSocket,
+    GIAN_DESKTOP_BROWSER_BROKER_SOCKET: browserBrokerSocket,
     GIAN_PARENT_MANAGED: '1',
     GIAN_MANAGED_PLUGINS: '1',
   };
@@ -96,6 +102,8 @@ export function startManagedHost({
   desktopToken,
   instanceId,
   githubBrokerSocket,
+  remoteBrokerSocket,
+  browserBrokerSocket,
   env = process.env,
   spawnProcess = spawn,
 }: StartManagedHostOptions): ChildProcess {
@@ -112,6 +120,8 @@ export function startManagedHost({
         desktopToken,
         instanceId,
         githubBrokerSocket,
+        remoteBrokerSocket,
+        browserBrokerSocket,
         env,
       }),
       stdio: ['pipe', logFd, logFd],

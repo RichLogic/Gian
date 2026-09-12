@@ -33,7 +33,6 @@ import {
   AgentUpdateBusyError,
   type AgentUpdateLease,
 } from '../src/agents/update-lock.js';
-import { CliRuntimeManager } from '../src/runtime/manager.js';
 import { runProtectedCommand } from '../src/runtime/protected-command.js';
 import { ProxyManager } from '../src/proxy/manager.js';
 import { ProtocolV2Client } from '../src/proxy/protocol-v2-client.js';
@@ -46,12 +45,17 @@ import {
   shutdownProxyProcess,
 } from '../src/proxy/process-shutdown.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
+import {
+  idleRuntimeResolver,
+  resolverFromAcquire,
+  V4_PROTOCOL_DESCRIPTORS,
+} from './runtime-lease-resolver.js';
+import { developmentEntries, testResolver } from './runtime-test-harness.js';
+import { legacyProxyManagerConfig } from './helpers/legacy-proxy-manager.js';
 
 const PROTOCOL_V2 = {
-  claudeProxy: { pluginVersion: '0.2.0', processScope: 'session' as const },
-  codexProxy: { pluginVersion: '0.2.0', processScope: 'shared' as const },
-  kimiProxy: { pluginVersion: '0.2.0', processScope: 'shared' as const },
-  grokProxy: { pluginVersion: '0.3.0', processScope: 'session' as const },
+  ...V4_PROTOCOL_DESCRIPTORS,
+  runtimeResolver: idleRuntimeResolver(),
 };
 
 const PROTOCOL_V2_STDIO_BOOT = `
@@ -59,8 +63,13 @@ const PROTOCOL_V2_STDIO_BOOT = `
       const fail = (request, error) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error }) + '\\n');
       if (request.method === 'initialize') {
         const pluginId = process.env.GIAN_PLUGIN_ID || 'claude';
+        const offered = request.params?.protocol?.versions ?? [];
+        const version = offered.includes('2.2') ? '2.2'
+          : offered.includes('2.1') ? '2.1'
+          : offered[0] || '2.0';
+        globalThis.__gianNegotiatedProtocol = version;
         reply(request, {
-          protocol: { name: 'gian.proxy', version: '2.0' },
+          protocol: { name: 'gian.proxy', version },
           plugin: { id: pluginId, name: pluginId, version: pluginId === 'grok' ? '0.3.0' : '0.2.0' },
           process: { scope: pluginId === 'codex' || pluginId === 'kimi' ? 'shared' : 'session' },
           capabilities: {},
@@ -68,7 +77,14 @@ const PROTOCOL_V2_STDIO_BOOT = `
         continue;
       }
       if (request.method === 'catalog.list') {
-        reply(request, { catalogRevision: 'test', input: [{ type: 'text' }], configOptions: [], slashCommands: [] });
+        const negotiated = globalThis.__gianNegotiatedProtocol || '2.0';
+        reply(request, {
+          catalogRevision: 'test',
+          input: [{ type: 'text' }],
+          configOptions: [],
+          slashCommands: [],
+          ...(negotiated === '2.0' ? {} : { specialCatalogs: {} }),
+        });
         continue;
       }
 `;
@@ -195,7 +211,7 @@ if (process.argv.includes('--self-test')) {
     const fail = (code, message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code, message } }) + '\\n');
     if (request.method === 'initialize') {
       const envOk = ${String(!requireManagedEnv)} || (
-        process.env.DISABLE_AUTOUPDATER === '1' && process.env.DISABLE_UPDATES === '1'
+        Boolean(process.env.GIAN_PLUGIN_ID) && Boolean(process.env.GIAN_PROTOCOL_VERSIONS)
       );
       if (!envOk) {
         fail(-32602, 'unsafe-env');
@@ -240,9 +256,9 @@ async function writeProxyVersion(
   return directory;
 }
 
-async function writeFakeCli(root: string, id: string): Promise<string> {
+async function writeFakeCli(root: string, id: string, version = '2.1.159'): Promise<string> {
   const path = join(root, `${id}-cli`);
-  await writeFile(path, `#!/bin/sh\nprintf '${id} 1.2.3\\n'\n`, { mode: 0o700 });
+  await writeFile(path, `#!/bin/sh\nprintf '${id} ${version}\\n'\n`, { mode: 0o700 });
   return path;
 }
 
@@ -318,341 +334,96 @@ test('official installer bootstrap is pinned before Gian executes it', () => {
   );
 });
 
-test('pinned official installer runs with vendor updater isolation', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-official-installer-'));
+test('Host no longer executes official Runtime installers', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-official-installer-removed-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const homeDir = join(root, 'home');
-  const cliPath = join(homeDir, '.local', 'bin', 'claude');
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
-  const installer = Buffer.from([
-    '#!/bin/sh',
-    'set -eu',
-    'test "$NON_INTERACTIVE" = "1"',
-    'test "$DISABLE_AUTOUPDATER" = "1"',
-    'test "$DISABLE_UPDATES" = "1"',
-    `mkdir -p ${JSON.stringify(dirname(cliPath))}`,
-    `printf '%s\\n' '#!/bin/sh' "printf '%s\\\\n' 'claude 9.9.9'" > ${JSON.stringify(cliPath)}`,
-    `chmod 700 ${JSON.stringify(cliPath)}`,
-    '',
-  ].join('\n'));
-  const installerDigest = createHash('sha256').update(installer).digest('hex');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: {
-      claude: proxyPath,
-      codex: proxyPath,
-      kimi: proxyPath,
-      grok: proxyPath,
-    },
-    homeDir,
-    pathEnv: '',
-    fetchImpl: async () => new Response(installer),
-    officialInstallerSha256: { claude: installerDigest },
-  });
-
-  const result = await manager.installOfficialCli('claude');
-  assert.equal(result.agent.cli.state, 'ready');
-  assert.equal(result.agent.cli.version, '9.9.9');
-  assert.equal(result.agent.cli.path, cliPath);
-});
-
-for (const fixture of [
-  { id: 'claude', relativePath: ['.local', 'bin', 'claude'], version: 'claude 9.9.1' },
-  { id: 'codex', relativePath: ['.local', 'bin', 'codex'], version: 'codex-cli 9.9.2' },
-  { id: 'kimi', relativePath: ['.kimi-code', 'bin', 'kimi'], version: 'kimi 9.9.3' },
-] as const) {
-  test(`official ${fixture.id} installer lands on its supported user path`, async t => {
-    const root = await mkdtemp(join(tmpdir(), `gian-${fixture.id}-official-path-`));
-    t.after(() => rm(root, { recursive: true, force: true }));
-    const homeDir = join(root, 'home');
-    const cliPath = join(homeDir, ...fixture.relativePath);
-    const proxyPath = join(root, 'proxy.mjs');
-    await writeFile(proxyPath, 'export {};\n');
-    const installer = Buffer.from([
-      '#!/bin/sh',
-      'set -eu',
-      'test "$NON_INTERACTIVE" = "1"',
-      `mkdir -p "$HOME/${fixture.relativePath.slice(0, -1).join('/')}"`,
-      `printf '%s\\n' '#!/bin/sh' "printf '%s\\\\n' '${fixture.version}'" > "$HOME/${fixture.relativePath.join('/')}"`,
-      `chmod 700 "$HOME/${fixture.relativePath.join('/')}"`,
-      '',
-    ].join('\n'));
-    const installerDigest = createHash('sha256').update(installer).digest('hex');
-    const manager = await AgentManager.create({
-      dataDir: join(root, 'data'),
-      releaseVersion: '0.1.0',
-      managedProxies: false,
-      developmentProxyEntries: {
-        claude: proxyPath,
-        codex: proxyPath,
-        kimi: proxyPath,
-      },
-      homeDir,
-      pathEnv: '',
-      fetchImpl: async () => new Response(installer),
-      officialInstallerSha256: { [fixture.id]: installerDigest },
-    });
-
-    const result = await manager.installOfficialCli(fixture.id);
-    assert.equal(result.agent.cli.state, 'ready');
-    assert.equal(result.agent.cli.path, cliPath);
-    assert.equal(result.agent.cli.source, 'official-user');
-  });
-}
-
-test('install route cannot replace an in-use CLI and re-probes after the last lease drains', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-official-installer-runtime-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const homeDir = join(root, 'home');
-  const cliPath = join(homeDir, '.local', 'bin', 'claude');
-  const proxyPath = join(root, 'proxy.mjs');
-  await mkdir(dirname(cliPath), { recursive: true });
-  await writeFile(cliPath, "#!/bin/sh\nprintf 'claude 1.0.0\\n'\n", { mode: 0o700 });
-  await writeFile(proxyPath, 'export {};\n');
-  const installer = Buffer.from([
-    '#!/bin/sh',
-    'set -eu',
-    `printf '%s\\n' '#!/bin/sh' "printf 'claude 2.0.0\\\\n'" > ${JSON.stringify(cliPath)}`,
-    `chmod 700 ${JSON.stringify(cliPath)}`,
-    '',
-  ].join('\n'));
-  const installerDigest = createHash('sha256').update(installer).digest('hex');
-  let fetchCalls = 0;
-  const agents = await AgentManager.create({
-    dataDir: join(root, 'data'),
-    releaseVersion: '0.1.0',
-    managedProxies: false,
-    developmentProxyEntries: {
-      claude: proxyPath,
-      codex: proxyPath,
-      kimi: proxyPath,
-      grok: proxyPath,
-    },
-    environmentCliPaths: { claude: cliPath },
-    homeDir,
+    homeDir: join(root, 'home'),
     pathEnv: '',
     fetchImpl: async () => {
-      fetchCalls += 1;
-      return new Response(installer);
+      throw new Error('Host installer must not fetch');
     },
-    officialInstallerSha256: { claude: installerDigest },
   });
-  const runtimes = new CliRuntimeManager(
-    agents.runtimeProviders(),
-    agents.updateLockDataDir(),
-  );
-  const oldLease = await runtimes.acquire('claude');
-  assert.equal(oldLease.version, '1.0.0');
+  for (const id of ['claude', 'codex', 'kimi'] as const) {
+    await assert.rejects(
+      () => manager.installOfficialCli(id),
+      (error: unknown) => (error as { code?: string }).code === 'HOST_RUNTIME_INSTALLER_REMOVED',
+    );
+  }
+});
 
+test('install-cli route is gone and never fetches a Host Runtime installer', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-official-installer-runtime-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+    fetchImpl: async () => {
+      throw new Error('install-cli must not fetch');
+    },
+  });
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes,
-    // The lease represents another Host, so closing this route's local Proxy
-    // cannot release it.
     closeProxy: async () => undefined,
-    capabilities: async () => ({ models: [], modes: [] }),
+    capabilities: async () => ({ models: [], modes: [] }) as never,
   });
-  const blocked = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
-  assert.equal(blocked.status, 409);
-  assert.equal(fetchCalls, 0, 'the installer script is not even downloaded while CLI use is active');
-  assert.equal(
-    (await execFileAsync(oldLease.binaryPath, [], { encoding: 'utf8' })).stdout.trim(),
-    'claude 1.0.0',
-  );
-
-  await oldLease.release();
-  const installed = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
-  assert.equal(installed.status, 200);
-  assert.equal(fetchCalls, 1);
-  const newLease = await runtimes.acquire('claude');
-  assert.equal(newLease.binaryPath, oldLease.binaryPath);
-  assert.equal(newLease.version, '2.0.0');
-  await newLease.release();
+  const removed = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
+  assert.equal(removed.status, 410);
+  const body = await removed.json() as { code?: string };
+  assert.equal(body.code, 'HOST_RUNTIME_INSTALLER_REMOVED');
 });
 
-test('runtime invalidation keeps a failed idle retirement strongly retryable', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-invalidate-retirement-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  let manager!: CliRuntimeManager;
-  let probeCalls = 0;
-  let retirementReleaseCalls = 0;
-  let firstReleaseStarted!: () => void;
-  const firstReleasing = new Promise<void>(resolve => { firstReleaseStarted = resolve; });
-  let allowFirstReleaseFailure!: () => void;
-  const firstReleaseGate = new Promise<void>(resolve => { allowFirstReleaseFailure = resolve; });
-  const provider = {
-    id: 'claude' as const,
-    async inspectInstalled() {
-      return [{ cli: 'claude' as const, binaryPath: '/fake/claude', source: 'override' as const }];
-    },
-    async probe(runtime: { binaryPath: string }, protector: unknown) {
-      probeCalls += 1;
-      if (probeCalls === 1) {
-        const claim = protector as { release(): Promise<void> };
-        const release = claim.release.bind(claim);
-        claim.release = async () => {
-          retirementReleaseCalls += 1;
-          if (retirementReleaseCalls === 1) {
-            firstReleaseStarted();
-            await firstReleaseGate;
-            throw new Error('controlled idle retirement failure');
-          }
-          await release();
-        };
-        // First microtask lets resolve() publish ActiveRuntime; the nested one
-        // invalidates before acquire() can increment its lease count.
-        queueMicrotask(() => queueMicrotask(() => manager.invalidate('claude')));
-      }
-      return {
-        cli: 'claude' as const,
-        binaryPath: runtime.binaryPath,
-        version: `${probeCalls}.0.0`,
-        source: 'override' as const,
-      };
-    },
-    managedEnv() { return {}; },
-  };
-  manager = new CliRuntimeManager([provider], root);
-
-  const acquiring = manager.acquire('claude');
-  const acquireRejected = assert.rejects(acquiring, /controlled idle retirement failure/);
-  await firstReleasing;
-  allowFirstReleaseFailure();
-  await acquireRejected;
-  assert.equal(retirementReleaseCalls, 1);
-  await assert.rejects(
-    acquireAgentUpdateLock(root, 'claude', 'exclusive writer'),
-    (error: unknown) => error instanceof AgentUpdateBusyError,
-  );
-
-  await manager.drain('claude');
-  assert.equal(retirementReleaseCalls, 2);
-  const writer = await acquireAgentUpdateLock(root, 'claude', 'exclusive writer');
-  await writer.release();
-  const lease = await manager.acquire('claude');
-  assert.equal(lease.version, '2.0.0');
-  await lease.release();
-});
-
-test('failed runtime resolution keeps an unreleased claim visible to drain', {
-  skip: process.platform === 'win32',
-}, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-resolution-retirement-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const claimDirectory = join(root, 'update-locks', 'agent-claude-claims');
-  const provider = {
-    id: 'claude' as const,
-    async inspectInstalled() {
-      await chmod(claimDirectory, 0o500);
-      throw new Error('controlled runtime inspection failure');
-    },
-    async probe() {
-      throw new Error('probe must not run');
-    },
-    managedEnv() { return {}; },
-  };
-  const manager = new CliRuntimeManager([provider], root);
-
-  await assert.rejects(
-    manager.acquire('claude'),
-    (error: unknown) => error instanceof AggregateError
-      && error.errors.some(item => /controlled runtime inspection failure/.test(String(item))),
-  );
-  await chmod(claimDirectory, 0o700);
-  await assert.rejects(
-    acquireAgentUpdateLock(root, 'claude', 'exclusive writer'),
-    (error: unknown) => error instanceof AgentUpdateBusyError,
-  );
-  await manager.drain('claude');
-  const writer = await acquireAgentUpdateLock(root, 'claude', 'exclusive writer');
-  await writer.release();
-});
-
-test('real status --version probe blocks installer fetch and post-install status reuses writer', async t => {
+test('status refresh never vendor-probes and install-cli is gone', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-status-probe-writer-gate-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const homeDir = join(root, 'home');
   const cliPath = join(root, 'bin', 'claude');
   const probeStarted = join(root, 'probe-started');
-  const probeRelease = join(root, 'probe-release');
-  const proxyPath = join(root, 'proxy.mjs');
   await mkdir(dirname(cliPath), { recursive: true });
   await writeFile(cliPath, [
     '#!/bin/sh',
     `printf started > ${JSON.stringify(probeStarted)}`,
-    `while [ ! -f ${JSON.stringify(probeRelease)} ]; do sleep 0.02; done`,
     "printf 'claude 1.0.0\\n'",
     '',
   ].join('\n'), { mode: 0o700 });
-  await writeFile(proxyPath, 'export {};\n');
-  const installer = Buffer.from([
-    '#!/bin/sh',
-    'set -eu',
-    `printf '%s\\n' '#!/bin/sh' "printf 'claude 2.0.0\\\\n'" > ${JSON.stringify(cliPath)}`,
-    `chmod 700 ${JSON.stringify(cliPath)}`,
-    '',
-  ].join('\n'));
-  const installerDigest = createHash('sha256').update(installer).digest('hex');
   let fetchCalls = 0;
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: {
-      claude: proxyPath,
-      codex: proxyPath,
-      kimi: proxyPath,
-      grok: proxyPath,
-    },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     environmentCliPaths: { claude: cliPath },
-    homeDir,
+    homeDir: join(root, 'home'),
     pathEnv: '',
     fetchImpl: async () => {
       fetchCalls += 1;
-      return new Response(installer);
+      return new Response('nope');
     },
-    officialInstallerSha256: { claude: installerDigest },
   });
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: { drain: async () => undefined, invalidate: () => true } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({ models: [], modes: [] }),
   });
 
-  const statusProbe = agents.status('claude', true);
-  const markerDeadline = Date.now() + 3_000;
-  while (Date.now() < markerDeadline) {
-    try {
-      await readFile(probeStarted);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-  }
-  assert.equal(await readFile(probeStarted, 'utf8'), 'started');
-  const blocked = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
-  assert.equal(blocked.status, 409);
-  assert.equal(fetchCalls, 0, 'writer must fail before fetching while --version is running');
-
-  await writeFile(probeRelease, 'go');
-  assert.equal((await statusProbe).cli.version, '1.0.0');
-  const installed = await Promise.race([
-    app.request('/api/agents/claude/install-cli', { method: 'POST' }),
-    new Promise<never>((_resolve, reject) => {
-      setTimeout(() => reject(new Error('post-install owner status self-locked')), 4_000);
-    }),
-  ]);
-  assert.equal(installed.status, 200);
-  assert.equal(fetchCalls, 1);
-  const body = await installed.json() as { agent: { cli: { version: string } } };
-  assert.equal(body.agent.cli.version, '2.0.0');
+  const status = await agents.status('claude', true);
+  assert.equal(status.cli.version, '1.0.0');
+  assert.equal((await readFile(probeStarted, 'utf8')).trim(), 'started');
+  const gone = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
+  assert.equal(gone.status, 410);
+  assert.equal((await gone.json() as { code: string }).code, 'HOST_RUNTIME_INSTALLER_REMOVED');
+  assert.equal(fetchCalls, 0);
 });
 
 test('updateAgent rejects while the kind claim is busy and leaves agents.json untouched', async t => {
@@ -660,8 +431,6 @@ test('updateAgent rejects while the kind claim is busy and leaves agents.json un
   t.after(() => rm(root, { recursive: true, force: true }));
   const oldPath = await writeFakeCli(root, 'old-claude');
   const newPath = await writeFakeCli(root, 'new-claude');
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
   await mkdir(dataDir, { recursive: true });
   const configPath = join(dataDir, 'agents.json');
@@ -671,15 +440,12 @@ test('updateAgent rejects while the kind claim is busy and leaves agents.json un
     proxyDefaults: {},
   }, null, 2)}\n`);
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: {
-      claude: proxyPath,
-      codex: proxyPath,
-      kimi: proxyPath,
-      grok: proxyPath,
-    },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -720,10 +486,8 @@ test('updateAgent holds the kind claim from the path probe through persistence',
   await writeFile(newPath, `#!/bin/sh
 : > '${probeStarted}'
 while [ ! -f '${probeRelease}' ]; do sleep 0.02; done
-printf 'claude 2.0.0\\n'
+printf 'claude 2.1.159\\n'
 `, { mode: 0o700 });
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
   await mkdir(dataDir, { recursive: true });
   const configPath = join(dataDir, 'agents.json');
@@ -733,10 +497,12 @@ printf 'claude 2.0.0\\n'
     proxyDefaults: {},
   }, null, 2)}\n`);
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -765,7 +531,7 @@ printf 'claude 2.0.0\\n'
     schemaVersion: number;
     agents: Array<{ id: string; cliPath: string | null }>;
   };
-  assert.equal(persisted.schemaVersion, 3);
+  assert.equal(persisted.schemaVersion, 5);
   assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.cliPath, newPath);
 });
 
@@ -775,8 +541,6 @@ test('updateAgent leaves persisted state untouched when the path probe fails', a
   const oldPath = await writeFakeCli(root, 'old-claude');
   const newPath = join(root, 'flaky-claude');
   await writeFile(newPath, "#!/bin/sh\nprintf 'broken\\n'\n", { mode: 0o700 });
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
   await mkdir(dataDir, { recursive: true });
   const configPath = join(dataDir, 'agents.json');
@@ -787,10 +551,12 @@ test('updateAgent leaves persisted state untouched when the path probe fails', a
   }, null, 2)}\n`);
   const persistedBefore = await readFile(configPath, 'utf8');
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -813,8 +579,6 @@ test('updateAgent keeps a committed path when only claim retirement fails', {
   t.after(() => rm(root, { recursive: true, force: true }));
   const oldPath = await writeFakeCli(root, 'old-claude-retirement');
   const newPath = await writeFakeCli(root, 'new-claude-retirement');
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
   await mkdir(dataDir, { recursive: true });
   const configPath = join(dataDir, 'agents.json');
@@ -824,10 +588,12 @@ test('updateAgent keeps a committed path when only claim retirement fails', {
     proxyDefaults: {},
   }, null, 2)}\n`);
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     homeDir: join(root, 'home'),
     pathEnv: '',
   });
@@ -874,6 +640,7 @@ test('committed Agent defaults invalidate cached status before claim retirement'
   await writeFile(proxyPath, 'export {};\n');
   const dataDir = join(root, 'data');
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
@@ -919,26 +686,27 @@ test('config mutations serialize locally and a stale Host reloads before commit'
   t.after(() => rm(root, { recursive: true, force: true }));
   const dataDir = join(root, 'data');
   const homeDir = join(root, 'home');
-  const proxyPath = join(root, 'proxy.mjs');
-  await writeFile(proxyPath, 'export {};\n');
+  const claude = await writeFakeCli(root, 'claude', '2.1.159');
+  const codex = await writeFakeCli(root, 'codex', '0.146.0');
+  const kimi = await writeFakeCli(root, 'kimi', '0.38.0');
   const options = {
     dataDir,
     releaseVersion: '0.1.0',
+    allowCreateWithoutCatalog: true,
     managedProxies: false as const,
-    developmentProxyEntries: { claude: proxyPath, codex: proxyPath, kimi: proxyPath, grok: proxyPath, dsh: proxyPath },
+    developmentProxyEntries: await developmentEntries(root),
+    runtimeResolver: testResolver(root),
     homeDir,
     pathEnv: '',
   };
   const firstHost = await AgentManager.create(options);
   const staleHost = await AgentManager.create(options);
 
-  await Promise.all([
-    firstHost.createAgent({ name: 'Claude A', proxy: 'claude' }),
-    firstHost.createAgent({ name: 'Codex A', proxy: 'codex' }),
-  ]);
+  await firstHost.createAgent({ name: 'Claude A', proxy: 'claude', cliPath: claude });
+  await firstHost.createAgent({ name: 'Codex A', proxy: 'codex', cliPath: codex });
   // The stale Host's in-memory config predates both creates; it must reload
   // under the cross-Host claim rather than overwrite the newer file.
-  await staleHost.createAgent({ name: 'Kimi A', proxy: 'kimi' });
+  await staleHost.createAgent({ name: 'Kimi A', proxy: 'kimi', cliPath: kimi });
 
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
     agents: Array<{ name: string; proxy: string }>;
@@ -1812,53 +1580,63 @@ test('Claude already-empty observation makes a later exit cleanup signal-free', 
   assert.deepEqual(repeatedGroupSignals, []);
 });
 
-test('CLI and Proxy installers share one cross-process Agent update boundary', async t => {
+test('managed Runtime update locks are isolated by Gian data directory', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-update-boundary-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const dataDir = join(root, 'data');
   let releaseFetch!: () => void;
   const blocked = new Promise<void>(resolve => { releaseFetch = resolve; });
-  let fetchStarted!: () => void;
-  const started = new Promise<void>(resolve => { fetchStarted = resolve; });
+  let fetchStarts = 0;
+  let bothFetchesStarted!: () => void;
+  const started = new Promise<void>(resolve => { bothFetchesStarted = resolve; });
   const options = {
     dataDir,
     releaseVersion: '0.1.0',
+    allowCreateWithoutCatalog: true,
     managedProxies: true,
     homeDir: join(root, 'home'),
     pathEnv: '',
     fetchImpl: async () => {
-      fetchStarted();
+      fetchStarts += 1;
+      if (fetchStarts === 2) bothFetchesStarted();
       await blocked;
       return new Response(new Uint8Array());
     },
   } as const;
   const firstManager = await AgentManager.create(options);
-  // Different app/worktree profiles have different data directories but the
-  // same HOME and vendor CLI. They must still share one updater namespace.
+  // Managed artifacts live below each profile's dataDir. GianDev and
+  // production therefore must not block one another through a HOME-global
+  // updater namespace.
   const secondManager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     ...options,
     dataDir: join(root, 'other-profile-data'),
   });
 
-  const first = firstManager.installOfficialCli('claude');
-  await started;
   await assert.rejects(
-    secondManager.installOfficialCli('claude'),
-    (error: unknown) => error instanceof AgentUpdateBusyError,
+    () => firstManager.installOfficialCli('claude'),
+    (error: unknown) => (error as { code?: string }).code === 'HOST_RUNTIME_INSTALLER_REMOVED',
   );
-  await assert.rejects(
+  const first = assert.rejects(
     firstManager.installProxy('claude'),
-    (error: unknown) => error instanceof AgentUpdateBusyError,
+    /Download size is invalid|integrity metadata size is invalid|HOST_RUNTIME_INSTALLER_REMOVED|not found|incompatible/i,
   );
-
+  const second = assert.rejects(
+    secondManager.installProxy('claude'),
+    /Download size is invalid|integrity metadata size is invalid|HOST_RUNTIME_INSTALLER_REMOVED|not found|incompatible/i,
+  );
+  await started;
   releaseFetch();
-  await assert.rejects(first, /Download size is invalid/);
-  const lease = await acquireAgentUpdateLock(
-    join(options.homeDir, '.gian'),
-    'claude',
-    'post-failure check',
-  );
-  await lease.release();
+  await first;
+  await second;
+  for (const manager of [firstManager, secondManager]) {
+    const lease = await acquireAgentUpdateLock(
+      manager.updateLockDataDir(),
+      'claude',
+      'post-failure check',
+    );
+    await lease.release();
+  }
 });
 
 test('an already-empty compatibility process never enters signalling shutdown', {
@@ -1871,6 +1649,7 @@ test('an already-empty compatibility process never enters signalling shutdown', 
   let signalPathCalls = 0;
   let releaseUnregisteredCalls = 0;
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false,
@@ -1953,10 +1732,14 @@ for await (const line of input) {
     const valid = process.env.GIAN_PLUGIN_ID === 'claude'
       && process.env.GIAN_PLUGIN_DATA_DIR
       && process.env.GIAN_RUNTIME_BIN
-      && process.env.GIAN_PROTOCOL_VERSIONS === '2.1,2.0'
+      && process.env.GIAN_PROTOCOL_VERSIONS === '2.3,2.2,2.1,2.0'
       && request.params.protocol.name === 'gian.proxy'
+      && request.params.protocol.versions.includes('2.3')
+      && request.params.protocol.versions.includes('2.2')
       && request.params.protocol.versions.includes('2.1')
-      && request.params.protocol.versions.includes('2.0');
+      && request.params.protocol.versions.includes('2.0')
+      && request.params.host.name === 'Gian'
+      && request.params.host.version === '99.8.7';
     reply({
       protocol: { name: 'gian.proxy', version: '2.0' },
       plugin: { id: valid ? 'claude' : 'invalid.fixture', name: 'Claude', version: '7.4.2' },
@@ -1974,6 +1757,7 @@ for await (const line of input) {
   const cliPath = await writeFakeCli(root, 'claude');
   const dataDir = join(root, 'data');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '99.8.7',
     managedProxies: false,
@@ -2022,6 +1806,7 @@ test('production compatibility handshake validates protocol, capabilities, and m
   const artifact = await proxyArchive(root, 'claude', '0.1.0', true, true, true);
   const cliPath = await writeFakeCli(root, 'claude');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2047,6 +1832,7 @@ test('an incompatible real protocol handshake never activates the candidate', {
   const artifact = await proxyArchive(root, 'claude', '0.1.0', true, false);
   const cliPath = await writeFakeCli(root, 'claude');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2081,6 +1867,7 @@ test('the compatibility gate rejects a missing catalog.list method', {
       );
       const cliPath = await writeFakeCli(root, id);
       const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
         dataDir,
         releaseVersion: '0.1.0',
         managedProxies: true,
@@ -2107,6 +1894,7 @@ test('failed Proxy compatibility probe never changes the active version', {
   const artifact = await proxyArchive(root, 'claude', '0.1.0', false);
   let activationProbeCalls = 0;
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2135,6 +1923,7 @@ test('a pending or failed compatibility probe never exposes the candidate versio
   let rejectProbe!: (reason: Error) => void;
   const blocked = new Promise<void>((_resolve, reject) => { rejectProbe = reject; });
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2165,6 +1954,7 @@ test('an atomic activation commit failure keeps the previous validated version',
   await symlink('0.0.9', join(dataDir, 'plugins', 'claude', 'current'), 'dir');
   const artifact = await proxyArchive(root, 'claude', '0.1.0');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2197,6 +1987,7 @@ test('an escaped version symlink is never classified as a validated previous ver
   await symlink('0.0.9', join(agentRoot, 'current'), 'dir');
   const artifact = await proxyArchive(root, 'claude', '0.1.0');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2223,6 +2014,7 @@ test('Proxy refresh reruns self-test after an entry changes in place', async t =
   const directory = await writeProxyVersion(dataDir, 'claude', '0.1.0');
   await symlink('0.1.0', join(dataDir, 'plugins', 'claude', 'current'), 'dir');
   const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: true,
@@ -2232,7 +2024,8 @@ test('Proxy refresh reruns self-test after an entry changes in place', async t =
 
   assert.equal((await manager.status('claude', true)).proxy.state, 'ready');
   await writeFile(join(directory, 'proxy.mjs'), proxySource('claude', '0.1.0', false));
-  assert.equal((await manager.status('claude', true)).proxy.state, 'invalid');
+  assert.equal((await manager.status('claude', true)).proxy.state, 'ready');
+  await assert.rejects(manager.proxyLaunchDescriptor('claude'), /self-test|invalid/i);
 });
 
 test('Agent install routes expose updater contention as 409', async () => {
@@ -2243,16 +2036,15 @@ test('Agent install routes expose updater contention as 409', async () => {
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: { drain: async () => undefined, invalidate: () => true } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({ models: [], modes: [] }),
   });
 
-  for (const endpoint of ['install-cli', 'install-proxy']) {
-    const response = await app.request(`/api/agents/claude/${endpoint}`, { method: 'POST' });
-    assert.equal(response.status, 409);
-    assert.match((await response.json() as { error: string }).error, /already in progress/i);
-  }
+  const removed = await app.request('/api/agents/claude/install-cli', { method: 'POST' });
+  assert.equal(removed.status, 410);
+  const response = await app.request('/api/agents/claude/install-proxy', { method: 'POST' });
+  assert.equal(response.status, 409);
+  assert.match((await response.json() as { error: string }).error, /already in progress/i);
 });
 
 test('Proxy defaults keep managed approval presets separate from native policy values', async () => {
@@ -2317,7 +2109,6 @@ test('Proxy defaults keep managed approval presets separate from native policy v
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: {} as never,
     closeProxy: async () => undefined,
     capabilities: async () => catalog,
   });
@@ -2385,7 +2176,6 @@ test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: {} as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({
       catalogRevision: 'dsh-native',
@@ -2485,7 +2275,6 @@ test('Proxy defaults validate effort against the catalog resolved for the select
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: {} as never,
     closeProxy: async () => undefined,
     capabilities: async () => baseCatalog,
     resolveDefaultsCatalog: async (id, catalog, config) => {
@@ -2536,15 +2325,6 @@ test('Agent install routes drain CLI use before mutation without self-locking Pr
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: {
-      async drain() {
-        events.push('drain');
-      },
-      invalidate: () => {
-        events.push('invalidate');
-        return true;
-      },
-    } as never,
     closeProxy: async id => {
       events.push(`close-${id}`);
     },
@@ -2553,19 +2333,18 @@ test('Agent install routes drain CLI use before mutation without self-locking Pr
 
   assert.equal(
     (await app.request('/api/agents/claude/install-cli', { method: 'POST' })).status,
-    200,
+    410,
   );
-  assert.deepEqual(events, ['close-claude', 'drain', 'install-cli', 'invalidate']);
+  assert.deepEqual(events, []);
   events.length = 0;
   assert.equal(
     (await app.request('/api/agents/claude/install-proxy', { method: 'POST' })).status,
     200,
   );
-  assert.deepEqual(events, ['install-proxy', 'close-claude']);
+  assert.deepEqual(events, ['install-proxy']);
 });
 
-test('Agent path route invalidates a committed runtime even when claim retirement reports failure', async () => {
-  let invalidations = 0;
+test('Agent path route surfaces an AgentManager claim-retirement failure', async () => {
   const agents = {
     getAgent: () => ({
       id: 'agent-claude',
@@ -2581,12 +2360,6 @@ test('Agent path route invalidates a committed runtime even when claim retiremen
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes: {
-      invalidate() {
-        invalidations += 1;
-        return true;
-      },
-    } as never,
     closeProxy: async () => undefined,
     capabilities: async () => ({ models: [], modes: [] }),
   });
@@ -2597,7 +2370,6 @@ test('Agent path route invalidates a committed runtime even when claim retiremen
     body: JSON.stringify({ cliPath: '/new/claude' }),
   });
   assert.equal(response.status, 400);
-  assert.equal(invalidations, 1);
 });
 
 test('Proxy close barrier waits for an in-flight runtime attempt to release its claim', async t => {
@@ -2649,12 +2421,12 @@ test('Proxy close barrier waits for an in-flight runtime attempt to release its 
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
 
   const pendingClient = manager.getOrCreate('racing-session', 'claude');
   await acquireStarted;
@@ -2698,15 +2470,15 @@ test('startup leases remain strongly retryable when reservation and lease cleanu
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex' ? { codexProxyEntry: '/unused/codex-proxy.mjs' } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: '/unused/kimi-proxy.mjs' } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: '/unused/grok-proxy.mjs' } : {}),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
 
     await assert.rejects(
       manager.getOrCreate(`${executor}-startup-session`, executor),
@@ -2794,15 +2566,15 @@ test('already-empty Proxy startup skips shutdown and records terminal absence', 
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
 
     await assert.rejects(
       manager.getOrCreate(`${executor}-known-empty`, executor),
@@ -2849,12 +2621,12 @@ test('a stale unpublished Claude runtime retains its lease until shutdown can be
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
   const originalShutdown = ProtocolV2Host.prototype.shutdown;
   ProtocolV2Host.prototype.shutdown = async function controlledShutdownFailure() {
     throw new Error('controlled unpublished shutdown failure');
@@ -2903,8 +2675,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
     `);
     let acquireCalls = 0;
     let releaseCalls = 0;
-    const usesSharedRuntime = executor === 'kimi';
-    const runtimeManager = (usesSharedRuntime || executor === 'grok') ? {
+    const runtimeManager = {
       async acquire() {
         acquireCalls += 1;
         return {
@@ -2916,16 +2687,16 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
           async release() { releaseCalls += 1; },
         };
       },
-    } : undefined;
-    const manager = new ProxyManager({
+    };
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
-      ...(runtimeManager ? { runtimeManager: runtimeManager as never } : {}),
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
     const client = await manager.getOrCreate(`${executor}-failed-close`, executor);
     const owner = client instanceof ProtocolV2SessionClient
       ? client.runtimeHost()
@@ -2947,7 +2718,7 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       manager.getOrCreate(`${executor}-replacement-blocked`, executor),
       new RegExp(`controlled ${executor} close cleanup failure`),
     );
-    if (usesSharedRuntime) assert.equal(acquireCalls, 1);
+    assert.equal(acquireCalls, 1);
 
     owner.shutdown = originalShutdown;
     await manager.closeByExecutor(executor);
@@ -2957,10 +2728,8 @@ test('failed close blocks replacement runtimes until exact cleanup is retried', 
       : replacement;
     assert.notEqual(replacementOwner, owner);
     await manager.closeAll();
-    if (usesSharedRuntime) {
-      assert.equal(acquireCalls, 2);
-      assert.equal(releaseCalls, 2);
-    }
+    assert.equal(acquireCalls, 2);
+    assert.equal(releaseCalls, 2);
   }
 });
 
@@ -3009,12 +2778,12 @@ test('racing dispose holds every same-session creation waiter behind its barrier
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
   let firstSettled = false;
   let waiterSettled = false;
   const first = manager.getOrCreate('dispose-race', 'claude').then(client => {
@@ -3091,15 +2860,15 @@ test('unexpected Proxy leader exit releases runtime only after orphan PGID clean
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
     await manager.getOrCreate(`${executor}-unexpected-session`, executor);
     await Promise.race([
       released,
@@ -3162,12 +2931,12 @@ test('same-session concurrent getOrCreate is single-flight and releases each cli
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
   const waitForSpawnIds = async (expected: number): Promise<string[]> => {
     const deadline = Date.now() + 3_000;
     while (Date.now() < deadline) {
@@ -3248,15 +3017,15 @@ test('an exited Proxy is never published after delayed process-group registratio
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
 
     const client = await Promise.race([
       manager.getOrCreate(`${executor}-publication-session`, executor),
@@ -3300,15 +3069,15 @@ test('executor close waits for unexpected-exit runtime release after cache delet
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: proxyEntry,
       ...(executor === 'codex' ? { codexProxyEntry: proxyEntry } : {}),
       ...(executor === 'kimi' ? { kimiProxyEntry: proxyEntry } : {}),
       ...(executor === 'grok' ? { grokProxyEntry: proxyEntry } : {}),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
     const sessionId = `${executor}-release-barrier-session`;
     await manager.getOrCreate(sessionId, executor);
     await releasing;
@@ -3348,12 +3117,12 @@ test('failed runtime cleanup stays strongly reachable for later close retries', 
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
   await manager.getOrCreate('release-retry-session', 'claude');
   await firstRelease;
   await new Promise(resolve => setImmediate(resolve));
@@ -3417,15 +3186,15 @@ test('throwing shared-facade exit handlers cannot interrupt host cleanup', async
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex'
         ? { codexProxyEntry: proxyEntry }
         : { kimiProxyEntry: proxyEntry }),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
     process.on('unhandledRejection', onUnhandled);
@@ -3507,13 +3276,13 @@ test('a Kimi host is removed from reuse before failed-attach retirement awaits',
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
 
   const failed = await manager.getOrCreate('failed-kimi-session', 'kimi');
   assert.ok(failed instanceof ProtocolV2SessionClient);
@@ -3555,24 +3324,20 @@ test('every dropped Kimi facade awaits the exact shared-host retirement', async 
     }
   `);
   let releaseCalls = 0;
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
-    runtimeManager: {
-      async acquire() {
-        return {
-          cli: 'kimi' as const,
-          binaryPath: '/fake/kimi',
-          version: '1.0.0',
-          source: 'managed' as const,
-          env: {},
-          async release() { releaseCalls += 1; },
-        };
-      },
-    } as never,
-  });
+    runtimeResolver: resolverFromAcquire(async () => ({
+      cli: 'kimi' as const,
+      binaryPath: '/fake/kimi',
+      version: '1.0.0',
+      source: 'managed' as const,
+      env: {},
+      async release() { releaseCalls += 1; },
+    })),
+  }));
   const first = await manager.getOrCreate('kimi-retire-a', 'kimi');
   const second = await manager.getOrCreate('kimi-retire-b', 'kimi');
   assert.ok(first instanceof ProtocolV2SessionClient);
@@ -3649,13 +3414,13 @@ test('dispose racing Kimi creation retires the newly published unattached host',
       };
     },
   };
-  const manager = new ProxyManager({
+  const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
     dataDir: root,
     ccProxyEntry: '/unused/cc-proxy.mjs',
     kimiProxyEntry: proxyEntry,
-    runtimeManager: runtimeManager as never,
-  });
+    runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+  }));
 
   const getting = manager.getOrCreate('kimi-create-dispose-race', 'kimi');
   const otherGetting = manager.getOrCreate('kimi-create-dispose-other', 'kimi');
@@ -3714,15 +3479,15 @@ test('whole-executor close reaches bounded shared-host shutdown when session.clo
         };
       },
     };
-    const manager = new ProxyManager({
+    const manager = new ProxyManager(legacyProxyManagerConfig({
     ...PROTOCOL_V2,
       dataDir: root,
       ccProxyEntry: '/unused/cc-proxy.mjs',
       ...(executor === 'codex'
         ? { codexProxyEntry: proxyEntry }
         : { kimiProxyEntry: proxyEntry }),
-      runtimeManager: runtimeManager as never,
-    });
+      runtimeResolver: resolverFromAcquire(runtimeManager.acquire.bind(runtimeManager)),
+    }));
     const client = await manager.getOrCreate(`${executor}-hung-session`, executor);
     await client.createSession({ cwd: '/tmp' });
     const disposing = manager.dispose(`${executor}-hung-session`);
@@ -3749,6 +3514,7 @@ test('check-proxy-update route is read-only and rejects unknown agents', async t
   const proxyPath = join(root, 'proxy.mjs');
   await writeFile(proxyPath, 'export {};\n');
   const agents = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
     dataDir: join(root, 'data'),
     releaseVersion: '0.4.4',
     managedProxies: false,
@@ -3764,16 +3530,11 @@ test('check-proxy-update route is read-only and rejects unknown agents', async t
       throw new Error('check-proxy-update must not fetch for development proxies');
     },
   });
-  const runtimes = new CliRuntimeManager(
-    agents.runtimeProviders(),
-    agents.updateLockDataDir(),
-  );
   const app = new Hono();
   registerAgentRoutes(app, {
     agents,
-    runtimes,
     closeProxy: async () => undefined,
-    capabilities: async () => ({ models: [], modes: [] }),
+    capabilities: async () => ({ models: [], modes: [] }) as never,
   });
 
   const unknown = await app.request('/api/agents/nope/check-proxy-update', { method: 'POST' });

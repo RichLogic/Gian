@@ -1,7 +1,7 @@
 import type {
   ApprovalMode,
   AgentProxyDefaults,
-  AgentRuntimeProfile,
+  SessionRuntimeProfile,
   ConfigOption,
   ConfigValue,
   Executor,
@@ -17,7 +17,9 @@ import type {
   TraceSnapshot,
   UserAgent,
 } from '@gian/shared';
-import { isApprovalMode } from '@gian/shared';
+import { isApprovalMode, sessionRuntimeCliPath } from '@gian/shared';
+import type { SessionBindingPlanner } from './binding-planner.js';
+import { agentMatchesSessionKind, pluginIdForSessionIdentity } from './compatibility-executor.js';
 import { existsSync } from 'node:fs';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
@@ -58,6 +60,12 @@ import type {
   SidechatCloseResult,
 } from '@gian/shared';
 import { SubtaskLifecycle } from './subtask-lifecycle.js';
+import type {
+  DeliveryLifecycleSink,
+  SendQueuedNowReceipt,
+  SteerReceipt,
+} from './delivery-lifecycle.js';
+export type { SendQueuedNowReceipt, SteerReceipt } from './delivery-lifecycle.js';
 import { NativeSessionService } from './native-session-service.js';
 import {
   assertLocalFilesBelongToSession,
@@ -75,6 +83,15 @@ const PROXY_CLOSE_TIMEOUT_MS = 5_000;
 
 /** Resolves which (kind, CLI path) runtime a session or kind maps to. The
  *  Host wires this from AgentManager; tests may omit it (provider default). */
+/** Stable origin metadata attached to a scheduled prompt's user_message
+ *  event (contract F): lets Web render "sent by a schedule" and lets the
+ *  schedule dispatcher/recovery locate the Turn from canonical evidence. */
+export interface ScheduledTaskOrigin {
+  scheduleId: string;
+  runId: string;
+  scheduleName: string;
+}
+
 export interface SessionAgentResolver {
   /** Resolved CLI path of the kind's default (first saved) Agent. */
   cliPathForKind(executor: Executor): string | null;
@@ -87,7 +104,7 @@ export interface SessionAgentResolver {
   /** The saved Agent and its runtime CLI path; throws when the id is
    *  unknown (deleted Agents cannot start new sessions). */
   agentRuntime(agentId: string): { agent: UserAgent; cliPath: string | null };
-  agentRuntimeProfile(agentId: string): Promise<AgentRuntimeProfile | null>;
+  agentRuntimeProfile(agentId: string): Promise<SessionRuntimeProfile | null>;
   /** Saved Agents of one Proxy kind (native adopt binds one explicitly). */
   agentsForKind(executor: Executor): UserAgent[];
 }
@@ -132,6 +149,7 @@ export class SessionManager {
   private traceEvidence: TraceEvidenceStore;
   private readonly interactionResponseIds = new Map<string, string>();
   private readonly sidechats: SidechatCoordinator;
+  private deliveryLifecycle: DeliveryLifecycleSink | null = null;
 
   constructor(
     private db: Db,
@@ -143,10 +161,11 @@ export class SessionManager {
     /** Live Sync v2 — when present, host mirrors external CLI appends into
      *  events + WS for each active session. Optional so tests can omit. */
     private watcher: NativeJsonlWatcher | null = null,
-    private proxyDefaults?: (executor: Executor) => AgentProxyDefaults,
+    private proxyDefaults?: (executor: Executor) => AgentProxyDefaults | undefined,
     attention?: AttentionDispatcher,
     private agentResolver?: SessionAgentResolver,
     hostServices?: GianSessionHostServiceIssuer,
+    private bindingPlanner?: SessionBindingPlanner,
   ) {
     this.sessions = new SessionRepository(db);
     this.history = new SessionHistoryStore(db);
@@ -181,6 +200,7 @@ export class SessionManager {
           : this.agentResolver?.cliPathForKind(executor)
       ) ?? null,
       hostServices,
+      bindingPlanner,
     );
     this.autoTitle = new AutoTitleService({
       db,
@@ -235,6 +255,7 @@ export class SessionManager {
           this.persistKimiReplay(sessionId, updates, timestamp, replayStreamId),
       },
       agentResolver ? executor => agentResolver.cliPathForKind(executor) : undefined,
+      bindingPlanner,
     );
     this.lifecycle = new SessionLifecycleService(
       db,
@@ -263,6 +284,7 @@ export class SessionManager {
             runtimeProfile: await agentResolver.agentRuntimeProfile(agentId),
           })
         : undefined,
+      bindingPlanner,
     );
   }
 
@@ -400,22 +422,26 @@ export class SessionManager {
       const publish = this.db.transaction(() => {
         this.db.prepare(
           `INSERT INTO sessions
-            (id, name, type, task_id, workspace_id, executor, agent_id, agent_name,
+            (id, name, type, task_id, workspace_id, executor,
+             proxy_plugin_id, proxy_binding_json,
+             agent_id, agent_name,
              runtime_profile_json,
              model, approval_mode,
              executor_config_json, thinking_effort, service_tier, active_channel, status,
-             archived, worktree_path, branch, base_branch, worktree_outcome,
+             archived, hidden, worktree_path, branch, base_branch, worktree_outcome,
              native_session_id, fork_from_session_id, conversation_usage_complete,
              turn_config_json, turn_config_options_json, turn_config_revision,
              origin_kind, origin_session_id, origin_turn_id, origin_source_turn_id,
              origin_source_stream_id, origin_anchor_type,
              available_actions_json, created_at, updated_at)
            VALUES
-            (@id, @name, @type, @task_id, @workspace_id, @executor, @agent_id, @agent_name,
+            (@id, @name, @type, @task_id, @workspace_id, @executor,
+             @proxy_plugin_id, @proxy_binding_json,
+             @agent_id, @agent_name,
              @runtime_profile_json,
              @model,
              @approval_mode, @executor_config_json, @thinking_effort, @service_tier, 'web', 'new',
-             0, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
+             0, @hidden, @worktree_path, @branch, @base_branch, NULL, @native_session_id,
              NULL, 1,
              @turn_config_json, @turn_config_options_json, @turn_config_revision,
              'fork', @origin_session_id, @origin_turn_id, @origin_source_turn_id,
@@ -423,11 +449,22 @@ export class SessionManager {
              @available_actions_json, @now, @now)`,
         ).run({
           id: sessionId,
-          name: nextForkSessionName(this.db, source),
+          name: input.hidden
+            ? (input.name ?? nextForkSessionName(this.db, source))
+            : nextForkSessionName(this.db, source),
           type: source.type,
-          task_id: source.task_id,
+          // Hidden schedule Forks never enter Task/Subtask listings.
+          task_id: input.hidden ? null : source.task_id,
+          hidden: input.hidden ? 1 : 0,
           workspace_id: source.workspace_id,
           executor: source.executor,
+          proxy_plugin_id: pluginIdForSessionIdentity({
+            pluginId: source.proxy_plugin_id,
+            executor: source.executor,
+          }),
+          proxy_binding_json: source.proxy_binding
+            ? JSON.stringify(source.proxy_binding)
+            : null,
           agent_id: source.agent_id ?? null,
           agent_name: source.agent_name ?? null,
           runtime_profile_json: source.runtime_profile
@@ -490,15 +527,19 @@ export class SessionManager {
 
     this.sessions.setNativeOptions(sessionId, source.native_config_options ?? []);
     const session = this.sessions.get(sessionId);
-    this.broadcaster.broadcast({
-      type: 'session:created',
-      session,
-      origin: 'session-fork',
-    });
-    if (session.name) {
-      void this.applyNativeSessionName(sessionId, session.name).catch(err => {
-        console.warn(`[session] fork native name sync failed for ${sessionId}: ${String(err)}`);
+    // Hidden schedule Forks never appear in the rail: no session:created
+    // broadcast and no native session-list rename (contract G/H).
+    if (!input.hidden) {
+      this.broadcaster.broadcast({
+        type: 'session:created',
+        session,
+        origin: 'session-fork',
       });
+      if (session.name) {
+        void this.applyNativeSessionName(sessionId, session.name).catch(err => {
+          console.warn(`[session] fork native name sync failed for ${sessionId}: ${String(err)}`);
+        });
+      }
     }
     return { sessionId, origin };
   }
@@ -556,25 +597,36 @@ export class SessionManager {
     agentId: string | null;
     agentName: string | null;
     cliPath: string | null;
-    runtimeProfile: AgentRuntimeProfile | null;
+    runtimeProfile: SessionRuntimeProfile | null;
+    agent?: UserAgent;
   }> {
     const none = { agentId: null, agentName: null, cliPath: null, runtimeProfile: null };
-    if (!this.agentResolver) return none;
+    if (!this.agentResolver) {
+      if (this.bindingPlanner) {
+        throw Object.assign(
+          new Error(`choose an Agent for this ${executor} session`),
+          { code: 'AGENT_REQUIRED', agents: [] },
+        );
+      }
+      return none;
+    }
     if (agentId !== undefined) {
       const { agent, cliPath } = this.agentResolver.agentRuntime(agentId);
-      if (agent.proxy !== executor) {
-        throw new Error(`agent ${agentId} is a ${agent.proxy} Agent, not ${executor}`);
+      const matches = agentMatchesSessionKind(agent, executor);
+      if (!matches) {
+        throw new Error(`agent ${agentId} is a ${agent.proxy ?? agent.pluginId} Agent, not ${executor}`);
       }
       const runtimeProfile = await this.agentResolver.agentRuntimeProfile(agent.id);
       return {
         agentId: agent.id,
         agentName: agent.name,
-        cliPath: runtimeProfile?.cliPath ?? cliPath,
+        cliPath: sessionRuntimeCliPath(runtimeProfile) ?? cliPath,
         runtimeProfile,
+        agent,
       };
     }
     const candidates = this.agentResolver.agentsForKind(executor);
-    if (candidates.length > 1) {
+    if (candidates.length > 1 || (candidates.length === 0 && this.bindingPlanner)) {
       throw Object.assign(
         new Error(`choose an Agent for this ${executor} session`),
         {
@@ -589,8 +641,9 @@ export class SessionManager {
     return {
       agentId: only.id,
       agentName: only.name,
-      cliPath: runtimeProfile?.cliPath ?? this.agentResolver.agentRuntime(only.id).cliPath,
+      cliPath: sessionRuntimeCliPath(runtimeProfile) ?? this.agentResolver.agentRuntime(only.id).cliPath,
       runtimeProfile,
+      agent: only,
     };
   }
 
@@ -708,6 +761,17 @@ export class SessionManager {
     resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
   ): Promise<void> {
     this.getSession(sessionId);
+    const localApproval = this.approvals.getPending(approvalId);
+    if (localApproval?.sessionId === sessionId && localApproval.payload?.['localOnly'] === true) {
+      if (resolvedBy !== 'web') {
+        throw Object.assign(
+          new Error('This local approval must be resolved in Gian Desktop'),
+          { code: 'PERMISSION_DENIED' },
+        );
+      }
+      this.approvals.resolve(approvalId, decision, resolvedBy);
+      return;
+    }
     const proxySessionId = this.proxySessions.get(sessionId);
     if (!proxySessionId) throw new Error(`session not initialized: ${sessionId}`);
     const client = this.proxy.get(sessionId);
@@ -909,6 +973,7 @@ export class SessionManager {
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
     turnConfig?: Record<string, ConfigValue>,
+    scheduledTask?: ScheduledTaskOrigin,
   ): Promise<{
     turnId: string;
     turnNumber: number;
@@ -1003,6 +1068,15 @@ export class SessionManager {
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
     if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
     if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
+    // Scheduled-task origin rides on the canonical user_message event so Web
+    // can render "sent by a schedule" and recovery can find the Turn later.
+    if (scheduledTask) {
+      userMessagePayload.scheduled_task = {
+        schedule_id: scheduledTask.scheduleId,
+        run_id: scheduledTask.runId,
+        schedule_name: scheduledTask.scheduleName,
+      };
+    }
     this.persistAndBroadcastUserMessage(
       sessionId,
       turnId,
@@ -1033,7 +1107,12 @@ export class SessionManager {
       : (catalog?.configOptions.filter((option) => option.binding === 'turn') ?? []);
     const config: Record<string, string | boolean | number | null> = {};
     const draft: Record<string, string | boolean | number | null> = {};
-    const candidateValues: Record<string, string | boolean | number | null> = {};
+    // Conditions on a Turn-bound option may reference a Session-bound option
+    // from the same Proxy Catalog. Seed the evaluation context with the
+    // immutable Session snapshot before layering the next-Turn draft.
+    const candidateValues: Record<string, string | boolean | number | null> = {
+      ...session.executor_config.values,
+    };
     const dispatchValues = new Map<string, ConfigValue>();
     for (const option of turnOptions) {
       const persisted = option.role === 'fast'
@@ -1098,27 +1177,38 @@ export class SessionManager {
         input: dispatchItems,
         config,
       });
-      // gian.proxy/2 returns the Host-assigned turnId here. Its distinct
-      // Provider identity arrives on live notifications as sourceTurnId.
-      if (client.protocolV2 !== true) {
-        this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
+      try {
+        // gian.proxy/2 returns the Host-assigned turnId here. Its distinct
+        // Provider identity arrives on live notifications as sourceTurnId.
+        if (client.protocolV2 !== true) {
+          this.turns.bindProviderTurn(sessionId, turnId, started.turn.id, true);
+        }
+        this.persistTurnConfig(sessionId, draft);
+        // Non-Claude native titles can appear while the first turn is running,
+        // so start discovery as soon as the Provider accepts it. Claude writes
+        // ai-title after completion; starting its fallback clock here would beat
+        // the real summary on long turns, so Claude keeps the completion trigger.
+        // AutoTitle's in-flight/name guards keep accepted + completed idempotent.
+        if (session.executor !== 'claude') void this.autoTitle.maybeAutoTitle(sessionId);
+        if (toolRequestId) {
+          this.deliveryLifecycle?.queueStarted({
+            id: '',
+            sessionId,
+            text,
+            toolRequestId,
+            createdAt: Date.now(),
+          }, { turnId, turnNumber });
+        }
+        return { turnId, turnNumber, configSnapshot };
+      } catch {
+        const unknown = new Error('Provider accepted the turn but the receipt was not persisted');
+        (unknown as Error & { code: string }).code = 'UNKNOWN_OUTCOME';
+        throw unknown;
       }
-      this.persistTurnConfig(sessionId, draft);
-      // Non-Claude native titles can appear while the first turn is running,
-      // so start discovery as soon as the Provider accepts it. Claude writes
-      // ai-title after completion; starting its fallback clock here would beat
-      // the real summary on long turns, so Claude keeps the completion trigger.
-      // AutoTitle's in-flight/name guards keep accepted + completed idempotent.
-      if (session.executor !== 'claude') void this.autoTitle.maybeAutoTitle(sessionId);
-      if (toolRequestId) {
-        this.db.prepare(
-          `UPDATE tool_deliveries
-             SET turn_id = ?, queue_entry_id = NULL, state = 'started', updated_at = ?
-           WHERE request_id = ?`,
-        ).run(turnId, new Date().toISOString(), toolRequestId);
-      }
-      return { turnId, turnNumber, configSnapshot };
     } catch (err) {
+      if (err instanceof Error && (err as Error & { code?: string }).code === 'UNKNOWN_OUTCOME') {
+        throw err;
+      }
       // startTurn rejected. The host already optimistically wrote
       // turn=running / session=running and paused the watcher above; roll
       // it back so the UI doesn't sit on a phantom spinner. The error
@@ -1417,7 +1507,7 @@ export class SessionManager {
 
   /** Slash commands for an executor. With cwd, includes project-level. */
   async listSlashCommands(
-    executor: 'codex' | 'claude',
+    executor: Executor,
     cwd?: string,
     cliPath?: string | null,
   ): Promise<import('@gian/shared').SlashListResult> {
@@ -1519,6 +1609,35 @@ export class SessionManager {
   // call site and the broadcast/popNext machinery lives next to SessionManager.
   // -------------------------------------------------------------------------
 
+  setDeliveryLifecycle(sink: DeliveryLifecycleSink | null): void {
+    this.deliveryLifecycle = sink;
+  }
+
+  getQueueRevision(sessionId: string): string {
+    return this.queue.getRevision(sessionId);
+  }
+
+  getResourceRevision(sessionId: string): string {
+    const row = this.db.prepare('SELECT resource_revision FROM sessions WHERE id = ?')
+      .get(sessionId) as { resource_revision: number } | undefined;
+    return String(row?.resource_revision ?? 0);
+  }
+
+  bumpResourceRevision(sessionId: string, expected?: string): string {
+    return this.db.transaction(() => {
+      const current = this.getResourceRevision(sessionId);
+      if (expected !== undefined && expected !== current) {
+        const error = new Error('session revision mismatch');
+        (error as Error & { code: string }).code = 'PRECONDITION_FAILED';
+        throw error;
+      }
+      this.db.prepare(
+        'UPDATE sessions SET resource_revision = resource_revision + 1 WHERE id = ?',
+      ).run(sessionId);
+      return this.getResourceRevision(sessionId);
+    })();
+  }
+
   enqueueMessage(
     sessionId: string,
     text: string,
@@ -1526,6 +1645,7 @@ export class SessionManager {
     toolRequestId?: string,
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
+    expectedQueueRevision?: string,
   ): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
@@ -1538,6 +1658,7 @@ export class SessionManager {
     );
     const entry = this.queue.add(sessionId, text, items, {
       toolRequestId,
+      expectedRevision: expectedQueueRevision,
       ...(normalizedContextItems.length > 0 ? { contextItems: normalizedContextItems } : {}),
       ...(normalizedDocument ? { composerDocument: normalizedDocument } : {}),
     });
@@ -1545,30 +1666,48 @@ export class SessionManager {
     return entry;
   }
 
-  removeFromQueue(sessionId: string, queueId: string): void {
+  removeFromQueue(sessionId: string, queueId: string, expectedQueueRevision?: string): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
-    this.queue.remove(sessionId, queueId);
+    const removed = this.queue.remove(sessionId, queueId, expectedQueueRevision);
+    if (!removed) throw new Error(`queue entry not found: ${queueId}`);
+    this.deliveryLifecycle?.queueRemoved(removed, 'queue_removed');
     this.broadcastQueueUpdated(sessionId);
+    return removed;
   }
 
-  updateQueueMessage(sessionId: string, queueId: string, text: string): void {
+  updateQueueMessage(
+    sessionId: string,
+    queueId: string,
+    text: string,
+    expectedQueueRevision?: string,
+  ): import('../queue/manager.js').QueueEntry {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
-    this.queue.update(sessionId, queueId, text);
+    const updated = this.queue.update(sessionId, queueId, text, expectedQueueRevision);
+    if (!updated) throw new Error(`queue entry not found: ${queueId}`);
     this.broadcastQueueUpdated(sessionId);
+    return updated;
   }
 
-  clearQueue(sessionId: string): void {
+  clearQueue(sessionId: string, expectedQueueRevision?: string): import('../queue/manager.js').QueueEntry[] {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
-    this.queue.clear(sessionId);
+    const removed = this.queue.clear(sessionId, expectedQueueRevision);
+    for (const entry of removed) this.deliveryLifecycle?.queueRemoved(entry, 'queue_cleared');
     this.broadcastQueueUpdated(sessionId);
+    return removed;
   }
 
-  async sendQueuedNow(sessionId: string): Promise<void> {
+  async sendQueuedNow(sessionId: string, expectedQueueRevision?: string): Promise<SendQueuedNowReceipt> {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
+    const empty = (): SendQueuedNowReceipt => ({
+      mode: 'noop',
+      affected: [],
+      queue: this.queue.list(sessionId),
+      queueRevision: this.queue.getRevision(sessionId),
+    });
     if (this.turns.has(sessionId)) {
       if (session.executor !== 'codex') {
         // Claude/Kimi have no mid-turn injection — "send now" can't beat the
@@ -1576,46 +1715,47 @@ export class SessionManager {
         // path lost the message from both the queue and the transcript.
         throw new Error(`a turn is already running; the queue drains automatically when it completes`);
       }
-      // Codex: steer every queued message into the in-flight turn. If the
-      // turn completes mid-drain, re-queue whatever hasn't been steered so
-      // nothing is lost (auto-drain picks it up next turn).
-      const drained = this.queue.sendNow(sessionId);
-      if (drained.length === 0) return;
+      const drained = this.queue.sendNow(sessionId, expectedQueueRevision);
+      if (drained.length === 0) return empty();
       this.broadcastQueueUpdated(sessionId);
+      const affected: SendQueuedNowReceipt['affected'] = [];
       for (let i = 0; i < drained.length; i++) {
+        const entry = drained[i]!;
         try {
-          await this.steerMessage(
+          const receipt = await this.steerMessage(
             sessionId,
-            drained[i]!.text,
-            drained[i]!.items,
-            drained[i]!.contextItems,
-            drained[i]!.composerDocument,
+            entry.text,
+            entry.items,
+            entry.contextItems,
+            entry.composerDocument,
           );
+          this.deliveryLifecycle?.queueSteered(entry, receipt);
+          affected.push({
+            queueId: entry.id,
+            ...(entry.toolRequestId ? { toolRequestId: entry.toolRequestId } : {}),
+            state: 'steered',
+            turnId: receipt.turnId,
+            turnNumber: receipt.turnNumber,
+          });
         } catch (err) {
-          for (let j = i; j < drained.length; j++) {
-            this.queue.add(sessionId, drained[j]!.text, drained[j]!.items, {
-              id: drained[j]!.id,
-              ...(drained[j]!.toolRequestId ? { toolRequestId: drained[j]!.toolRequestId } : {}),
-              ...(drained[j]!.contextItems ? { contextItems: drained[j]!.contextItems } : {}),
-              ...(drained[j]!.composerDocument ? { composerDocument: drained[j]!.composerDocument } : {}),
-            });
-          }
+          const remaining = drained.slice(i);
+          this.queue.restore(sessionId, remaining);
+          for (const restored of remaining) this.deliveryLifecycle?.queueRestored(restored);
           this.broadcastQueueUpdated(sessionId);
           throw err;
         }
       }
-      return;
+      return {
+        mode: 'steered',
+        affected,
+        queue: this.queue.list(sessionId),
+        queueRevision: this.queue.getRevision(sessionId),
+      };
     }
-    // Idle: pop only the head entry. Awaiting sendMessage just unblocks the
-    // proxy's startTurn (the turn itself is async); kicking off the next
-    // entry from here would race with turn 1 still running and trip
-    // SESSION_BUSY, burning the queued text. Let `maybeAutoSendNext` walk the
-    // rest of the queue on every turn.completed/failed instead — it's
-    // already wired.
-    const next = this.queue.popNext(sessionId);
-    if (!next) return;
+    const next = this.queue.popNext(sessionId, expectedQueueRevision);
+    if (!next) return empty();
     this.broadcastQueueUpdated(sessionId);
-    await this.sendMessage(
+    const started = await this.sendMessage(
       sessionId,
       next.text,
       next.items,
@@ -1624,6 +1764,24 @@ export class SessionManager {
       next.contextItems,
       next.composerDocument,
     );
+    if (!started) {
+      this.queue.restore(sessionId, [next]);
+      this.deliveryLifecycle?.queueRestored(next);
+      this.broadcastQueueUpdated(sessionId);
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    return {
+      mode: 'started',
+      affected: [{
+        queueId: next.id,
+        ...(next.toolRequestId ? { toolRequestId: next.toolRequestId } : {}),
+        state: 'started',
+        turnId: started.turnId,
+        turnNumber: started.turnNumber,
+      }],
+      queue: this.queue.list(sessionId),
+      queueRevision: this.queue.getRevision(sessionId),
+    };
   }
 
   /** Codex-only mid-turn injection (`turn/steer`): append the message to the
@@ -1636,7 +1794,7 @@ export class SessionManager {
     items?: import('@gian/shared').InputItem[],
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
-  ): Promise<void> {
+  ): Promise<SteerReceipt> {
     if (this.sidechats.has(sessionId)) {
       const normalizedContextItems = normalizeMessageContextItems(contextItems);
       const normalizedDocument = normalizeMessageComposerDocument(
@@ -1648,7 +1806,7 @@ export class SessionManager {
         sessionId,
         compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
       );
-      return;
+      return { turnId: sessionId, turnNumber: 0 };
     }
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
@@ -1681,15 +1839,22 @@ export class SessionManager {
 
     await client.steerTurn({ sessionId: proxySessionId, input: dispatchItems });
 
-    // Only record the message after Codex accepted the steer. Persisting it
-    // before the RPC made a rejected steer look successful and caused a
-    // re-queued entry to appear twice when it later drained normally.
-    this.persistAndBroadcastUserMessage(
-      sessionId,
-      active.id,
-      active.number,
-      userMessagePayload,
-    );
+    try {
+      // Only record the message after Codex accepted the steer. Persisting it
+      // before the RPC made a rejected steer look successful and caused a
+      // re-queued entry to appear twice when it later drained normally.
+      this.persistAndBroadcastUserMessage(
+        sessionId,
+        active.id,
+        active.number,
+        userMessagePayload,
+      );
+    } catch {
+      const unknown = new Error('Provider accepted the steer but the receipt was not persisted');
+      (unknown as Error & { code: string }).code = 'UNKNOWN_OUTCOME';
+      throw unknown;
+    }
+    return { turnId: active.id, turnNumber: active.number };
   }
 
   // -------------------------------------------------------------------------
@@ -1710,8 +1875,83 @@ export class SessionManager {
     return this.queue.list(sessionId);
   }
 
+  /** Fail-closed lifecycle gate for scheduled dispatch (contract J): the
+   *  control conversation must still be open for input and its Agent must
+   *  still exist. Throws otherwise; the schedule layer pauses fail-closed. */
+  assertReadyForScheduledTurn(sessionId: string): Session {
+    const session = this.getSession(sessionId);
+    if (session.archived) {
+      throw Object.assign(
+        new Error(`session is archived: ${sessionId}`),
+        { code: 'SCHEDULE_CONTROL_SESSION_ARCHIVED' },
+      );
+    }
+    assertSessionAcceptsInput(session);
+    this.agentResolver?.requireCliPathForSession(session);
+    return session;
+  }
+
+  /** Busy check for the idle-vs-fork decision (contract G): a live Turn or a
+   *  queued user delivery that would claim the next Turn both count. */
+  isBusyForScheduledTurn(sessionId: string): boolean {
+    return this.hasRunningTurn(sessionId) || this.getQueueLength(sessionId) > 0;
+  }
+
+  /** Reattach (or confirm the attach of) a session's Proxy after a Host
+   *  restart. Schedule reconciliation drives this for its live Runs: hidden
+   *  Fork Sessions have no user path that would trigger the lazy attach, and
+   *  without it a Provider-side completion would never be observed. Before
+   *  the attach may deliver provider events synchronously, the single
+   *  persisted `running` Turn is restored as the active generation from the
+   *  canonical turns/proxy_replay_turns rows, so terminal notifications
+   *  settle the restored Turn instead of being dropped. Idempotent and cheap
+   *  when already attached. */
+  async ensureProxyAttached(sessionId: string, expectedTurnId: string): Promise<void> {
+    const activeBefore = this.turns.get(sessionId);
+    const restored = this.turns.restoreActiveGenerationFromDb(sessionId, expectedTurnId);
+    if (!restored) {
+      throw new Error(`cannot restore the accepted scheduled Turn ${expectedTurnId}`);
+    }
+    try {
+      await this.proxySessions.ensure(this.getSession(sessionId));
+    } catch (error) {
+      if (!activeBefore) this.turns.clearRestoredGeneration(sessionId, expectedTurnId);
+      throw error;
+    }
+  }
+
+  /** Fail closed after bounded reattach attempts. The Schedule Run becomes
+   *  unknown separately, while this method clears the recovered generation
+   *  and settles its canonical Turn/Session so the target is not left busy. */
+  settleUnattachableScheduledTurn(sessionId: string, turnId: string): boolean {
+    this.turns.clearRestoredGeneration(sessionId, turnId);
+    return this.settleLostRuntimeTurn(sessionId, turnId);
+  }
+
   getActiveTurn(sessionId: string): import('./turn-runtime.js').ActiveTurn | null {
     return this.turns.get(sessionId) ?? null;
+  }
+
+  runtimeActivationBlockers(pluginId: string): Array<{
+    kind: 'turn' | 'interaction';
+    id: string;
+  }> {
+    const turns = this.db.prepare(
+      `SELECT t.id AS id
+         FROM turns t
+         JOIN sessions s ON s.id = t.session_id
+        WHERE s.proxy_plugin_id = ? AND t.status = 'running'`,
+    ).all(pluginId) as Array<{ id: string }>;
+    const interactions = this.db.prepare(
+      `SELECT p.interaction_id AS id
+         FROM proxy_interactions p
+         JOIN sessions s ON s.id = p.session_id
+        WHERE s.proxy_plugin_id = ? AND p.outcome IS NULL`,
+    ).all(pluginId) as Array<{ id: string }>;
+    return [
+      ...turns.map(row => ({ kind: 'turn' as const, id: row.id })),
+      ...interactions.map(row => ({ kind: 'interaction' as const, id: row.id })),
+    ];
   }
 
   getApprovalModeForActiveTurn(sessionId: string): ApprovalMode | null {
@@ -1726,6 +1966,23 @@ export class SessionManager {
 
   getSession(id: string): Session {
     return this.sessions.get(id);
+  }
+
+  hasSession(id: string): boolean {
+    try {
+      this.sessions.get(id);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  getPendingApproval(id: string): import('../approval/manager.js').ApprovalRecord | undefined {
+    return this.approvals.getPending(id);
+  }
+
+  listPendingApprovals(): import('../approval/manager.js').ApprovalRecord[] {
+    return this.approvals.listPending();
   }
 
   listSessions(opts: { includeArchived?: boolean; archivedOnly?: boolean } = {}): Session[] {
@@ -1819,7 +2076,7 @@ export class SessionManager {
     return updated;
   }
 
-  assignTask(sessionId: string, taskId: string): void {
+  assignTask(sessionId: string, taskId: string | null): void {
     this.lifecycle.assignTask(sessionId, taskId);
   }
 

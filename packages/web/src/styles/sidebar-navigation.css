@@ -1,0 +1,178 @@
+/* Persistent primary sidebar navigation (2026-08-31 r8 design). */
+
+.sb-nav {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 0;
+}
+
+.sb-navrow {
+  width: calc(100% - 4px);
+  min-height: 32px;
+  margin: 1px 2px;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--text);
+  /* Airy rail scale (2026-09-07 owner call): 14px/600 rows carrying 17px
+     icons — the same icon size the collapsed left rail uses. */
+  font: 600 var(--fz-13)/1.2 var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sb-navrow:hover { background: var(--surface); }
+.sb-navrow.active { background: var(--surface-2); }
+.sb-navrow .sb-group-ico { width: 18px; }
+
+/* 显示更多 row — quiet; its text lands on the shared 43px title column
+   (2px margin + 35px padding), aligned with the rows above it
+   (2026-09-10 owner call). */
+.sb-showmore {
+  display: block;
+  width: calc(100% - 4px);
+  margin: 1px 2px;
+  padding: 4px 8px 4px 35px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  font: 500 var(--fz-11)/1.2 var(--font-sans);
+  color: var(--text-3);
+  text-align: left;
+  cursor: pointer;
+}
+.sb-showmore:hover { background: var(--surface); color: var(--text); }
+
+/* Session hover detail card (redesigned 2026-09-06, owner mockup): agent
+   logo + full name (click to rename) + relative time, then the owning Repo.
+   Interactive — the card must keep pointer events so the rename is clickable. */
+.session-hover-card {
+  position: fixed;
+  z-index: 90;
+  min-width: 220px;
+  max-width: 300px;
+  padding: 8px 10px;
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  animation: gian-fade-in var(--dur-fast) var(--ease-soft);
+}
+.session-hover-card .shc-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.session-hover-card .shc-name {
+  flex: 1;
+  min-width: 0;
+  font: 600 var(--fz-12)/1.35 var(--font-sans);
+  color: var(--text);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+.session-hover-card .shc-name:hover { color: var(--accent-text); }
+.session-hover-card .shc-time {
+  flex: none;
+  margin-left: auto;
+  font: 10.5px/1 var(--font-mono);
+  color: var(--text-3);
+}
+.session-hover-card .shc-rename {
+  flex: 1;
+  min-width: 0;
+  font: 600 var(--fz-12)/1.35 var(--font-sans);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 0;
+  border-radius: var(--r-1);
+  padding: 2px 6px;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.session-hover-card .shc-repo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fz-11);
+  color: var(--text-2);
+}
+.session-hover-card .shc-repo svg { color: var(--text-3); flex: none; }
+.session-hover-card .shc-repo span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-hover-card { animation: none; }
+}
+
+/* The list-switch row sticks to the top of the scroll area (owner call
+   2026-09-08): the Agents/Custom/Timer nav rows scroll away with a long
+   list; the switch stays. */
+.sb-scroll > .sb-listswitch {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
+}
+
+/* List-switch nav row (2026-09-08 owner call): a plain `.sb-navrow` under
+   Timer showing the current list (Tasks/Repos); the caret hugs the label in
+   the quiet text color (2026-09-09 — it used to be pushed to the row end). */
+.sb-listswitch .sb-row-caret {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+/* The list-switch dropdown reuses the shared ws-kebab popover (portaled to
+   <body> — the rail clips absolute overflow); items flex so the `.ck` check
+   column on the active list aligns. */
+.sb-listswitch-pop .ws-kebab-item { display: flex; align-items: center; gap: 6px; }
+.sb-listswitch-pop .ws-kebab-item.active { font-weight: 600; }
+.sb-listswitch-pop .ws-kebab-item .ck {
+  width: 12px; flex: none;
+  color: var(--accent, var(--text));
+  font-size: 11px; text-align: center;
+}
+
+.left-rail {
+  margin-left: 0;
+  padding: 6px 3px;
+}
+
+.left-rail .dock-btn .lbl {
+  right: auto;
+  left: calc(100% + 6px);
+}
+
+.primary-page-surface {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.primary-page-surface > .agents-view,
+.primary-page-surface > .timer-view,
+.primary-page-surface > .custom-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  gap: var(--gutter);
+  position: relative;
+}
+
+@media (max-width: 760px) {
+  .sb-navrow { min-height: 32px; }
+}

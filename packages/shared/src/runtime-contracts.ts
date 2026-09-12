@@ -11,7 +11,9 @@ import type {
   Task,
   Workspace,
 } from './model.js';
-import { EXECUTOR_IDS, PRODUCT_EXECUTOR_IDS } from './executors.js';
+import { isProxyPluginId } from './plugin-id.js';
+import { isExecutorId, pluginIdForExecutorId } from './legacy-plugin-aliases.js';
+import { isSessionProxyBinding, isSessionRuntimeProfile } from './session-proxy-binding.js';
 import { normalizeBrowserElementCapture } from './browser-context.js';
 import { normalizeComposerDocument } from './context.js';
 import type { ListNativeSessionsResponse, NativeSession } from './native.js';
@@ -92,22 +94,13 @@ function isExecutorConfigState(value: unknown): boolean {
   return Object.values(value.values).every(isNativeConfigValue);
 }
 
-function isAgentRuntimeProfile(value: unknown): boolean {
-  if (!isRecord(value) || !isRecord(value.skill)) return false;
-  return isString(value.id)
-    && isString(value.agentId)
-    && isOneOf(value.proxy, PRODUCT_EXECUTOR_IDS as readonly string[])
-    && isString(value.cliPath)
-    && isString(value.cliVersion)
-    && isNullableString(value.configHome)
-    && isNullableString(value.cliFingerprint)
-    && isString(value.proxyVersion)
-    && isArrayOf(value.verifiedCliVersions, isString)
-    && isOneOf(value.verification, ['verified', 'unverified', 'incompatible'])
-    && value.skill.name === 'gian-session'
-    && isString(value.skill.version)
-    && isOneOf(value.skill.state, ['ready', 'missing', 'conflict', 'invalid']);
+function isSessionExecutorIdentity(value: UnknownRecord): boolean {
+  if (isProxyPluginId(value.executor)) return true;
+  if (!isExecutorId(value.executor) || !isProxyPluginId(value.proxy_plugin_id)) return false;
+  return value.proxy_plugin_id === pluginIdForExecutorId(value.executor);
 }
+
+export { isAgentRuntimeProfile } from './session-proxy-binding.js';
 
 /** Runtime contract for the canonical shared model crossing REST/WS boundaries. */
 export function isSession(value: unknown): value is Session {
@@ -122,8 +115,11 @@ export function isSession(value: unknown): value is Session {
     ))
     && isOptional(value, 'created_by_actor_id', isNullableString)
     && isOptional(value, 'created_by_session_id', isNullableString)
-    && isOneOf(value.executor, EXECUTOR_IDS as readonly string[])
-    && isOptional(value, 'runtime_profile', entry => entry === null || isAgentRuntimeProfile(entry))
+    && isSessionExecutorIdentity(value)
+    && isOptional(value, 'proxy_plugin_id', entry => entry === null || isProxyPluginId(entry))
+    && isOptional(value, 'proxy_binding', entry => entry === null || isSessionProxyBinding(entry))
+    && isOptional(value, 'proxy_binding_error', isNullableString)
+    && isOptional(value, 'runtime_profile', entry => entry === null || isSessionRuntimeProfile(entry))
     && isNullableString(value.model)
     && (value.approval_mode === null
       || isOneOf(value.approval_mode, ['plan', 'ask', 'auto', 'custom', 'full-access']))
@@ -185,6 +181,9 @@ function isSessionOrigin(value: unknown): boolean {
     && value.kind === 'fork'
     && isString(value.session_id)
     && isString(value.turn_id)
+    && isOptional(value, 'turn_number', candidate => (
+      typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0
+    ))
     && isString(value.source_turn_id);
 }
 
@@ -287,7 +286,7 @@ function isApproval(value: unknown): value is Approval {
     && isString(value.session_id)
     && isString(value.turn_id)
     && isOneOf(value.category, [
-      'command', 'network', 'file_write_outside_ws', 'exit_plan_mode', 'question', 'other',
+      'command', 'network', 'file_write_outside_ws', 'browser_capture', 'exit_plan_mode', 'question', 'other',
     ])
     && isString(value.title)
     && isString(value.command)
@@ -382,7 +381,7 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
 export function isNativeSession(value: unknown): value is NativeSession {
   if (!isRecord(value)) return false;
   return isString(value.id)
-    && isOneOf(value.executor, EXECUTOR_IDS as readonly string[])
+    && isProxyPluginId(value.executor)
     && isString(value.filePath)
     && isString(value.cwd)
     && isString(value.updatedAt)

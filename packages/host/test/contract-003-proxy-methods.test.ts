@@ -7,37 +7,44 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { CORE_METHODS, OPTIONAL_METHOD_CAPABILITIES } from '@gian/proxy-protocol';
+import {
+  CORE_METHODS,
+  OPTIONAL_METHOD_CAPABILITIES,
+} from '@gian/proxy-protocol';
 import { PROXY_METHODS } from '@gian/shared';
 
 const CC_ADAPTER = resolve('../proxies/cc-proxy/src/protocol/v2-adapter.ts');
 const CODEX_ADAPTER = resolve('../proxies/codex-proxy/src/protocol/v2-adapter.ts');
 const KIMI_ADAPTER = resolve('../proxies/kimi-proxy/src/protocol/v2-adapter.ts');
 const GROK_ADAPTER = resolve('../proxies/grok-proxy/src/protocol/v2-adapter.ts');
+const DSH_ADAPTER = resolve('../proxies/dsh-proxy/src/protocol/v2-adapter.ts');
 const ZCODE_ADAPTER = resolve('../proxies/zcode-proxy/src/adapter.ts');
 
 /** Registry-keyed v2 adapter table: registering a new executor's adapter in
  * the shared executor registry adds exactly one entry here. */
-const V2_ADAPTERS: ReadonlyArray<[label: string, path: string]> = [
-  ['cc', CC_ADAPTER],
-  ['codex', CODEX_ADAPTER],
-  ['kimi', KIMI_ADAPTER],
-  ['grok', GROK_ADAPTER],
-  ['zcode', ZCODE_ADAPTER],
+const V2_ADAPTERS = [
+  { label: 'cc', path: CC_ADAPTER, marker: 'async handle(', switchMarker: 'switch (request.method)' },
+  { label: 'codex', path: CODEX_ADAPTER, marker: 'async handle(', switchMarker: 'switch (request.method)' },
+  { label: 'kimi', path: KIMI_ADAPTER, marker: 'async handle(', switchMarker: 'switch (request.method)' },
+  { label: 'grok', path: GROK_ADAPTER, marker: 'async handle(', switchMarker: 'switch (request.method)' },
+  { label: 'dsh', path: DSH_ADAPTER, marker: 'private async route(', switchMarker: 'switch (method)' },
+  { label: 'zcode', path: ZCODE_ADAPTER, marker: 'async handle(', switchMarker: 'switch (request.method)' },
 ];
 const HOST_CLIENT = resolve('src/proxy/protocol-v2-client.ts');
 const HOST_SESSION = resolve('src/proxy/protocol-v2-session-client.ts');
+const CUSTOMIZATION_SERVICE = resolve('src/proxy/customization-inventory.ts');
+const RUNTIME_RESOLVER = resolve('src/runtime/resolver.ts');
 
 const CANONICAL = new Set<string>([
   ...CORE_METHODS,
   ...Object.keys(OPTIONAL_METHOD_CAPABILITIES),
 ]);
 
-function extractSwitchCases(source: string, marker: string): Set<string> {
+function extractSwitchCases(source: string, marker: string, switchMarker: string): Set<string> {
   const start = source.indexOf(marker);
   assert.ok(start >= 0, `failed to locate ${marker}`);
-  const switchStart = source.indexOf('switch (request.method)', start);
-  assert.ok(switchStart >= 0, `failed to locate request.method switch after ${marker}`);
+  const switchStart = source.indexOf(switchMarker, start);
+  assert.ok(switchStart >= 0, `failed to locate ${switchMarker} after ${marker}`);
   const braceStart = source.indexOf('{', switchStart);
   let depth = 0;
   let end = braceStart;
@@ -59,12 +66,18 @@ function extractSwitchCases(source: string, marker: string): Set<string> {
   return out;
 }
 
-function methodsFromAdapter(path: string): Set<string> {
-  return extractSwitchCases(readFileSync(path, 'utf8'), 'async handle(');
+function methodsFromAdapter(adapter: typeof V2_ADAPTERS[number]): Set<string> {
+  return extractSwitchCases(
+    readFileSync(adapter.path, 'utf8'),
+    adapter.marker,
+    adapter.switchMarker,
+  );
 }
 
 function methodsCalledByHost(): Set<string> {
-  const text = `${readFileSync(HOST_CLIENT, 'utf8')}\n${readFileSync(HOST_SESSION, 'utf8')}`;
+  const text = [HOST_CLIENT, HOST_SESSION, CUSTOMIZATION_SERVICE, RUNTIME_RESOLVER]
+    .map(path => readFileSync(path, 'utf8'))
+    .join('\n');
   const out = new Set<string>();
   for (const match of text.matchAll(/(?:request|sendRequest)\s*(?:<[^>]+>)?\(\s*'([^']+)'/g)) {
     out.add(match[1]!);
@@ -84,27 +97,27 @@ test('CONTRACT-003: shared PROXY_METHODS matches the gian.proxy/2 method set', (
 });
 
 test('CONTRACT-003: parser locates the canonical methods in every v2 adapter', () => {
-  for (const [label, path] of V2_ADAPTERS) {
-    const methods = methodsFromAdapter(path);
+  for (const adapter of V2_ADAPTERS) {
+    const methods = methodsFromAdapter(adapter);
     for (const must of CORE_METHODS) {
-      assert.ok(methods.has(must), `${label} v2 adapter handle() missing ${must}`);
+      assert.ok(methods.has(must), `${adapter.label} v2 adapter missing ${must}`);
     }
   }
 });
 
 test('CONTRACT-003: every adapter-handled method is in shared PROXY_METHODS', () => {
-  for (const [label, path] of V2_ADAPTERS) {
+  for (const adapter of V2_ADAPTERS) {
     const orphans: string[] = [];
-    for (const method of methodsFromAdapter(path)) {
+    for (const method of methodsFromAdapter(adapter)) {
       if (!sharedRegistry.has(method)) orphans.push(method);
     }
-    assert.deepEqual(orphans, [], `${label} adapter handles undeclared methods: ${orphans.join(', ')}`);
+    assert.deepEqual(orphans, [], `${adapter.label} adapter handles undeclared methods: ${orphans.join(', ')}`);
   }
 });
 
 test('CONTRACT-003: every shared method is handled by at least one adapter', () => {
   const union = new Set<string>(
-    V2_ADAPTERS.flatMap(([, path]) => [...methodsFromAdapter(path)]),
+    V2_ADAPTERS.flatMap(adapter => [...methodsFromAdapter(adapter)]),
   );
   const orphans = [...sharedRegistry].filter((method) => (
     !union.has(method) && !PROVIDER_DEFERRED_METHODS.has(method)

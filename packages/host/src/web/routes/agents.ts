@@ -3,43 +3,96 @@ import type {
   AgentProxyDefaults,
   ConfigValue,
   Executor,
+  LegacyExecutorId,
   ProductExecutor,
   ProxyCatalog,
 } from '@gian/shared';
-import { EXECUTOR_IDS, isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
+import { executorIdForPluginId, isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
-import { AgentNameTakenError } from '../../agents/manager.js';
-import type { CliRuntimeManager } from '../../runtime/manager.js';
+import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError } from '../../agents/manager.js';
+import { AgentHomeError } from '../../agents/home.js';
+import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
+import type { RuntimeResolver } from '../../runtime/resolver.js';
+import { RuntimeControlError, type RuntimeControlPlane } from '../../runtime/control-plane.js';
+import { isCanonicalAbsolutePath } from '@gian/shared';
 import { pickPath } from '../pick-path.js';
+import { isCatalogDocumentKey, type CatalogService } from '../../catalog/service.js';
+import { PluginStoreError } from '../../plugin-store/errors.js';
 
-const EXECUTORS = new Set<Executor>(EXECUTOR_IDS);
-
-function executor(raw: string): Executor | null {
-  return EXECUTORS.has(raw as Executor) ? raw as Executor : null;
+function executor(raw: string): LegacyExecutorId | null {
+  return executorIdForPluginId(raw);
 }
 
 function errorResponse(error: unknown): { error: string; code?: string } {
   return {
     error: error instanceof Error ? error.message : String(error),
-    ...(error instanceof AgentNameTakenError ? { code: error.code } : {}),
+    ...(error instanceof AgentNameTakenError
+      || error instanceof PluginIdImmutableError
+      || error instanceof AgentHomeError
+      || error instanceof AgentCreateError
+      ? { code: error.code } : {}),
   };
 }
 
 /** Agent mutations map onto HTTP statuses: name collisions 409, missing
  *  Agents 404, everything else is a bad request. */
 function agentErrorStatus(error: unknown): 400 | 404 | 409 {
+  if (error instanceof AgentCreateError) return error.status;
+  if (error instanceof AgentHomeError) return error.status;
   if (error instanceof AgentNameTakenError) return 409;
+  if (error instanceof PluginIdImmutableError) return 400;
   if (error instanceof Error && error.message.startsWith('agent not found:')) return 404;
   return 400;
 }
 
-function installErrorStatus(error: unknown): 409 | 502 {
-  return (
-    typeof error === 'object'
-    && error !== null
-    && 'code' in error
-    && error.code === 'AGENT_UPDATE_BUSY'
-  ) ? 409 : 502;
+function runtimeApiStatus(error: unknown): 400 | 404 | 409 | 413 | 502 {
+  if (error instanceof RuntimeControlError) return error.status;
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+  if (code === 'REQUEST_TOO_LARGE') return 413;
+  if (error instanceof SyntaxError) return 400;
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith('invalid pluginId') || message === 'invalid JSON body') return 400;
+  return 502;
+}
+
+function installErrorStatus(error: unknown): 400 | 409 | 410 | 502 {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === 'HOST_RUNTIME_INSTALLER_REMOVED') return 410;
+  if (code === 'AGENT_UPDATE_BUSY' || code === 'PLUGIN_VERSION_CONFLICT') return 409;
+  if (
+    code === 'PLUGIN_ID_INVALID'
+    || message.startsWith('invalid pluginId')
+    || code === 'CATALOG_INSTALL_FORBIDDEN'
+    || code === 'CATALOG_UPDATE_FORBIDDEN'
+    || code === 'PLUGIN_PROTOCOL_INCOMPATIBLE'
+  ) return 400;
+  if (error instanceof PluginStoreError && (
+    code === 'PLUGIN_URL_REJECTED'
+    || code === 'CATALOG_ENTRY_MISSING'
+    || code === 'PLUGIN_VERSION_INVALID'
+    || code === 'PLUGIN_OFFICIAL_RESERVED'
+    || code === 'PLUGIN_CURRENT_UNMANAGED'
+  )) return 400;
+  return 502;
+}
+
+function publicAgentStatus<T extends { cliPath?: unknown }>(
+  status: T,
+  managed: boolean,
+): Omit<T, 'cliPath'> | T {
+  if (!managed) return status;
+  const { cliPath: _legacyCliPath, ...publicStatus } = status;
+  return publicStatus;
+}
+
+function managesRuntimePaths(agents: AgentManager): boolean {
+  const method = (agents as Partial<Pick<AgentManager, 'managesRuntimePaths'>>).managesRuntimePaths;
+  return typeof method === 'function' && method.call(agents) === true;
 }
 
 function optionChoices(catalog: ProxyCatalog, role: string): string[] {
@@ -114,11 +167,64 @@ function normalizeDefaultsPatch(
   return patch;
 }
 
+function normalizeHome(
+  value: unknown,
+): { kind: 'managed' } | { kind: 'custom'; path: string } | undefined | { error: string } {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'home must be an object' };
+  }
+  const home = value as Record<string, unknown>;
+  const keys = Object.keys(home);
+  if (home.kind === 'managed') {
+    return keys.length === 1 ? { kind: 'managed' } : { error: 'managed home accepts only kind' };
+  }
+  if (home.kind === 'custom') {
+    return keys.length === 2 && typeof home.path === 'string'
+      ? { kind: 'custom', path: home.path }
+      : { error: 'custom home requires kind and path' };
+  }
+  return { error: 'home.kind must be managed or custom' };
+}
+
+const MAX_RUNTIME_API_JSON_BYTES = 64 * 1024;
+
+async function readBoundedJson(c: { req: { raw: Request } }): Promise<unknown> {
+  const request = c.req.raw;
+  const declared = Number(request.headers.get('content-length') ?? 0);
+  if (Number.isFinite(declared) && declared > MAX_RUNTIME_API_JSON_BYTES) {
+    throw Object.assign(new Error('request body exceeds 64 KiB'), { code: 'REQUEST_TOO_LARGE' });
+  }
+  const reader = request.body?.getReader();
+  if (!reader) return {};
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    size += value.byteLength;
+    if (size > MAX_RUNTIME_API_JSON_BYTES) {
+      await reader.cancel();
+      throw Object.assign(new Error('request body exceeds 64 KiB'), { code: 'REQUEST_TOO_LARGE' });
+    }
+    chunks.push(value);
+  }
+  if (size === 0) return {};
+  const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new SyntaxError('invalid JSON body');
+  }
+}
+
 export function registerAgentRoutes(
   app: Hono,
   options: {
     agents: AgentManager;
-    runtimes: CliRuntimeManager;
+    resolver?: RuntimeResolver;
+    runtimeControl?: RuntimeControlPlane;
     closeProxy: (id: Executor) => Promise<void>;
     capabilities: (id: Executor) => Promise<ProxyCatalog>;
     resolveDefaultsCatalog?: (
@@ -126,34 +232,180 @@ export function registerAgentRoutes(
       catalog: ProxyCatalog,
       config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
     ) => Promise<ProxyCatalog>;
+    catalogService?: CatalogService;
+    /** Test seam around the native folder picker; production uses pickPath. */
+    pickHome?: () => ReturnType<typeof pickPath>;
   },
 ): void {
   // ------------------------------------------------------------------
   // Proxy-kind catalog (static metadata; drafts may call it — no Agent id
   // required, nothing is spawned or probed).
   // ------------------------------------------------------------------
-  app.get('/api/proxies', c => c.json({ proxies: options.agents.proxiesCatalog() }));
+  app.get('/api/proxies', async c => {
+    const catalog = options.catalogService
+      ? await options.catalogService.list()
+      : { source: { id: null, sequence: null, state: 'empty', error: null }, items: [] };
+    return c.json({
+      proxies: options.agents.proxiesCatalog(),
+      catalog,
+    });
+  });
+
+  app.post('/api/proxies/sync', async c => {
+    if (!options.catalogService) return c.json({ error: 'catalog unavailable' }, 404);
+    try {
+      return c.json(await options.catalogService.sync());
+    } catch (error) {
+      return c.json(errorResponse(error), 502);
+    }
+  });
 
   app.get('/api/proxies/:id/logo/:variant', async c => {
-    const id = executor(c.req.param('id'));
+    const raw = decodeURIComponent(c.req.param('id'));
     const variant = c.req.param('variant');
-    if (!id || !isProductExecutor(id) || (variant !== 'light' && variant !== 'dark')) {
+    if (variant !== 'light' && variant !== 'dark') {
       return c.json({ error: 'logo not found' }, 404);
     }
-    const logo = await options.agents.proxyLogo(id, variant);
-    if (!logo) return c.json({ error: 'logo not found' }, 404);
-    c.header('content-type', logo.mediaType);
-    c.header('cache-control', 'private, max-age=300');
-    c.header('etag', `"${logo.sha256}"`);
+    const official = executor(raw);
+    if (official && isProductExecutor(official)) {
+      const logo = await options.agents.proxyLogo(official, variant);
+      if (logo) {
+        c.header('content-type', logo.mediaType);
+        c.header('cache-control', 'private, max-age=300');
+        c.header('etag', `"${logo.sha256}"`);
+        c.header('x-content-type-options', 'nosniff');
+        return c.body(Uint8Array.from(logo.bytes).buffer);
+      }
+    }
+    if (options.catalogService && isProxyPluginId(raw)) {
+      const logo = await options.catalogService.logo(raw, variant);
+      if (logo) {
+        c.header('content-type', logo.mediaType);
+        c.header('cache-control', 'private, max-age=300');
+        c.header('etag', `"${logo.sha256}"`);
+        c.header('x-content-type-options', 'nosniff');
+        return c.body(Uint8Array.from(logo.bytes).buffer);
+      }
+    }
+    return c.json({ error: 'logo not found' }, 404);
+  });
+
+  app.get('/api/proxies/:pluginId/docs/:document', async c => {
+    if (!options.catalogService) return c.json({ error: 'documentation not found' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    const document = c.req.param('document');
+    if (!isProxyPluginId(pluginId) || !isCatalogDocumentKey(document)) {
+      return c.json({ error: 'documentation not found' }, 404);
+    }
+    const body = await options.catalogService.documentation(pluginId, document);
+    if (!body) return c.json({ error: 'documentation not found' }, 404);
+    c.header('content-type', body.mediaType);
     c.header('x-content-type-options', 'nosniff');
-    return c.body(Uint8Array.from(logo.bytes).buffer);
+    c.header('cache-control', 'private, max-age=300');
+    return c.body(Uint8Array.from(body.bytes).buffer);
+  });
+
+  app.get('/api/proxies/:pluginId', async c => {
+    if (!options.catalogService) return c.json({ error: 'proxy not found' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    if (!isProxyPluginId(pluginId)) return c.json({ error: 'invalid pluginId' }, 400);
+    const item = await options.catalogService.get(pluginId);
+    if (!item) return c.json({ error: 'proxy not found' }, 404);
+    return c.json({ proxy: item });
+  });
+
+  app.post('/api/proxies/:pluginId/runtime/discover', async c => {
+    if (!options.runtimeControl) return c.json({ error: 'runtime control unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      return c.json(await options.runtimeControl.discover(pluginId));
+    } catch (error) {
+      return c.json(errorResponse(error), runtimeApiStatus(error));
+    }
+  });
+
+  app.get('/api/proxies/:pluginId/runtime', async c => {
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      return c.json(await options.agents.managedRuntimeStatus(pluginId));
+    } catch (error) {
+      return c.json(errorResponse(error), runtimeApiStatus(error));
+    }
+  });
+
+  app.post('/api/proxies/:pluginId/runtime/probe', async c => {
+    if (!options.runtimeControl) return c.json({ error: 'runtime control unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      const body = await readBoundedJson(c);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return c.json({ error: 'invalid JSON body' }, 400);
+      }
+      const path = (body as { path?: unknown }).path;
+      if (typeof path !== 'string' || !isCanonicalAbsolutePath(path)) {
+        return c.json({ error: 'path must be a canonical absolute path' }, 400);
+      }
+      return c.json(await options.runtimeControl.probe(pluginId, path));
+    } catch (error) {
+      return c.json(errorResponse(error), runtimeApiStatus(error));
+    }
+  });
+
+  app.post('/api/proxies/:pluginId/install', async c => {
+    if (!options.catalogService) return c.json({ error: 'catalog unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      const receipt = await options.catalogService.install(pluginId);
+      return c.json({ receipt });
+    } catch (error) {
+      return c.json(errorResponse(error), installErrorStatus(error));
+    }
+  });
+
+  app.post('/api/proxies/:pluginId/update', async c => {
+    if (!options.catalogService) return c.json({ error: 'catalog unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      const receipt = await options.catalogService.update(pluginId);
+      return c.json({ receipt });
+    } catch (error) {
+      return c.json(errorResponse(error), installErrorStatus(error));
+    }
+  });
+
+  app.post('/api/proxies/:pluginId/rollback', async c => {
+    if (!options.catalogService) return c.json({ error: 'catalog unavailable' }, 404);
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    try {
+      parseProxyPluginId(pluginId);
+      let version: string | undefined;
+      try {
+        const body = await c.req.json<{ version?: unknown }>();
+        if (body.version !== undefined && typeof body.version !== 'string') {
+          return c.json({ error: 'version must be a string' }, 400);
+        }
+        if (typeof body.version === 'string') version = body.version;
+      } catch {
+        /* empty body selects previous SemVer generation */
+      }
+      const receipt = await options.catalogService.rollback(pluginId, version);
+      return c.json({ receipt });
+    } catch (error) {
+      return c.json(errorResponse(error), installErrorStatus(error));
+    }
   });
 
   // ------------------------------------------------------------------
   // User Agents (saved identities in agents.json).
   // ------------------------------------------------------------------
   app.get('/api/agents', async c => c.json({
-    agents: await options.agents.listAgentStatuses(c.req.query('refresh') === '1'),
+    agents: (await options.agents.listAgentStatuses(c.req.query('refresh') === '1'))
+      .map(status => publicAgentStatus(status, managesRuntimePaths(options.agents))),
   }));
 
   app.post('/api/agents', async c => {
@@ -164,16 +416,31 @@ export function registerAgentRoutes(
       return c.json({ error: 'invalid JSON body' }, 400);
     }
     try {
-      if (!isProductExecutor(body.proxy)) {
-        return c.json({ error: 'proxy must be a catalog Proxy kind' }, 400);
+      if (body.pluginId !== undefined && typeof body.pluginId !== 'string') {
+        return c.json({ error: 'pluginId must be a string' }, 400);
+      }
+      const pluginId = body.pluginId !== undefined ? resolvePluginIdInput(body.pluginId) : null;
+      if (body.pluginId !== undefined && !pluginId) {
+        return c.json({ error: 'pluginId must be a reserved official ID or reverse-domain ID' }, 400);
+      }
+      if (!pluginId && !isProductExecutor(body.proxy)) {
+        return c.json({ error: 'pluginId or proxy is required' }, 400);
       }
       if (typeof body.name !== 'string') {
         return c.json({ error: 'name must be a string' }, 400);
       }
       const cliPath = body.cliPath;
+      if (cliPath !== undefined && managesRuntimePaths(options.agents)) {
+        return c.json({
+          error: 'CLI path is managed globally by Gian and cannot be configured per Agent.',
+          code: 'CLI_PATH_MANAGED',
+        }, 400);
+      }
       if (cliPath !== undefined && cliPath !== null && typeof cliPath !== 'string') {
         return c.json({ error: 'cliPath must be a string or null' }, 400);
       }
+      const home = normalizeHome(body.home);
+      if (home && 'error' in home) return c.json({ error: home.error }, 400);
       const defaultsPatch = body.defaults && typeof body.defaults === 'object'
         && !Array.isArray(body.defaults)
         ? normalizeDefaultsPatch(body.defaults as Record<string, unknown>)
@@ -181,11 +448,18 @@ export function registerAgentRoutes(
       if ('error' in defaultsPatch) return c.json({ error: defaultsPatch.error }, 400);
       const agent = await options.agents.createAgent({
         name: body.name,
-        proxy: body.proxy,
+        ...(pluginId ? { pluginId } : {}),
+        ...(isProductExecutor(body.proxy) ? { proxy: body.proxy } : {}),
+        ...(home ? { home } : {}),
         ...(cliPath !== undefined ? { cliPath } : {}),
         defaults: defaultsPatch,
       });
-      return c.json({ agent: await options.agents.agentStatus(agent.id, true) }, 201);
+      return c.json({
+        agent: publicAgentStatus(
+          await options.agents.agentStatus(agent.id, true),
+          managesRuntimePaths(options.agents),
+        ),
+      }, 201);
     } catch (error) {
       return c.json(errorResponse(error), agentErrorStatus(error));
     }
@@ -207,11 +481,26 @@ export function registerAgentRoutes(
         if (typeof body.name !== 'string') return c.json({ error: 'name must be a string' }, 400);
         patch.name = body.name;
       }
+      if (body.cliPath !== undefined && managesRuntimePaths(options.agents)) {
+        return c.json({
+          error: 'CLI path is managed globally by Gian and cannot be configured per Agent.',
+          code: 'CLI_PATH_MANAGED',
+        }, 400);
+      }
       if (body.cliPath !== undefined) {
         if (body.cliPath !== null && typeof body.cliPath !== 'string') {
           return c.json({ error: 'cliPath must be a string or null' }, 400);
         }
         patch.cliPath = body.cliPath;
+      }
+      const home = normalizeHome(body.home);
+      if (home && 'error' in home) return c.json({ error: home.error }, 400);
+      if (home) patch.home = home;
+      if (body.pluginId !== undefined) {
+        if (typeof body.pluginId !== 'string') {
+          return c.json({ error: 'pluginId must be a string' }, 400);
+        }
+        patch.pluginId = body.pluginId;
       }
       if (body.proxy !== undefined) {
         if (!isProductExecutor(body.proxy)) {
@@ -230,6 +519,9 @@ export function registerAgentRoutes(
         // Defaults stay write-through (no restart), but they must remain
         // values the kind's Proxy actually advertises.
         const kind = patch.proxy ?? current.proxy;
+        if (!kind) {
+          return c.json({ error: 'defaults require an official Agent' }, 400);
+        }
         const next = { ...current.defaults, ...defaultsPatch };
         const catalog = await options.capabilities(kind);
         const validationCatalog = options.resolveDefaultsCatalog && next.model
@@ -248,14 +540,16 @@ export function registerAgentRoutes(
             // generation for every completed mutation attempt, including that
             // committed-error outcome, so a stale lease can never keep serving
             // the previous CLI.
-            options.runtimes.invalidate(current.proxy);
-            if (patch.proxy !== undefined && patch.proxy !== current.proxy) {
-              options.runtimes.invalidate(patch.proxy);
-            }
+            options.resolver?.invalidate(current.pluginId, current.cliPath);
           }
         }
       })();
-      return c.json({ agent: await options.agents.agentStatus(agent.id, true) });
+      return c.json({
+        agent: publicAgentStatus(
+          await options.agents.agentStatus(agent.id, true),
+          managesRuntimePaths(options.agents),
+        ),
+      });
     } catch (error) {
       return c.json(errorResponse(error), agentErrorStatus(error));
     }
@@ -282,7 +576,10 @@ export function registerAgentRoutes(
       return c.json(await options.agents.status(kind, c.req.query('refresh') === '1'));
     }
     try {
-      return c.json(await options.agents.agentStatus(raw, c.req.query('refresh') === '1'));
+      return c.json(publicAgentStatus(
+        await options.agents.agentStatus(raw, c.req.query('refresh') === '1'),
+        managesRuntimePaths(options.agents),
+      ));
     } catch (error) {
       return c.json(errorResponse(error), agentErrorStatus(error));
     }
@@ -291,10 +588,33 @@ export function registerAgentRoutes(
   app.post('/api/agents/:id/pick-cli-path', async c => {
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
+    return c.json({
+      error: 'CLI path is managed globally by Gian and has no file picker.',
+      code: 'CLI_PATH_MANAGED',
+    }, 410);
+  });
+
+  app.post('/api/agents/:id/pick-home', async c => {
+    const id = c.req.param('id');
+    try {
+      options.agents.getAgent(id);
+    } catch {
+      return c.json({ error: `agent not found: ${id}` }, 404);
+    }
     if (process.platform !== 'darwin') {
       return c.json({ error: 'file picker only available on macOS' }, 400);
     }
-    const outcome = await pickPath('file', 'Select CLI executable');
+    const outcome = await (options.pickHome?.() ?? pickPath('folder', 'Select Agent HOME'));
+    if (outcome.kind === 'ok') return c.json({ path: outcome.path });
+    if (outcome.kind === 'canceled') return c.json({ canceled: true });
+    return c.json({ error: outcome.error }, 500);
+  });
+
+  app.post('/api/agents/pick-home', async c => {
+    if (process.platform !== 'darwin') {
+      return c.json({ error: 'file picker only available on macOS' }, 400);
+    }
+    const outcome = await (options.pickHome?.() ?? pickPath('folder', 'Select Agent HOME'));
     if (outcome.kind === 'ok') return c.json({ path: outcome.path });
     if (outcome.kind === 'canceled') return c.json({ canceled: true });
     return c.json({ error: outcome.error }, 500);
@@ -303,18 +623,10 @@ export function registerAgentRoutes(
   app.post('/api/agents/:id/install-cli', async c => {
     const id = executor(c.req.param('id'));
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
-    try {
-      // Drain this Host's shared runtime claim before requesting the exclusive
-      // installer claim. A concurrent session or another Host can still win
-      // the claim race, in which case installation fails closed with 409.
-      await options.closeProxy(id);
-      await options.runtimes.drain(id);
-      const result = await options.agents.installOfficialCli(id);
-      const activated = options.runtimes.invalidate(id);
-      return c.json({ ...result, activated });
-    } catch (error) {
-      return c.json(errorResponse(error), installErrorStatus(error));
-    }
+    return c.json({
+      error: 'Runtime setup uses Proxy documentation and typed open/select actions; Host no longer executes installers.',
+      code: 'HOST_RUNTIME_INSTALLER_REMOVED',
+    }, 410);
   });
 
   app.post('/api/agents/:id/check-proxy-update', async c => {
@@ -334,11 +646,8 @@ export function registerAgentRoutes(
     if (!id) return c.json({ error: 'unsupported agent' }, 404);
     try {
       const result = await options.agents.installProxy(id);
-      // The active Proxy version is an immutable directory selected at child
-      // spawn, so existing children may drain only after atomic activation.
-      // The scoped Proxy updater claim serializes updater work without
-      // blocking another Host's read-only vendor CLI runtime claim.
-      await options.closeProxy(id);
+      // Current pointer changes affect future Sessions only. Existing exact
+      // owners keep their retained generation and drain themselves.
       return c.json(result);
     } catch (error) {
       return c.json(errorResponse(error), installErrorStatus(error));
@@ -354,9 +663,9 @@ export function registerAgentRoutes(
     const existing = options.agents.listAgents().filter(agent => agent.proxy === kind);
     return c.json({
       name: options.agents.nextAgentName(kind),
-      // A second Agent of the same kind starts from the kind's existing path;
-      // otherwise prefill the first locally detected CLI (PATH, then official
-      // install locations). The user can still change it before saving.
+      home: kind === 'zcode' ? null : { kind: 'managed', path: null },
+      // Read-only active Runtime path. Never PATH-scan or accept it back on
+      // Agent create/update.
       cliPath: existing.find(agent => agent.cliPath !== null)?.cliPath
         ?? await options.agents.scannedCliPath(kind),
     });

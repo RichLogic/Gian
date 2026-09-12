@@ -24,6 +24,7 @@ function sessionFixture() {
     runtime_profile: {
       id: 'profile-1',
       agentId: 'agent-1',
+      pluginId: 'codex',
       proxy: 'codex',
       cliPath: '/usr/local/bin/codex',
       cliVersion: '0.146.0',
@@ -161,6 +162,54 @@ test('CONTRACT-005: model Session runtime contract accepts the complete canonica
   assert.equal(parseSessionList(list), list);
 });
 
+test('CONTRACT-005: Session and WS contracts accept an unregistered pluginId', () => {
+  const fixture = sessionFixture();
+  const profile = {
+    id: 'fixture-profile',
+    agentId: 'fixture-agent',
+    pluginId: 'io.gian.fixture',
+    runtimeId: null,
+    path: null,
+    version: null,
+    configHome: null,
+    contentFingerprint: null,
+    verifiedVersions: [],
+    verification: 'verified',
+  };
+  fixture.executor = 'io.gian.fixture';
+  fixture.proxy_plugin_id = 'io.gian.fixture';
+  fixture.runtime_profile = profile;
+  fixture.proxy_binding = {
+    schemaVersion: 1,
+    pluginId: 'io.gian.fixture',
+    pluginVersion: '1.0.0',
+    manifestSha256: 'a'.repeat(64),
+    protocolVersion: '2.2',
+    processScope: 'session',
+    runtimeProfile: profile,
+  };
+  assert.equal(parseSession(fixture), fixture);
+  const sync = stateSyncFixture();
+  sync.sessions = [fixture];
+  assert.equal(parseStateSyncMessage(sync), sync);
+});
+
+test('CONTRACT-005: migrated legacy executor columns require their canonical pluginId snapshot', () => {
+  const dsh = sessionFixture();
+  dsh.executor = 'dsh';
+  dsh.proxy_plugin_id = 'ai.deepseek.harness';
+  assert.equal(parseSession(dsh), dsh);
+
+  const missingCanonical = sessionFixture();
+  missingCanonical.executor = 'dsh';
+  assert.throws(() => parseSession(missingCanonical), RuntimeContractError);
+
+  const mismatchedCanonical = sessionFixture();
+  mismatchedCanonical.executor = 'zcode';
+  mismatchedCanonical.proxy_plugin_id = 'ai.deepseek.harness';
+  assert.throws(() => parseSession(mismatchedCanonical), RuntimeContractError);
+});
+
 test('CONTRACT-005 / WS-001: state_sync runtime contract validates the complete nested snapshot', () => {
   const fixture = stateSyncFixture();
   assert.equal(parseStateSyncMessage(fixture), fixture);
@@ -170,6 +219,9 @@ test('CONTRACT-005: malformed nested model/web fields are rejected at runtime', 
   const badSession = sessionFixture();
   badSession.status = 'busy';
   assert.throws(() => parseSession(badSession), RuntimeContractError);
+  const badPluginId = sessionFixture();
+  badPluginId.proxy_plugin_id = 'Not A Plugin';
+  assert.throws(() => parseSession(badPluginId), RuntimeContractError);
   assert.throws(() => parseSessionList([badSession]), error =>
     error instanceof RuntimeContractError && error.contract === 'Session[]');
 

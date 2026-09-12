@@ -364,6 +364,10 @@ async function handle(request) {
       return;
     }
     case 'session/setThoughtLevel': {
+      if (scenario.behavior?.failThoughtLevel === params.thoughtLevel) {
+        replyError(id, { code: -32603, message: `Unsupported thought level: ${params.thoughtLevel}` });
+        return;
+      }
       if (typeof params.thoughtLevel !== 'string') {
         replyError(id, { code: -32602, message: 'Invalid params — thoughtLevel is required' });
         return;

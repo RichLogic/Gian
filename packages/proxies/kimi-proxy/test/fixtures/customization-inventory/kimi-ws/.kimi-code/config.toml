@@ -1,0 +1,5 @@
+extra_skill_dirs = ["./team-skills"]
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "echo 'submit'"

@@ -147,16 +147,22 @@ const sessionSetServiceTier: OperationDefinition<SessionIdInput & { tier: 'fast'
   timeoutMs: WS_TIMEOUT_MS,
 };
 
-const sessionAssignTask: OperationDefinition<SessionIdInput & { taskId: string }> = {
+const sessionAssignTask: OperationDefinition<SessionIdInput & { taskId: string | null }> = {
   policy: 'optimistic',
   entityKey: input => sessionEntityKey(input.sessionId),
   // A Task-owned Session is defined by BOTH fields. Keeping them in one
   // operation mirrors the Host transaction and prevents an intermediate
   // task_id-only row that neither Sessions nor Tasks can classify correctly.
-  optimisticWrites: input => [
-    { field: 'type', value: 'subtask' as const },
-    { field: 'task_id', value: input.taskId },
-  ],
+  // taskId null releases a Subtask back to standalone (2026-09-06).
+  optimisticWrites: input => input.taskId !== null
+    ? [
+        { field: 'type', value: 'subtask' as const },
+        { field: 'task_id', value: input.taskId },
+      ]
+    : [
+        { field: 'type', value: 'coding' as const },
+        { field: 'task_id', value: null },
+      ],
   buildMessage: input => ({
     type: 'session:assign_task',
     session_id: input.sessionId,

@@ -18,18 +18,32 @@ import {
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
 import { sortSessionsForRail } from './session-routing.js';
-import type { ChangeScope } from './api.js';
 import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
 import { useHistoryMovementRevision } from './controllers/use-history.js';
 import { applyChangesScopeRequest, requestChangesDiffAnchor } from './controllers/use-changes-diff.js';
 import './operations/git-history.js';
 import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
-import { DiffOpenContext, FileLinkOpenContext, ImageZoomContext, PlanOpenContext, RelativeLinkOpenContext } from './transcript/items.js';
+import {
+  DiffOpenContext,
+  FileLinkHrefContext,
+  FileLinkOpenContext,
+  ImageZoomContext,
+  PlanOpenContext,
+  RelativeLinkOpenContext,
+  ScheduleOpenContext,
+} from './transcript/items.js';
+import { ScheduleConfirmationHost } from './components/ScheduleConfirmations.js';
+import {
+  getScheduleConfirmationsSnapshot,
+  pendingScheduleConfirmations,
+  subscribeScheduleConfirmations,
+} from './controllers/schedule-confirmations.js';
 import { ImageLightbox, type ZoomImage } from './components/ImageLightbox.js';
 import { AssignSessionTaskDialog } from './components/AssignSessionTaskDialog.js';
 import { Topbar } from './components/Topbar.js';
 import type { Mode } from './components/Topbar.js';
+import type { SidebarListMode } from './components/SidebarChrome.js';
 import { Dock } from './components/Dock.js';
 import { Toaster } from './components/Toaster.js';
 import { confirm as confirmDialog, getSnapshot as getFeedbackSnapshot, subscribe as subscribeFeedback, toast } from './feedback.js';
@@ -38,11 +52,15 @@ import { Inspector } from './components/Inspector.js';
 import { SettingsBody } from './components/SettingsBody.js';
 import { BrowserPanel } from './components/BrowserPanel.js';
 import type { NavKey } from './components/SettingsBody.js';
+import { createRemoteSettingsController } from './remote-settings/production.js';
+import type { RemoteSettingsController } from './remote-settings/types.js';
 import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
 import { SessionSurface } from './views/SessionSurface.js';
-import { NewWorkspacePanel } from './views/workspace-create.js';
+import { WorkspaceDialog } from './views/workspace-dialog.js';
+import type { WorkspaceDialogState } from './views/workspace-dialog.js';
 import { TasksView, reorderableSubtasks } from './views/TasksView.js';
+import { PageWithSidebar } from './views/PageWithSidebar.js';
 // The primary view is imported statically: lazy-loading it served no purpose
 // (it renders on every launch) and its suspension used to tear down the whole
 // shell via the root Suspense boundary (the "full-screen flash" bug).
@@ -94,6 +112,7 @@ import './operations/files.js';
 import './operations/browser.js';
 import './operations/onboarding.js';
 import './operations/sidechat.js';
+import './operations/schedule.js';
 import { sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
 import {
   createMessageEchoSink,
@@ -135,6 +154,8 @@ import { routeScreenshotCapture } from './screenshot-routing.js';
 // flash. Local boundaries confine the fallback to the surface that's loading.
 const SpacesView = lazy(() =>
   import('./views/SpacesView.js').then(module => ({ default: module.SpacesView })));
+const CustomView = lazy(() =>
+  import('./views/CustomView.js').then(module => ({ default: module.CustomView })));
 const CommandPalette = lazy(() =>
   import('./components/CommandPalette.js').then(module => ({ default: module.CommandPalette })));
 const Sheet = lazy(() =>
@@ -153,6 +174,11 @@ const LoginView = lazy(() =>
   import('./views/LoginView.js').then(module => ({ default: module.LoginView })));
 const OnboardingView = lazy(() =>
   import('./views/OnboardingView.js').then(module => ({ default: module.OnboardingView })));
+const AgentsView = lazy(() =>
+  import('./views/AgentsView.js').then(module => ({ default: module.AgentsView })));
+// Timer (Issue #51): the conversation-bound Schedule management surface.
+const TimerView = lazy(() =>
+  import('./views/TimerView.js').then(module => ({ default: module.TimerView })));
 
 /**
  * Unresolved-reload reconcile (Phase 3a, proposal §4.3): after a targeted
@@ -184,6 +210,15 @@ function reconcileUnresolvedEntity(
   if (report.dropped.length > 0) {
     toast({ kind: 'warning', message: t('operations.mayNotHaveApplied') });
   }
+}
+
+/** Right-click/status-bar href for transcript file links (the local desktop
+ *  shell maps them to the editor scheme; clicks themselves route through
+ *  FileLinkOpenContext into the in-app Sheet). encodeURI keeps `/` and `:`
+ *  intact; covers spaces and unicode in paths. */
+function fileLinkHref(absPath: string, line?: number): string {
+  const encoded = encodeURI(absPath);
+  return line ? `vscode://file/${encoded}:${line}` : `vscode://file/${encoded}`;
 }
 
 export function App() {
@@ -257,6 +292,8 @@ export function App() {
   void pendingBySidechat;
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
+  const [sidebarListMode, setSidebarListMode] = useState<SidebarListMode>('tasks');
+  const [newSubtaskForTaskId, setNewSubtaskForTaskId] = useState<string | null>(null);
   const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
   const refreshWorkingTrees = useCallback(() => {
     reloadWorkingTrees({ force: true });
@@ -264,11 +301,22 @@ export function App() {
   // Active Settings section — owned here (controlled into SettingsBody +
   // internal Settings directory) so it survives rail collapse/restore.
   const [settingsSection, setSettingsSection] = useState<NavKey>('appearance');
+  // Both GianDev and packaged Desktop use the same local Host adapter.
+  const [remoteController, setRemoteController] = useState<RemoteSettingsController | null>(null);
+  useEffect(() => {
+    const controller = createRemoteSettingsController();
+    setRemoteController(controller);
+    return () => controller.dispose?.();
+  }, []);
   const [shortcutCreateRequest, setShortcutCreateRequest] = useState<{
     kind: 'session' | 'task';
     sequence: number;
   } | null>(null);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
+
+  useEffect(() => {
+    if (mode === 'tasks' || mode === 'sessions') setSidebarListMode(mode);
+  }, [mode]);
   const [terminalOptions, setTerminalOptions] = useState<TerminalOptions | null>(null);
   // Canonical config for the operation layer's overlay `previous` values —
   // read via ref, never the overlaid render value.
@@ -289,13 +337,37 @@ export function App() {
     getFeedbackSnapshot,
     getFeedbackSnapshot,
   );
+  const scheduleConfirmationState = useSyncExternalStore(
+    subscribeScheduleConfirmations,
+    getScheduleConfirmationsSnapshot,
+    getScheduleConfirmationsSnapshot,
+  );
+  const hasPendingScheduleConfirmation = pendingScheduleConfirmations(
+    scheduleConfirmationState,
+  ).length > 0;
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const pendingFirstMessageRef = useRef<PendingFirstMessageValue>(null);
-  // New-session → New Workspace sheet round trip (issue #57 v2): the view
-  // flags localStorage before opening the sheet; when the sheet's create
-  // lands we return to a fresh new-session page with that workspace
-  // preselected (the view's own draft restores message/agent/chips).
+  // New-session → New Repo dialog round trip (issue #57 v2, dialog since
+  // 2026-09-09): the view flags localStorage before opening the dialog; when
+  // the dialog's create lands we return to a fresh new-session page with that
+  // workspace preselected (the view's own draft restores message/agent/chips).
   const [newSessionForWs, setNewSessionForWs] = useState<string | null>(null);
+  // App-owned New/Edit Repo modal: create from the Repos rail "+" / the
+  // new-session page's "+ New Repo" row; edit from a workspace group's ⋯ menu.
+  const [wsDialog, setWsDialog] = useState<WorkspaceDialogState | null>(null);
+  // Timer's 新建定时任务 CTA (design 05): opens the new-session page with a
+  // prefilled guidance prompt; CodingView consumes it once.
+  const [newSessionPrefill, setNewSessionPrefill] = useState<string | null>(null);
+  // ─── Timer / Schedules (Issue #51) ────────────────────────────────────────
+  // The Timer page's selected Schedule lives at App level so the transcript's
+  // "sent by a schedule" tag can deep-link into the detail from any mode.
+  const [timerScheduleId, setTimerScheduleId] = useState<string | null>(null);
+  // A bound-session Run navigation request: open the control conversation and
+  // scroll its transcript to the scheduled user message of this Run.
+  const [focusScheduleRun, setFocusScheduleRun] = useState<{
+    sessionId: string;
+    runId: string;
+  } | null>(null);
   const workspaceIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     workspaceIdsRef.current = new Set(workspaces.map(w => w.id));
@@ -461,6 +533,7 @@ export function App() {
       remove: workspaceId => setWorkspaces(previous => previous.filter(w => w.id !== workspaceId)),
       applyOrder: ids => setWorkspaces(previous => applyWorkspaceOrderOverlay(previous, ids)),
       refetch: () => { void loadWorkspaces().then(setWorkspaces); },
+      refetchSessions: () => { void loadSessions().then(setSessions); },
     });
     wireSubtaskCanonicalSink((sessionId, partial) => {
       setSessions(previous => previous.map(s => (s.id === sessionId ? { ...s, ...partial } : s)));
@@ -570,13 +643,25 @@ export function App() {
       CHAT_FONT_FAMILY_STACKS[displayConfig.chat_font_family],
     );
     document.documentElement.setAttribute('lang', displayConfig.locale);
-    applyGianIconAppearance(displayConfig.theme, displayConfig.accent);
+    // The brand mark is theme-adjusted but accent-fixed (Plum gradient,
+    // 2026-09-08 owner call) — accent changes no longer repaint the logo.
+    applyGianIconAppearance(displayConfig.theme);
     // Keep the remappable-shortcut store aligned with the rendered config
     // (optimistic overlay applies in the same task; rollback reverts it).
     setKeymapPreferences(displayConfig.keymap);
   }, [displayConfig?.theme, displayConfig?.accent,
       displayConfig?.chat_font_size, displayConfig?.chat_font_family,
       displayConfig?.keymap, displayConfig?.locale]);
+
+  useEffect(() => {
+    const browserPreferences = displayConfig?.tools?.browser;
+    if (!browserPreferences) return;
+    void desktopBridge()?.browser?.configure(browserPreferences);
+  }, [
+    displayConfig?.tools?.browser.home_page,
+    displayConfig?.tools?.browser.restore_last_page,
+    displayConfig?.tools?.browser.external_links,
+  ]);
   // Latest active session id for stable event and unread handlers.
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
@@ -816,7 +901,6 @@ export function App() {
     fileRehype,
     sheetActions,
     GROUP_OF_RAIL,
-    defaultWorkingTreeIdFor,
     viewedWorkingTreeId,
     handleOpenWith,
     activateRail,
@@ -830,8 +914,6 @@ export function App() {
     openChatPanel,
     addTerminalTab,
     addBrowserTab,
-    openWorkspaceInSheet,
-    openNewWorkspaceInSheet,
   } = useWorkbench({
     authStatus: runtimeAuthStatus,
     dispatch: ops.dispatch,
@@ -848,19 +930,6 @@ export function App() {
     t: appT,
   });
 
-  // The top-right GitBadge reports the All-changes numbers, so clicking it
-  // must land the Changes surface on that same scope. The scope lives in the
-  // use-changes-diff store now (shared by the panel-3 inspector and panel 2's
-  // multi-diff view) — these entries write the store and open the rail.
-  const showChanges = (
-    scope: ChangeScope,
-    target?: { sessionId: string; turn: number },
-  ) => {
-    const wtId = viewedWorkingTreeId(activeSession);
-    if (wtId) applyChangesScopeRequest(wtId, scope, target, activeSessionId);
-    showChangesDiff();
-  };
-  const showAllChanges = () => showChanges('all');
   // A file selected from the transcript underbar's Diff panel opens the
   // Diffs rail on that exact turn's scope and jumps panel 2's multi-diff
   // view to the file's block. It intentionally steals the view.
@@ -956,6 +1025,31 @@ export function App() {
     restoreChatPanelForSession,
     ops,
   });
+
+  // Timer deep links (Issue #51): the transcript's schedule provenance tag
+  // opens the Timer detail; a bound-session Run opens its control
+  // conversation with the transcript focused on the scheduled Turn.
+  const openSchedule = useCallback((scheduleId: string) => {
+    setTimerScheduleId(scheduleId);
+    startTransition(() => setMode('timer'));
+  }, []);
+  const openScheduledTurn = useCallback((sessionId: string, runId: string) => {
+    selectSession(sessionId);
+    setActiveRail(null);
+    setViewState('main');
+    startTransition(() => setMode('sessions'));
+    setFocusScheduleRun({ sessionId, runId });
+  }, [selectSession, setActiveRail, setViewState]);
+
+  // 未分配 (untasked) sessions open inside the Tasks view, not in Project
+  // mode (2026-09-06 owner call): clear any task/subtask selection, point
+  // the active session at the row, stay in Tasks.
+  const selectStandaloneInTasks = useCallback((sessionId: string) => {
+    setActiveTaskId(null);
+    setActiveSubtaskId(null);
+    selectSession(sessionId);
+    startTransition(() => setMode('tasks'));
+  }, [selectSession]);
 
   useEffect(() => {
     const screenshot = desktopBridge()?.screenshot;
@@ -1230,7 +1324,7 @@ export function App() {
 
   const panelLayout = usePanelLayout({
     enabled: authStatus === 'authenticated' && onboarding.status === 'complete',
-    panel1Visible: mode === 'spaces' || viewState !== 'workbench',
+    panel1Visible: mode === 'spaces' || mode === 'custom' || mode === 'timer' || viewState !== 'workbench',
     panel2Visible: (chatPanel !== null && workbenchActive) || sheetVisible,
     inspectorVisible,
     p3Collapsed,
@@ -1339,10 +1433,22 @@ export function App() {
     sessionsRef,
     ops,
     paletteOpen,
-    disabled: assignTaskSessionId !== null,
+    disabled: assignTaskSessionId !== null || hasPendingScheduleConfirmation,
     setPaletteOpen,
     onCommand: handleKeymapCommand,
   });
+
+  // The Dock's workbench rails (Settings above all) stay reachable from the
+  // primary pages (Agents/Timer/Custom, 2026-09-06 owner report): hop back
+  // to the current chat list mode first so the workbench surface exists,
+  // then toggle the rail.
+  const toggleRailAnyMode = (rail: Parameters<typeof toggleRail>[0]) => {
+    if (mode === 'agents' || mode === 'timer' || mode === 'custom') {
+      startTransition(() => setMode(sidebarListMode));
+    }
+    toggleRail(rail);
+  };
+
 
   useEffect(() => {
     if (!shortcutCreateRequest) return;
@@ -1364,43 +1470,45 @@ export function App() {
   // pointed at this subtask. TasksView renders this element where the old
   // "Open in Sessions" placeholder used to live (inside its own `.main`).
   const subtask = subtaskActive ? activeSession : null;
-  const subtaskWorkspace = subtask
-    ? displayWorkspaces.find(w => w.id === subtask.workspace_id) ?? null
+  // A standalone (untasked) Session selected from the Tasks rail's 未分配
+  // group opens inside the Tasks view — the same SessionSurface as a
+  // subtask's, no jump to Project mode (2026-09-06 owner call).
+  const standaloneActive = mode === 'tasks'
+    && !subtask
+    && !activeTaskId
+    && activeSession !== null
+    && activeSession.task_id === null;
+  const surfaceSession = subtask ?? (standaloneActive ? activeSession : null);
+  const surfaceSessionWorkspace = surfaceSession
+    ? displayWorkspaces.find(w => w.id === surfaceSession.workspace_id) ?? null
     : null;
-  const subtaskWorkingTreeId = defaultWorkingTreeIdFor(subtask);
-  const subtaskMain = subtask ? (
+  const surfaceSessionMain = surfaceSession ? (
     <SessionSurface
-      session={subtask}
-      workspace={subtaskWorkspace}
-      items={itemsBySession[subtask.id] ?? []}
-      hydrated={historyBySession[subtask.id]?.phase === 'page'
-        || historyBySession[subtask.id]?.phase === 'complete'}
-      history={historyBySession[subtask.id]}
-      onLoadOlder={() => loadOlder(subtask.id, subtask.executor)}
-      onRetryHistory={() => retryHistory(subtask.id, subtask.executor)}
-      pending={pendingBySession[subtask.id] ?? false}
-      queue={queueBySession[subtask.id] ?? []}
-      planText={planStateBySession[subtask.id]?.text}
-      planCompleted={planStateBySession[subtask.id]?.completed}
-      planStatus={planStateBySession[subtask.id]?.status}
-      planTurn={planStateBySession[subtask.id]?.turn}
+      session={surfaceSession}
+      workspace={surfaceSessionWorkspace}
+      items={itemsBySession[surfaceSession.id] ?? []}
+      hydrated={historyBySession[surfaceSession.id]?.phase === 'page'
+        || historyBySession[surfaceSession.id]?.phase === 'complete'}
+      history={historyBySession[surfaceSession.id]}
+      onLoadOlder={() => loadOlder(surfaceSession.id, surfaceSession.executor)}
+      onRetryHistory={() => retryHistory(surfaceSession.id, surfaceSession.executor)}
+      pending={pendingBySession[surfaceSession.id] ?? false}
+      queue={queueBySession[surfaceSession.id] ?? []}
+      planText={planStateBySession[surfaceSession.id]?.text}
+      planCompleted={planStateBySession[surfaceSession.id]?.completed}
+      planStatus={planStateBySession[surfaceSession.id]?.status}
+      planTurn={planStateBySession[surfaceSession.id]?.turn}
       commands={sessionMainHandlers}
-      workingTreeId={subtaskWorkingTreeId}
-      branch={workingTrees.find(tree => tree.id === subtaskWorkingTreeId)?.branch ?? null}
       onOpenFile={(absolutePath, line) => { void openFileInSheet(absolutePath, false, line); }}
       onOpenRelativeFile={openRelativeFileHref}
       onOpenDiff={item => { void openTranscriptDiffInSheet(item); }}
-      onOpenPlan={payload => openChatPanel(subtask.id, { kind: 'plan', id: payload.id })}
-      onOpenChat={request => openChatPanel(subtask.id, request)}
+      onOpenPlan={payload => openChatPanel(surfaceSession.id, { kind: 'plan', id: payload.id })}
+      onOpenChat={request => openChatPanel(surfaceSession.id, request)}
       fileRehype={fileRehype}
-      onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: subtask.id }); }}
-      onShowChanges={showAllChanges}
-      onShowLastTurnChanges={(turn, path) => showLastTurnChanges(subtask, turn, path)}
+      onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: surfaceSession.id }); }}
+      onShowLastTurnChanges={(turn, path) => showLastTurnChanges(surfaceSession, turn, path)}
       forkAtTurnControl={forkAtTurnControl}
       sideChatControl={sideChatControl}
-      originParentName={subtask.origin?.kind === 'fork'
-        ? sessions.find(s => s.id === subtask.origin!.session_id)?.name ?? undefined
-        : undefined}
     />
   ) : null;
 
@@ -1463,6 +1571,7 @@ export function App() {
     <OperationStoreProvider store={operationStore}>
     <OperationDispatcherProvider dispatcher={ops}>
     <ImageZoomContext.Provider value={(src, alt) => setZoomImage({ src, alt })}>
+    <ScheduleOpenContext.Provider value={openSchedule}>
     <div
       className="app"
       data-testid="app-shell"
@@ -1485,6 +1594,13 @@ export function App() {
         onGoForward={() => navGo(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
+      {wsDialog && (
+        <WorkspaceDialog
+          dialog={wsDialog}
+          onClose={() => setWsDialog(null)}
+          onChanged={handleWorkspaceListChanged}
+        />
+      )}
       {assignTaskSession && (
         <AssignSessionTaskDialog
           sessionName={assignTaskSession.name || appT('coding.session.untitled')}
@@ -1523,6 +1639,7 @@ export function App() {
         data-panel-resizing={panelLayout.resizing ? 'true' : undefined}
       >
           {mode === 'sessions' && (
+          <FileLinkHrefContext.Provider value={fileLinkHref}>
           <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
           <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
           <FileRefRehypeContext.Provider value={fileRehype}>
@@ -1536,7 +1653,6 @@ export function App() {
             <CodingView
               mode={mode}
               onSetAppMode={(m) => { startTransition(() => setMode(m)); }}
-              onOpenSearch={() => setPaletteOpen(true)}
               workspaces={displayWorkspaces}
               sessions={displaySessions}
               activeSession={activeSession}
@@ -1550,9 +1666,12 @@ export function App() {
               onLoadOlder={(sessionId, executor) => loadOlder(sessionId, executor)}
               onRetryHistory={(sessionId, executor) => retryHistory(sessionId, executor)}
               onSelectSession={selectSession}
-              onNewWorkspace={openNewWorkspaceInSheet}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
+              onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
               openNewForWorkspace={newSessionForWs}
               onConsumeOpenNewForWorkspace={() => setNewSessionForWs(null)}
+              openNewWithMessage={newSessionPrefill}
+              onConsumeOpenNewWithMessage={() => setNewSessionPrefill(null)}
               onCreateSession={(input) => {
                 // First message rides the dormant pendingFirstMessage channel:
                 // the session:created socket handler consumes it and dispatches
@@ -1615,15 +1734,11 @@ export function App() {
                   ...(activeSession?.id === sessionId ? activeSession.turn_config ?? {} : {}),
                   [optionId]: value,
                 })}
-              onShowChanges={showAllChanges}
               onShowLastTurnChanges={showLastTurnChanges}
-              activeWorkingTreeId={viewedWorkingTreeId(activeSession)}
-              activeBranch={
-                workingTrees.find(wt => wt.id === viewedWorkingTreeId(activeSession))?.branch
-                ?? null
-              }
               forkAtTurnControl={forkAtTurnControl}
               sideChatControl={sideChatControl}
+              scheduleFocus={focusScheduleRun}
+              onConsumeScheduleFocus={() => setFocusScheduleRun(null)}
               railLayout={panelLayout.railLayout}
             />
           </ChatPanelOpenContext.Provider>
@@ -1632,6 +1747,7 @@ export function App() {
           </FileRefRehypeContext.Provider>
           </RelativeLinkOpenContext.Provider>
           </FileLinkOpenContext.Provider>
+          </FileLinkHrefContext.Provider>
           )}
           {mode === 'spaces' && (
             <Suspense fallback={null}>
@@ -1655,11 +1771,99 @@ export function App() {
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
               onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
-              onNewWorkspace={openNewWorkspaceInSheet}
+              activeSessionId={activeSessionId}
+              onSelectSession={selectStandaloneInTasks}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
               onSetPendingFirstMessage={text => { pendingFirstMessageRef.current = text; }}
-              subtaskMain={subtaskMain}
+              openNewForTaskId={newSubtaskForTaskId}
+              onConsumeOpenNewForTaskId={() => setNewSubtaskForTaskId(null)}
+              subtaskMain={surfaceSessionMain}
               railLayout={panelLayout.railLayout}
             />
+          )}
+          {(mode === 'agents' || mode === 'timer' || mode === 'custom') && (
+            <PageWithSidebar
+              mode={mode}
+              onSetMode={(next) => { startTransition(() => setMode(next)); }}
+              listMode={sidebarListMode}
+              onSetListMode={(next) => {
+                setSidebarListMode(next);
+                startTransition(() => setMode(next));
+              }}
+              workspaces={displayWorkspaces}
+              sessions={displaySessions}
+              tasks={displayTasks}
+              activeSessionId={activeSessionId}
+              activeSubtaskId={activeSubtaskId}
+              onNewWorkspace={() => setWsDialog({ kind: 'create' })}
+              onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
+              onNewForWorkspace={(workspaceId) => {
+                setNewSessionForWs(workspaceId);
+                startTransition(() => setMode('sessions'));
+              }}
+              onPinSession={sessionMainHandlers.onPin}
+              onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
+              onSelectSession={(sessionId) => {
+                selectSession(sessionId);
+                startTransition(() => setMode('sessions'));
+              }}
+              onSelectUnassignedSession={selectStandaloneInTasks}
+              onSelectSubtask={(taskId, subtaskId) => {
+                setActiveTaskId(taskId);
+                setActiveSubtaskId(subtaskId);
+                startTransition(() => setMode('tasks'));
+              }}
+              onNewSessionForTask={(taskId) => {
+                setActiveTaskId(taskId);
+                setActiveSubtaskId(null);
+                setNewSubtaskForTaskId(taskId);
+                startTransition(() => setMode('tasks'));
+              }}
+              railLayout={panelLayout.railLayout}
+            >
+              {mode === 'agents' && (
+                <Suspense fallback={null}>
+                  <AgentsView terminalHost={{
+                    preferences: displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES,
+                    makeWire: (termId, agentId, spawn) => makeWorkbenchWire(
+                      ws,
+                      termId,
+                      { target: { kind: 'agent_cli', agent_id: agentId } },
+                      spawn ? ops.dispatch : undefined,
+                    ),
+                    close: termId => { ops.dispatch('term.close', { termId }); },
+                  }} />
+                </Suspense>
+              )}
+              {mode === 'custom' && (
+                <Suspense fallback={null}>
+                  <CustomView
+                    workspaces={displayWorkspaces}
+                    onOpenAgents={() => { startTransition(() => setMode('agents')); }}
+                  />
+                </Suspense>
+              )}
+              {mode === 'timer' && (
+                <Suspense fallback={null}>
+                  <TimerView
+                    sessions={displaySessions}
+                    selectedScheduleId={timerScheduleId}
+                    onSelectSchedule={setTimerScheduleId}
+                    onOpenScheduledTurn={openScheduledTurn}
+                    onCreateSchedule={(prompt) => {
+                      // Design 05: creation is prompt-driven — jump to the
+                      // standard new-session page with the guidance prompt
+                      // prefilled; that conversation becomes the owning one.
+                      setNewSessionPrefill(prompt);
+                      startTransition(() => setMode('sessions'));
+                    }}
+                    offline={!(wsState === 'open' && authed)}
+                  />
+                </Suspense>
+              )}
+            </PageWithSidebar>
           )}
         {chatPanel && workbenchActive && (
           <>
@@ -1669,6 +1873,7 @@ export function App() {
               ariaLabel="Resize conversation and context panels"
               onMouseDown={panelLayout.onMainSheetMouseDown}
             />
+            <FileLinkHrefContext.Provider value={fileLinkHref}>
             <FileLinkOpenContext.Provider value={(absPath, line) => {
               void openFileInSheet(absPath, false, line);
             }}>
@@ -1707,6 +1912,7 @@ export function App() {
             </FileRefRehypeContext.Provider>
             </RelativeLinkOpenContext.Provider>
             </FileLinkOpenContext.Provider>
+            </FileLinkHrefContext.Provider>
           </>
         )}
         {sheetMounted && (
@@ -1740,12 +1946,14 @@ export function App() {
                     <BrowserPanel
                       tabId={t.id}
                       contextTargetSessionId={sessionViewActive ? activeSessionId : null}
+                      onTitleChange={(name) => sheetActions.setTabName(t.id, name)}
                       visible={sheetVisible
                         && activeGroup === 'browser'
                         && activeTabByGroup.browser === t.id
                         && !paletteOpen
                         && !zoomImage
                         && !assignTaskSession
+                        && !hasPendingScheduleConfirmation
                         && feedbackState.confirms.length === 0}
                     />
                   );
@@ -1759,10 +1967,11 @@ export function App() {
                       activeSection={settingsSection}
                       onSectionChange={onSettingsNavSelect}
                       workspaces={displayWorkspaces}
-                      onWorkspaceOpened={openWorkspaceInSheet}
                       onSessionOpened={openAdoptedSession}
                       identity={identity}
                       onSignOut={signOut}
+                      onOpenAgentsPage={() => { startTransition(() => setMode('agents')); }}
+                      remoteController={remoteController}
                     />
                   );
                 }
@@ -1777,14 +1986,6 @@ export function App() {
                       />
                       </Suspense>
                     </div>
-                  );
-                }
-                if (t.kind === 'new-workspace') {
-                  return (
-                    <NewWorkspacePanel
-                      onChange={handleWorkspaceListChanged}
-                      onClose={() => sheetActions.closeTab(t.id)}
-                    />
                   );
                 }
                 if (t.kind === 'workspace') {
@@ -1820,16 +2021,6 @@ export function App() {
                 }
                 return null;
               }}
-              renderEmpty={(group) => group === 'history' ? (
-                <div className="sheet-empty history-empty" data-testid="history-empty-panel">
-                  <svg className="fpe-icon" viewBox="0 0 24 24" width="34" height="34" fill="none"
-                       stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M3 12h6 M15 12h6" />
-                  </svg>
-                  <span className="fpe-title">{appT('history.emptyPanel.title')}</span>
-                  <span className="fpe-hint">{appT('history.emptyPanel.hint')}</span>
-                </div>
-              ) : null}
             />
             </Suspense>
           </>
@@ -1881,7 +2072,7 @@ export function App() {
         )}
         <Dock
           activeRail={chatPanel ? null : activeRail}
-          onToggleRail={toggleRail}
+          onToggleRail={toggleRailAnyMode}
           sessionRailsDisabled={!sessionViewActive}
           sideChat={{
             active: chatPanel?.kind === 'sidechat',
@@ -1908,8 +2099,10 @@ export function App() {
           <span>{appT('coding.forking')}</span>
         </div>
       )}
+      <ScheduleConfirmationHost />
       <Toaster />
     </div>
+    </ScheduleOpenContext.Provider>
     </ImageZoomContext.Provider>
     </OperationDispatcherProvider>
     </OperationStoreProvider>

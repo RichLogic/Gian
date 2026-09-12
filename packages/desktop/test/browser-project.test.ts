@@ -3,7 +3,9 @@ import { describe, it } from 'node:test';
 import {
   BROWSER_PROJECT_CSP,
   browserProjectUrl,
+  createBrowserAbsoluteSite,
   createBrowserProjectSite,
+  resolveAbsoluteBrowserPath,
   resolveBrowserProjectPath,
 } from '../src/browser-project.js';
 
@@ -36,6 +38,25 @@ describe('Browser project origin', () => {
     assert.equal(browserProjectUrl('sitea', 'index.html'), 'gian-browser://sitea/index.html');
     assert.notEqual(new URL(browserProjectUrl('sitea', 'index.html')).hostname,
       new URL(browserProjectUrl('siteb', 'index.html')).hostname);
+  });
+
+  it('roots an absolute attachment next to the opened file', () => {
+    assert.deepEqual(createBrowserAbsoluteSite('/Users/me/.gian/attachments/s1/plan.html'), {
+      absoluteRoot: '/Users/me/.gian/attachments/s1',
+      entry: 'plan.html',
+    });
+    assert.equal(
+      resolveAbsoluteBrowserPath('/Users/me/.gian/attachments/s1', '/plan.html'),
+      '/Users/me/.gian/attachments/s1/plan.html',
+    );
+    assert.equal(
+      resolveAbsoluteBrowserPath('/Users/me/.gian/attachments/s1', '/style.css'),
+      '/Users/me/.gian/attachments/s1/style.css',
+    );
+    assert.equal(createBrowserAbsoluteSite('plan.html'), null);
+    assert.equal(createBrowserAbsoluteSite('../plan.html'), null);
+    assert.equal(resolveAbsoluteBrowserPath('/Users/me/.gian/attachments/s1', '/../secret.txt'), null);
+    assert.equal(resolveAbsoluteBrowserPath('/Users/me/.gian/attachments/s1', '/%2e%2e/secret.txt'), null);
   });
 
   it('allows authored static resources without granting file access', () => {

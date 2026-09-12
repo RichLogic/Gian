@@ -14,7 +14,10 @@ export { GIAN_MCP_TOOL_DEFINITIONS } from './schemas.js';
 
 export interface GianMcpCallResult {
   [key: string]: unknown;
-  content: Array<{ type: 'text'; text: string }>;
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+  >;
   structuredContent: Record<string, unknown>;
   isError?: true;
 }
@@ -28,7 +31,26 @@ export type GianMcpRpcCall = (options: {
   requestId: string;
 }) => Promise<GianToolResult>;
 
-function mcpResult(result: GianToolResult): GianMcpCallResult {
+function mcpResult(result: GianToolResult, method?: GianToolMethod): GianMcpCallResult {
+  // The Host completes a mandatory user approval before browser.screenshot
+  // can return bytes. Keep those bytes out of JSON logs and structured data;
+  // MCP's image block is the sole approved destination.
+  if (method === 'browser.screenshot' && result.ok) {
+    const data = result.data && typeof result.data === 'object'
+      ? result.data as Record<string, unknown>
+      : null;
+    if (data && typeof data['base64'] === 'string' && data['mime_type'] === 'image/png') {
+      const { base64, ...metadata } = data;
+      const projected = { ...result, data: metadata };
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(projected) },
+          { type: 'image', data: base64, mimeType: 'image/png' },
+        ],
+        structuredContent: projected as unknown as Record<string, unknown>,
+      };
+    }
+  }
   return {
     content: [{ type: 'text', text: JSON.stringify(result) }],
     structuredContent: result as unknown as Record<string, unknown>,
@@ -103,7 +125,7 @@ export async function dispatchGianMcpTool(options: {
     requestId,
     ...(typeof idempotencyKey === 'string' ? { idempotencyKey } : {}),
   });
-  return mcpResult(result);
+  return mcpResult(result, options.method);
 }
 
 export async function dispatchGianMcpCall(options: {

@@ -1,7 +1,6 @@
 // projectTurnDiff (underbar "Last turn" diff chip): aggregates the most
-// current/latest transcript turn, merging per-path last-one-wins so codex's
-// turn-cumulative diff.updated events don't double count while claude/kimi
-// per-edit events still surface every file.
+// current/latest transcript turn. Codex's cumulative snapshot is already
+// upserted by activity id; distinct Claude/Kimi edits add by path.
 
 import { describe, it, expect } from 'vitest';
 import { projectTurnDiff } from '../src/presentation/turn-diff.js';
@@ -35,14 +34,21 @@ describe('projectTurnDiff', () => {
     expect(out?.files.map(f => f.path).sort()).toEqual(['a.ts', 'b.ts']);
   });
 
-  it('per-path last-wins: cumulative events report final numbers (codex shape)', () => {
+  it('uses the current cumulative Codex snapshot without double counting it', () => {
     const items: TranscriptItem[] = [
-      diff('d1', 1, [file('a.ts', 3, 1)]),
-      diff('d2', 1, [file('a.ts', 8, 2), file('b.ts', 4, 0)]),
+      diff('codex-turn-diff', 1, [file('a.ts', 8, 2), file('b.ts', 4, 0)]),
     ];
     const out = projectTurnDiff(items);
     expect(out?.files).toHaveLength(2);
     expect(out?.files.find(f => f.path === 'a.ts')).toMatchObject({ add: 8, del: 2 });
+  });
+
+  it('adds distinct edit activities that touch the same path', () => {
+    const items: TranscriptItem[] = [
+      diff('edit-1', 1, [file('a.ts', 3, 1)]),
+      diff('edit-2', 1, [file('a.ts', 5, 2)]),
+    ];
+    expect(projectTurnDiff(items)?.files).toEqual([file('a.ts', 8, 3)]);
   });
 
   it('uses the most recent turn that produced a diff', () => {

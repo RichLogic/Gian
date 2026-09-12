@@ -233,11 +233,12 @@ function legacyModels(raw: unknown): ProxyModel[] {
 
 /** Settings Executors defaults: prefer 2.1 Special Catalog slots (normalized
  *  to internal roles), keep 2.0 roles and Protocol 1 arrays as fallbacks. */
-export function executorSettingsFromCapabilities(executor: Executor, raw: unknown): {
+export function executorSettingsFromCapabilities(executor: Executor | null, raw: unknown): {
   models: ProxyModel[];
   thinkingLevels: string[];
   modes: ProxyModeCapabilities[];
 } {
+  if (!executor) return { models: [], thinkingLevels: [], modes: [] };
   const catalog = catalogFromCapabilities(raw);
   const catalogModels = modelsFromCatalog(optionByRole(catalog.configOptions, 'model'));
   const models = catalogModels.length > 0 ? catalogModels : legacyModels(raw);

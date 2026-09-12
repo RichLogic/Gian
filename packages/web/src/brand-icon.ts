@@ -1,4 +1,4 @@
-import type { Accent, SystemConfig } from '@gian/shared';
+import type { SystemConfig } from '@gian/shared';
 import { desktopBridge } from './desktop-bridge.js';
 
 export const GIAN_ICON_VIEWBOX = 1254;
@@ -17,16 +17,11 @@ export const GIAN_DRAGON_WHISKER_TOP_PATH = 'M 966.169 331.983 C 964.337 332.421
 
 export const GIAN_DRAGON_WHISKER_BOTTOM_PATH = 'M 985.028 407.574 C 968.818 415.026, 954.948 421.628, 954.205 422.245 C 948.994 426.569, 947.684 437.349, 951.699 442.864 C 954.634 446.897, 961.786 450.217, 965.921 449.466 C 968.967 448.913, 1004.404 433.504, 1022.283 424.958 C 1030.674 420.947, 1033.262 417.598, 1033.788 410.065 C 1034.252 403.427, 1031.607 398.579, 1025.980 395.752 C 1019.160 392.325, 1016.573 393.072, 985.028 407.574';
 
-const ACCENTS: Record<Accent, { hue: number; chroma: number }> = {
-  rose: { hue: 5, chroma: 0.15 },
-  ember: { hue: 35, chroma: 0.14 },
-  citron: { hue: 95, chroma: 0.13 },
-  moss: { hue: 150, chroma: 0.11 },
-  teal: { hue: 195, chroma: 0.11 },
-  azure: { hue: 230, chroma: 0.13 },
-  ink: { hue: 270, chroma: 0.13 },
-  plum: { hue: 320, chroma: 0.14 },
-};
+/* The brand gradient is FIXED to the former Plum accent's hues (2026-09-08
+ *  owner call): the logo no longer follows the accent setting — one Gian
+ *  mark, theme-adjusted lightness only. */
+const ICON_HUE = 320;
+const ICON_CHROMA = 0.14;
 
 const THEME_LIGHTNESS: Record<SystemConfig['theme'], [number, number, number]> = {
   light: [0.66, 0.74, 0.58],
@@ -36,25 +31,22 @@ const THEME_LIGHTNESS: Record<SystemConfig['theme'], [number, number, number]> =
 
 export function gianIconGradient(
   theme: SystemConfig['theme'],
-  accent: Accent,
 ): [string, string, string] {
   const [l1, l2, l3] = THEME_LIGHTNESS[theme];
-  const { hue, chroma } = ACCENTS[accent];
-  const outerChroma = (chroma + 0.04).toFixed(2);
-  const centerChroma = (chroma + 0.06).toFixed(2);
+  const outerChroma = (ICON_CHROMA + 0.04).toFixed(2);
+  const centerChroma = (ICON_CHROMA + 0.06).toFixed(2);
   return [
-    `oklch(${l1} ${outerChroma} ${hue - 46})`,
-    `oklch(${l2} ${centerChroma} ${hue + 8})`,
-    `oklch(${l3} ${outerChroma} ${hue + 60})`,
+    `oklch(${l1} ${outerChroma} ${ICON_HUE - 46})`,
+    `oklch(${l2} ${centerChroma} ${ICON_HUE + 8})`,
+    `oklch(${l3} ${outerChroma} ${ICON_HUE + 60})`,
   ];
 }
 
 export function buildGianIconSvg(
   theme: SystemConfig['theme'],
-  accent: Accent,
   development = false,
 ): string {
-  const [g1, g2, g3] = gianIconGradient(theme, accent);
+  const [g1, g2, g3] = gianIconGradient(theme);
   return [
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254">',
     '<defs><linearGradient id="accent" x1="0%" y1="26.65%" x2="100%" y2="73.35%">',
@@ -84,7 +76,6 @@ function updateFavicon(svg: string): void {
 
 function renderDockIcon(
   theme: SystemConfig['theme'],
-  accent: Accent,
   development: boolean,
 ): string | null {
   const size = 512;
@@ -96,7 +87,7 @@ function renderDockIcon(
 
   const tileSize = size * GIAN_MACOS_ICON_SCALE;
   const inset = (size - tileSize) / 2;
-  const [g1, g2, g3] = gianIconGradient(theme, accent);
+  const [g1, g2, g3] = gianIconGradient(theme);
   const gradient = context.createLinearGradient(
     inset,
     inset + tileSize * 0.2665,
@@ -147,15 +138,14 @@ function renderDockIcon(
 
 export function applyGianIconAppearance(
   theme: SystemConfig['theme'],
-  accent: Accent,
 ): void {
   const bridge = desktopBridge();
   const development = bridge?.appVariant === 'development';
-  updateFavicon(buildGianIconSvg(theme, accent, development));
+  updateFavicon(buildGianIconSvg(theme, development));
   if (!bridge?.setDockIcon) return;
 
   try {
-    const icon = renderDockIcon(theme, accent, development);
+    const icon = renderDockIcon(theme, development);
     if (icon) void bridge.setDockIcon(icon);
   } catch {
     // The favicon still updates when a browser lacks Canvas OKLCH support.

@@ -158,10 +158,18 @@ export class TaskManager {
           : input.status === 'open'
             ? 0
             : null;
-        if (archived !== null) {
+        if (archived === 1) {
+          // T1 (2026-09-06): completing a Task marks its sessions completed
+          // FIRST (completed_at sticks), then archives them.
           this.db
-            .prepare('UPDATE sessions SET archived = ?, updated_at = ? WHERE task_id = ?')
-            .run(archived, now, id);
+            .prepare('UPDATE sessions SET completed_at = COALESCE(completed_at, @now), archived = 1, updated_at = @now WHERE task_id = @id')
+            .run({ now, id });
+        } else if (archived === 0) {
+          // Reopen restores visibility only — completed_at is NOT cleared,
+          // so the sessions stay marked done.
+          this.db
+            .prepare('UPDATE sessions SET archived = 0, updated_at = @now WHERE task_id = @id')
+            .run({ now, id });
         }
       }
     };

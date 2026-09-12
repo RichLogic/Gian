@@ -1,4 +1,4 @@
-import { EXECUTOR_IDS, type AttentionMessage } from '@gian/shared';
+import { isProxyPluginId, type AttentionMessage } from '@gian/shared';
 
 export interface AttentionSocket {
   addEventListener(type: 'open', listener: () => void): void;
@@ -158,7 +158,7 @@ export function parseAttentionMessage(data: unknown): AttentionMessage | null {
     || !isBoundedString(candidate.title, 1, 256)
     || !isBoundedString(candidate.body, 1, 512)
     || !['turn-completed', 'approval', 'question', 'error'].includes(String(candidate.kind))
-    || !(EXECUTOR_IDS as readonly string[]).includes(String(candidate.provider))
+    || !isProxyPluginId(candidate.provider)
   ) {
     return null;
   }

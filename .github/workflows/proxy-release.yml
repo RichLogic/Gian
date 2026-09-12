@@ -1,119 +1,119 @@
-name: Release Gian Proxy Plugin
+name: Release Certified Gian Proxy Plugin
 
 on:
-  push:
-    tags:
-      - 'proxy-claude-v*'
-      - 'proxy-codex-v*'
-      - 'proxy-kimi-v*'
-      - 'proxy-dsh-v*'
-      - 'proxy-zcode-v*'
+  workflow_dispatch:
+    inputs:
+      certification_run_id:
+        description: Successful Proxy Release Certification workflow run ID
+        required: true
+        type: string
+      provider:
+        description: Proxy package releaseId from its package.json gianProxy metadata
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
-  group: proxy-release-${{ github.ref }}
+  group: proxy-release-${{ inputs.provider }}
   cancel-in-progress: false
 
 jobs:
-  macos-arm64:
+  publish-certified-artifact:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Require release commit on main
-        run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
-
-      - name: Resolve plugin metadata
-        id: plugin
+      - name: Resolve and authenticate certification run
+        id: certification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
         shell: bash
         run: |
-          case "${GITHUB_REF_NAME}" in
-            proxy-claude-v*)
-              ID=claude
-              PACKAGE=@gian/cc-proxy
-              MANIFEST=packages/proxies/cc-proxy/package.json
-              ;;
-            proxy-codex-v*)
-              ID=codex
-              PACKAGE=@gian/codex-proxy
-              MANIFEST=packages/proxies/codex-proxy/package.json
-              ;;
-            proxy-kimi-v*)
-              ID=kimi
-              PACKAGE=@gian/kimi-proxy
-              MANIFEST=packages/proxies/kimi-proxy/package.json
-              ;;
-            proxy-dsh-v*)
-              ID=dsh
-              PACKAGE=@gian/dsh-proxy
-              MANIFEST=packages/proxies/dsh-proxy/package.json
-              ;;
-            proxy-zcode-v*)
-              ID=zcode
-              PACKAGE=@gian/zcode-proxy
-              MANIFEST=packages/proxies/zcode-proxy/package.json
-              ;;
-            *) exit 1 ;;
-          esac
-          VERSION="${GITHUB_REF_NAME#proxy-${ID}-v}"
-          test "$(node -p "require('./${MANIFEST}').version")" = "${VERSION}"
-          echo "id=${ID}" >> "${GITHUB_OUTPUT}"
-          echo "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r '.status' <<<"${RUN_JSON}")" = completed
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = success
+          test "$(jq -r '.event' <<<"${RUN_JSON}")" = workflow_dispatch
+          test "$(jq -r '.path' <<<"${RUN_JSON}")" = .github/workflows/proxy-certification.yml
+          test "$(jq -r '.head_repository.full_name' <<<"${RUN_JSON}")" = "${GITHUB_REPOSITORY}"
+          RUN_SHA="$(jq -r '.head_sha' <<<"${RUN_JSON}")"
+          test -n "${RUN_SHA}"
+          echo "sha=${RUN_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "artifact=proxy-release-certification-${RUN_SHA}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - name: Check out the certified revision
+        uses: actions/checkout@v6
         with:
-          version: 10.33.2
+          ref: ${{ steps.certification.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Require certified revision on main
+        run: git merge-base --is-ancestor "${{ steps.certification.outputs.sha }}" origin/main
 
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build and test protocol
-        run: |
-          pnpm --filter @gian/shared build
-          pnpm --filter @gian/proxy-protocol test
-
-      - name: Build and test plugin
-        run: |
-          if [ "${{ steps.plugin.outputs.id }}" = "dsh" ]; then
-            pnpm --filter @gian/dsh-bridge test
-          fi
-          pnpm --filter "${{ steps.plugin.outputs.package }}" test
-
-      - name: Package plugin
-        run: >-
-          node scripts/build-proxy-artifacts.mjs
-          --plugin "${{ steps.plugin.outputs.id }}"
-          --version "${{ steps.plugin.outputs.version }}"
-
-      - name: Verify packaged checksum
-        working-directory: artifacts/proxies
-        run: >-
-          shasum -a 256 -c
-          "gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.sha256"
-
-      - name: Publish GitHub Release
+      - name: Download certification artifact
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
+          ARTIFACT_NAME: ${{ steps.certification.outputs.artifact }}
+        run: gh run download "${RUN_ID}" --name "${ARTIFACT_NAME}" --dir certification
+
+      - name: Resolve plugin metadata
+        id: plugin
+        env:
+          PROVIDER: ${{ inputs.provider }}
+        shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz" \
-            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.sha256" \
-            "artifacts/proxies/gian-proxy-${{ steps.plugin.outputs.id }}-${{ steps.plugin.outputs.version }}-darwin-arm64.tar.gz.manifest.json" \
+          METADATA="$(node scripts/proxy-release-metadata.mjs --provider "${PROVIDER}")"
+          echo "id=$(jq -r '.id' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "version=$(jq -r '.version' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "tag=$(jq -r '.tag' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+          echo "asset=$(jq -r '.asset' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify certificate and exact tested artifacts
+        run: >-
+          node scripts/verify-proxy-release-certificate.mjs
+          --certificate certification/output/proxy-certification/release/certificate.json
+          --artifact-dir certification/artifacts/proxies
+          --revision "${{ steps.certification.outputs.sha }}"
+          --provider "${{ steps.plugin.outputs.id }}"
+          --version "${{ steps.plugin.outputs.version }}"
+
+      - name: Create or validate immutable release tag
+        env:
+          TAG: ${{ steps.plugin.outputs.tag }}
+          CERTIFIED_SHA: ${{ steps.certification.outputs.sha }}
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            test "$(git rev-list -n 1 "${TAG}")" = "${CERTIFIED_SHA}"
+          else
+            git tag -a "${TAG}" "${CERTIFIED_SHA}" -m "Certified Gian ${TAG}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
+      - name: Publish only the certified Proxy artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plugin.outputs.tag }}
+          PROVIDER: ${{ steps.plugin.outputs.id }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+          ASSET: ${{ steps.plugin.outputs.asset }}
+        shell: bash
+        run: |
+          ASSET_DIR=certification/artifacts/proxies
+          gh release create "${TAG}" \
+            "${ASSET_DIR}/${ASSET}" \
+            "${ASSET_DIR}/${ASSET}.sha256" \
+            "${ASSET_DIR}/${ASSET}.manifest.json" \
             --verify-tag \
             --generate-notes \
             --latest=false \
-            --title "Gian ${{ steps.plugin.outputs.id }} Proxy ${{ steps.plugin.outputs.version }}"
+            --title "Gian ${PROVIDER} Proxy ${VERSION}"

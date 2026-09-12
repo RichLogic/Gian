@@ -4,9 +4,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+
 import { CcProxyService } from '../core/service.js';
+import { createTaskQueue } from '../core/task-queue.js';
 import { ClaudeProtocolV2Adapter } from '../protocol/v2-adapter.js';
 import { ClaudeMcpRuntime } from '../runtime/claude-mcp-runtime.js';
+import { discoverClaudeRuntimes, probeClaudeRuntime } from '../runtime/discover.js';
 import {
   ClaudeProtocolError,
   createProtocolWriter,
@@ -40,7 +44,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.3';
+  return '0.2.4';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -48,7 +52,7 @@ const PLUGIN_VERSION = readPluginVersion();
 function runSelfTest(argv: string[]): boolean {
   if (!argv.includes(SELF_TEST_FLAG)) return false;
   process.stdout.write(`${JSON.stringify({
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: 'claude',
     pluginVersion: PLUGIN_VERSION,
     ok: true,
@@ -70,6 +74,17 @@ function parseArgs(argv: string[]) {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (runSelfTest(argv)) return;
+  if (isRuntimeBootstrapOffer()) {
+    await serveRuntimeBootstrap({
+      pluginId: process.env.GIAN_PLUGIN_ID ?? 'claude',
+      pluginName: 'Claude Code',
+      pluginVersion: PLUGIN_VERSION,
+      processScope: 'session',
+      discover: discoverClaudeRuntimes,
+      probe: probeClaudeRuntime,
+    });
+    return;
+  }
   parseArgs(argv);
   if (process.env.GIAN_RUNTIME_BIN) {
     process.env.CLAUDE_BIN = process.env.GIAN_RUNTIME_BIN;
@@ -108,11 +123,29 @@ async function main(): Promise<void> {
   );
   await service.initialize();
 
+  // Every dispatched task (session or scan) is tracked so EOF/shutdown/signal
+  // can drain in-flight work before the process exits: a scan must never be
+  // orphaned without its Response because the loop ended or a shutdown was
+  // processed while it was still running.
+  const queue = createTaskQueue('cc-proxy');
+
   let shuttingDown = false;
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await service.close();
+    try {
+      await queue.drain();
+      await service.close();
+    } catch (error) {
+      // Fail closed: an unverified terminal cleanup must turn the shutdown
+      // into a failed exit, not a silent clean one — and must never surface
+      // as an unhandled rejection.
+      console.error(
+        '[cc-proxy:shutdown] cleanup failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+      process.exit(1);
+    }
     process.exit(code);
   };
   process.on('SIGINT', () => {
@@ -127,6 +160,43 @@ async function main(): Promise<void> {
     input: process.stdin,
     crlfDelay: Infinity,
   });
+
+  // Customization scans are pipelined (never await each other) so every kind
+  // of an aggregate inspection is answered within its own bound: a slow kind
+  // must not queue the remaining kinds behind it and push them past the Host
+  // per-request timeout. Inspection processes never carry live sessions;
+  // session requests (including shutdown) stay serialized among themselves.
+  const isCustomization = (method: string): boolean => (
+    method === 'customization.list' || method === 'customization.detail'
+  );
+
+  const dispatchTask = async (request: { id: string; method: string; params: Record<string, unknown> }) => {
+    try {
+      const result = await adapter.handle(request);
+      if (request.method === 'sidechat.close') {
+        // Contract §10.5.4 explicitly requires teardown terminals before the
+        // close Success response.
+        adapter.flushDeferredNotifications();
+        writer.result(request.id, result);
+      } else {
+        writer.result(request.id, result);
+        // Response-before-Notification: turn.started and interaction.resolved
+        // are produced inside handle(), so the CLI must flush them only after
+        // the JSON-RPC Response has been written.
+        adapter.flushDeferredNotifications();
+      }
+      if (request.method === 'shutdown') {
+        input.close();
+        void shutdown(0);
+      }
+    } catch (error) {
+      // Failure responses still precede notifications. Never discard a queued
+      // notification: it may resolve a pending interaction or close a content
+      // stream that the Host is already rendering.
+      writer.error(request.id, error);
+      adapter.flushDeferredNotifications();
+    }
+  };
 
   for await (const line of input) {
     if (!line.trim()) continue;
@@ -158,34 +228,19 @@ async function main(): Promise<void> {
       continue;
     }
 
-    try {
-      const result = await adapter.handle(request);
-      if (request.method === 'sidechat.close') {
-        // Contract §10.5.4 explicitly requires teardown terminals before the
-        // close Success response.
-        adapter.flushDeferredNotifications();
-        writer.result(request.id, result);
-      } else {
-        writer.result(request.id, result);
-        // Response-before-Notification: turn.started and interaction.resolved
-        // are produced inside handle(), so the CLI must flush them only after
-        // the JSON-RPC Response has been written.
-        adapter.flushDeferredNotifications();
-      }
-      if (request.method === 'shutdown') {
-        input.close();
-        await shutdown(0);
-        return;
-      }
-    } catch (error) {
-      // Failure responses still precede notifications. Never discard a queued
-      // notification: it may resolve a pending interaction or close a content
-      // stream that the Host is already rendering.
-      writer.error(request.id, error);
-      adapter.flushDeferredNotifications();
+    if (isCustomization(request.method)) {
+      // Pipelined by design; the loop never waits for a scan.
+      queue.enqueuePipelined(() => dispatchTask(request));
+      continue;
     }
+    // Session traffic is strictly serialized relative to itself but never
+    // waits for an in-flight customization scan (and vice versa).
+    queue.enqueueSession(() => dispatchTask(request));
   }
 
+  // EOF with work still in flight: every tracked task (including scans) gets
+  // to write its Response before the process exits.
+  await queue.drain();
   await shutdown(0);
 }
 

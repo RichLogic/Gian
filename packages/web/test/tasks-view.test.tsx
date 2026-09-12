@@ -13,16 +13,18 @@
 //   - Subtask rows carry hover pin (`session.pin`, open subtasks only) and a
 //     complete/reopen toggle (task.completeSubtask / task.reopenSubtask),
 //     disabled while a turn is running.
-//   - Tasks exposes only the new-task action in its sidebar header; the
-//     session-search button remains exclusive to Sessions view.
+//   - The Tasks rail nav block ends with the Tasks/Repos list-switch dropdown
+//     row (2026-09-08, replaces the sticky segmented switch); new-task lives
+//     on the 进行中 section header's hover "+" (2026-09-07). Search is ⌘K-only.
 //   - All task mutations dispatch through the operation layer (Phase 3a):
 //     rename/done/pin are optimistic overlays on `task:<id>`, create/delete
 //     are pending (delete keeps the row visible with a pending affordance).
-//   - The sidebar "+" creates a task with NO executor pick.
+//   - The 进行中 section "+" creates a task with NO executor pick.
 //   - A selected task (no session) shows the placeholder panel.
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClientToServerMessage, Session, Task, Workspace } from '@gian/shared';
@@ -52,6 +54,7 @@ vi.mock('../src/api.js', () => ({
     {
       id: 'agent-codex-1',
       name: 'Codex',
+      pluginId: 'codex',
       proxy: 'codex',
       cliPath: '/bin/codex',
       defaults: { model: '', thinking: '', mode: '' },
@@ -147,6 +150,7 @@ function operationHarness() {
 function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
   const onSelectTask = vi.fn();
   const onSelectSubtask = vi.fn();
+  const onSelectSession = vi.fn();
   const onSetPendingFirstMessage = vi.fn();
   const harness = operationHarness();
   const view = render(
@@ -160,6 +164,10 @@ function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
           workspaces={[workspace('ws-1')]}
           activeTaskId={null}
           activeSubtaskId={null}
+          activeSessionId={null}
+          onSelectSession={onSelectSession}
+          onPinSession={vi.fn()}
+          onArchiveSession={vi.fn()}
           subtaskMain={null}
           onSelectTask={onSelectTask}
           onSelectSubtask={onSelectSubtask}
@@ -173,6 +181,7 @@ function renderTasks(props: Partial<Parameters<typeof TasksView>[0]> = {}) {
   return {
     onSelectTask,
     onSelectSubtask,
+    onSelectSession,
     onSetPendingFirstMessage,
     opSent: harness.sent,
     unmount: view.unmount,
@@ -188,24 +197,26 @@ beforeEach(() => {
 });
 
 describe('subtasksFor ordering', () => {
-  it('puts pinned subtasks first (pinned_at DESC), then created_at DESC', () => {
+  // 2026-09-06 owner call: no pin in the Tasks rail; open rows follow
+  // created_at ASC, completed sink to the bottom.
+  it('orders open subtasks by created_at ASC, ignoring pins', () => {
     const sessions = [
       subtask({ id: 'a', created_at: '2026-08-01T03:00:00Z' }),
       subtask({ id: 'b', pinned_at: '2026-08-01T01:00:00Z', created_at: '2026-08-01T01:00:00Z' }),
       subtask({ id: 'c', created_at: '2026-08-01T02:00:00Z' }),
       subtask({ id: 'd', pinned_at: '2026-08-01T02:00:00Z', created_at: '2026-08-01T00:00:00Z' }),
     ];
-    expect(subtasksFor(sessions, 'task-1').map(s => s.id)).toEqual(['d', 'b', 'a', 'c']);
+    expect(subtasksFor(sessions, 'task-1').map(s => s.id)).toEqual(['d', 'b', 'c', 'a']);
   });
 
-  it('sinks completed subtasks to the bottom (created_at DESC), pins ignored', () => {
+  it('sinks completed subtasks to the bottom, pins ignored', () => {
     const sessions = [
       subtask({ id: 'a', created_at: '2026-08-01T01:00:00Z' }),
       subtask({ id: 'b', completed_at: '2026-08-01T02:00:00Z', created_at: '2026-08-01T03:00:00Z' }),
       subtask({ id: 'c', pinned_at: '2026-08-01T02:00:00Z', created_at: '2026-08-01T02:00:00Z' }),
       subtask({ id: 'd', completed_at: '2026-08-01T01:00:00Z', pinned_at: '2026-08-01T03:00:00Z', created_at: '2026-08-01T04:00:00Z' }),
     ];
-    expect(subtasksFor(sessions, 'task-1').map(s => s.id)).toEqual(['c', 'a', 'd', 'b']);
+    expect(subtasksFor(sessions, 'task-1').map(s => s.id)).toEqual(['a', 'c', 'b', 'd']);
   });
 
   it('ignores sessions of other tasks and non-subtask types', () => {
@@ -373,7 +384,6 @@ describe('task group row actions', () => {
       expect(createSubtask).toHaveBeenCalledWith('task-1', {
         workspace_id: 'ws-1',
         agent_id: 'agent-codex-1',
-        executor: 'codex',
         name: 'Child title',
         service_tier: 'fast',
       });
@@ -425,6 +435,12 @@ describe('task group row actions', () => {
 });
 
 describe('sections (进行中 / 完成)', () => {
+  it('labels the open group Doing (2026-09-06 owner call)', () => {
+    renderTasks({ tasks: [task()] });
+    expect(screen.getByTestId('tasks-section-doing')).toHaveTextContent('Doing');
+    expect(screen.getByText('My task')).toBeInTheDocument();
+  });
+
   it('renders open tasks under In Progress and done tasks under Done, both collapsible', async () => {
     renderTasks({
       tasks: [
@@ -432,14 +448,186 @@ describe('sections (进行中 / 完成)', () => {
         task({ id: 'task-2', name: 'Done one', status: 'done', created_at: '2026-08-02T00:00:00Z' }),
       ],
     });
-    // Open tasks render directly (no section header); 完成 collapsed by default.
+    // 进行中 expanded by default; 完成 collapsed by default (persisted).
     expect(screen.getByText('Open one')).toBeInTheDocument();
     expect(screen.queryByText('Done one')).toBeNull();
+    // Section headers carry no count badge (2026-09-07 Codex-style refactor).
+    expect(screen.getByTestId('tasks-section-doing').querySelector('.count')).toBeNull();
+    expect(screen.getByTestId('tasks-section-done').querySelector('.count')).toBeNull();
     await userEvent.click(screen.getByTestId('tasks-section-done'));
     expect(screen.getByText('Done one')).toBeInTheDocument();
     // 完成 row is struck + greyed and carries no "+".
     expect(screen.getByText('Done one').closest('.done-task-group')).not.toBeNull();
     expect(screen.queryByTestId('task-new-session-task-2')).toBeNull();
+  });
+
+  it('always renders the 进行中 header — its "+" stays reachable with zero open tasks', () => {
+    renderTasks({ tasks: [] });
+    const section = screen.getByTestId('tasks-section-doing');
+    expect(section).toHaveTextContent('Doing');
+    expect(screen.getByTestId('tasks-section-doing-add')).toBeInTheDocument();
+  });
+
+  it('persists section collapse across a rail remount (localStorage)', async () => {
+    const both = () => [
+      task({ id: 'task-1', name: 'Open one' }),
+      task({ id: 'task-2', name: 'Done one', status: 'done' as const, created_at: '2026-08-02T00:00:00Z' }),
+    ];
+    const first = renderTasks({ tasks: both() });
+    // Default: 进行中 expanded, 完成 collapsed.
+    expect(screen.getByText('Open one')).toBeInTheDocument();
+    expect(screen.queryByText('Done one')).toBeNull();
+
+    await userEvent.click(screen.getByTestId('tasks-section-doing'));
+    await userEvent.click(screen.getByTestId('tasks-section-done'));
+    expect(screen.queryByText('Open one')).toBeNull();
+    expect(screen.getByText('Done one')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('gian.tasks.sections.collapsed')!))
+      .toEqual(expect.arrayContaining(['doing']));
+
+    // Switching to the Repos tab unmounts this rail — the persisted state
+    // survives the remount.
+    first.unmount();
+    renderTasks({ tasks: both() });
+    expect(screen.getByTestId('tasks-section-doing')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Open one')).toBeNull();
+    expect(screen.getByTestId('tasks-section-done')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Done one')).toBeInTheDocument();
+  });
+});
+
+describe('unassigned group (未分配)', () => {
+  it('lists untasked sessions, collapses, and selects through the Project surface', async () => {
+    const { onSelectSession } = renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ id: 'sub-1', name: 'Bound one' }),
+        subtask({ id: 'sess-loose', name: 'Loose chat', type: 'coding', task_id: null }),
+      ],
+    });
+    const section = await screen.findByTestId('tasks-section-unassigned');
+    expect(section).toHaveTextContent('Unassigned');
+    // No count badge on section headers (2026-09-07 Codex-style refactor).
+    expect(section.querySelector('.count')).toBeNull();
+    // Expanded by default; the untasked row shows, the task-bound one does not.
+    const row = screen.getByTestId('session-row-sess-loose');
+    expect(row).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-sub-1')).not.toBeInTheDocument();
+    // Collapse hides the rows.
+    await userEvent.click(section);
+    expect(screen.queryByTestId('session-row-sess-loose')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId('tasks-section-unassigned'));
+    await userEvent.click(screen.getByTestId('session-row-sess-loose'));
+    expect(onSelectSession).toHaveBeenCalledWith('sess-loose');
+  });
+
+  it('omits archived, manager, and hidden-workspace sessions', async () => {
+    renderTasks({
+      workspaces: [workspace('ws-1'), { ...workspace('ws-hidden'), hidden: 1 }],
+      sessions: [
+        subtask({ id: 'sess-archived', type: 'coding', task_id: null, archived: 1 }),
+        subtask({ id: 'sess-manager', type: 'manager', task_id: null }),
+        subtask({ id: 'sess-hidden-ws', type: 'coding', task_id: null, workspace_id: 'ws-hidden' }),
+      ],
+    });
+    // Nothing eligible → the group itself stays hidden.
+    await waitFor(() => expect(screen.queryByTestId('tasks-section-unassigned')).not.toBeInTheDocument());
+  });
+});
+
+describe('Tasks rail rows (T2/T4)', () => {
+  it('drops the row-end time stamp from subtask and unassigned rows', async () => {
+    renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ status: 'done', unread: 0 }),
+        subtask({ id: 'sess-loose', name: 'Loose', type: 'coding', task_id: null }),
+      ],
+    });
+    await screen.findByTestId('session-row-sess-loose');
+    const rail = document.querySelector('.tasks-rail');
+    expect(rail).not.toBeNull();
+    expect(rail!.querySelectorAll('.ri-age')).toHaveLength(0);
+  });
+
+  it('dragging an unassigned row onto a task header assigns it (session.assignTask)', async () => {
+    const { opSent } = renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ id: 'sub-1', name: 'Bound' }),
+        subtask({ id: 'sess-loose', name: 'Loose', type: 'coding', task_id: null }),
+      ],
+    });
+    const row = await screen.findByTestId('session-row-sess-loose');
+    const header = screen.getByText('My task').closest('.task-group')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: () => {} };
+    fireEvent.dragStart(row, { dataTransfer });
+    // The header only accepts while the unassigned drag is in flight.
+    expect(header.className).toContain('dnd-assign-target');
+    fireEvent.dragOver(header, { dataTransfer, clientY: 0 });
+    fireEvent.drop(header, { dataTransfer });
+    expect(opSent.at(-1)).toMatchObject({
+      type: 'session:assign_task',
+      session_id: 'sess-loose',
+      task_id: 'task-1',
+    });
+  });
+
+  it('moves a subtask to another task via its header (task → task)', async () => {
+    const { opSent } = renderTasks({
+      tasks: [task(), task({ id: 'task-2', name: 'Other task', created_at: '2026-08-02T00:00:00Z' })],
+      sessions: [subtask({ id: 'sub-1', name: 'Bound' })],
+    });
+    const rowEl = (await screen.findByText('Bound')).closest('.session-row')!;
+    const ownHeader = screen.getByText('My task').closest('.task-group')!;
+    const targetHeader = screen.getByText('Other task').closest('.task-group')!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: () => {} };
+    fireEvent.dragStart(rowEl, { dataTransfer });
+    // Its own task's header does not accept; the other task's does.
+    expect(ownHeader.className).not.toContain('dnd-assign-target');
+    expect(targetHeader.className).toContain('dnd-assign-target');
+    fireEvent.dragOver(targetHeader, { dataTransfer, clientY: 0 });
+    fireEvent.drop(targetHeader, { dataTransfer });
+    expect(opSent.at(-1)).toMatchObject({
+      type: 'session:assign_task',
+      session_id: 'sub-1',
+      task_id: 'task-2',
+    });
+  });
+
+  it('releases a subtask to standalone via the unassigned section header (task → null)', async () => {
+    const { opSent } = renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ id: 'sub-1', name: 'Bound' }),
+        // The 未分配 section must exist as a drop target even while empty.
+        subtask({ id: 'sess-loose', name: 'Loose', type: 'coding', task_id: null }),
+      ],
+    });
+    const rowEl = (await screen.findByText('Bound')).closest('.session-row')!;
+    const sectionHeader = screen.getByTestId('tasks-section-unassigned');
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: () => {} };
+    fireEvent.dragStart(rowEl, { dataTransfer });
+    expect(sectionHeader.className).toContain('dnd-assign-target');
+    fireEvent.dragOver(sectionHeader, { dataTransfer, clientY: 0 });
+    fireEvent.drop(sectionHeader, { dataTransfer });
+    expect(opSent.at(-1)).toMatchObject({
+      type: 'session:assign_task',
+      session_id: 'sub-1',
+      task_id: null,
+    });
+  });
+});
+
+describe('standalone session in place (未分配 click stays in Tasks)', () => {
+  it('renders the App-built session surface when a standalone session is selected', () => {
+    renderTasks({
+      sessions: [subtask({ id: 'sess-loose', name: 'Loose', type: 'coding', task_id: null })],
+      activeSessionId: 'sess-loose',
+      subtaskMain: <div data-testid="standalone-surface">surface</div>,
+    });
+    expect(screen.getByTestId('standalone-surface')).toBeInTheDocument();
+    expect(screen.queryByText('Select a task to view its sessions.')).toBeNull();
   });
 });
 
@@ -459,23 +647,35 @@ describe('done group', () => {
 });
 
 describe('subtask row actions', () => {
-  it('pins via session.pin (operation layer, request-correlated)', async () => {
-    const { opSent } = renderTasks({ tasks: [task()], sessions: [subtask()] });
-    const row = screen.getByText('Sub session').closest('.session-row')!;
-    await userEvent.hover(row);
-    await userEvent.click(screen.getByTestId('subtask-pin-sub-1'));
-    expect(opSent.at(-1)).toMatchObject({ type: 'session:pin', session_id: 'sub-1', pinned: true });
-    expect((opSent.at(-1) as { request_id?: string })?.request_id).toBeTruthy();
-  });
-
-  it('a completed subtask cannot be pinned — no pin button', () => {
+  // 2026-09-06 owner call: the Tasks rail has no pin concept — no pin button
+  // on any subtask row, and pinned_at no longer reorders the list.
+  it('has no pin button on subtask rows (open or completed)', () => {
     renderTasks({
       tasks: [task()],
-      sessions: [subtask({ completed_at: '2026-08-01T04:00:00Z' })],
+      sessions: [subtask(), subtask({ id: 'sub-2', name: 'Done sub', completed_at: '2026-08-01T04:00:00Z' })],
     });
     expect(screen.queryByTestId('subtask-pin-sub-1')).toBeNull();
-    // The reopen toggle is still there (hover action).
+    expect(screen.queryByTestId('subtask-pin-sub-2')).toBeNull();
+    // The complete/reopen toggles stay (hover actions).
     expect(screen.getByTestId('subtask-complete-sub-1')).toBeInTheDocument();
+    expect(screen.getByTestId('subtask-complete-sub-2')).toBeInTheDocument();
+  });
+
+  it('marks glyph-carrying rows has-status and reserves the row-end space (2026-09-08 overlap regression)', () => {
+    // The status glyph is an absolutely-positioned overlay at the row end;
+    // without the reservation a long title runs under it (owner report).
+    renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ id: 'run-1', name: 'Running sub', status: 'running' }),
+        subtask({ id: 'plain-1', name: 'Plain sub' }),
+      ],
+    });
+    expect(screen.getByText('Running sub').closest('.session-row')).toHaveClass('has-status');
+    expect(screen.getByText('Plain sub').closest('.session-row')).not.toHaveClass('has-status');
+    const css = readFileSync('src/styles/tasks-v3.css', 'utf8');
+    expect(css.match(/\.tasks-rail \.session-row\.has-status \.ri-row1\s*\{([^}]*)\}/)?.[1] ?? '')
+      .toMatch(/padding-right:\s*26px/);
   });
 
   it('completes via REST /complete and reopens via /reopen (operation layer)', async () => {
@@ -486,7 +686,7 @@ describe('subtask row actions', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            tasks={[task()]}
+              tasks={[task()]}
             sessions={[subtask()]}
             workspaces={[workspace('ws-1')]}
             activeTaskId={null}
@@ -508,7 +708,7 @@ describe('subtask row actions', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            tasks={[task()]}
+              tasks={[task()]}
             sessions={[subtask({ completed_at: '2026-08-01T04:00:00Z' })]}
             workspaces={[workspace('ws-1')]}
             activeTaskId={null}
@@ -525,23 +725,24 @@ describe('subtask row actions', () => {
     expect(reopenSubtask).toHaveBeenCalledWith('sub-1');
   });
 
-  it('hides the complete toggle while the turn is running (pin stays)', () => {
+  it('hides the complete toggle while the turn is running (no other action shows)', () => {
     renderTasks({ tasks: [task()], sessions: [subtask({ status: 'running' })] });
     expect(screen.queryByTestId('subtask-complete-sub-1')).toBeNull();
-    expect(screen.getByTestId('subtask-pin-sub-1')).toBeTruthy();
+    expect(screen.queryByTestId('subtask-pin-sub-1')).toBeNull();
   });
 });
 
 describe('new task form', () => {
-  it('does not render the Sessions search button', () => {
+  it('keeps the top row to the switch only — New lives on the 进行中 section "+"', async () => {
     renderTasks();
     expect(screen.queryByTestId('sb-open-search')).toBeNull();
-    expect(screen.getByTestId('sb-new-task')).toBeTruthy();
+    expect(screen.queryByTestId('sb-new-task')).toBeNull();
+    expect(screen.getByTestId('tasks-section-doing-add')).toBeInTheDocument();
   });
 
   it('creates a task without any executor pick', async () => {
     const { opSent } = renderTasks();
-    await userEvent.click(screen.getByTestId('sb-new-task'));
+    await userEvent.click(screen.getByTestId('tasks-section-doing-add'));
     await userEvent.type(screen.getByLabelText('Task name'), 'Fresh task');
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     expect(opSent.at(-1)).toMatchObject({ type: 'task:create', name: 'Fresh task' });
@@ -558,7 +759,7 @@ describe('task detail placeholder', () => {
           <TasksView
             mode="tasks"
             onSetMode={vi.fn()}
-            tasks={[task()]}
+              tasks={[task()]}
             sessions={[]}
             workspaces={[workspace('ws-1')]}
             activeTaskId="task-1"
@@ -573,5 +774,53 @@ describe('task detail placeholder', () => {
     );
     expect(container.querySelector('.tasks-detail-task-name')).toHaveTextContent('My task');
     expect(screen.getByText(/Pick a session from the list/)).toBeInTheDocument();
+  });
+});
+
+
+describe('show-more caps (2026-09-08 owner call)', () => {
+  // Everything in the Tasks rail caps at 5 rows + 显示更多 (+10 per click)
+  // EXCEPT the Doing tasks' open subtasks, which always render in full.
+  it('caps the 未分配 section at 5 rows and reveals 10 more per click', async () => {
+    const sessions = Array.from({ length: 7 }, (_, i) =>
+      subtask({ id: `loose-${i}`, name: `Loose ${i}`, type: 'coding', task_id: null, created_at: `2026-08-0${i + 1}T00:00:00Z` }));
+    renderTasks({ tasks: [task()], sessions });
+    await screen.findByTestId('tasks-section-unassigned');
+    expect(screen.queryByTestId('session-row-loose-4')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-loose-5')).toBeNull();
+    const more = screen.getByTestId('sb-showmore-unassigned');
+    expect(more).toHaveTextContent('Show more (2 more)');
+    await userEvent.click(more);
+    expect(screen.getByTestId('session-row-loose-6')).toBeInTheDocument();
+    expect(screen.queryByTestId('sb-showmore-unassigned')).toBeNull();
+  });
+
+  it('caps the 完成 section at 5 done tasks and reveals the rest', async () => {
+    const doneTasks = Array.from({ length: 7 }, (_, i) =>
+      task({ id: `done-${i}`, name: `Done ${i}`, status: 'done', created_at: `2026-08-0${i + 1}T00:00:00Z` }));
+    renderTasks({ tasks: doneTasks, sessions: [] });
+    await userEvent.click(screen.getByTestId('tasks-section-done'));
+    // Done tasks sort newest first (compareTasks) — the cap shows Done 6…2.
+    expect(screen.getByText('Done 2')).toBeInTheDocument();
+    expect(screen.queryByText('Done 1')).toBeNull();
+    await userEvent.click(screen.getByTestId('sb-showmore-done'));
+    expect(screen.getByText('Done 1')).toBeInTheDocument();
+    expect(screen.getByText('Done 0')).toBeInTheDocument();
+  });
+
+  it('keeps open subtasks uncapped while the completed tail caps at 5 + show more', async () => {
+    const openSubs = Array.from({ length: 6 }, (_, i) =>
+      subtask({ id: `open-${i}`, name: `Open ${i}`, status: 'running', created_at: `2026-08-0${i + 1}T00:00:00Z` }));
+    const completedSubs = Array.from({ length: 7 }, (_, i) =>
+      subtask({ id: `comp-${i}`, name: `Comp ${i}`, completed_at: `2026-08-0${i + 1}T01:00:00Z`, created_at: `2026-08-0${i + 1}T01:00:00Z` }));
+    renderTasks({ tasks: [task()], sessions: [...openSubs, ...completedSubs] });
+    // All 6 open subtasks render — no cap on unfinished conversations.
+    expect(screen.getByText('Open 5')).toBeInTheDocument();
+    // The completed tail shows 5 + 显示更多.
+    expect(screen.getByText('Comp 4')).toBeInTheDocument();
+    expect(screen.queryByText('Comp 5')).toBeNull();
+    await userEvent.click(screen.getByTestId('sb-showmore-completed-task-1'));
+    expect(screen.getByText('Comp 6')).toBeInTheDocument();
+    expect(screen.queryByTestId('sb-showmore-completed-task-1')).toBeNull();
   });
 });

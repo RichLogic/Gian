@@ -103,35 +103,5 @@
 }
 .main-head-r { display: flex; align-items: center; gap: 4px; }
 
-/* Git status chip in main-head-r: branch + worktree marker + +N/-N. */
-.main-head-changes {
-  display: inline-flex; align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border: 0;
-  border-radius: var(--r-1);
-  background: transparent;
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: -0.01em;
-  cursor: pointer;
-  transition: background 100ms var(--ease), color 100ms var(--ease);
-}
-.main-head-changes:hover { background: var(--surface-2); color: var(--text); }
-.main-head-changes .scr-plus,
-.main-head-changes .scr-minus {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
-  font-variant-numeric: tabular-nums;
-}
-.main-head-changes .scr-plus  { color: var(--ok); }
-.main-head-changes .scr-minus { color: var(--warn); }
-.main-head-changes:hover .scr-plus,
-.main-head-changes:hover .scr-minus { filter: brightness(1.15); }
-
 .main-head { flex-wrap: wrap; row-gap: 4px; }
 .main-head-l { flex-wrap: wrap; row-gap: 4px; }

@@ -1,9 +1,20 @@
-import { posix } from 'node:path';
+import { basename, dirname, isAbsolute, posix, resolve, sep } from 'node:path';
 
 export interface BrowserProjectSite {
   workingTreeId: string;
   root: string;
   entry: string;
+}
+
+export interface BrowserAbsoluteSite {
+  absoluteRoot: string;
+  entry: string;
+}
+
+export type BrowserPreviewSite = BrowserProjectSite | BrowserAbsoluteSite;
+
+export function isAbsoluteBrowserSite(site: BrowserPreviewSite): site is BrowserAbsoluteSite {
+  return 'absoluteRoot' in site;
 }
 
 export function createBrowserProjectSite(
@@ -50,6 +61,39 @@ export function resolveBrowserProjectPath(root: string, pathname: string): strin
   const full = posix.normalize(root ? `${root}/${normalized}` : normalized);
   if (!root) return normalizeRelativePath(full);
   if (full !== root && !full.startsWith(`${root}/`)) return null;
+  return full;
+}
+
+export function createBrowserAbsoluteSite(absolutePath: string): BrowserAbsoluteSite | null {
+  if (!absolutePath || absolutePath.includes('\0') || !isAbsolute(absolutePath)) return null;
+  const resolved = resolve(absolutePath);
+  const entry = basename(resolved);
+  if (!entry || entry === '.' || entry === '..') return null;
+  return { absoluteRoot: dirname(resolved), entry };
+}
+
+/** Resolve a custom-origin request next to an opened absolute file. Traversal
+ *  cannot leave the file's directory; the Host repeats the attachments check
+ *  for OS Open and still applies FILE-012 bounds for raw preview. */
+export function resolveAbsoluteBrowserPath(root: string, pathname: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  if (decoded.includes('\0') || decoded.includes('\\')) return null;
+
+  const directoryRequest = decoded === '' || decoded.endsWith('/');
+  const relative = decoded.replace(/^\/+/, '') || 'index.html';
+  const normalized = normalizeRelativePath(directoryRequest && relative !== 'index.html'
+    ? `${relative}/index.html`
+    : relative);
+  if (!normalized) return null;
+
+  const full = resolve(root, ...normalized.split('/'));
+  const rootResolved = resolve(root);
+  if (full !== rootResolved && !full.startsWith(`${rootResolved}${sep}`)) return null;
   return full;
 }
 

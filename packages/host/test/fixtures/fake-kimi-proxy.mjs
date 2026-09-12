@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const sessions = new Map();
 const emittedAt = '2026-07-29T00:00:00.000Z';
+let negotiatedProtocol = '2.0';
 
 function write(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -32,7 +33,7 @@ function catalog() {
       id: 'mode',
       displayName: 'Mode',
       binding: 'session',
-      role: 'approval_mode',
+      ...(negotiatedProtocol === '2.0' ? { role: 'approval_mode' } : {}),
       control: 'select',
       required: false,
       defaultValue: 'default',
@@ -43,6 +44,7 @@ function catalog() {
         { value: 'yolo', displayName: 'YOLO' },
       ],
     }],
+    ...(negotiatedProtocol === '2.0' ? {} : { specialCatalogs: { approvalMode: 'mode' } }),
     slashCommands: [{
       name: '/skill:review',
       description: 'Review code',
@@ -56,9 +58,14 @@ for await (const line of lines) {
   if (!line.trim()) continue;
   const request = JSON.parse(line);
   switch (request.method) {
-    case 'initialize':
+    case 'initialize': {
+      const offered = request.params?.protocol?.versions ?? [];
+      const version = offered.includes('2.2') ? '2.2'
+        : offered.includes('2.1') ? '2.1'
+        : offered[0] || '2.0';
+      negotiatedProtocol = version;
       result(request.id, {
-        protocol: { name: 'gian.proxy', version: '2.0' },
+        protocol: { name: 'gian.proxy', version },
         plugin: {
           id: process.env.GIAN_PLUGIN_ID ?? 'kimi',
           name: 'Kimi Code',
@@ -73,6 +80,7 @@ for await (const line of lines) {
         },
       });
       break;
+    }
     case 'catalog.list':
       result(request.id, catalog());
       break;
