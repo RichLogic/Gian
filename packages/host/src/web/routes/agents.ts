@@ -650,7 +650,7 @@ export function registerAgentRoutes(
     } catch {
       return c.json({ error: `agent not found: ${id}` }, 404);
     }
-    if (process.platform !== 'darwin') {
+    if (!options.pickHome && process.platform !== 'darwin') {
       return c.json({ error: 'file picker only available on macOS' }, 400);
     }
     const outcome = await (options.pickHome?.() ?? pickPath('folder', 'Select Agent HOME'));
@@ -660,7 +660,7 @@ export function registerAgentRoutes(
   });
 
   app.post('/api/agents/pick-home', async c => {
-    if (process.platform !== 'darwin') {
+    if (!options.pickHome && process.platform !== 'darwin') {
       return c.json({ error: 'file picker only available on macOS' }, 400);
     }
     const outcome = await (options.pickHome?.() ?? pickPath('folder', 'Select Agent HOME'));

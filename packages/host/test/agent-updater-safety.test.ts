@@ -1580,7 +1580,9 @@ test('Claude already-empty observation makes a later exit cleanup signal-free', 
   assert.deepEqual(repeatedGroupSignals, []);
 });
 
-test('managed Runtime update locks are isolated by Gian data directory', async t => {
+test('managed Runtime update locks are isolated by Gian data directory', {
+  skip: process.platform !== 'darwin' || process.arch !== 'arm64',
+}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-update-boundary-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const dataDir = join(root, 'data');
