@@ -14,6 +14,9 @@ test('catalog reconciles every current standard test exactly once', () => {
   const { catalog, entries } = loadValidatedCatalog();
   const counts = Object.groupBy(entries, entry => entry.scope);
   const hasE2eSources = existsSync(new URL('../e2e/specs', import.meta.url));
+  const missingOptionalRoots = (catalog.optionalDiscoveryRoots ?? []).filter(root => (
+    !existsSync(new URL(`../${root}/`, import.meta.url))
+  ));
 
   // Semantic reconciliation instead of a fixed total baseline: the catalog
   // must classify every discovered test exactly once and every group must
@@ -27,6 +30,10 @@ test('catalog reconciles every current standard test exactly once', () => {
   assert.deepEqual(catalog.defaultScopes, ['unit', 'integration']);
   assert.deepEqual(catalog.fullScopes, ['unit', 'integration', 'system']);
   for (const group of catalog.groups) {
+    const belongsToMissingOptionalRoot = group.patterns.every(pattern => (
+      missingOptionalRoots.some(root => pattern === root || pattern.startsWith(`${root}/`))
+    ));
+    if (belongsToMissingOptionalRoot) continue;
     assert.ok(
       entries.some(entry => group.patterns.some(pattern => matchesPattern(entry.path, pattern))),
       `catalog group ${group.id} matches no test file`,

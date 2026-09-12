@@ -11,10 +11,14 @@ import test from 'node:test';
 // and Proxy Catalog ADR numbers.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const INTERNAL_DOCS = join(__dirname, '..', 'docs');
 const ADR = join(__dirname, '..', 'docs', 'adr', '0054-customization-inventory-protocol-v23.md');
 const PROTOCOL_DOC = join(__dirname, '..', 'docs', 'protocol-customization-inventory.md');
+const internalDocsTestOptions = {
+  skip: existsSync(INTERNAL_DOCS) ? false : 'curated public source omits internal docs',
+};
 
-test('ADR-0054 is proposed, has no deciders, and keeps the next free number', () => {
+test('ADR-0054 is proposed, has no deciders, and keeps the next free number', internalDocsTestOptions, () => {
   assert.equal(existsSync(ADR), true, 'ADR-0054 must exist');
   const text = readFileSync(ADR, 'utf8');
   assert.match(text, /^id: ADR-0054$/m, 'id must be ADR-0054');
@@ -26,7 +30,7 @@ test('ADR-0054 is proposed, has no deciders, and keeps the next free number', ()
   assert.equal(existsSync(adr0053), false, 'no 0053 collision with Issue #140');
 });
 
-test('ADR-0054 and the protocol doc record the integrated 2.3-over-2.2 contract', () => {
+test('ADR-0054 and the protocol doc record the integrated 2.3-over-2.2 contract', internalDocsTestOptions, () => {
   const adr = readFileSync(ADR, 'utf8');
   const doc = readFileSync(PROTOCOL_DOC, 'utf8');
   // The old "coexists in parallel" claims are gone.
@@ -38,7 +42,7 @@ test('ADR-0054 and the protocol doc record the integrated 2.3-over-2.2 contract'
   assert.match(doc, /当前为\s*`?\["2\.3","2\.2","2\.1","2\.0"\]/);
 });
 
-test('the protocol doc references ADR-0054 (never the superseded 0053 numbering)', () => {
+test('the protocol doc references ADR-0054 (never the superseded 0053 numbering)', internalDocsTestOptions, () => {
   const doc = readFileSync(PROTOCOL_DOC, 'utf8');
   assert.match(doc, /ADR-0054/);
   assert.doesNotMatch(doc, /0053-customization-inventory-protocol-v23/);
