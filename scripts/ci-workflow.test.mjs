@@ -70,12 +70,15 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
     readFile(proxyUiSpecUrl, 'utf8'),
     readFile(proxyUiNavigationUrl, 'utf8'),
   ]);
-  assert.match(certification, /runs-on: \[self-hosted, macOS, ARM64, gian-proxy-certification\]/);
+  assert.match(certification, /runs-on: macos-15/);
+  assert.match(certification, /runner\.environment/);
+  assert.match(certification, /test "\$\(uname -m\)" = arm64/);
+  assert.doesNotMatch(certification, /self-hosted/);
+  assert.doesNotMatch(certification, /GIAN_ALLOW_REAL_AGENT_TURN/);
   assert.match(certification, /pnpm verify:proxy --/);
   assert.match(certification, /--stage artifacts/);
   assert.match(certification, /build-managed-runtime-candidates\.mjs/);
-  assert.match(certification, /pnpm --filter @gian\/host\.\.\. build/);
-  assert.doesNotMatch(certification, /pnpm --filter @gian\/host build/);
+  assert.match(certification, /GIAN_RUNNER_ENVIRONMENT: \$\{\{ runner\.environment \}\}/);
   assert.match(certification, /artifacts\/proxies/);
   assert.match(previewSmokeSpec, /App shell/);
   assert.match(previewSmokeSpec, /\.\.\/fixtures\/navigation\.js/);
@@ -86,6 +89,9 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
   assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
   assert.match(release, /scripts\/verify-proxy-release-certificate\.mjs/);
+  assert.match(release, /--run-id/);
+  assert.match(release, /--run-attempt/);
+  assert.match(release, /--repository/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
 });
 

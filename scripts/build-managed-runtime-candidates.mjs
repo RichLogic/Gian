@@ -6,12 +6,13 @@ import {
   copyFile,
   mkdir,
   readFile,
-  realpath,
+  readdir,
   rm,
   stat,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -37,6 +38,14 @@ export const upstreamRuntimeCandidates = Object.freeze({
     url: 'https://github.com/openai/codex/releases/download/rust-v0.146.0/codex-package-aarch64-apple-darwin.tar.gz',
     sha256: 'cd961b480f6dfc4703bd244601f1927231fa31a587cb9046ccdffa6c4c29e7d5',
     size: 121348006,
+  }),
+  kimi: Object.freeze({
+    version: '0.41.0',
+    format: 'tar.gz',
+    entryRelativePath: 'kimi',
+    url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.41.0/kimi-code-darwin-arm64.tar.gz',
+    sha256: '8d3dd7dde4b2a3cbd0993fb677c96665dcb6b93ac8cf0fff80ab20a7539024e9',
+    size: 60450550,
   }),
 });
 
@@ -117,40 +126,56 @@ async function buildUpstream(provider, candidate, outputDir, workDir) {
   };
 }
 
-async function buildKimi(outputDir, workDir) {
-  const metadata = proxyReleaseMetadata('kimi');
-  const source = process.env.KIMI_BIN?.trim() || join(process.env.HOME || '', '.kimi-code/bin/kimi');
-  const sourcePath = await realpath(source);
-  const version = metadata.runtime.verifiedVersions[0];
-  const entry = await inspectEntry('kimi', sourcePath, version, {
-    HOME: join(workDir, 'kimi-home'),
-    KIMI_HOME: join(workDir, 'kimi-home'),
-  });
-  const name = `gian-runtime-kimi-${version}-darwin-arm64`;
-  const path = join(outputDir, name);
-  await copyFile(sourcePath, path);
-  await chmod(path, 0o700);
-  return {
-    provider: 'kimi', version, format: 'raw', entryRelativePath: 'bin/kimi', entry,
-    asset: {
-      name, path,
-      url: `https://github.com/RichLogic/Gian/releases/download/${metadata.tag}/${name}`,
-      sha256: digest(await readFile(path)), size: (await stat(path)).size, publish: true,
-    },
-    candidateBin: path,
-  };
+async function archiveFileList(directory, prefix = '') {
+  const paths = [];
+  for (const item of await readdir(directory, { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${item.name}` : item.name;
+    const path = join(directory, item.name);
+    if (relative === 'node_modules/.package-lock.json') continue;
+    if (item.isDirectory()) paths.push(...await archiveFileList(path, relative));
+    else if (item.isFile()) paths.push(relative);
+    else if (item.isSymbolicLink()) {
+      const target = await stat(path);
+      if (!target.isFile()) throw new Error(`DSH Runtime link must resolve to a file: ${relative}`);
+      paths.push(relative);
+    } else {
+      throw new Error(`DSH Runtime contains an unsupported filesystem entry: ${relative}`);
+    }
+  }
+  return paths.sort((left, right) => left.localeCompare(right));
+}
+
+async function normalizeArchiveTimes(root, paths) {
+  const epoch = new Date('2000-01-01T00:00:00.000Z');
+  for (let index = 0; index < paths.length; index += 256) {
+    await Promise.all(paths.slice(index, index + 256).map(relative => (
+      utimes(join(root, ...relative.split('/')), epoch, epoch)
+    )));
+  }
 }
 
 async function buildDsh(outputDir, workDir) {
   const metadata = proxyReleaseMetadata('dsh');
-  const configured = process.env.DSH_BIN?.trim() || 'dsh';
-  const sourcePath = configured.includes(sep)
-    ? await realpath(configured)
-    : await realpath((await execFileAsync('/usr/bin/which', [configured], { encoding: 'utf8' })).stdout.trim());
-  const marker = `${sep}node_modules${sep}`;
-  const markerIndex = sourcePath.indexOf(marker);
-  if (markerIndex <= 0) throw new Error('DSH Runtime must resolve inside a complete node_modules tree.');
-  const runtimeRoot = sourcePath.slice(0, markerIndex);
+  const lockedSource = resolve(rootDir, 'runtimes/deepseek-harness');
+  const runtimeRoot = join(workDir, 'dsh-runtime');
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([
+    copyFile(join(lockedSource, 'package.json'), join(runtimeRoot, 'package.json')),
+    copyFile(join(lockedSource, 'package-lock.json'), join(runtimeRoot, 'package-lock.json')),
+  ]);
+  await execFileAsync(process.platform === 'win32' ? 'npm.cmd' : 'npm', [
+    'ci',
+    '--ignore-scripts',
+    '--omit=dev',
+    '--no-audit',
+    '--no-fund',
+  ], {
+    cwd: runtimeRoot,
+    encoding: 'utf8',
+    timeout: 15 * 60_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const sourcePath = join(runtimeRoot, 'node_modules/@deepseek-ai/dsh/lib/bin.js');
   const version = metadata.runtime.verifiedVersions[0];
   const entry = await inspectEntry('dsh', sourcePath, version, {
     HOME: join(workDir, 'dsh-home'),
@@ -159,7 +184,27 @@ async function buildDsh(outputDir, workDir) {
   });
   const name = `gian-runtime-dsh-${version}-darwin-arm64.tar.gz`;
   const path = join(outputDir, name);
-  await execFileAsync('/usr/bin/tar', ['-czhf', path, '-C', runtimeRoot, '.'], {
+  const listPath = join(workDir, 'dsh-runtime-files');
+  const paths = await archiveFileList(join(runtimeRoot, 'node_modules'), 'node_modules');
+  await normalizeArchiveTimes(runtimeRoot, paths);
+  await writeFile(listPath, Buffer.from(`${paths.join('\0')}\0`, 'utf8'));
+  await execFileAsync('/usr/bin/tar', [
+    '-czhf', path,
+    '--format', 'ustar',
+    '--uid', '0',
+    '--gid', '0',
+    '--uname', 'root',
+    '--gname', 'root',
+    '--numeric-owner',
+    '--no-xattrs',
+    '--no-acls',
+    '--no-fflags',
+    '--no-mac-metadata',
+    '--options', 'gzip:!timestamp',
+    '-C', runtimeRoot,
+    '--null',
+    '-T', listPath,
+  ], {
     maxBuffer: 1024 * 1024,
     env: { ...process.env, COPYFILE_DISABLE: '1' },
   });
@@ -202,7 +247,6 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   for (const [provider, definition] of Object.entries(upstreamRuntimeCandidates)) {
     candidates.push(await buildUpstream(provider, definition, target, workDir));
   }
-  candidates.push(await buildKimi(target, workDir));
   candidates.push(await buildDsh(target, workDir));
   const manifest = {
     schemaVersion: 1,

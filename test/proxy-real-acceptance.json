@@ -1,17 +1,18 @@
 {
   "version": 1,
   "protocol": "gian.proxy/2.3",
-  "description": "Version-independent Proxy qualification catalog for deterministic and real Provider evidence.",
+  "description": "Version-independent Proxy qualification catalog for hosted artifact evidence and optional real Provider canaries.",
   "certification": {
     "schemaVersion": 1,
     "shippingSource": "scripts/build-proxy-artifacts.mjs#shippingProxyIds",
     "requiredResult": "PASS",
+    "artifactCertificateMaxAgeHours": 72,
     "realEvidenceMaxAgeHours": 72,
     "stages": {
       "development": ["catalog", "affected-deterministic"],
       "nightly": ["catalog", "full-deterministic", "proxy-ui"],
-      "artifacts": ["catalog", "full-deterministic", "proxy-ui", "preview", "real-provider"],
-      "release": ["catalog", "full-deterministic", "proxy-ui", "preview", "package", "real-provider"]
+      "artifacts": ["catalog", "full-deterministic", "proxy-ui", "preview", "runtime-artifacts"],
+      "release": ["catalog", "full-deterministic", "proxy-ui", "preview", "package", "runtime-artifacts"]
     }
   },
   "resultSchemas": {

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
+import { reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRequiredStepIds = [
@@ -14,7 +15,7 @@ const artifactRequiredStepIds = [
   'proxy-ui',
   'preview',
   'proxy-artifacts',
-  'real-provider',
+  'runtime-artifacts',
   'candidate-binding',
 ];
 
@@ -33,12 +34,18 @@ export function validateProxyReleaseCertificate(
     revision,
     provider = null,
     version = null,
+    runId = null,
+    runAttempt = null,
+    repository = null,
     now = Date.now(),
   } = {},
 ) {
   const issues = [];
-  if (certificate?.schemaVersion !== 1) issues.push('certificate schemaVersion must be 1');
-  if (!/^(?:artifacts|release)-[a-f0-9]{40}$/u.test(certificate?.certificateId ?? '')) {
+  if (certificate?.schemaVersion !== 2) issues.push('certificate schemaVersion must be 2');
+  if (certificate?.evidenceModel !== 'hosted-artifact-qualification-v1') {
+    issues.push('certificate evidence model is not hosted artifact qualification');
+  }
+  if (!/^(?:artifacts|release)-[a-f0-9]{40}-[0-9]+-[0-9]+$/u.test(certificate?.certificateId ?? '')) {
     issues.push('certificate has no valid immutable certificateId');
   }
   if (certificate?.stage !== 'artifacts' && certificate?.stage !== 'release') {
@@ -53,6 +60,28 @@ export function validateProxyReleaseCertificate(
   if (!revision || certificate?.revision !== revision) {
     issues.push(`certificate revision ${String(certificate?.revision)} != ${String(revision)}`);
   }
+  if (certificate?.runner?.environment !== 'github-hosted'
+    || certificate?.runner?.os !== 'macOS'
+    || certificate?.runner?.arch !== 'ARM64'
+    || !/^[0-9]+$/u.test(certificate?.runner?.runId ?? '')
+    || !/^[0-9]+$/u.test(certificate?.runner?.runAttempt ?? '')
+    || typeof certificate?.runner?.repository !== 'string'
+    || certificate.runner.repository.length === 0) {
+    issues.push('certificate was not issued by a GitHub-hosted macOS ARM64 run');
+  }
+  const expectedCertificateId = `${certificate?.stage}-${certificate?.revision}-${certificate?.runner?.runId}-${certificate?.runner?.runAttempt}`;
+  if (certificate?.certificateId !== expectedCertificateId) {
+    issues.push('certificateId does not bind its revision and GitHub run provenance');
+  }
+  if (runId !== null && certificate?.runner?.runId !== String(runId)) {
+    issues.push(`certificate run ${String(certificate?.runner?.runId)} != ${String(runId)}`);
+  }
+  if (runAttempt !== null && certificate?.runner?.runAttempt !== String(runAttempt)) {
+    issues.push(`certificate run attempt ${String(certificate?.runner?.runAttempt)} != ${String(runAttempt)}`);
+  }
+  if (repository !== null && certificate?.runner?.repository !== repository) {
+    issues.push(`certificate repository ${String(certificate?.runner?.repository)} != ${repository}`);
+  }
   if (!Array.isArray(certificate?.shippingProxyIds)
     || !sameMembers(certificate.shippingProxyIds, shippingProxyIds)) {
     issues.push('certificate shipping Proxy set does not match the current shipping set');
@@ -63,7 +92,7 @@ export function validateProxyReleaseCertificate(
   }
 
   const completedAt = Date.parse(certificate?.completedAt ?? '');
-  const maxAgeHours = certificate?.realEvidenceMaxAgeHours;
+  const maxAgeHours = certificate?.certificateMaxAgeHours;
   const ageMs = now - completedAt;
   if (!Number.isFinite(completedAt)
     || !Number.isFinite(maxAgeHours)
@@ -103,7 +132,7 @@ export function validateProxyReleaseCertificate(
       issues.push(`${id} candidate package identity does not match the shipping definition`);
     }
     if (!tuple) {
-      issues.push(`${id} has no tested candidate tuple`);
+      issues.push(`${id} has no qualified candidate tuple`);
       continue;
     }
     if (tuple.proxy?.source !== 'packaged-artifact'
@@ -120,9 +149,19 @@ export function validateProxyReleaseCertificate(
       || tuple.cli.size <= 0) {
       issues.push(`${id} CLI tuple has no exact artifact identity`);
     }
-    if (definition.pluginId !== 'com.zhipu.zcode') {
+    if (definition.pluginId === 'com.zhipu.zcode') {
+      const reviewed = reviewedExternalRuntimeCandidates[id];
+      if (!reviewed
+        || tuple.cli?.source !== 'reviewed-external-app'
+        || tuple.cli?.version !== reviewed.version
+        || tuple.cli?.sha256 !== reviewed.sha256
+        || tuple.cli?.size !== reviewed.size) {
+        issues.push(`${id} external-App Runtime is not the reviewed compatibility candidate`);
+      }
+    } else {
       const runtime = runtimeArtifacts.get(id);
-      if (!runtime
+      if (tuple.cli?.source !== 'managed-runtime-artifact'
+        || !runtime
         || runtime.version !== tuple.cli?.version
         || runtime.entry?.sha256 !== tuple.cli?.sha256
         || runtime.entry?.size !== tuple.cli?.size
@@ -130,7 +169,7 @@ export function validateProxyReleaseCertificate(
         || !/^[a-f0-9]{64}$/u.test(runtime.asset?.sha256 ?? '')
         || !Number.isSafeInteger(runtime.asset?.size)
         || runtime.asset.size <= 0) {
-        issues.push(`${id} managed Runtime artifact is not bound to the tested CLI tuple`);
+        issues.push(`${id} managed Runtime artifact is not bound to the qualified CLI tuple`);
       }
     }
   }
@@ -181,7 +220,16 @@ export async function verifyPackagedProxyArtifacts(certificate, artifactDir) {
 }
 
 function parseArgs(argv) {
-  const options = { certificate: null, artifactDir: null, revision: null, provider: null, version: null };
+  const options = {
+    certificate: null,
+    artifactDir: null,
+    revision: null,
+    provider: null,
+    version: null,
+    runId: null,
+    runAttempt: null,
+    repository: null,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--certificate') options.certificate = argv[++index];
@@ -189,9 +237,21 @@ function parseArgs(argv) {
     else if (arg === '--revision') options.revision = argv[++index];
     else if (arg === '--provider') options.provider = argv[++index];
     else if (arg === '--version') options.version = argv[++index];
+    else if (arg === '--run-id') options.runId = argv[++index];
+    else if (arg === '--run-attempt') options.runAttempt = argv[++index];
+    else if (arg === '--repository') options.repository = argv[++index];
     else throw new Error(`Unknown certificate verification argument ${arg}.`);
   }
-  for (const required of ['certificate', 'artifactDir', 'revision', 'provider', 'version']) {
+  for (const required of [
+    'certificate',
+    'artifactDir',
+    'revision',
+    'provider',
+    'version',
+    'runId',
+    'runAttempt',
+    'repository',
+  ]) {
     if (!options[required]) throw new Error(`--${required.replace(/[A-Z]/gu, match => `-${match.toLowerCase()}`)} is required.`);
   }
   return options;

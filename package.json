@@ -30,6 +30,7 @@
     "verify:preview": "node scripts/run-verification.mjs verify:preview",
     "verify:proxy": "node scripts/run-proxy-certification.mjs",
     "verify:proxy-ui": "node scripts/run-proxy-ui-certification.mjs",
+    "canary:proxy-real": "node scripts/run-proxy-real-acceptance.mjs",
     "test:e2e": "pnpm -r build && node scripts/run-e2e.mjs",
     "test:e2e:run": "node scripts/run-e2e.mjs",
     "test:e2e:proxy-mock": "pnpm -r build && node scripts/run-proxy-ui-certification.mjs",

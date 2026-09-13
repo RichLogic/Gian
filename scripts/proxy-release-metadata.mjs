@@ -3,6 +3,22 @@ import { fileURLToPath } from 'node:url';
 
 import { proxyDefinitions } from './build-proxy-artifacts.mjs';
 
+/**
+ * Exact external-App Runtime identities admitted by code review. These are not
+ * downloadable Gian assets and hosted certification does not claim to execute
+ * them. Host still discovers, hashes, and version-probes the local App before
+ * activation.
+ */
+export const reviewedExternalRuntimeCandidates = Object.freeze({
+  zcode: Object.freeze({
+    source: 'reviewed-external-app',
+    version: '0.16.5',
+    sha256: 'e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8',
+    size: 12615227,
+    bundleEntry: 'Contents/Resources/glm/zcode.cjs',
+  }),
+});
+
 export function proxyReleaseMetadata(releaseId) {
   const definition = proxyDefinitions.find(item => item.id === releaseId);
   if (!definition || !definition.shipping) {

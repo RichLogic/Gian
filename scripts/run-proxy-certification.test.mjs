@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  buildArtifactCandidateTuple,
   parseProxyCertificationOptions,
   proxyCertificationPlan,
-  validateCandidateTuple,
   validateRuntimeArtifactTuple,
 } from './run-proxy-certification.mjs';
 import { validateProxyReleaseCertificate } from './verify-proxy-release-certificate.mjs';
@@ -58,13 +62,13 @@ test('artifact certification breaks the first-publication cycle without weakenin
     'proxy-ui',
     'preview',
     'proxy-artifacts',
-    'real-provider',
+    'runtime-artifacts',
   ]);
   assert.equal(plan.some(step => step.id === 'package'), false);
-  assert.equal(plan.at(-1).authorizationEnvironment, 'GIAN_ALLOW_REAL_AGENT_TURN');
+  assert.equal(plan.some(step => step.lane === 'real-provider'), false);
 });
 
-test('release certification cannot omit preview, package, or real Provider evidence', () => {
+test('release certification cannot omit preview, package, or Runtime artifact evidence', () => {
   const options = parseProxyCertificationOptions([
     '--stage', 'release',
     '--base', 'release-base',
@@ -79,7 +83,7 @@ test('release certification cannot omit preview, package, or real Provider evide
     'preview',
     'proxy-artifacts',
     'package',
-    'real-provider',
+    'runtime-artifacts',
   ]);
   assert.equal(plan.find(step => step.id === 'preview').authorizationEnvironment,
     'GIAN_ALLOW_ELECTRON_PREVIEW');
@@ -87,11 +91,8 @@ test('release certification cannot omit preview, package, or real Provider evide
     'GIAN_ALLOW_PACKAGE');
   assert.equal(plan.find(step => step.id === 'package').authorizationEnvironment,
     'GIAN_ALLOW_PACKAGE');
-  assert.equal(plan.at(-1).authorizationEnvironment, 'GIAN_ALLOW_REAL_AGENT_TURN');
-  assert.ok(plan.at(-1).args.includes('--artifact-dir'));
-  for (const provider of shippingProxyIds) {
-    assert.ok(plan.at(-1).args.includes(provider));
-  }
+  assert.equal(plan.some(step => step.lane === 'real-provider'), false);
+  assert.ok(plan.at(-1).args.includes('scripts/verify-managed-runtime-candidates.mjs'));
 });
 
 test('certification rejects ambiguous stages, missing bases, and hidden Proxies', () => {
@@ -112,41 +113,39 @@ test('certification rejects ambiguous stages, missing bases, and hidden Proxies'
   );
 });
 
-test('release candidate binding requires the exact fresh packaged Proxy and verified CLI tuple', () => {
+test('release candidate binding derives the exact packaged Proxy and managed Runtime tuple', async (t) => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'gian-artifact-binding-'));
+  t.after(() => rm(artifactDir, { recursive: true, force: true }));
+  const archive = Buffer.from('codex proxy archive');
+  const sha256 = createHash('sha256').update(archive).digest('hex');
   const certificate = {
-    revision: 'candidate-sha',
-    realEvidenceMaxAgeHours: 72,
     candidatePackages: [{
       provider: 'codex',
+      pluginId: 'codex',
+      processScope: 'shared',
       proxyVersion: '0.2.10',
       runtime: { verifiedCliVersions: ['0.146.0'] },
     }],
   };
-  const validRun = {
-    revision: 'candidate-sha',
-    completedAt: new Date().toISOString(),
-    candidateTuple: [{
+  await Promise.all([
+    writeFile(join(artifactDir, 'gian-proxy-codex-0.2.10-darwin-arm64.tar.gz'), archive),
+    writeFile(join(artifactDir, 'gian-proxy-codex-0.2.10-darwin-arm64.tar.gz.sha256'), `${sha256}\n`),
+    writeFile(join(artifactDir, 'gian-proxy-codex-0.2.10-darwin-arm64.tar.gz.manifest.json'), JSON.stringify({
+      id: 'codex', pluginVersion: '0.2.10', process: { scope: 'shared' },
+    })),
+  ]);
+  const runtimeManifest = {
+    candidates: [{
       provider: 'codex',
-      proxy: {
-        source: 'packaged-artifact',
-        proxyVersion: '0.2.10',
-        sha256: 'a'.repeat(64),
-      },
-      cli: { version: '0.146.0', verified: true, sha256: 'b'.repeat(64), size: 123 },
+      version: '0.146.0',
+      entry: { sha256: 'b'.repeat(64), size: 123 },
     }],
   };
-  assert.deepEqual(validateCandidateTuple(certificate, validRun).issues, []);
-
-  const invalid = structuredClone(validRun);
-  invalid.revision = 'other-sha';
-  invalid.completedAt = '2025-01-01T00:00:00.000Z';
-  invalid.candidateTuple[0].proxy.source = 'workspace-dist';
-  invalid.candidateTuple[0].cli.verified = false;
-  const issues = validateCandidateTuple(certificate, invalid).issues.join('\n');
-  assert.match(issues, /revision/);
-  assert.match(issues, /older than 72h/);
-  assert.match(issues, /packaged Proxy artifact/);
-  assert.match(issues, /not verified/);
+  const binding = await buildArtifactCandidateTuple(certificate, runtimeManifest, artifactDir);
+  assert.deepEqual(binding.issues, []);
+  assert.equal(binding.tuples[0].proxy.sha256, sha256);
+  assert.equal(binding.tuples[0].cli.source, 'managed-runtime-artifact');
+  assert.equal(binding.tuples[0].cli.sha256, 'b'.repeat(64));
 });
 
 test('artifact certificate binds the downloadable Runtime to the exact exercised entry', () => {
@@ -170,11 +169,12 @@ test('artifact certificate binds the downloadable Runtime to the exact exercised
   manifest.candidates[0].entry.sha256 = 'c'.repeat(64);
   assert.match(
     validateRuntimeArtifactTuple({ candidateTuple }, manifest).issues.join('\n'),
-    /differs from the real Provider candidate/,
+    /differs from the qualified artifact candidate/,
   );
 });
 
 test('Proxy publication accepts a fresh full-shipping artifact certificate for the exact revision', () => {
+  const revision = 'c'.repeat(40);
   const candidatePackages = proxyDefinitions
     .filter(definition => definition.shipping)
     .map(definition => ({
@@ -188,18 +188,27 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
       },
     }));
   const certificate = {
-    schemaVersion: 1,
-    certificateId: `artifacts-${'c'.repeat(40)}`,
+    schemaVersion: 2,
+    evidenceModel: 'hosted-artifact-qualification-v1',
+    certificateId: `artifacts-${'c'.repeat(40)}-123-1`,
     stage: 'artifacts',
     admissionEligible: false,
     artifactPublicationEligible: true,
     qualified: true,
     status: 'PASS',
-    revision: 'release-sha',
+    revision,
     dirty: false,
     shippingProxyIds: [...shippingProxyIds],
     providers: [...shippingProxyIds],
-    realEvidenceMaxAgeHours: 72,
+    certificateMaxAgeHours: 72,
+    runner: {
+      environment: 'github-hosted',
+      os: 'macOS',
+      arch: 'ARM64',
+      repository: 'RichLogic/Gian',
+      runId: '123',
+      runAttempt: '1',
+    },
     completedAt: new Date().toISOString(),
     steps: [
       'acceptance-catalog',
@@ -209,7 +218,7 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
       'proxy-ui',
       'preview',
       'proxy-artifacts',
-      'real-provider',
+      'runtime-artifacts',
       'candidate-binding',
     ].map(id => ({ id, status: 'PASS' })),
     candidatePackages,
@@ -221,10 +230,15 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
         sha256: 'a'.repeat(64),
       },
       cli: {
+        source: candidate.pluginId === 'com.zhipu.zcode'
+          ? 'reviewed-external-app'
+          : 'managed-runtime-artifact',
         version: candidate.runtime.verifiedCliVersions[0],
         verified: true,
-        sha256: 'b'.repeat(64),
-        size: 123,
+        sha256: candidate.pluginId === 'com.zhipu.zcode'
+          ? 'e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8'
+          : 'b'.repeat(64),
+        size: candidate.pluginId === 'com.zhipu.zcode' ? 12615227 : 123,
       },
     })),
     runtimeArtifacts: candidatePackages
@@ -238,14 +252,17 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
       })),
   };
   assert.deepEqual(validateProxyReleaseCertificate(certificate, {
-    revision: 'release-sha',
+    revision,
     provider: candidatePackages[0].provider,
     version: candidatePackages[0].proxyVersion,
+    runId: '123',
+    runAttempt: '1',
+    repository: 'RichLogic/Gian',
   }), []);
 
   const forged = structuredClone(certificate);
   forged.providers.pop();
-  forged.steps.find(step => step.id === 'real-provider').status = 'BLOCKED';
+  forged.steps.find(step => step.id === 'runtime-artifacts').status = 'BLOCKED';
   forged.candidateTuple.find(tuple => tuple.provider === candidatePackages[0].provider).cli.verified = false;
   const issues = validateProxyReleaseCertificate(forged, {
     revision: 'other-sha',
@@ -254,8 +271,24 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
   }).join('\n');
   assert.match(issues, /revision/);
   assert.match(issues, /complete shipping Proxy set/);
-  assert.match(issues, /real-provider/);
+  assert.match(issues, /runtime-artifacts/);
   assert.match(issues, /non-PASS step/);
   assert.match(issues, /CLI tuple/);
   assert.match(issues, /certificate version/);
+
+  const selfHosted = structuredClone(certificate);
+  selfHosted.runner.environment = 'self-hosted';
+  assert.match(
+    validateProxyReleaseCertificate(selfHosted, { revision }).join('\n'),
+    /GitHub-hosted macOS ARM64/,
+  );
+  assert.match(
+    validateProxyReleaseCertificate(certificate, {
+      revision,
+      runId: '999',
+      runAttempt: '2',
+      repository: 'Other/Gian',
+    }).join('\n'),
+    /certificate run 123 != 999[\s\S]*run attempt 1 != 2[\s\S]*repository RichLogic\/Gian != Other\/Gian/,
+  );
 });

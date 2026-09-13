@@ -39,8 +39,11 @@ jobs:
           test "$(jq -r '.path' <<<"${RUN_JSON}")" = .github/workflows/proxy-certification.yml
           test "$(jq -r '.head_repository.full_name' <<<"${RUN_JSON}")" = "${GITHUB_REPOSITORY}"
           RUN_SHA="$(jq -r '.head_sha' <<<"${RUN_JSON}")"
+          RUN_ATTEMPT="$(jq -r '.run_attempt' <<<"${RUN_JSON}")"
           test -n "${RUN_SHA}"
+          test "${RUN_ATTEMPT}" -ge 1
           echo "sha=${RUN_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "attempt=${RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
           echo "artifact=proxy-release-certification-${RUN_SHA}" >> "${GITHUB_OUTPUT}"
 
       - name: Check out the certified revision
@@ -76,7 +79,7 @@ jobs:
           echo "tag=$(jq -r '.tag' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
           echo "asset=$(jq -r '.asset' <<<"${METADATA}")" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify certificate and exact tested artifacts
+      - name: Verify certificate and exact qualified artifacts
         run: >-
           node scripts/verify-proxy-release-certificate.mjs
           --certificate certification/output/proxy-certification/release/certificate.json
@@ -84,6 +87,9 @@ jobs:
           --revision "${{ steps.certification.outputs.sha }}"
           --provider "${{ steps.plugin.outputs.id }}"
           --version "${{ steps.plugin.outputs.version }}"
+          --run-id "${{ inputs.certification_run_id }}"
+          --run-attempt "${{ steps.certification.outputs.attempt }}"
+          --repository "${{ github.repository }}"
 
       - name: Verify the certified managed Runtime artifact
         env:

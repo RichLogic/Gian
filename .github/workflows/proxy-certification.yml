@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-certificate:
-    runs-on: [self-hosted, macOS, ARM64, gian-proxy-certification]
+    runs-on: macos-15
     timeout-minutes: 240
     steps:
       - name: Check out exact candidate
@@ -27,6 +27,14 @@ jobs:
 
       - name: Require candidate commit on main
         run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+
+      - name: Require GitHub-hosted macOS ARM64
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          test "${RUNNER_KIND}" = github-hosted
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -46,22 +54,14 @@ jobs:
         run: pnpm exec playwright install chromium
 
       - name: Prepare exact managed Runtime candidates
-        run: >-
-          node scripts/build-managed-runtime-candidates.mjs
-          --output artifacts/runtimes
-          --github-env "${GITHUB_ENV}"
-
-      - name: Verify candidates with the production Runtime extractor
-        run: |
-          pnpm --filter @gian/host... build
-          node scripts/verify-managed-runtime-candidates.mjs
+        run: node scripts/build-managed-runtime-candidates.mjs --output artifacts/runtimes
 
       - name: Issue pre-Catalog artifact certificate
         shell: bash
         env:
           GIAN_ALLOW_ELECTRON_PREVIEW: '1'
           GIAN_ALLOW_PACKAGE: '1'
-          GIAN_ALLOW_REAL_AGENT_TURN: '1'
+          GIAN_RUNNER_ENVIRONMENT: ${{ runner.environment }}
           PLAYWRIGHT_CHANNEL: chromium
         run: |
           BASE_REF="${{ inputs.base_ref }}"
@@ -71,7 +71,7 @@ jobs:
             --base "${BASE_REF}" \
             --output output/proxy-certification/release
 
-      - name: Upload certificate, evidence, and exact tested Proxy artifacts
+      - name: Upload certificate, evidence, and exact qualified artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:

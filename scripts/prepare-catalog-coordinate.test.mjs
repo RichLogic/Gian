@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
-import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
+import {
+  proxyReleaseMetadata,
+  reviewedExternalRuntimeCandidates,
+} from './proxy-release-metadata.mjs';
 import { prepareCatalogCoordinate } from './prepare-catalog-coordinate.mjs';
 
 const requiredSteps = [
@@ -17,7 +20,7 @@ const requiredSteps = [
   'proxy-ui',
   'preview',
   'proxy-artifacts',
-  'real-provider',
+  'runtime-artifacts',
   'candidate-binding',
 ];
 
@@ -38,8 +41,9 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
   const runtimeAssetName = `gian-runtime-${provider}-${candidatePackages
     .find(candidate => candidate.provider === provider).runtime.verifiedCliVersions[0]}-darwin-arm64`;
   return {
-    schemaVersion: 1,
-    certificateId: `artifacts-${'c'.repeat(40)}`,
+    schemaVersion: 2,
+    evidenceModel: 'hosted-artifact-qualification-v1',
+    certificateId: `artifacts-${'c'.repeat(40)}-123-1`,
     stage: 'artifacts',
     admissionEligible: false,
     artifactPublicationEligible: true,
@@ -49,7 +53,15 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
     dirty: false,
     shippingProxyIds: [...shippingProxyIds],
     providers: [...shippingProxyIds],
-    realEvidenceMaxAgeHours: 72,
+    certificateMaxAgeHours: 72,
+    runner: {
+      environment: 'github-hosted',
+      os: 'macOS',
+      arch: 'ARM64',
+      repository: 'RichLogic/Gian',
+      runId: '123',
+      runAttempt: '1',
+    },
     completedAt: new Date().toISOString(),
     steps: requiredSteps.map(id => ({ id, status: 'PASS' })),
     candidatePackages,
@@ -60,12 +72,15 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
         proxyVersion: candidate.proxyVersion,
         sha256: candidate.provider === provider ? proxySha256 : 'a'.repeat(64),
       },
-      cli: {
-        version: candidate.runtime.verifiedCliVersions[0],
-        verified: true,
-        sha256: candidate.provider === provider ? runtimeSha256 : 'b'.repeat(64),
-        size: candidate.provider === provider ? runtimeSize : 1,
-      },
+      cli: reviewedExternalRuntimeCandidates[candidate.provider]
+        ? { ...reviewedExternalRuntimeCandidates[candidate.provider], verified: true }
+        : {
+          source: 'managed-runtime-artifact',
+          version: candidate.runtime.verifiedCliVersions[0],
+          verified: true,
+          sha256: candidate.provider === provider ? runtimeSha256 : 'b'.repeat(64),
+          size: candidate.provider === provider ? runtimeSize : 1,
+        },
     })),
     runtimeArtifacts: candidatePackages
       .filter(candidate => candidate.pluginId !== 'com.zhipu.zcode')
@@ -158,12 +173,12 @@ test('ZCode coordinate binds the certified local App Runtime without a CLI downl
   const metadata = proxyReleaseMetadata('zcode');
   const archive = Buffer.from('zcode proxy archive');
   const manifest = Buffer.from('{"schemaVersion":4}\n');
-  const runtimeSha256 = createHash('sha256').update('zcode app runtime').digest('hex');
+  const reviewedRuntime = reviewedExternalRuntimeCandidates.zcode;
   const certificate = releaseCertificate(
     'zcode',
     createHash('sha256').update(archive).digest('hex'),
-    runtimeSha256,
-    321,
+    reviewedRuntime.sha256,
+    reviewedRuntime.size,
   );
   const certificatePath = join(root, 'certificate.json');
   await Promise.all([
@@ -181,7 +196,7 @@ test('ZCode coordinate binds the certified local App Runtime without a CLI downl
     kind: 'external-app',
     runtimeId: 'zcode',
     version: metadata.runtime.verifiedVersions[0],
-    artifactSha256: runtimeSha256,
+    artifactSha256: reviewedRuntime.sha256,
   });
 });
 

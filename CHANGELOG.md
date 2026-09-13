@@ -38,6 +38,10 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
   Kimi Proxy 0.2.10, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
 - Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
   unavailable legacy 0.38.0 distribution.
+- Moved formal Proxy/Catalog artifact qualification to GitHub-hosted macOS
+  ARM64. Claude, Codex, and Kimi use pinned official assets, DSH is rebuilt
+  from an exact npm lock, and live Provider accounts remain optional canary
+  evidence instead of a Release dependency.
 - Established Developer ID signing, Apple notarization, Gatekeeper validation,
   and latest-stable GitHub publication for official macOS releases.
 

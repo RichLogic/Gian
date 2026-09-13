@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,13 +11,17 @@ import {
   loadProxyRealAcceptanceCatalog,
   validateProxyRealAcceptanceCatalog,
 } from './proxy-real-acceptance-catalog.mjs';
+import { reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const stages = new Set(['development', 'nightly', 'artifacts', 'release']);
-const realTurnAuthorization = 'GIAN_ALLOW_REAL_AGENT_TURN';
 const previewAuthorization = 'GIAN_ALLOW_ELECTRON_PREVIEW';
 const packageAuthorization = 'GIAN_ALLOW_PACKAGE';
+
+function digest(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
 
 function timestampSlug() {
   return new Date().toISOString().replaceAll(':', '').replaceAll('-', '').replace(/\.\d{3}Z$/, 'Z');
@@ -132,17 +137,9 @@ export function proxyCertificationPlan(options) {
     ));
   }
   steps.push(nodeStep(
-    'real-provider',
-    'real-provider',
-    [
-      'scripts/run-proxy-real-acceptance.mjs',
-      ...options.providers.flatMap(provider => ['--provider', provider]),
-      '--output',
-      resolve(options.output, 'real-provider'),
-      '--artifact-dir',
-      resolve('artifacts/proxies'),
-    ],
-    { authorizationEnvironment: realTurnAuthorization },
+    'runtime-artifacts',
+    'runtime-artifacts',
+    ['scripts/verify-managed-runtime-candidates.mjs'],
   ));
   return steps;
 }
@@ -219,42 +216,63 @@ async function candidatePackages(providers) {
   }));
 }
 
-export function validateCandidateTuple(certificate, run) {
+export async function buildArtifactCandidateTuple(
+  certificate,
+  runtimeManifest,
+  artifactDir = resolve(rootDir, 'artifacts/proxies'),
+) {
   const issues = [];
-  if (run.revision !== certificate.revision) {
-    issues.push(`real Provider evidence revision ${run.revision} != ${certificate.revision}`);
-  }
-  const completedAt = Date.parse(run.completedAt ?? '');
-  const maxAgeMs = certificate.realEvidenceMaxAgeHours * 60 * 60 * 1_000;
-  const ageMs = Date.now() - completedAt;
-  if (!Number.isFinite(completedAt) || ageMs < 0 || ageMs > maxAgeMs) {
-    issues.push(`real Provider evidence is missing, future-dated, or older than ${certificate.realEvidenceMaxAgeHours}h`);
-  }
-  const tuples = Array.isArray(run.candidateTuple) ? run.candidateTuple : [];
-  const byProvider = new Map(tuples.map(tuple => [tuple.provider, tuple]));
+  const tuples = [];
+  const runtimes = new Map((runtimeManifest?.candidates ?? []).map(candidate => [candidate.provider, candidate]));
   for (const expected of certificate.candidatePackages) {
-    const tuple = byProvider.get(expected.provider);
-    if (!tuple) {
-      issues.push(`${expected.provider} has no candidate tuple`);
+    const definition = proxyDefinitions.find(candidate => candidate.id === expected.provider);
+    if (!definition) {
+      issues.push(`${expected.provider} has no shipping Proxy definition`);
       continue;
     }
-    if (tuple.proxy?.source !== 'packaged-artifact') {
-      issues.push(`${expected.provider} real evidence did not use a packaged Proxy artifact`);
-    }
-    if (tuple.proxy?.proxyVersion !== expected.proxyVersion) {
-      issues.push(`${expected.provider} Proxy version does not match ${expected.proxyVersion}`);
-    }
-    if (!/^[a-f0-9]{64}$/u.test(tuple.proxy?.sha256 ?? '')) {
-      issues.push(`${expected.provider} Proxy artifact has no valid SHA-256`);
-    }
-    if (tuple.cli?.verified !== true
-      || !expected.runtime.verifiedCliVersions.includes(tuple.cli?.version)) {
-      issues.push(`${expected.provider} CLI ${String(tuple.cli?.version)} is not verified by this candidate`);
-    }
-    if (!/^[a-f0-9]{64}$/u.test(tuple.cli?.sha256 ?? '')
-      || !Number.isSafeInteger(tuple.cli?.size)
-      || tuple.cli.size <= 0) {
-      issues.push(`${expected.provider} CLI candidate has no exact artifact identity`);
+    const assetName = `gian-proxy-${expected.provider}-${expected.proxyVersion}-darwin-arm64.tar.gz`;
+    try {
+      const [archive, checksum, manifestText] = await Promise.all([
+        readFile(resolve(artifactDir, assetName)),
+        readFile(resolve(artifactDir, `${assetName}.sha256`), 'utf8'),
+        readFile(resolve(artifactDir, `${assetName}.manifest.json`), 'utf8'),
+      ]);
+      const proxySha256 = digest(archive);
+      const manifest = JSON.parse(manifestText);
+      if (checksum.trim().split(/\s+/u)[0] !== proxySha256) {
+        issues.push(`${expected.provider} Proxy checksum sidecar differs from the packaged artifact`);
+      }
+      if (manifest.id !== expected.pluginId
+        || manifest.pluginVersion !== expected.proxyVersion
+        || manifest.process?.scope !== expected.processScope) {
+        issues.push(`${expected.provider} packaged Manifest differs from candidate package metadata`);
+      }
+      const external = reviewedExternalRuntimeCandidates[expected.provider];
+      const runtime = runtimes.get(expected.provider);
+      const cli = external
+        ? { ...external, verified: true }
+        : runtime
+          ? {
+            source: 'managed-runtime-artifact',
+            version: runtime.version,
+            verified: true,
+            sha256: runtime.entry?.sha256,
+            size: runtime.entry?.size,
+          }
+          : null;
+      if (!cli) issues.push(`${expected.provider} has no managed Runtime artifact candidate`);
+      tuples.push({
+        provider: expected.provider,
+        proxy: {
+          source: 'packaged-artifact',
+          proxyVersion: expected.proxyVersion,
+          sha256: proxySha256,
+          size: archive.length,
+        },
+        cli,
+      });
+    } catch (error) {
+      issues.push(`${expected.provider} packaged artifact is unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return { tuples, issues };
@@ -278,7 +296,7 @@ export function validateRuntimeArtifactTuple(certificate, runtimeManifest) {
     if (candidate.version !== tuple.cli?.version
       || candidate.entry?.sha256 !== tuple.cli?.sha256
       || candidate.entry?.size !== tuple.cli?.size) {
-      issues.push(`${provider} Runtime entry differs from the real Provider candidate`);
+      issues.push(`${provider} Runtime entry differs from the qualified artifact candidate`);
     }
     if (!['raw', 'tar.gz'].includes(candidate.format)
       || !/^[a-f0-9]{64}$/u.test(candidate.asset?.sha256 ?? '')
@@ -316,9 +334,20 @@ export async function main(argv = process.argv.slice(2)) {
   const outputDir = resolve(rootDir, options.output);
   await mkdir(outputDir, { recursive: true });
   const git = await revisionState();
+  const githubRunId = process.env.GITHUB_RUN_ID?.trim() || null;
+  const githubRunAttempt = process.env.GITHUB_RUN_ATTEMPT?.trim() || null;
+  const runner = {
+    environment: process.env.GIAN_RUNNER_ENVIRONMENT?.trim() || 'local',
+    os: process.env.RUNNER_OS?.trim() || process.platform,
+    arch: process.env.RUNNER_ARCH?.trim() || process.arch,
+    repository: process.env.GITHUB_REPOSITORY?.trim() || null,
+    runId: githubRunId,
+    runAttempt: githubRunAttempt,
+  };
   const certificate = {
-    schemaVersion: 1,
-    certificateId: `${options.stage}-${git.revision}`,
+    schemaVersion: 2,
+    evidenceModel: 'hosted-artifact-qualification-v1',
+    certificateId: `${options.stage}-${git.revision}-${githubRunId ?? 'local'}-${githubRunAttempt ?? '1'}`,
     stage: options.stage,
     admissionEligible: options.stage === 'release',
     artifactPublicationEligible: options.stage === 'artifacts' || options.stage === 'release',
@@ -332,7 +361,8 @@ export async function main(argv = process.argv.slice(2)) {
     shippingProxyIds: [...shippingProxyIds],
     providers: [...options.providers],
     candidatePackages: await candidatePackages(options.providers),
-    realEvidenceMaxAgeHours: catalog.certification.realEvidenceMaxAgeHours,
+    certificateMaxAgeHours: catalog.certification.artifactCertificateMaxAgeHours,
+    runner,
     startedAt: new Date().toISOString(),
     steps: [],
   };
@@ -362,19 +392,12 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (certificate.artifactPublicationEligible) {
     try {
-      const realEvidencePath = resolve(outputDir, 'real-provider', 'results.json');
-      const realRun = JSON.parse(await readFile(realEvidencePath, 'utf8'));
-      const binding = validateCandidateTuple(certificate, realRun);
-      certificate.candidateTuple = binding.tuples;
       const runtimeManifestPath = resolve(rootDir, 'artifacts/runtimes/runtime-candidates.json');
       const runtimeManifest = JSON.parse(await readFile(runtimeManifestPath, 'utf8'));
+      const binding = await buildArtifactCandidateTuple(certificate, runtimeManifest);
+      certificate.candidateTuple = binding.tuples;
       const runtimeBinding = validateRuntimeArtifactTuple(certificate, runtimeManifest);
       certificate.runtimeArtifacts = runtimeBinding.candidates;
-      certificate.realProviderEvidence = {
-        path: realEvidencePath,
-        startedAt: realRun.startedAt,
-        completedAt: realRun.completedAt,
-      };
       certificate.steps.push({
         id: 'candidate-binding',
         lane: 'certificate',
@@ -386,7 +409,7 @@ export async function main(argv = process.argv.slice(2)) {
         id: 'candidate-binding',
         lane: 'certificate',
         status: 'BLOCKED',
-        reason: `Candidate tuple evidence unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `Artifact candidate binding unavailable: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
   }
@@ -397,10 +420,19 @@ export async function main(argv = process.argv.slice(2)) {
   certificate.status = hasFailure ? 'FAIL' : hasBlocked ? 'BLOCKED' : 'PASS';
   certificate.qualified = certificate.artifactPublicationEligible
     && certificate.status === 'PASS'
-    && !certificate.dirty;
+    && !certificate.dirty
+    && runner.environment === 'github-hosted'
+    && runner.os === 'macOS'
+    && runner.arch === 'ARM64';
   if (certificate.status === 'PASS' && certificate.artifactPublicationEligible && certificate.dirty) {
     certificate.status = 'BLOCKED';
     certificate.blockedReason = 'Release certification requires a clean revision.';
+  }
+  if (certificate.status === 'PASS'
+    && certificate.artifactPublicationEligible
+    && (runner.environment !== 'github-hosted' || runner.os !== 'macOS' || runner.arch !== 'ARM64')) {
+    certificate.status = 'BLOCKED';
+    certificate.blockedReason = 'Artifact publication requires a GitHub-hosted macOS ARM64 runner.';
   }
   const certificatePath = resolve(outputDir, 'certificate.json');
   await writeFile(certificatePath, `${JSON.stringify(certificate, null, 2)}\n`, 'utf8');
