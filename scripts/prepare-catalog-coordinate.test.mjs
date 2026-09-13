@@ -13,6 +13,7 @@ import {
 import { prepareCatalogCoordinate } from './prepare-catalog-coordinate.mjs';
 
 const requiredSteps = [
+  'protocol-build',
   'acceptance-catalog',
   'signed-catalog',
   'artifact-contract',

@@ -8,6 +8,7 @@ import { reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs'
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRequiredStepIds = [
+  'protocol-build',
   'acceptance-catalog',
   'signed-catalog',
   'artifact-contract',

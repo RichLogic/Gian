@@ -23,6 +23,7 @@ test('development certification is deterministic and never claims admission', ()
   assert.deepEqual(
     proxyCertificationPlan(options).map(step => [step.id, step.lane]),
     [
+      ['protocol-build', 'catalog'],
       ['acceptance-catalog', 'catalog'],
       ['signed-catalog', 'catalog'],
       ['artifact-contract', 'proxy-artifacts'],
@@ -35,6 +36,7 @@ test('nightly certification includes full deterministic and every-Proxy UI evide
   const options = parseProxyCertificationOptions(['--stage', 'nightly']);
   const plan = proxyCertificationPlan(options);
   assert.deepEqual(plan.map(step => step.id), [
+    'protocol-build',
     'acceptance-catalog',
     'signed-catalog',
     'artifact-contract',
@@ -55,6 +57,7 @@ test('artifact certification breaks the first-publication cycle without weakenin
   ]);
   const plan = proxyCertificationPlan(options);
   assert.deepEqual(plan.map(step => step.id), [
+    'protocol-build',
     'acceptance-catalog',
     'signed-catalog',
     'artifact-contract',
@@ -75,6 +78,7 @@ test('release certification cannot omit preview, package, or Runtime artifact ev
   ]);
   const plan = proxyCertificationPlan(options);
   assert.deepEqual(plan.map(step => step.id), [
+    'protocol-build',
     'acceptance-catalog',
     'signed-catalog',
     'artifact-contract',
@@ -211,6 +215,7 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
     },
     completedAt: new Date().toISOString(),
     steps: [
+      'protocol-build',
       'acceptance-catalog',
       'signed-catalog',
       'artifact-contract',

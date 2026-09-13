@@ -86,7 +86,11 @@ export function parseProxyCertificationOptions(argv = []) {
 }
 
 export function proxyCertificationPlan(options) {
-  const steps = [nodeStep(
+  const steps = [pnpmStep(
+    'protocol-build',
+    'catalog',
+    ['--filter', '@gian/proxy-protocol', 'build'],
+  ), nodeStep(
     'acceptance-catalog',
     'catalog',
     ['--test', 'scripts/proxy-real-acceptance-catalog.test.mjs'],
