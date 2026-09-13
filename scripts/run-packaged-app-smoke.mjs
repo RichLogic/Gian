@@ -671,10 +671,11 @@ async function completePackagedOnboarding({
   const setup = claude.locator('.onboarding-agent-summary button');
   await setup.waitFor({ timeout: 30_000 });
   await setup.click();
+  const runtimeInstallTimeoutMs = 5 * 60_000;
   try {
     await Promise.race([
-      setup.waitFor({ state: 'detached', timeout: 120_000 }),
-      onboarding.getByRole('alert').waitFor({ timeout: 120_000 }).then(async () => {
+      setup.waitFor({ state: 'detached', timeout: runtimeInstallTimeoutMs }),
+      onboarding.getByRole('alert').waitFor({ timeout: runtimeInstallTimeoutMs }).then(async () => {
         throw new Error(`Runtime installation failed: ${await onboarding.getByRole('alert').innerText()}`);
       }),
     ]);
@@ -1052,7 +1053,12 @@ export async function main(args = process.argv.slice(2)) {
   } finally {
     if (electronApp) await electronApp.close().catch(() => undefined);
     await waitForHostExit(origin).catch(() => undefined);
-    await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(temporaryRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
 }
 
