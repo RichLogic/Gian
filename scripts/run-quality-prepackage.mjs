@@ -73,7 +73,8 @@ export function prepackageSkipReason(stepId, options) {
 }
 
 export function hasInternalBrowserJourneys(sourceRoot, fileExists = existsSync) {
-  return fileExists(join(sourceRoot, 'e2e', 'specs', '01-app-loads.spec.ts'));
+  return fileExists(join(sourceRoot, 'docs', 'quality', 'traceability.md'))
+    && fileExists(join(sourceRoot, 'e2e', 'specs', '01-app-loads.spec.ts'));
 }
 
 export async function main() {

@@ -72,6 +72,8 @@ test('the public Proxy qualification spec does not impersonate the internal brow
   const available = new Set(['/repo/e2e/specs/12-proxy-v2-mock.spec.ts']);
   assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
   available.add('/repo/e2e/specs/01-app-loads.spec.ts');
+  assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
+  available.add('/repo/docs/quality/traceability.md');
   assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), true);
 });
 
