@@ -62,8 +62,13 @@ export class ManagedRuntimeDeliveryService {
         `${id} has no Runtime combination compatible with this Gian version.`,
       );
     }
-    if (item.installation.state === 'not_installed') {
+    if (item.installation.state === 'not_installed'
+      || item.installation.state === 'quarantined'
+      || item.installation.state === 'invalid') {
       await this.options.catalog.install(id);
+      item = await this.options.catalog.get(id);
+    } else if (item.installation.state === 'installed' && item.installation.updateAvailable) {
+      await this.options.catalog.update(id);
       item = await this.options.catalog.get(id);
     }
     if (item?.installation.state !== 'installed') {
@@ -89,10 +94,6 @@ export class ManagedRuntimeDeliveryService {
     const status = await this.options.agents.managedRuntimeStatus(id);
     if (status.active) {
       if (status.active.generationId === plan.generationId) return status.active;
-      throw new ManagedRuntimeDeliveryError(
-        'RUNTIME_UPDATE_NOT_IMPLEMENTED',
-        'This operation installs a missing Runtime only; global Runtime Update is a separate flow.',
-      );
     }
     const staged = await this.options.installer.install(plan);
 

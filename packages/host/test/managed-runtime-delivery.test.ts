@@ -159,6 +159,106 @@ test('delivery rejects a Runtime install for an Agent bound to another Proxy', a
   );
 });
 
+test('delivery upgrades a legacy Proxy projection before staging its certified Runtime', async () => {
+  const calls: string[] = [];
+  let installation: 'quarantined' | 'installed' = 'quarantined';
+  const generation = {
+    schemaVersion: 1,
+    generationId: 'claude-managed-generation',
+    pluginId: parseProxyPluginId('claude'),
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '0.2.4', manifestSha256: 'a'.repeat(64), artifactSha256: 'b'.repeat(64),
+      entryPath: '/managed/proxy.mjs', processScope: 'session', protocolRange: '^2.2',
+    },
+    runtime: null,
+    companions: [],
+    certificate: { id: 'certificate', sha256: 'c'.repeat(64) },
+    state: 'staged',
+    installedAt: '2026-09-13T00:00:00.000Z',
+    activatedAt: null,
+  } as const;
+  const service = new ManagedRuntimeDeliveryService({
+    agents: {
+      managedRuntimeStatus: async () => ({ pluginId: 'claude', active: null, staged: [] }),
+      trustedLaunch: async () => ({ pluginId: 'claude' }),
+    } as never,
+    catalog: {
+      get: async () => ({
+        compatibility: { state: 'compatible' },
+        installation: { state: installation, updateAvailable: false },
+      }),
+      install: async () => { calls.push('proxy'); installation = 'installed'; },
+      managedRuntimeKind: () => 'native-binary',
+      managedRuntimePlan: async () => generation,
+    } as never,
+    installer: {
+      install: async () => { calls.push('runtime'); return generation; },
+    } as never,
+    activation: {
+      activate: async () => { calls.push('activate'); return { ...generation, state: 'active' }; },
+    } as never,
+    runtimeControl: {} as never,
+    resolver: {} as never,
+  });
+
+  const active = await service.install('claude');
+  assert.equal(active.state, 'active');
+  assert.deepEqual(calls, ['proxy', 'runtime', 'activate']);
+});
+
+test('delivery updates an older certified Proxy and Runtime generation together', async () => {
+  const calls: string[] = [];
+  let updateAvailable = true;
+  const generation = {
+    schemaVersion: 1,
+    generationId: 'claude-new-generation',
+    pluginId: parseProxyPluginId('claude'),
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '0.2.5', manifestSha256: 'd'.repeat(64), artifactSha256: 'e'.repeat(64),
+      entryPath: '/managed/proxy.mjs', processScope: 'session', protocolRange: '^2.2',
+    },
+    runtime: null,
+    companions: [],
+    certificate: { id: 'certificate-2', sha256: 'f'.repeat(64) },
+    state: 'staged',
+    installedAt: '2026-09-13T00:00:00.000Z',
+    activatedAt: null,
+  } as const;
+  const service = new ManagedRuntimeDeliveryService({
+    agents: {
+      managedRuntimeStatus: async () => ({
+        pluginId: 'claude',
+        active: { ...generation, generationId: 'claude-old-generation', state: 'active' },
+        staged: [],
+      }),
+      trustedLaunch: async () => ({ pluginId: 'claude' }),
+    } as never,
+    catalog: {
+      get: async () => ({
+        compatibility: { state: 'compatible' },
+        installation: { state: 'installed', updateAvailable },
+      }),
+      update: async () => { calls.push('proxy-update'); updateAvailable = false; },
+      managedRuntimeKind: () => 'native-binary',
+      managedRuntimePlan: async () => generation,
+    } as never,
+    installer: {
+      install: async () => { calls.push('runtime-update'); return generation; },
+    } as never,
+    activation: {
+      activate: async () => { calls.push('activate'); return { ...generation, state: 'active' }; },
+    } as never,
+    runtimeControl: {} as never,
+    resolver: {} as never,
+  });
+
+  const active = await service.install('claude');
+  assert.equal(active.generationId, 'claude-new-generation');
+  assert.deepEqual(calls, ['proxy-update', 'runtime-update', 'activate']);
+});
+
 test('ZCode delivery discovers the local App Runtime and never downloads a CLI', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-zcode-delivery-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

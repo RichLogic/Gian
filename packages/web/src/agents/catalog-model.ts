@@ -16,33 +16,26 @@ import type {
 export const CATALOG_DOC_KEYS = ['overview', 'setup', 'usage', 'troubleshooting'] as const;
 export type CatalogDocKey = (typeof CATALOG_DOC_KEYS)[number];
 
-/** Display classification for one Catalog card. Ordered by severity; the
- *  first entry is the card's primary badge. */
+/** The only installation states exposed to people. Host keeps richer
+ * fail-closed detail and Web collapses it into one actionable product state. */
 export type CatalogBadge =
-  | 'update-available'
+  | 'update-required'
   | 'installed'
-  | 'setup-required'
-  | 'requires-app-update'
-  | 'requires-proxy-update'
-  | 'invalid'
   | 'not-installed';
 
 export function catalogBadges(item: ProxyCatalogItem): CatalogBadge[] {
-  const badges: CatalogBadge[] = [];
-  if (item.compatibility.state === 'requires_app_update') badges.push('requires-app-update');
-  else if (item.compatibility.state === 'requires_proxy_update') badges.push('requires-proxy-update');
-  else if (item.compatibility.state === 'invalid') badges.push('invalid');
+  if (item.compatibility.state !== 'compatible') return ['update-required'];
+  if (item.installation.state === 'not_installed') return ['not-installed'];
+  if (
+    item.installation.state !== 'installed'
+    || item.installation.updateAvailable
+    || (item.runtime.state !== 'ready' && item.runtime.state !== 'not_required')
+  ) return ['update-required'];
+  return ['installed'];
+}
 
-  if (item.installation.state === 'installed') {
-    badges.push('installed');
-    if (item.installation.updateAvailable) badges.unshift('update-available');
-    if (item.runtime.state === 'setup_required') badges.push('setup-required');
-  } else if (item.installation.state === 'invalid' || item.installation.state === 'quarantined') {
-    if (!badges.includes('invalid')) badges.push('invalid');
-  } else if (badges.length === 0) {
-    badges.push('not-installed');
-  }
-  return badges;
+export function catalogInstallationStatus(item: ProxyCatalogItem): CatalogBadge {
+  return catalogBadges(item)[0] ?? 'not-installed';
 }
 
 /** Actions the page may render for one item — verbatim Host projection,
@@ -65,12 +58,10 @@ export function canCreateAgent(item: ProxyCatalogItem): boolean {
   return item.availableActions.includes('create_agent');
 }
 
-/** True when the item stays visible but every install/enable path is off
- *  (incompatible with this App, or broken local install). */
+/** True when an official Integration cannot currently create an Agent. Its
+ * row remains explorable even while actions are unavailable. */
 export function isCatalogItemDisabled(item: ProxyCatalogItem): boolean {
-  return item.compatibility.state !== 'compatible'
-    || item.installation.state === 'invalid'
-    || item.installation.state === 'quarantined';
+  return item.compatibility.state !== 'compatible' || item.installation.latestVersion === null;
 }
 
 /** i18n key + flag distinguishing "the App is too old" from "the Proxy is

@@ -2,8 +2,6 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type {
   AgentProxyDefaults,
   ConfigValue,
-  ManagedRuntimeStatus,
-  ProxyCatalogItem,
   TerminalPreferences,
   UserAgentStatus,
 } from '@gian/shared';
@@ -15,7 +13,6 @@ import {
   executorSettingsFromCapabilities,
 } from '../components/composer/capabilities.js';
 import { agentIdEntityKey } from '../operations/agents.js';
-import { runtimeEntityKey } from '../operations/catalog.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
 import type { TerminalWire } from '../components/terminal-wire.js';
@@ -36,27 +33,17 @@ export interface AgentTerminalControl {
   onStop: () => void;
 }
 
-/**
- * Panel-2 detail for one saved Agent (WP4 port of the Settings Agents card):
- * identity is the open `pluginId`; the bound Proxy section renders Catalog
- * metadata (or legacy kind metadata for pre-migration Agents) and links into
- * the Catalog detail. Kind-scoped affordances (official CLI install, native
- * picker, capability-driven Defaults) stay gated on `agent.proxy` — an Agent
- * bound to an open pluginId never fabricates them.
- */
+/** One saved Agent owns identity, HOME and defaults. Its shared Proxy + CLI
+ * Runtime lifecycle belongs to the Agent Integrations surface, never here. */
 export function AgentDetailPanel({
   agent,
   display,
-  catalogItem,
-  runtime,
   terminal,
   showBack,
   errorNotice,
   onRename,
   onSetHome,
   onPickHome,
-  onInstallRuntime,
-  onUpdateProxy,
   onSetDefaults,
   onDelete,
   onOpenProxy,
@@ -64,16 +51,12 @@ export function AgentDetailPanel({
 }: {
   agent: UserAgentStatus;
   display: ProxyLogoDisplay;
-  catalogItem: ProxyCatalogItem | null;
-  runtime: ManagedRuntimeStatus | null;
   terminal?: AgentTerminalControl;
   showBack: boolean;
   errorNotice: React.ReactNode;
   onRename: (name: string) => Promise<boolean>;
   onSetHome: (home: { kind: 'managed' } | { kind: 'custom'; path: string }) => Promise<boolean>;
   onPickHome: () => Promise<string | null>;
-  onInstallRuntime?: () => void;
-  onUpdateProxy?: () => void;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
   onDelete: () => void;
   /** Present only when the Agent's pluginId has a Catalog entry. */
@@ -83,10 +66,8 @@ export function AgentDetailPanel({
   const t = useT();
   const kind = agent.proxy;
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
-  const runtimeRuns = usePendingOperations(runtimeEntityKey(agent.pluginId));
-  const busy = agentRuns.length > 0 || runtimeRuns.length > 0;
+  const busy = agentRuns.length > 0;
   const [name, setName] = useState(agent.name);
-  const resolvedPath = agent.cliPath ?? agent.cli.path ?? '';
   const [customHome, setCustomHome] = useState(agent.home?.kind === 'custom' ? agent.home.path : '');
   const [useCustomHome, setUseCustomHome] = useState(agent.home?.kind === 'custom');
   const [capabilities, setCapabilities] = useState<unknown>(null);
@@ -247,16 +228,8 @@ export function AgentDetailPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capabilities, defaults.model]);
 
-  const cliUnverified = agent.runtimeProfile?.verification === 'unverified';
   const defaultsEditable = !!kind && agent.ready
     && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError);
-  const activeRuntime = runtime?.active ?? null;
-  const runtimeCliVersion = activeRuntime?.runtime?.version ?? agent.cli.version;
-  const runtimeProxyVersion = activeRuntime?.proxy.pluginVersion ?? agent.plugin.version;
-  const updateAvailable = !!catalogItem?.installation.updateAvailable
-    && catalogItem.availableActions.includes('update_proxy');
-  const installAvailable = !activeRuntime
-    && catalogItem?.availableActions.includes('install_runtime') === true;
   const customHomeEnabled = useCustomHome;
   const externalHome = agent.home === null;
   const terminalAvailable = !!terminal && agent.home !== null && agent.cli.state === 'ready';
@@ -324,114 +297,21 @@ export function AgentDetailPanel({
         )}
 
         <section className="ag-sec">
-          <span className="s2-subhead">{t('agents.runtime.title')}</span>
-          <dl className="kv-grid">
-            <dt>Runtime</dt>
-            <dd>
-              <span className="rt-line">
-                <span className="mono">{runtimeCliVersion ?? t('agents.runtime.notInstalled')}</span>
-                {terminalAvailable && (
-                  <button type="button" className="btn icon ghost compact"
-                          title={t('agents.terminal.open')}
-                          aria-label={t('agents.terminal.open')}
-                          onClick={terminal.onOpen}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="m5 7 4 4-4 4" /><path d="M11 17h8" />
-                      <rect x="2" y="3" width="20" height="18" rx="2" />
-                    </svg>
-                  </button>
-                )}
-              </span>
-              {agent.cli.source === 'managed' && (
-                <span className="hint">{t('agents.runtime.managedHelp')}</span>
-              )}
-            </dd>
-            <dt>{t('agents.runtime.proxyVersionLabel')}</dt>
-            <dd>
-              <span className="mono">{runtimeProxyVersion ?? t('agents.runtime.notInstalled')}</span>
-              {cliUnverified && (
-                <span className="hint danger-hint" role="alert">
-                  {t('settings.agents.cliVersionUnverified').replace(
-                    '{versions}',
-                    agent.runtimeProfile?.verifiedVersions.join(', ') || 'none',
-                  )}
-                </span>
-              )}
-            </dd>
-            <dt>{t('agents.runtime.cliPath')}</dt>
-            <dd>
-              <span className="rt-line">
-                <span className="cli-path-val" title={resolvedPath}>{resolvedPath || '—'}</span>
-                {resolvedPath && (
-                  <button type="button" className="btn icon ghost compact"
-                          title={t('common.copy')} aria-label={t('common.copy')}
-                          onClick={() => { void navigator.clipboard?.writeText(resolvedPath); }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <rect x="9" y="9" width="11" height="11" rx="2" />
-                      <path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" />
-                    </svg>
-                  </button>
-                )}
-              </span>
-            </dd>
-          </dl>
-
-          <div className="act-row" data-testid="agent-runtime-action">
-            {installAvailable ? (
-              <>
-                <span className="delta">{t('agents.runtime.notInstalledHelp')}</span>
-                <button type="button" className="btn xs primary" disabled={busy}
-                        data-testid="agent-runtime-install" onClick={onInstallRuntime}>
-                  {t('agents.catalog.action.installRuntime')}
-                </button>
-              </>
-            ) : updateAvailable ? (
-              <>
-                <span className="delta">
-                  <span className="mono">
-                    {t('agents.runtime.proxyDelta')
-                      .replace('{current}', runtimeProxyVersion ?? '—')
-                      .replace('{latest}', catalogItem?.installation.latestVersion ?? '—')}
-                  </span>
-                  {' · '}{t('agents.runtime.updateProxyOnly')}
-                </span>
-                <button type="button" className="btn xs primary" disabled={busy}
-                        data-testid="agent-runtime-update" onClick={onUpdateProxy}>
-                  {t('agents.catalog.action.update')}
-                </button>
-              </>
-            ) : (
-              <span className="delta muted">
-                {agent.ready ? t('agents.runtime.current') : t('agents.runtime.setupPending')}
-              </span>
+          <span className="s2-subhead">{t('agents.integration')}</span>
+          <div className="sec-line">
+            <span className="rt-line">
+              <AgentLogo proxy={kind} logo={display.logo ?? undefined}
+                         fallback={display.name} size={20} />
+              <span className="catalog-name">{display.name}</span>
+              <span className="mono hint">{agent.pluginId}</span>
+            </span>
+            {onOpenProxy && (
+              <button type="button" className="btn xs secondary" disabled={busy}
+                      onClick={onOpenProxy}>
+                {t('agents.detail.viewInCatalog')}
+              </button>
             )}
           </div>
-
-          {terminal?.visible && terminal.termId && (
-            <div className="tty" data-testid="agent-cli-terminal">
-              <div className="term-bar">
-                <span>{t('agents.terminal.title')}</span>
-                <span className="spacer" />
-                <button type="button" className="btn xs ghost" onClick={terminal.onHide}>
-                  {t('agents.terminal.hide')}
-                </button>
-                <button type="button" className="btn xs danger-ghost" onClick={terminal.onStop}>
-                  {t('agents.terminal.stop')}
-                </button>
-              </div>
-              <div className="agent-terminal-body">
-                <Suspense fallback={null}>
-                  <Terminal
-                    instanceKey={`agent-cli:${terminal.termId}`}
-                    preferences={terminal.preferences}
-                    wire={terminal.makeWire(terminal.termId, agent.id, !terminal.started)}
-                  />
-                </Suspense>
-              </div>
-            </div>
-          )}
         </section>
 
         <section className="ag-sec">
@@ -479,6 +359,40 @@ export function AgentDetailPanel({
                        }} />
                 {t('agents.home.useCustom')}
               </label>
+            </div>
+          )}
+          {terminalAvailable && !terminal?.visible && (
+            <div className="act-row">
+              <span className="delta muted">{t('agents.terminal.homeHelp')}</span>
+              <button type="button" className="btn xs secondary"
+                      title={t('agents.terminal.open')}
+                      aria-label={t('agents.terminal.open')}
+                      onClick={terminal.onOpen}>
+                {t('agents.terminal.open')}
+              </button>
+            </div>
+          )}
+          {terminal?.visible && terminal.termId && (
+            <div className="tty" data-testid="agent-cli-terminal">
+              <div className="term-bar">
+                <span>{t('agents.terminal.title')}</span>
+                <span className="spacer" />
+                <button type="button" className="btn xs ghost" onClick={terminal.onHide}>
+                  {t('agents.terminal.hide')}
+                </button>
+                <button type="button" className="btn xs danger-ghost" onClick={terminal.onStop}>
+                  {t('agents.terminal.stop')}
+                </button>
+              </div>
+              <div className="agent-terminal-body">
+                <Suspense fallback={null}>
+                  <Terminal
+                    instanceKey={`agent-cli:${terminal.termId}`}
+                    preferences={terminal.preferences}
+                    wire={terminal.makeWire(terminal.termId, agent.id, !terminal.started)}
+                  />
+                </Suspense>
+              </div>
             </div>
           )}
         </section>

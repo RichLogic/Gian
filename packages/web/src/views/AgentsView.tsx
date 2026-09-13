@@ -112,7 +112,6 @@ function nextDraftName(base: string, agents: UserAgentStatus[]): string {
 
 function canDraftAgent(item: ProxyCatalogItem): boolean {
   if (item.compatibility.state !== 'compatible') return false;
-  if (item.installation.state === 'invalid' || item.installation.state === 'quarantined') return false;
   return item.availableActions.some(action => (
     action === 'create_agent' || action === 'install_runtime'
       || action === 'install_proxy' || action === 'update_proxy'
@@ -275,6 +274,12 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
           } satisfies ProxyCatalogItem;
         })
       : [];
+  // CatalogService preserves local packages without a trusted coordinate so
+  // existing My Agents can still be explained. They are not official
+  // Integrations and must not leak into Add Agent or global installation.
+  const integrationItems = signedCatalogItems.length > 0
+    ? catalogItems.filter(item => item.installation.latestVersion !== null)
+    : catalogItems;
 
   function legacyKindFor(pluginId: string): ProductExecutor | null {
     return legacyProxies.find(entry => entry.id === pluginId)?.id ?? null;
@@ -328,8 +333,22 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
     setDraftSaving(true);
     try {
       const item = catalogItems.find(candidate => candidate.pluginId === selection.pluginId);
-      const installAfterCreate = item?.availableActions.includes('install_runtime') === true
-        && !runtimeByPlugin[selection.pluginId]?.active;
+      const preparation = item?.availableActions.includes('install_runtime')
+        ? 'catalog.installRuntime'
+        : item?.availableActions.includes('install_proxy')
+          ? 'catalog.installProxy'
+          : item?.availableActions.includes('update_proxy')
+            ? 'catalog.updateProxy'
+            : null;
+      if (preparation) {
+        const prepared = await waitForRunSettle(store, dispatch(preparation, {
+          pluginId: selection.pluginId,
+        }).id);
+        if (prepared.phase !== 'confirmed') {
+          setError(prepared.error ?? 'Agent Integration installation failed');
+          return;
+        }
+      }
       const settled = await waitForRunSettle(store, dispatch('agent.create', {
         name: draft.name.trim(),
         pluginId: selection.pluginId,
@@ -348,16 +367,6 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
       setDraftHomeSupported(true);
       setSelection({ kind: 'agent', id: result.agent.id });
       await refresh();
-      if (installAfterCreate) {
-        const installed = await waitForRunSettle(store, dispatch('catalog.installRuntime', {
-          pluginId: selection.pluginId,
-          agentId: result.agent.id,
-        }).id);
-        await refresh();
-        if (installed.phase !== 'confirmed') {
-          setError(installed.error ?? 'Runtime installation failed');
-        }
-      }
     } finally {
       setDraftSaving(false);
     }
@@ -451,14 +460,38 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
     ? agents.find(agent => agent.id === selection.id) ?? null
     : null;
   const selectedProxy = selection?.kind === 'proxy'
-    ? catalogItems.find(item => item.pluginId === selection.pluginId) ?? null
+    ? integrationItems.find(item => item.pluginId === selection.pluginId) ?? null
     : null;
   const draftItem = selection?.kind === 'draft'
-    ? catalogItems.find(item => item.pluginId === selection.pluginId) ?? null
+    ? integrationItems.find(item => item.pluginId === selection.pluginId) ?? null
     : null;
   const panelOpen = !!selectedAgent || !!selectedProxy || (!!draftItem && !!draft);
   const source = catalog?.source ?? null;
   const errorNotice = error ? <div className="notice danger" role="alert">{error}</div> : null;
+  const catalogNotice = (
+    <>
+      {catalogLoadError && (
+        <div className="notice danger" role="alert">
+          <span className="grow">{t('agents.catalog.loadError').replace('{message}', catalogLoadError)}</span>
+          <button type="button" className="btn xs secondary" data-testid="catalog-sync"
+                  onClick={() => { void syncCatalog(); }}>
+            {t('common.retry')}
+          </button>
+        </div>
+      )}
+      {source && (source.state === 'stale' || source.state === 'error') && (
+        <div className="notice warn" role="status" data-testid="catalog-source-state">
+          <span className="grow">
+            {t(`agents.catalog.source.${source.state}`).replace('{message}', source.error?.message ?? '')}
+          </span>
+          <button type="button" className="btn xs secondary" data-testid="catalog-sync"
+                  disabled={catalogSyncing} onClick={() => { void syncCatalog(); }}>
+            {catalogSyncing ? t('agents.catalog.syncing') : t('agents.catalog.refresh')}
+          </button>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="agents-view" data-testid="agents-view" data-loading={loading ? 'true' : 'false'}>
@@ -504,8 +537,6 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                   <div className="catalog" data-testid="agent-list">
                     {agents.map(agent => {
                       const display = agentProxyDisplay(agent, catalogItems, legacyProxies);
-                      const item = catalogItems.find(candidate => candidate.pluginId === agent.pluginId);
-                      const update = !!item?.installation.updateAvailable;
                       return (
                         <button key={agent.id} type="button"
                                 className={`catalog-item ${selectedAgent?.id === agent.id ? 'active' : ''}`}
@@ -516,56 +547,48 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                           <span className="grow">
                             <span className="catalog-name">{agent.name}</span>
                             <span className="catalog-sub ellip" title={display.name}>
-                              {display.name}{agent.cli.version ? ` · CLI ${agent.cli.version}` : ''}
+                              {display.name}
                             </span>
-                          </span>
-                          <span className={`st ${update ? 'run' : agent.ready ? 'ok' : 'warn'}`}>
-                            <span className="st-dot" />
-                            {update ? t('agents.catalog.badge.update')
-                              : agent.ready ? t('settings.agents.ready') : t('settings.agents.setupRequired')}
                           </span>
                         </button>
                       );
                     })}
                   </div>
                   {agents.length === 0 && <p className="s2-help">{t('settings.agents.empty')}</p>}
+                  {catalogNotice}
+                  <div className="s2-subhead">
+                    {t('agents.integrations').replace('{count}', String(integrationItems.length))}
+                  </div>
+                  <div className="catalog" data-testid="agent-integrations-list">
+                    {integrationItems.map(item => (
+                      <CatalogRow key={item.pluginId} item={item}
+                                  active={selection?.kind === 'proxy'
+                                    && selection.pluginId === item.pluginId}
+                                  onPick={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }}
+                                  onInfo={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }} />
+                    ))}
+                  </div>
                 </>
               ) : (
                 <>
                   {errorNotice}
-                  {catalogLoadError && (
-                    <div className="notice danger" role="alert">
-                      <span className="grow">{t('agents.catalog.loadError').replace('{message}', catalogLoadError)}</span>
-                      <button type="button" className="btn xs secondary" data-testid="catalog-sync"
-                              onClick={() => { void syncCatalog(); }}>
-                        {t('common.retry')}
-                      </button>
-                    </div>
-                  )}
-                  {source && (source.state === 'stale' || source.state === 'error') && (
-                    <div className="notice warn" role="status" data-testid="catalog-source-state">
-                      <span className="grow">
-                        {t(`agents.catalog.source.${source.state}`).replace('{message}', source.error?.message ?? '')}
-                      </span>
-                      <button type="button" className="btn xs secondary" data-testid="catalog-sync"
-                              disabled={catalogSyncing} onClick={() => { void syncCatalog(); }}>
-                        {catalogSyncing ? t('agents.catalog.syncing') : t('agents.catalog.refresh')}
-                      </button>
-                    </div>
-                  )}
+                  {catalogNotice}
                   <div className="s2-subhead">
-                    {t('agents.draft.pickProxy')} · {catalogItems.length}
+                    {t('agents.draft.pickProxy')} · {integrationItems.length}
                   </div>
                   <div className="catalog" data-testid="proxy-catalog-list">
-                    {catalogItems.map(item => (
+                    {integrationItems.map(item => (
                       <CatalogRow key={item.pluginId} item={item}
                                   active={selection?.kind !== 'agent'
                                     && selection?.pluginId === item.pluginId}
-                                  onPick={() => { void startDraft(item); }}
+                                  onPick={() => {
+                                    if (canDraftAgent(item)) void startDraft(item);
+                                    else setSelection({ kind: 'proxy', pluginId: item.pluginId });
+                                  }}
                                   onInfo={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }} />
                     ))}
                   </div>
-                  {catalog && catalogItems.length === 0 && (
+                  {catalog && integrationItems.length === 0 && (
                     <p className="s2-help">{t('agents.catalog.empty')}</p>
                   )}
                 </>
@@ -627,29 +650,19 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
             <AgentDetailPanel
               agent={selectedAgent}
               display={agentProxyDisplay(selectedAgent, catalogItems, legacyProxies)}
-              catalogItem={catalogItems.find(item => item.pluginId === selectedAgent.pluginId) ?? null}
-              runtime={runtimeByPlugin[selectedAgent.pluginId] ?? null}
               terminal={terminalControl(selectedAgent.id)}
               showBack={narrow}
               errorNotice={errorNotice}
               onRename={name => run('agent.patch', { agentId: selectedAgent.id, patch: { name } })}
               onSetHome={home => run('agent.patch', { agentId: selectedAgent.id, patch: { home } })}
               onPickHome={() => pickHome(selectedAgent.id)}
-              onInstallRuntime={catalogItems.find(item => item.pluginId === selectedAgent.pluginId)
-                ?.availableActions.includes('install_runtime')
-                ? () => { void runCatalog('catalog.installRuntime', selectedAgent.pluginId, selectedAgent.id); }
-                : undefined}
-              onUpdateProxy={catalogItems.find(item => item.pluginId === selectedAgent.pluginId)
-                ?.availableActions.includes('update_proxy')
-                ? () => { void runCatalog('catalog.updateProxy', selectedAgent.pluginId); }
-                : undefined}
               onSetDefaults={defaults => run('agent.patch', {
                 agentId: selectedAgent.id,
                 patch: { defaults },
               })}
               onDelete={() => { void removeAgent(selectedAgent); }}
-              onOpenProxy={catalogItems.some(item => item.pluginId === selectedAgent.pluginId)
-                ? () => { setPageMode('add'); setSelection({ kind: 'proxy', pluginId: selectedAgent.pluginId }); }
+              onOpenProxy={integrationItems.some(item => item.pluginId === selectedAgent.pluginId)
+                ? () => { setSelection({ kind: 'proxy', pluginId: selectedAgent.pluginId }); }
                 : undefined}
               onClose={() => setSelection(null)}
             />
@@ -672,13 +685,12 @@ function CatalogRow({
   onInfo: () => void;
 }) {
   const t = useT();
-  const usable = canDraftAgent(item);
   return (
     <div className={`catalog-item catalog-card ${active ? 'active' : ''}`}
          data-testid={`catalog-item-${item.pluginId}`}>
       <button type="button" className="catalog-item-open"
               data-testid={`catalog-open-${item.pluginId}`}
-              disabled={!usable} onClick={onPick}>
+              onClick={onPick}>
         <AgentLogo proxy={null} logo={item.logo} fallback={item.displayName} size={28} />
         <span className="grow">
           <span className="catalog-name">{item.displayName}</span>

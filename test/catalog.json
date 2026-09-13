@@ -162,6 +162,7 @@
         "packages/host/test/managed-runtime-delivery.test.ts",
         "packages/host/test/managed-runtime-generation-store.test.ts",
         "packages/host/test/managed-runtime-installer.test.ts",
+        "packages/host/test/runtime-download.test.ts",
         "packages/host/test/model-002-warmup-retry.test.ts",
         "packages/host/test/native-001-scanner.test.ts",
         "packages/host/test/onboarding-state.test.ts",

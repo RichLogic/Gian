@@ -4,7 +4,7 @@ import { loadCatalogDocument } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import { CatalogMarkdown } from './CatalogMarkdown.js';
-import { compatibilityMessage } from './catalog-model.js';
+import { catalogInstallationStatus, compatibilityMessage } from './catalog-model.js';
 
 export type ProxyDetailSection = 'basic' | 'tutorial' | 'versions';
 
@@ -103,6 +103,7 @@ export function ProxyDetailPanel({
   const generation = runtime?.active ?? null;
   const compat = compatibilityMessage(item);
   const actions = item.availableActions;
+  const installationStatus = catalogInstallationStatus(item);
   const canUse = actions.includes('create_agent')
     || actions.includes('install_runtime')
     || actions.includes('install_proxy')
@@ -215,7 +216,9 @@ export function ProxyDetailPanel({
             {actions.includes('install_runtime') && (
               <button type="button" className="btn xs primary" disabled={busy}
                       data-testid="proxy-action-install-runtime" onClick={() => onAction('install_runtime')}>
-                {t('agents.catalog.action.installRuntime')}
+                {t(installationStatus === 'update-required'
+                  ? 'agents.catalog.action.update'
+                  : 'agents.catalog.action.install')}
               </button>
             )}
             {actions.includes('update_proxy') && (

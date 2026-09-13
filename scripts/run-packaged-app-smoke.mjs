@@ -5,10 +5,12 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readlink,
   readdir,
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -61,6 +63,13 @@ async function writeFakeClaude(path, version, probePidPath) {
     '',
   ].join('\n'));
   await chmod(path, 0o700);
+}
+
+async function seedLegacyProxy(dataDir, pluginId, version) {
+  const versionDir = join(dataDir, 'plugins', pluginId, version);
+  await mkdir(versionDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(versionDir, 'proxy.mjs'), 'export {};\n', { mode: 0o600 });
+  await symlink(version, join(dataDir, 'plugins', pluginId, 'current'));
 }
 
 export async function validatePackagedApp(appPath) {
@@ -837,6 +846,18 @@ export async function main(args = process.argv.slice(2)) {
   ));
   const expectedClaudeRuntimeVersion = expectedClaudeManifest.runtime?.verifiedVersions?.[0];
   assert.equal(typeof expectedClaudeRuntimeVersion, 'string');
+  const expectedCodexManifest = JSON.parse(await readFile(
+    join(rootDir, 'packages', 'proxies', 'codex-proxy', 'manifest.json'),
+    'utf8',
+  ));
+  const expectedCodexProxyVersion = expectedCodexManifest.pluginVersion;
+  assert.equal(typeof expectedCodexProxyVersion, 'string');
+  const legacyCodexProxyVersion = '0.2.12';
+  assert.notEqual(expectedCodexProxyVersion, legacyCodexProxyVersion);
+  // Existing production profiles may contain a safe SemVer current pointer
+  // from before PluginStore receipts existed. Keep Claude completely fresh,
+  // while Codex proves the packaged upgrade path does not disable Add Agent.
+  await seedLegacyProxy(dataDir, 'codex', legacyCodexProxyVersion);
   // This machine-global decoy must remain unused. The packaged product may
   // execute only the Runtime downloaded below its own dataDir/runtimes tree.
   await writeFakeClaude(fakeClaude, '9.8.8', fakeClaudeProbePid);
@@ -893,6 +914,44 @@ export async function main(args = process.argv.slice(2)) {
     assert.equal(finalState.agents.find(agent => agent.proxy === 'kimi'), undefined);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'dsh'), undefined);
     assert.equal(finalState.agents.find(agent => agent.proxy === 'zcode'), undefined);
+
+    const beforeUpgradeResponse = await desktopFetch(origin, desktopToken, '/api/proxies');
+    assert.equal(beforeUpgradeResponse.status, 200);
+    const beforeUpgrade = await beforeUpgradeResponse.json();
+    const legacyCodex = beforeUpgrade.catalog.items.find(item => item.pluginId === 'codex');
+    assert.equal(legacyCodex?.installation.state, 'quarantined');
+    assert.equal(legacyCodex?.installation.latestVersion, expectedCodexProxyVersion);
+    assert.equal(legacyCodex?.availableActions.includes('install_runtime'), true);
+
+    const upgradeResponse = await desktopFetch(
+      origin,
+      desktopToken,
+      '/api/proxies/codex/runtime/install',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(5 * 60_000),
+      },
+    );
+    const upgradeBody = await upgradeResponse.text();
+    assert.equal(upgradeResponse.status, 200, upgradeBody);
+    const upgradedCodex = JSON.parse(upgradeBody).generation;
+    assert.equal(upgradedCodex.pluginId, 'codex');
+    assert.equal(upgradedCodex.proxy.pluginVersion, expectedCodexProxyVersion);
+    assert.equal(
+      await readlink(join(dataDir, 'plugins', 'codex', 'current')),
+      expectedCodexProxyVersion,
+    );
+    await assertFile(join(dataDir, 'plugins', 'codex', expectedCodexProxyVersion, 'install-receipt.json'));
+    await assertFile(join(dataDir, 'plugins', 'codex', legacyCodexProxyVersion, 'proxy.mjs'));
+
+    const afterUpgradeResponse = await desktopFetch(origin, desktopToken, '/api/proxies');
+    assert.equal(afterUpgradeResponse.status, 200);
+    const afterUpgrade = await afterUpgradeResponse.json();
+    const installedCodex = afterUpgrade.catalog.items.find(item => item.pluginId === 'codex');
+    assert.equal(installedCodex?.installation.state, 'installed');
+    assert.equal(installedCodex?.runtime.state, 'ready');
 
     await stopRelaunchedDesktop(executable, origin);
     await waitForHostExit(origin);

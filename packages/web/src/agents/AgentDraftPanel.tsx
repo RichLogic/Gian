@@ -1,6 +1,7 @@
 import type { ManagedRuntimeStatus, ProxyCatalogItem, UserAgentStatus } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
+import { catalogInstallationStatus } from './catalog-model.js';
 
 export interface AgentDraftState {
   name: string;
@@ -73,7 +74,11 @@ export function AgentDraftPanel({
     ?? item.installation.installedVersion
     ?? item.installation.latestVersion;
   const custom = draft.customHome !== null;
-  const installsRuntime = !active && item.availableActions.includes('install_runtime');
+  const installationStatus = catalogInstallationStatus(item);
+  const preparesIntegration = installationStatus !== 'installed'
+    && item.availableActions.some(action => (
+      action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy'
+    ));
   const defaultHome = t('agents.home.draftDefault').replace('{pluginId}', item.pluginId);
 
   return (
@@ -116,7 +121,7 @@ export function AgentDraftPanel({
 
         <section className="ag-sec">
           <dl className="kv-grid">
-            <dt>{t('settings.agents.proxy')}</dt>
+            <dt>{t('agents.integration')}</dt>
             <dd>
               <span className="rt-line">
                 <AgentLogo proxy={null} logo={item.logo} fallback={item.displayName} size={20} />
@@ -231,7 +236,11 @@ export function AgentDraftPanel({
         <button type="button" className="btn sm primary" data-testid="agent-draft-save"
                 disabled={busy || draftError !== null || (custom && !(draft.customHome?.trim()))}
                 onClick={onSave}>
-          {t(installsRuntime ? 'agents.draft.installAndCreate' : 'agents.draft.save')}
+          {t(preparesIntegration
+            ? installationStatus === 'update-required'
+              ? 'agents.draft.updateAndCreate'
+              : 'agents.draft.installAndCreate'
+            : 'agents.draft.save')}
         </button>
       </div>
     </>

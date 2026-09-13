@@ -68,7 +68,7 @@ test('certified combinations expose one unified Runtime install action', () => {
     canRollback: false,
     installable: true,
     runtimeInstallable: true,
-  }), ['create_agent'], 'certified combinations must never expose Proxy-only update or rollback');
+  }), ['install_runtime', 'create_agent'], 'certified combinations update through one Runtime + Proxy action');
 });
 
 function sha256(bytes: Uint8Array): string {
@@ -502,11 +502,18 @@ test('reserved official pluginId installs from Catalog in production but not ove
     platform: 'darwin-arm64',
     officialPresence: async () => null,
   });
-  assert.deepEqual((await production.get('claude'))?.availableActions, ['install_proxy']);
+  await mkdir(join(root, 'plugins', 'claude', '0.9.0'), { recursive: true });
+  await writeFile(join(root, 'plugins', 'claude', '0.9.0', 'proxy.mjs'), 'export {}\n');
+  await symlink('0.9.0', join(root, 'plugins', 'claude', 'current'));
+  const legacy = await production.get('claude');
+  assert.equal(legacy?.installation.state, 'quarantined');
+  assert.deepEqual(legacy?.availableActions, ['install_proxy']);
   await production.install('claude');
   const installed = await production.get('claude');
   assert.equal(installed?.installation.state, 'installed');
   assert.equal(installed?.availableActions.includes('create_agent'), true);
+  assert.equal((await plugins.inspect('claude')).currentVersion, '1.0.0');
+  assert.equal((await lstat(join(root, 'plugins', 'claude', '0.9.0'))).isDirectory(), true);
 
   const devRoot = join(root, 'dev');
   const devPlugins = new PluginStore({

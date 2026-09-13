@@ -67,6 +67,15 @@ export interface PluginStoreHooks {
   beforeRestore?: () => Promise<void>;
 }
 
+export interface PluginInstallOptions {
+  /** One-way migration seam for a pre-PluginStore `current -> <semver>`
+   * pointer. The old version directory is retained, but only a fully
+   * Catalog-validated candidate may replace the pointer. Arbitrary files,
+   * directories, escaped links, and concurrent pointer changes still fail
+   * closed. */
+  replaceLegacyCurrent?: boolean;
+}
+
 export class PluginStore {
   private readonly inFlight = new Set<string>();
   private readonly hostVersions: readonly string[];
@@ -257,7 +266,10 @@ export class PluginStore {
     };
   }
 
-  async install(coordinate: PluginInstallCoordinate): Promise<PluginInstallReceipt> {
+  async install(
+    coordinate: PluginInstallCoordinate,
+    options: PluginInstallOptions = {},
+  ): Promise<PluginInstallReceipt> {
     const pluginId = parseProxyPluginId(coordinate.pluginId);
     if (!SEMVER.test(coordinate.pluginVersion)) {
       throw new PluginStoreError('PLUGIN_VERSION_INVALID', 'pluginVersion must be SemVer.');
@@ -272,7 +284,7 @@ export class PluginStore {
     this.inFlight.add(key);
     let operationError: unknown;
     try {
-      return await this.installLocked(pluginId, coordinate, lease);
+      return await this.installLocked(pluginId, coordinate, lease, options);
     } catch (error) {
       operationError = error;
       throw error;
@@ -350,8 +362,12 @@ export class PluginStore {
     pluginId: ProxyPluginId,
     coordinate: PluginInstallCoordinate,
     lease: AgentUpdateLease,
+    options: PluginInstallOptions,
   ): Promise<PluginInstallReceipt> {
-    await this.assertCurrentManagedOrAbsent(pluginId);
+    const legacyCurrentVersion = await this.assertCurrentManagedOrAbsent(
+      pluginId,
+      options.replaceLegacyCurrent === true,
+    );
     const offered = offeredProtocolVersionsForInstall(coordinate.protocolRange, this.hostVersions);
     if (parseGitHubReleaseAssetUrl(coordinate.manifest.url, this.options.allowedArtifactRepositories) === null
       || parseGitHubReleaseAssetUrl(coordinate.archive.url, this.options.allowedArtifactRepositories) === null) {
@@ -440,7 +456,7 @@ export class PluginStore {
           || existing.manifestSha256 !== receipt.manifestSha256) {
           throw new PluginVersionConflictError(pluginId, coordinate.pluginVersion);
         }
-        await this.activateCurrent(pluginId, coordinate.pluginVersion);
+        await this.activateCurrent(pluginId, coordinate.pluginVersion, legacyCurrentVersion);
         return existing;
       }
       await writeFile(
@@ -455,7 +471,7 @@ export class PluginStore {
         throw new PluginStoreError('PLUGIN_QUARANTINED', `${pluginId} failed candidate revalidation.`);
       }
       await this.options.hooks?.afterCandidateValidated?.(finalDir);
-      await this.activateCurrent(pluginId, coordinate.pluginVersion);
+      await this.activateCurrent(pluginId, coordinate.pluginVersion, legacyCurrentVersion);
       return verifiedCandidate;
     } finally {
       await rm(staging, { recursive: true, force: true });
@@ -528,9 +544,12 @@ export class PluginStore {
     }
   }
 
-  private async assertCurrentManagedOrAbsent(pluginId: ProxyPluginId): Promise<void> {
+  private async assertCurrentManagedOrAbsent(
+    pluginId: ProxyPluginId,
+    replaceLegacyCurrent = false,
+  ): Promise<string | null> {
     const pointer = await this.inspectCurrentPointer(pluginId);
-    if (pointer.kind === 'absent') return;
+    if (pointer.kind === 'absent') return null;
     if (pointer.kind === 'unmanaged') {
       throw new PluginStoreError(
         'PLUGIN_CURRENT_UNMANAGED',
@@ -539,14 +558,20 @@ export class PluginStore {
     }
     const receipt = await this.revalidateVersion(pluginId, pointer.version);
     if (!receipt) {
+      if (replaceLegacyCurrent) return pointer.version;
       throw new PluginStoreError(
         'PLUGIN_CURRENT_UNMANAGED',
         `${pluginId} current points at a package PluginStore does not own.`,
       );
     }
+    return null;
   }
 
-  private async activateCurrent(pluginId: ProxyPluginId, version: string): Promise<void> {
+  private async activateCurrent(
+    pluginId: ProxyPluginId,
+    version: string,
+    replaceLegacyCurrentVersion: string | null = null,
+  ): Promise<void> {
     const previous = await this.inspectCurrentPointer(pluginId);
     if (previous.kind === 'unmanaged') {
       throw new PluginStoreError(
@@ -561,7 +586,7 @@ export class PluginStore {
     await this.options.hooks?.beforePublish?.();
     if (previous.kind === 'valid') {
       const previousReceipt = await this.revalidateVersion(pluginId, previous.version);
-      if (!previousReceipt) {
+      if (!previousReceipt && previous.version !== replaceLegacyCurrentVersion) {
         throw new PluginStoreError(
           'PLUGIN_CURRENT_UNMANAGED',
           `${pluginId}@${previous.version} is no longer PluginStore-owned and valid.`,
@@ -578,7 +603,11 @@ export class PluginStore {
       }
     } catch (error) {
       try {
-        await this.restoreCurrentPointer(pluginId, previous);
+        await this.restoreCurrentPointer(
+          pluginId,
+          previous,
+          previous.kind === 'valid' && previous.version === replaceLegacyCurrentVersion,
+        );
       } catch (restoreError) {
         throw new AggregateError(
           [error, restoreError],
@@ -627,6 +656,7 @@ export class PluginStore {
   private async restoreCurrentPointer(
     pluginId: ProxyPluginId,
     previous: CurrentPointer,
+    allowLegacy = false,
   ): Promise<void> {
     await this.options.hooks?.beforeRestore?.();
     const current = join(this.pluginRoot(pluginId), CURRENT);
@@ -662,7 +692,11 @@ export class PluginStore {
       await this.publishCurrentPointer(pluginId, previous.version);
       const restored = await this.inspectCurrentPointer(pluginId);
       const verified = await this.revalidateVersion(pluginId, previous.version);
-      if (restored.kind !== 'valid' || restored.version !== previous.version || !verified) {
+      if (
+        restored.kind !== 'valid'
+        || restored.version !== previous.version
+        || (!allowLegacy && !verified)
+      ) {
         throw new PluginStoreError(
           'PLUGIN_CURRENT_RESTORE',
           `${pluginId} previous current pointer could not be restored.`,

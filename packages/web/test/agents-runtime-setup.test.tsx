@@ -285,7 +285,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     await renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View in Catalog'));
+    fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
     expect(within(panel).queryByTestId('proxy-action-setup')).toBeNull();
     expect(within(panel).queryByTestId('runtime-path-input')).toBeNull();
@@ -467,7 +467,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     // The product detail remains documentation-only.
     fireEvent.click(screen.getByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.needs-app');
-    fireEvent.click(within(card).getByLabelText('View in Catalog'));
+    fireEvent.click(within(card).getByLabelText('View Integration'));
     const detail = await screen.findByTestId('proxy-detail-panel');
     expect(within(detail).queryByTestId('runtime-path-input')).toBeNull();
     await waitFor(() => expect(api.loadCatalogDocument)
@@ -483,7 +483,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     await renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View in Catalog'));
+    fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
     expect(within(panel).queryByTestId('proxy-action-setup')).toBeNull();
     expect(within(panel).queryByTestId('runtime-path-input')).toBeNull();
@@ -572,7 +572,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     await renderAgents();
     fireEvent.click(screen.getByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View in Catalog'));
+    fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
     const updated = catalogItem({
       pluginId: PLUGIN_ID,

@@ -95,7 +95,7 @@ describe('catalogBadges', () => {
     expect(catalogBadges(item({
       installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true },
       availableActions: ['update_proxy'],
-    }))).toEqual(['update-available', 'installed']);
+    }))).toEqual(['update-required']);
   });
 
   it('flags runtime setup for an installed item needing a Runtime', () => {
@@ -103,29 +103,29 @@ describe('catalogBadges', () => {
       installation: { state: 'installed', installedVersion: '1.0.0' },
       runtime: { state: 'setup_required', displayName: 'Fixture CLI' },
       availableActions: ['open_setup', 'select_runtime'],
-    }))).toEqual(['installed', 'setup-required']);
+    }))).toEqual(['update-required']);
   });
 
   it('distinguishes app-too-old from proxy-too-old', () => {
     expect(catalogBadges(item({
       compatibility: { state: 'requires_app_update', reason: 'needs 2.2' },
       availableActions: [],
-    }))).toEqual(['requires-app-update']);
+    }))).toEqual(['update-required']);
     expect(catalogBadges(item({
       compatibility: { state: 'requires_proxy_update', reason: 'range 2.0-only' },
       availableActions: [],
-    }))).toEqual(['requires-proxy-update']);
+    }))).toEqual(['update-required']);
   });
 
   it('flags invalid compatibility and quarantined installs', () => {
     expect(catalogBadges(item({
       compatibility: { state: 'invalid', reason: 'bad manifest' },
       availableActions: [],
-    }))).toEqual(['invalid']);
+    }))).toEqual(['update-required']);
     expect(catalogBadges(item({
       installation: { state: 'quarantined', installedVersion: '0.9.0' },
       availableActions: [],
-    }))).toEqual(['invalid']);
+    }))).toEqual(['update-required']);
   });
 });
 

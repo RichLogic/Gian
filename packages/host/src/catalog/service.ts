@@ -85,13 +85,21 @@ export class CatalogService {
   async install(pluginId: string): Promise<PluginInstallReceipt> {
     const view = await this.captureView();
     const item = await this.requireProjectedFrom(view, pluginId);
-    if (item.compatibility.state !== 'compatible' || item.installation.state !== 'not_installed') {
+    const legacy = item.installation.state === 'quarantined'
+      || item.installation.state === 'invalid';
+    if (
+      item.compatibility.state !== 'compatible'
+      || (item.installation.state !== 'not_installed' && !legacy)
+    ) {
       throw new PluginStoreError(
         'CATALOG_INSTALL_FORBIDDEN',
-        `${item.pluginId} can be installed only when compatible and not installed.`,
+        `${item.pluginId} can be installed only when compatible and not installed or legacy.`,
       );
     }
-    const receipt = await this.options.plugins.install(this.coordinateFrom(view, pluginId));
+    const receipt = await this.options.plugins.install(
+      this.coordinateFrom(view, pluginId),
+      { replaceLegacyCurrent: legacy },
+    );
     this.retirePluginGeneration(item.pluginId);
     return receipt;
   }
@@ -542,6 +550,7 @@ export function catalogProxyActions(input: {
     && input.compatibility === 'compatible'
     && (
       input.installation !== 'installed'
+      || input.updateAvailable
       || (input.runtime !== 'ready' && input.runtime !== 'not_required')
     )
   ) {
@@ -551,7 +560,11 @@ export function catalogProxyActions(input: {
     input.installable
     && input.runtimeInstallable !== true
     && input.compatibility === 'compatible'
-    && input.installation === 'not_installed'
+    && (
+      input.installation === 'not_installed'
+      || input.installation === 'quarantined'
+      || input.installation === 'invalid'
+    )
   ) {
     result.push('install_proxy');
   }
