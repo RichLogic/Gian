@@ -52,6 +52,9 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 - Runtime activation, Catalog validation, Proxy lifecycle, SQLite startup,
   DSH continuation, Codex completion summaries, and packaged smoke now fail
   closed at their actual ownership boundaries.
+- DSH Catalog startup now tolerates optional Cordis services that are not
+  injected, and managed Kimi Runtime qualification reuses the protected user
+  configuration without replacing the user's own Kimi binary.
 
 ### Known limitations
 

@@ -266,6 +266,9 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
     const notifications = Array.isArray(scenario.notifications)
       ? scenario.notifications
       : requireStringArray(scenario.notifications, `${scenario.id}.notifications`);
+    const optionalNotifications = scenario.optionalNotifications === undefined
+      ? []
+      : requireStringArray(scenario.optionalNotifications, `${scenario.id}.optionalNotifications`);
     for (const method of methods) {
       if (!PROXY_METHODS.includes(method)) throw new Error(`${scenario.id} uses unknown method ${method}.`);
       coveredMethods.add(method);
@@ -275,6 +278,11 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
         throw new Error(`${scenario.id} expects unknown notification ${method}.`);
       }
       coveredNotifications.add(method);
+    }
+    for (const method of optionalNotifications) {
+      if (!notifications.includes(method)) {
+        throw new Error(`${scenario.id} marks ${method} optional without declaring it as a notification.`);
+      }
     }
     requireStringArray(scenario.steps, `${scenario.id}.steps`);
     const statuses = requireRecord(scenario.providers, `${scenario.id}.providers`);

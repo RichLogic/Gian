@@ -47,6 +47,16 @@ test('real Proxy catalog rejects incomplete notification coverage', async () => 
   );
 });
 
+test('optional real notifications must remain declared in their scenario', async () => {
+  const catalog = structuredClone(await loadProxyRealAcceptanceCatalog());
+  const basic = catalog.scenarios.find(scenario => scenario.id === 'turn.basic_content_reasoning_usage');
+  basic.optionalNotifications = ['history.changed'];
+  assert.throws(
+    () => validateProxyRealAcceptanceCatalog(catalog),
+    /marks history\.changed optional without declaring it/,
+  );
+});
+
 test('certification catalog fails closed when package or shipping inventory drifts', async () => {
   const missing = structuredClone(await loadProxyRealAcceptanceCatalog());
   delete missing.providers.dsh;

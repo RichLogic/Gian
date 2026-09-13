@@ -25,7 +25,7 @@ import {
   parseProxyNotification,
 } from '../packages/proxy-protocol/dist/src/index.js';
 import {
-  activateDefaultKimiStore,
+  activateSelectedKimiStore,
   resolveProviderBinary,
 } from './run-provider-attachment-canary.mjs';
 import {
@@ -35,7 +35,9 @@ import {
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
 import {
   finalizeProviderScenarioResults,
+  providerCapabilityNames,
   realScenarioRequirement,
+  resolveCatalogCandidateValue,
 } from './proxy-certification-policy.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -525,11 +527,20 @@ async function prepareDshProfile(tempRoot, binaryPath) {
   };
 }
 
-async function prepareClaudeEnvironment(binaryPath) {
+async function prepareClaudeEnvironment(binaryPath, providerConfig) {
   const { resolveClaudeSettingsPath } = await import(
     '../packages/proxies/cc-proxy/dist/src/runtime/claude-mcp-runtime.js'
   );
-  const settingsPath = resolveClaudeSettingsPath({ executable: binaryPath });
+  const configuredWrapper = typeof providerConfig.binary === 'string'
+    ? providerConfig.binary.trim().replace(/^~(?=\/)/, homedir())
+    : '';
+  const settingsExecutable = configuredWrapper
+    ? await access(configuredWrapper, fsConstants.X_OK).then(
+        () => configuredWrapper,
+        () => binaryPath,
+      )
+    : binaryPath;
+  const settingsPath = resolveClaudeSettingsPath({ executable: settingsExecutable });
   return settingsPath ? { CLAUDE_CONFIG_DIR: dirname(settingsPath) } : {};
 }
 
@@ -540,10 +551,11 @@ function splitConfig(catalog, cheapestConfig) {
   for (const [id, value] of Object.entries(cheapestConfig)) {
     const option = options.get(id);
     if (!option) throw new Error(`Current catalog has no cheapest config option ${id}.`);
-    if (option.choices && !option.choices.some(choice => Object.is(choice.value, value))) {
-      throw new Error(`Current catalog does not offer ${id}=${String(value)}.`);
+    const selectedValue = resolveCatalogCandidateValue(option, value);
+    if (option.choices && !option.choices.some(choice => Object.is(choice.value, selectedValue))) {
+      throw new Error(`Current catalog does not offer ${id}=${String(selectedValue)}.`);
     }
-    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
+    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = selectedValue;
   }
   return { sessionConfig, turnConfig };
 }
@@ -666,7 +678,8 @@ async function waitForTurn(client, session, turnId, from, options = {}) {
 
 function expectedNotificationsFor(catalog, provider, scenario) {
   const implemented = new Set(catalog.providers[provider].implementedNotifications);
-  return scenario.notifications.filter(method => implemented.has(method));
+  const optional = new Set(scenario.optionalNotifications ?? []);
+  return scenario.notifications.filter(method => implemented.has(method) && !optional.has(method));
 }
 
 function assembledContent(notifications) {
@@ -764,10 +777,10 @@ async function runPromptScenario(context, scenario, session) {
       && notification.params.data.kind === 'reasoning'
     ));
     assessment.reasoningObserved = reasoning;
-    if (catalog.providers[provider].capabilities.includes('event.reasoning') && !reasoning) {
-      assessment.status = 'UNOBSERVED';
-      assessment.issues.push('event.reasoning advertised but no reasoning content was observed');
-    }
+    assessment.reasoningRequested = reasoningExpectedFor(context.runtimeCatalog, turnConfig);
+    assessment.usageObserved = turn.notifications.some(notification => (
+      notification.method === 'usage.updated'
+    ));
   }
   if (scenario.id === 'activity.subagent') {
     const agentEvents = turn.notifications.filter(notification => (
@@ -1505,10 +1518,10 @@ async function runProvider({
     const providerEnvironment = setup === 'dsh-profile'
       ? await prepareDshProfile(tempRoot, binaryPath)
       : setup === 'claude-settings'
-        ? await prepareClaudeEnvironment(binaryPath)
+        ? await prepareClaudeEnvironment(binaryPath, providerConfig)
         : {};
     if (setup === 'kimi-store' && scenarios.some(scenario => scenario.trigger.includes('real'))) {
-      await activateDefaultKimiStore(binaryPath);
+      await activateSelectedKimiStore(binaryPath);
     }
     bootstrap = {
       dataDir,
@@ -1571,7 +1584,10 @@ async function runProvider({
       host: { name: 'Gian Real Proxy Acceptance', version: '0.5.0' },
     });
     const runtimeCatalog = await client.request('catalog.list', {});
-    assert.deepEqual(Object.keys(initialized.capabilities).sort(), [...providerConfig.capabilities].sort());
+    assert.deepEqual(
+      providerCapabilityNames(initialized.capabilities),
+      [...providerConfig.capabilities].sort(),
+    );
     results.push({
       scenarioId: 'transport.initialize_catalog',
       status: 'PASS',

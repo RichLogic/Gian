@@ -132,11 +132,11 @@
       "displayName": "Claude Code",
       "pluginVersion": "0.2.4",
       "processScope": "session",
-      "binary": "/Users/richlogic/.local/bin/claude-mix",
+      "binary": "~/.local/bin/claude-mix",
       "cheapestConfig": {
-        "model": "claude-settings-claude-router-deepseek-v4-flash-1m",
+        "model": "claude-gateway-claude-router-deepseek-v4-flash-1m",
         "effort": "low",
-        "permission_mode": "manual"
+        "permission_mode": "default"
       },
       "capabilities": [
         "input.localFile",
@@ -148,6 +148,7 @@
         "sidechat",
         "session.fork",
         "session.fork.atTurn",
+        "integration.mcp.streamableHttp",
         "interaction",
         "event.reasoning",
         "event.usage"
@@ -234,6 +235,8 @@
         "session.replay",
         "sidechat",
         "session.fork",
+        "catalog.resolve",
+        "integration.mcp.streamableHttp",
         "interaction",
         "event.reasoning",
         "event.plan",
@@ -308,13 +311,14 @@
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
       "cheapestConfig": {
-        "provider": "opencode-go",
+        "provider": "deepseek-official",
         "model": "deepseek-v4-flash",
         "permission_preset": "$catalog-default"
       },
       "capabilities": [
         "catalog.resolve",
         "session.replay",
+        "session.create.hostBindingProof",
         "event.reasoning",
         "event.usage",
         "event.step",
@@ -469,8 +473,9 @@
       "purpose": "Observe the normal text, reasoning, usage, session-state and terminal event family.",
       "methods": ["turn.start"],
       "notifications": ["turn.started", "content.delta", "content.completed", "usage.updated", "turn.completed"],
+      "optionalNotifications": ["usage.updated"],
       "prompt": "Think briefly about whether 17 is prime, then reply with exactly PRIME_17_OK. Do not use tools.",
-      "steps": ["create session with cheapest config", "start turn", "wait for exactly one terminal", "record optional reasoning stream"],
+      "steps": ["create session with cheapest config", "start turn", "wait for exactly one terminal", "record optional reasoning and usage streams"],
       "providers": {"claude":"required","codex":"required","kimi":"required","grok":"required","dsh":"required","zcode":"required"}
     },
     {

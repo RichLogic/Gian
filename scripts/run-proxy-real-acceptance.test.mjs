@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   finalizeProviderScenarioResults,
+  providerCapabilityNames,
   realScenarioRequirement,
+  resolveCatalogCandidateValue,
 } from './proxy-certification-policy.mjs';
 
 function scenario(id, trigger, status) {
@@ -46,4 +48,22 @@ test('required real evidence accepts only PASS', () => {
     scenarioId: 'control.interrupt',
     status: 'PASS',
   }]).status, 'PASS');
+});
+
+test('provider capability comparison excludes only protocol-managed control capabilities', () => {
+  assert.deepEqual(providerCapabilityNames({
+    'runtime.discover': 1,
+    'runtime.probe': 1,
+    'customization.list': 1,
+    'catalog.resolve': 1,
+    interaction: 1,
+  }), ['catalog.resolve', 'interaction']);
+  assert.deepEqual(providerCapabilityNames({
+    'integration.mcp.streamableHttp': 1,
+  }), ['integration.mcp.streamableHttp']);
+});
+
+test('real Provider candidate config resolves explicit Catalog defaults at runtime', () => {
+  assert.equal(resolveCatalogCandidateValue({ defaultValue: 'workspace-write' }, '$catalog-default'), 'workspace-write');
+  assert.equal(resolveCatalogCandidateValue({ defaultValue: 'workspace-write' }, 'read-only'), 'read-only');
 });

@@ -112,6 +112,10 @@ export function scriptsNeedProxyProtocol(paths) {
   return paths.some(path => requiringBuild.has(path));
 }
 
+export function scriptsNeedProxyCatalogContract(paths) {
+  return paths.includes('scripts/catalog-release.test.mjs');
+}
+
 function runBuiltPackageTests(entries, runner, packageName, packageRoot, env, extraArgs = []) {
   const paths = entriesForRunner(entries, runner);
   if (paths.length === 0) return;
@@ -145,8 +149,11 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   const scriptPaths = entriesForRunner(selected, 'scripts-node');
-  if (scriptsNeedProxyProtocol(scriptPaths)) {
+  if (scriptsNeedProxyProtocol(scriptPaths) || scriptsNeedProxyCatalogContract(scriptPaths)) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
+  }
+  if (scriptsNeedProxyCatalogContract(scriptPaths)) {
+    runPnpm(['--filter', '@gian/proxy-catalog-contract', 'build'], env);
   }
   runNodeTests(scriptPaths, env);
   if (options.qualityGates) {

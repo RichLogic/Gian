@@ -400,8 +400,23 @@ export class CordisDshHost implements BridgeHost {
     return registry as CordisAgentRegistry;
   }
 
+  private optionalContextValue(name: string): unknown {
+    try {
+      const value = this.ctx.get?.(name);
+      if (value !== null && value !== undefined) return value;
+    } catch {
+      // Cordis throws when an optional service was not injected into this
+      // plugin. Treat that as absence and try the property compatibility path.
+    }
+    try {
+      return this.ctx[name];
+    } catch {
+      return undefined;
+    }
+  }
+
   private approvalRuntime(): CordisApprovalService | null {
-    const service = this.ctx.get?.('approval') ?? this.ctx.approval;
+    const service = this.optionalContextValue('approval');
     return service !== null && typeof service === 'object'
       && typeof (service as CordisApprovalService).setPolicy === 'function'
       ? service as CordisApprovalService
@@ -409,7 +424,7 @@ export class CordisDshHost implements BridgeHost {
   }
 
   private permissionPresetsRuntime(): CordisPermissionPresets | null {
-    const service = this.ctx.get?.('permissionPresets') ?? this.ctx.permissionPresets;
+    const service = this.optionalContextValue('permissionPresets');
     return service !== null && typeof service === 'object'
       && Array.isArray((service as CordisPermissionPresets).names)
       && typeof (service as CordisPermissionPresets).defaultPreset === 'string'
@@ -421,7 +436,7 @@ export class CordisDshHost implements BridgeHost {
   }
 
   private agentPresetsRuntime(): CordisAgentPresets | null {
-    const service = this.ctx.get?.('agentPresets') ?? this.ctx.agentPresets;
+    const service = this.optionalContextValue('agentPresets');
     return service !== null && typeof service === 'object'
       && typeof (service as CordisAgentPresets).list === 'function'
       && typeof (service as CordisAgentPresets).resolve === 'function'
@@ -555,7 +570,7 @@ export class CordisDshHost implements BridgeHost {
   }
 
   private defaultSelection(models: Array<CordisModelInfo & { provider: string }>): DshModelSelection {
-    const service = this.ctx.get?.('agentDefaultModel') ?? this.ctx.agentDefaultModel;
+    const service = this.optionalContextValue('agentDefaultModel');
     if (service !== null && typeof service === 'object'
       && typeof (service as CordisDefaultModel).currentSelection === 'function') {
       const selected = (service as CordisDefaultModel).currentSelection();
@@ -1022,7 +1037,7 @@ export class CordisDshHost implements BridgeHost {
 
   async shutdown(): Promise<Record<string, unknown>> {
     await this.dispose();
-    const exit = this.ctx.get?.('appExit') ?? this.ctx.appExit;
+    const exit = this.optionalContextValue('appExit');
     if (typeof exit !== 'function') {
       throw new Error('RUNTIME_UNAVAILABLE: DSH launcher did not provide appExit');
     }

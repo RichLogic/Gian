@@ -538,3 +538,25 @@ test('permission presets that require approval are hidden without an interaction
   }]);
   assert.equal(catalog.defaultPermissionPreset, undefined);
 });
+
+test('missing optional Cordis services remain absent when ctx.get rejects uninjected names', async () => {
+  const host = new CordisDshHost({
+    get: (name: string) => {
+      if (name === 'llm') {
+        return {
+          listProviders: () => [{ id: 'deepseek-official' }],
+          listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+        };
+      }
+      throw new Error(`cannot get property ${name} without inject`);
+    },
+  }, '0.1.3');
+
+  const initialized = await host.initialize() as { capabilities: Record<string, number> };
+  assert.equal(initialized.capabilities.interaction, undefined);
+  const catalog = await host.catalogList();
+  assert.deepEqual(catalog.approvalPolicies, []);
+  assert.deepEqual(catalog.permissionPresets, []);
+  assert.deepEqual(catalog.agentPresets, []);
+  assert.equal(catalog.defaultAgentPreset, undefined);
+});

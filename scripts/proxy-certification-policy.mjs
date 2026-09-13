@@ -12,6 +12,21 @@ const realNotApplicableStatuses = new Set([
   'policy_blocked',
 ]);
 const realOptionalStatuses = new Set(['conditional']);
+const protocolManagedCapabilities = new Set([
+  'customization.list',
+  'runtime.discover',
+  'runtime.probe',
+]);
+
+export function providerCapabilityNames(capabilities) {
+  return Object.keys(capabilities ?? {})
+    .filter(name => !protocolManagedCapabilities.has(name))
+    .sort();
+}
+
+export function resolveCatalogCandidateValue(option, configuredValue) {
+  return configuredValue === '$catalog-default' ? option.defaultValue : configuredValue;
+}
 
 export function realScenarioRequirement(scenario, provider) {
   const providerStatus = scenario.providers[provider];

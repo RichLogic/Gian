@@ -97,6 +97,25 @@ export async function activateDefaultKimiStore(binaryPath) {
   };
 }
 
+export async function activateSelectedKimiStore(binaryPath, runtimeImpl = null) {
+  const runtime = runtimeImpl ?? await import(
+    join(rootDir, 'packages/proxies/kimi-proxy/dist/src/runtime/discover.js')
+  );
+  const probe = await runtime.probeKimiRuntime(binaryPath);
+  if (probe.readinessIssue) {
+    throw new Error(`Kimi candidate session-store activation is not ready: ${probe.readinessIssue.message}`);
+  }
+  await runtime.recordSelectedKimiActivation(binaryPath);
+  return {
+    compatible: true,
+    activationRecorded: true,
+    storeMutated: true,
+    kimiCodeHome: probe.configHome,
+    binaryPath,
+    candidateVersion: probe.version,
+  };
+}
+
 function waitForProcessExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolveWait, reject) => {

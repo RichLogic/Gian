@@ -3,7 +3,10 @@ import { EventEmitter } from 'node:events';
 import { readFile, stat } from 'node:fs/promises';
 import test from 'node:test';
 
-import { runProviderAttachmentCanary } from './run-provider-attachment-canary.mjs';
+import {
+  activateSelectedKimiStore,
+  runProviderAttachmentCanary,
+} from './run-provider-attachment-canary.mjs';
 
 const scriptUrl = new URL('./run-provider-attachment-canary.mjs', import.meta.url);
 const fakeProxyPath = new URL('./fixtures/fake-provider-attachment-proxy.mjs', import.meta.url).pathname;
@@ -39,6 +42,31 @@ test('Kimi attachment canary fails closed when its session-store activation does
     }),
     /session store activation did not pass/,
   );
+});
+
+test('managed Kimi candidate activation uses the production runtime guard without replacing the home binary', async () => {
+  const calls = [];
+  const result = await activateSelectedKimiStore('/managed/runtime/kimi', {
+    async probeKimiRuntime(path) {
+      calls.push(['probe', path]);
+      return { version: '0.41.0', configHome: '/Users/example/.kimi-code' };
+    },
+    async recordSelectedKimiActivation(path) {
+      calls.push(['activate', path]);
+    },
+  });
+  assert.deepEqual(calls, [
+    ['probe', '/managed/runtime/kimi'],
+    ['activate', '/managed/runtime/kimi'],
+  ]);
+  assert.deepEqual(result, {
+    compatible: true,
+    activationRecorded: true,
+    storeMutated: true,
+    kimiCodeHome: '/Users/example/.kimi-code',
+    binaryPath: '/managed/runtime/kimi',
+    candidateVersion: '0.41.0',
+  });
 });
 
 for (const provider of ['claude', 'codex', 'kimi', 'grok']) {

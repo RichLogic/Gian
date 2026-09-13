@@ -7,6 +7,7 @@ import {
   parseRunOptions,
   sanitizedTestEnv,
   selectCatalogEntries,
+  scriptsNeedProxyCatalogContract,
   scriptsNeedProxyProtocol,
 } from './run-tests.mjs';
 
@@ -91,6 +92,11 @@ test('root Proxy artifact tests request a clean Proxy Protocol build first', () 
   assert.equal(scriptsNeedProxyProtocol(['scripts/build-proxy-artifacts.test.mjs']), true);
   assert.equal(scriptsNeedProxyProtocol(['scripts/proxy-real-acceptance-catalog.test.mjs']), true);
   assert.equal(scriptsNeedProxyProtocol(['scripts/check-ui-operations.test.mjs']), false);
+});
+
+test('root Catalog release tests request a clean Catalog contract build first', () => {
+  assert.equal(scriptsNeedProxyCatalogContract(['scripts/catalog-release.test.mjs']), true);
+  assert.equal(scriptsNeedProxyCatalogContract(['scripts/check-ui-operations.test.mjs']), false);
 });
 
 test('Host integration runs after compiled Proxy package runners', async () => {
