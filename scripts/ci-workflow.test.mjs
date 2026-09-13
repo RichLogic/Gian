@@ -7,17 +7,15 @@ const releaseWorkflowUrl = new URL('../.github/workflows/release.yml', import.me
 const securityWorkflowUrl = new URL('../.github/workflows/security-audit.yml', import.meta.url);
 const proxyCertificationWorkflowUrl = new URL('../.github/workflows/proxy-certification.yml', import.meta.url);
 const proxyReleaseWorkflowUrl = new URL('../.github/workflows/proxy-release.yml', import.meta.url);
-const catalogReleaseWorkflowUrl = new URL('../.github/workflows/catalog-release.yml', import.meta.url);
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 
 test('hosted workflows pin every source, release, and audit gate to Node 24', async () => {
-  const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease, catalogRelease] = await Promise.all([
+  const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease] = await Promise.all([
     readFile(workflowUrl, 'utf8'),
     readFile(releaseWorkflowUrl, 'utf8'),
     readFile(securityWorkflowUrl, 'utf8'),
     readFile(proxyCertificationWorkflowUrl, 'utf8'),
     readFile(proxyReleaseWorkflowUrl, 'utf8'),
-    readFile(catalogReleaseWorkflowUrl, 'utf8'),
   ]);
 
   assert.match(workflow, /\n  pull_request:\n/);
@@ -29,7 +27,6 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
     securityWorkflow,
     proxyCertification,
     proxyRelease,
-    catalogRelease,
   ]) {
     assert.match(configuredWorkflow, /node-version: 24/);
     assert.doesNotMatch(configuredWorkflow, /node-version: 22/);
@@ -77,15 +74,6 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
   assert.match(release, /scripts\/verify-proxy-release-certificate\.mjs/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
-});
-
-test('Catalog publication stays in Gian and requires the protected signing secret', async () => {
-  const workflow = await readFile(catalogReleaseWorkflowUrl, 'utf8');
-  assert.match(workflow, /secrets\.GIAN_CATALOG_SIGNING_KEY_PEM/);
-  assert.match(workflow, /verify-official-catalog-release-source\.mjs/);
-  assert.match(workflow, /stage-official-catalog-release\.mjs/);
-  assert.match(workflow, /catalog-v1\.\$\{SEQUENCE\}\.0/);
-  assert.doesNotMatch(workflow, /generateKeyPair|openssl/);
 });
 
 test('release and desktop packaging fail closed before expensive builds', async () => {

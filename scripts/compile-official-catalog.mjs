@@ -8,7 +8,7 @@ import {
 } from '../packages/proxy-catalog-contract/dist/src/index.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const sourceRoot = join(root, 'catalog', 'official-source');
+const defaultSourceRoot = join(root, 'catalog', 'official-source');
 
 function requiredArg(name) {
   const index = process.argv.indexOf(name);
@@ -42,6 +42,7 @@ if (Number.isNaN(Date.parse(issuedAt))) {
 }
 
 const outDir = optionalArg('--out', join(root, 'catalog', 'official-source', 'dist'));
+const sourceRoot = optionalArg('--source-root', defaultSourceRoot);
 const bundle = await compileOfficialCatalogSource({
   sourceRoot,
   sequence,

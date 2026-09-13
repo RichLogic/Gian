@@ -24,7 +24,7 @@ async function writeExecutable(path: string, source: string): Promise<void> {
 function catalogPolicy() {
   return {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: { 'gian-official-catalog-2026': '00' },
   };

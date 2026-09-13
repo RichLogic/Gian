@@ -28,6 +28,7 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === '--provider') options.provider = argv[++index];
     else if (arg === '--coordinate') options.coordinatePath = argv[++index];
+    else if (arg === '--source-root') options.sourceRoot = argv[++index];
     else throw new Error(`Unknown Catalog apply argument ${arg}.`);
   }
   if (!options.provider || !options.coordinatePath) throw new Error('--provider and --coordinate are required.');

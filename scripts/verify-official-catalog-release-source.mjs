@@ -38,7 +38,10 @@ export async function verifyOfficialCatalogReleaseSource(sourceRoot = join(rootD
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  verifyOfficialCatalogReleaseSource().then(count => {
+  const sourceIndex = process.argv.indexOf('--source-root');
+  const sourceRoot = sourceIndex >= 0 ? process.argv[sourceIndex + 1] : undefined;
+  if (sourceIndex >= 0 && !sourceRoot) throw new Error('--source-root requires a path.');
+  verifyOfficialCatalogReleaseSource(sourceRoot).then(count => {
     console.log(`Catalog release source ready (${count} plugins)`);
   }).catch(error => {
     console.error(error instanceof Error ? error.message : String(error));

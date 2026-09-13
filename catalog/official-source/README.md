@@ -1,9 +1,9 @@
 # Official Catalog source
 
-Local source for signed `catalog-v1.*` Releases in `RichLogic/Gian`. Catalog,
-Proxy, Runtime-coordinate metadata, and App releases share that repository but
-remain separate immutable release tags. This tree describes the currently
-visible official Proxies:
+Local documentation mirror for the signed Catalog source managed in
+`RichLogic/Gian-Proxy-Catalog`. Catalog metadata Releases remain separate from
+the App and executable Proxy assets in `RichLogic/Gian`. This tree describes
+the currently visible official Proxies:
 
 | Plugin ID | Product name | Version |
 |---|---|---|
@@ -48,9 +48,9 @@ from this worktree.
 ## External publication blocker
 
 The production Host pins public key
-`ebe553fd895e32ea8a1261d8b1b7f209e66f2486e2b345fb77528179eb7c5cd2`
+`8721796e6bdf8798804745396bd2181cd999f261d077f09a6fdaa180091344df`
 (`keyId` `gian-official-catalog-2026-09`). The matching private key is
-stored only as the protected `RichLogic/Gian` Actions secret
+stored only as the protected `RichLogic/Gian-Proxy-Catalog` Actions secret
 `GIAN_CATALOG_SIGNING_KEY_PEM`. The repository cannot export or print it.
 This repository cannot otherwise prove that
 the matching private key exists, is protected, and is owned outside the

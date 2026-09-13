@@ -192,7 +192,7 @@ test('Catalog create_agent follows real resolver readiness and never a v3 resolv
     } as never,
     policy: {
       sourceId: 'gian-official',
-      repository: 'RichLogic/Gian',
+      repository: 'RichLogic/Gian-Proxy-Catalog',
       artifactRepositories: ['RichLogic/Gian'],
       pinnedPublicKeys: { 'gian-official-catalog-2026': '00' },
     },
@@ -234,7 +234,7 @@ test('Catalog create_agent follows real resolver readiness and never a v3 resolv
     } as never,
     policy: {
       sourceId: 'gian-official',
-      repository: 'RichLogic/Gian',
+      repository: 'RichLogic/Gian-Proxy-Catalog',
       artifactRepositories: ['RichLogic/Gian'],
       pinnedPublicKeys: { 'gian-official-catalog-2026': '00' },
     },

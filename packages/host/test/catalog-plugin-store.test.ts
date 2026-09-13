@@ -323,7 +323,7 @@ function makeSigningKeys() {
 function policyFor(keys: ReturnType<typeof makeSigningKeys>): OfficialCatalogSourcePolicy {
   return {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: { 'gian-official-catalog-2026': keys.publicKeyHex },
   };

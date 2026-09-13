@@ -302,7 +302,7 @@ test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 3
   });
 
   const latest = await service.fetchReleaseMetadata({
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     operation: 'latest-catalog',
   });
   assert.equal(latest.status, 200);
@@ -313,7 +313,7 @@ test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 3
   });
 
   const cached = await service.fetchReleaseMetadata({
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     operation: 'latest-catalog',
     ifNoneMatch: '"seq-3"',
   });
@@ -345,7 +345,7 @@ test('catalog asset download refuses unapproved redirects and never forwards Aut
   });
 
   const response = await service.fetchReleaseMetadata({
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     operation: 'catalog-asset',
     tag: 'catalog-v1.1.0',
     asset: 'catalog-v1.json',

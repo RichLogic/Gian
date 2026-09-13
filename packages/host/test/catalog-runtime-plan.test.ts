@@ -101,7 +101,7 @@ test('trusted Catalog builds the exact managed Runtime install plan from the ins
   };
   const policy: OfficialCatalogSourcePolicy = {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian',
+    repository: 'RichLogic/Gian-Proxy-Catalog',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: {},
   };
