@@ -75,8 +75,25 @@ function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-function createGzipUstar(files: Map<string, Buffer>): Buffer {
+function createGzipUstar(files: Map<string, Buffer>, directories: string[] = []): Buffer {
   const parts: Buffer[] = [];
+  for (const name of directories) {
+    const header = Buffer.alloc(512, 0);
+    Buffer.from(name).copy(header, 0);
+    header.write('0000755\0', 100, 'utf8');
+    header.write('0000000\0', 108, 'utf8');
+    header.write('0000000\0', 116, 'utf8');
+    header.write('00000000000\0', 124, 'utf8');
+    header.write('00000000000\0', 136, 'utf8');
+    header[156] = 0x35;
+    header.write('ustar\0', 257, 'utf8');
+    header.write('00', 263, 'utf8');
+    header.fill(' ', 148, 156);
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'utf8');
+    parts.push(header);
+  }
   for (const [name, data] of files) {
     const header = Buffer.alloc(512, 0);
     Buffer.from(name).copy(header, 0);
@@ -372,7 +389,7 @@ test('safe extract rejects traversal, symlink, and special members', async (t) =
   const root = await tempRoot(t);
   const dest = join(root, 'out');
   const good = packageFiles('0.1.0');
-  const archive = createGzipUstar(good.files);
+  const archive = createGzipUstar(good.files, ['./', 'assets/']);
   const extracted = await extractGzipUstar(archive, dest);
   assert.equal(extracted.has('manifest.json'), true);
 

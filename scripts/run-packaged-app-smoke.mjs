@@ -637,9 +637,11 @@ async function seedPackagedGitHubCredential(electronApp, token) {
 
 async function completePackagedOnboarding({
   dataDir,
+  desktopToken,
   electronApp,
   expectedClaudeRuntimeVersion,
   githubToken,
+  origin,
   projectRoot,
   window,
 }) {
@@ -668,12 +670,18 @@ async function completePackagedOnboarding({
       }),
     ]);
   } catch (error) {
-    const hostLog = await readFile(join(dataDir, 'logs', 'desktop-host.log'), 'utf8')
-      .catch(() => '<unavailable>');
-    const onboardingState = await onboarding.innerText().catch(() => '<unavailable>');
+    const [hostLog, onboardingState, catalogState] = await Promise.all([
+      readFile(join(dataDir, 'logs', 'desktop-host.log'), 'utf8').catch(() => '<unavailable>'),
+      onboarding.innerText().catch(() => '<unavailable>'),
+      desktopFetch(origin, desktopToken, '/api/proxies').then(async response => ({
+        status: response.status,
+        body: await response.json(),
+      })).catch(catalogError => ({ error: String(catalogError) })),
+    ]);
     throw new Error([
       `Packaged Claude Runtime installation did not become ready: ${error}`,
       `Onboarding state:\n${onboardingState}`,
+      `Catalog state:\n${JSON.stringify(catalogState, null, 2)}`,
       `Host log tail:\n${hostLog.slice(-8_000)}`,
     ].join('\n\n'));
   }
@@ -717,11 +725,24 @@ async function completePackagedOnboarding({
     `${projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/worktrees`,
   ));
   const windowClosed = window.waitForEvent('close', { timeout: 30_000 });
+  const appShellReady = window.getByTestId('app-shell').waitFor({ timeout: 30_000 })
+    .then(() => 'ready');
   await onboarding.locator('.onboarding-actions .btn.primary').click();
-  // Creating or patching an Agent intentionally relaunches the packaged App
-  // only after onboarding.complete. The caller validates and reattaches to
-  // that replacement generation.
-  await windowClosed;
+  // Creating an Agent relaunches after onboarding.complete. A fresh profile
+  // can also begin with the default Claude Agent already present; installing
+  // its Runtime needs no Agent-file rewrite, so onboarding completes in place.
+  // Exercise one real restart either way before validating persistence.
+  const outcome = await Promise.race([
+    windowClosed.then(() => 'closed'),
+    appShellReady,
+  ]);
+  if (outcome === 'ready') {
+    assert.equal(
+      await window.evaluate(() => window.gianDesktop?.restartApp()),
+      true,
+    );
+    await windowClosed;
+  }
 }
 
 function seedPriorVersionFixture(databasePath) {
@@ -838,9 +859,11 @@ export async function main(args = process.argv.slice(2)) {
     });
     await completePackagedOnboarding({
       dataDir,
+      desktopToken,
       electronApp,
       expectedClaudeRuntimeVersion,
       githubToken,
+      origin,
       projectRoot,
       window: firstLaunch.window,
     });

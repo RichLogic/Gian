@@ -24,6 +24,7 @@ import { RuntimeResolver } from './runtime/resolver.js';
 import { RuntimeReadinessCache } from './runtime/readiness-cache.js';
 import { RuntimeControlPlane } from './runtime/control-plane.js';
 import { ManagedRuntimeInstaller } from './runtime/installer.js';
+import { downloadManagedRuntimeAsset } from './runtime/download.js';
 import { discoverDevelopmentProxyEntries } from './runtime/development-proxy-source.js';
 import { AgentManager } from './agents/manager.js';
 import { legacyAgentBootstrap } from './agents/legacy-bootstrap.js';
@@ -39,7 +40,6 @@ import {
   createPluginArtifactNetwork,
 } from './catalog/index.js';
 import { PluginStore } from './plugin-store/index.js';
-import { downloadVerifiedAsset } from './plugin-store/download.js';
 import { RemoteIdentityBrokerClient } from './remote/identity-broker.js';
 import {
   BROWSER_USE_BROKER_SOCKET_ENV,
@@ -218,11 +218,9 @@ async function main(): Promise<void> {
   const runtimeInstaller = new ManagedRuntimeInstaller({
     dataDir,
     store: agentManager.managedRuntimeGenerationStore(),
-    download: (asset, signal) => downloadVerifiedAsset(
-      pluginArtifactNetwork,
+    download: (asset, signal) => downloadManagedRuntimeAsset(
       asset,
-      catalogPolicy.artifactRepositories,
-      512 * 1024 * 1024,
+      catalogPolicy.runtimeAssetPrefixes ?? [],
       signal,
     ),
     probeVersion: async ({ executable, pluginId }) => {

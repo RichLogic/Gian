@@ -27,7 +27,7 @@ function headerName(header: Buffer): string {
   const raw = header.subarray(0, 100).toString('utf8').replace(/\0/g, '');
   const prefix = header.subarray(345, 500).toString('utf8').replace(/\0/g, '');
   const name = prefix ? `${prefix}/${raw}` : raw;
-  return name.replace(/^\.\//, '');
+  return name.replace(/^\.\//, '').replace(/\/$/, '');
 }
 
 function isZeroBlock(block: Buffer): boolean {
@@ -62,6 +62,7 @@ export async function extractGzipUstar(
 
   let offset = 0;
   let files = 0;
+  let entries = 0;
   let total = 0;
   const written = new Set<string>();
   while (offset + BLOCK <= unpacked.byteLength) {
@@ -69,18 +70,31 @@ export async function extractGzipUstar(
     offset += BLOCK;
     if (isZeroBlock(header)) break;
     const typeflag = header[156] ?? 0;
-    if (typeflag !== 0 && typeflag !== 0x30) {
+    if (typeflag !== 0 && typeflag !== 0x30 && typeflag !== 0x35) {
       throw new PluginStoreError(
         'PLUGIN_ARCHIVE_ENTRY',
         'Archive contains a symlink, hard link, or special file.',
       );
     }
     const name = headerName(header);
+    const size = octal(header.subarray(124, 136));
+    entries += 1;
+    if (entries > MAX_PLUGIN_FILE_COUNT) {
+      throw new PluginStoreError('PLUGIN_FILE_COUNT', 'Archive exceeds entry count.');
+    }
+    if (typeflag === 0x35 && name === '' && size === 0) continue;
     assertCanonicalRelativePath(name, 'archive member');
     if (written.has(name)) {
       throw new PluginStoreError('PLUGIN_ARCHIVE_ENTRY', `Archive contains a duplicate path: ${name}`);
     }
-    const size = octal(header.subarray(124, 136));
+    written.add(name);
+    if (typeflag === 0x35) {
+      if (size !== 0) {
+        throw new PluginStoreError('PLUGIN_ARCHIVE_ENTRY', `Archive directory has content: ${name}`);
+      }
+      await mkdir(join(destination, ...name.split('/')), { recursive: true, mode: 0o700 });
+      continue;
+    }
     if (size === 0 || size > MAX_PLUGIN_FILE_BYTES) {
       throw new PluginStoreError('PLUGIN_FILE_INVALID', `Archive member size is invalid: ${name}`);
     }
@@ -97,9 +111,8 @@ export async function extractGzipUstar(
     const target = join(destination, ...name.split('/'));
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     await writeFile(target, bytes, { mode: 0o600, flag: 'wx' });
-    written.add(name);
   }
-  if (written.size === 0) {
+  if (files === 0) {
     throw new PluginStoreError('PLUGIN_ARCHIVE_EMPTY', 'Archive contains no regular files.');
   }
   return readPackageInventory(destination);

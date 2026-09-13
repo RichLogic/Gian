@@ -525,30 +525,22 @@ async function fetchApprovedAsset(
   url: string,
   signal?: AbortSignal,
 ): Promise<Response> {
-  let current = url;
-  for (let hop = 0; hop < 5; hop += 1) {
-    if (!isApprovedAssetUrl(current)) {
-      return new Response(JSON.stringify({ error: 'redirect_not_allowed' }), { status: 502 });
-    }
-    const response = await fetchImpl(current, {
-      redirect: 'manual',
-      ...(signal ? { signal } : {}),
-      headers: {
-        accept: 'application/octet-stream',
-        'user-agent': 'Gian',
-      },
-    });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location');
-      if (!location) {
-        return new Response(JSON.stringify({ error: 'redirect_missing' }), { status: 502 });
-      }
-      current = new URL(location, current).href;
-      continue;
-    }
-    return response;
+  if (!isApprovedAssetUrl(url)) {
+    return new Response(JSON.stringify({ error: 'redirect_not_allowed' }), { status: 502 });
   }
-  return new Response(JSON.stringify({ error: 'too_many_redirects' }), { status: 502 });
+  // Electron net.fetch cancels a 30x response when redirect='manual' instead
+  // of exposing Location. The URL itself comes from the authenticated or
+  // anonymous GitHub Releases API and is allowlisted above. Follow it without
+  // Authorization; Catalog signatures and package SHA-256 checks remain the
+  // execution authority for the returned bytes.
+  return fetchImpl(url, {
+    redirect: 'follow',
+    ...(signal ? { signal } : {}),
+    headers: {
+      accept: 'application/octet-stream',
+      'user-agent': 'Gian',
+    },
+  });
 }
 
 function isGitHubRepository(value: string): boolean {

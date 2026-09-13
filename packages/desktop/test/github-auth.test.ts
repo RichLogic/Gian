@@ -354,3 +354,53 @@ test('catalog asset download refuses unapproved redirects and never forwards Aut
   assert.deepEqual(await response.json(), { error: 'redirect_not_allowed' });
   assert.deepEqual(headers, [`Bearer github-token-sentinel`]);
 });
+
+test('catalog asset download lets Electron follow an approved GitHub URL without Authorization', async () => {
+  const calls: Array<{ url: string; authorization: string | null; redirect?: RequestRedirect }> = [];
+  const store = memoryStore();
+  store.saved = { token: 'github-token-sentinel', user };
+  const service = new GitHubAuthService({
+    clientId: 'Ov23liExampleClient',
+    store,
+    fetch: (async (input, init) => {
+      const url = String(input);
+      calls.push({
+        url,
+        authorization: new Headers(init?.headers).get('authorization'),
+        redirect: init?.redirect,
+      });
+      if (url.includes('/releases/tags/')) {
+        return Response.json({
+          tag_name: 'catalog-v1.2.0',
+          assets: [{
+            name: 'catalog-assets-v1.json',
+            browser_download_url: 'https://github.com/RichLogic/Gian-Proxy-Catalog/releases/download/catalog-v1.2.0/catalog-assets-v1.json',
+          }],
+        });
+      }
+      return new Response('signed Catalog asset');
+    }) as typeof fetch,
+  });
+
+  const response = await service.fetchReleaseMetadata({
+    repository: 'RichLogic/Gian-Proxy-Catalog',
+    operation: 'catalog-asset',
+    tag: 'catalog-v1.2.0',
+    asset: 'catalog-assets-v1.json',
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'signed Catalog asset');
+  assert.deepEqual(calls, [
+    {
+      url: 'https://api.github.com/repos/RichLogic/Gian-Proxy-Catalog/releases/tags/catalog-v1.2.0',
+      authorization: 'Bearer github-token-sentinel',
+      redirect: 'error',
+    },
+    {
+      url: 'https://github.com/RichLogic/Gian-Proxy-Catalog/releases/download/catalog-v1.2.0/catalog-assets-v1.json',
+      authorization: null,
+      redirect: 'follow',
+    },
+  ]);
+});
