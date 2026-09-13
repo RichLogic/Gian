@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   formatPrepackageSummary,
+  hasInternalBrowserJourneys,
   prepackageSkipReason,
   PREPACKAGE_STEPS,
 } from './run-quality-prepackage.mjs';
@@ -65,6 +66,13 @@ test('curated source skips only absent internal E2E and remains package-ready', 
   ]);
   assert.match(summary, /\[SKIP\] Browser journeys: curated public source/);
   assert.match(summary, /RESULT: PASS/);
+});
+
+test('the public Proxy qualification spec does not impersonate the internal browser suite', () => {
+  const available = new Set(['/repo/e2e/specs/12-proxy-v2-mock.spec.ts']);
+  assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
+  available.add('/repo/e2e/specs/01-app-loads.spec.ts');
+  assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), true);
 });
 
 test('package gate forwards only its explicitly authorized Gian inputs', () => {

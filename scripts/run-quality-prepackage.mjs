@@ -72,6 +72,10 @@ export function prepackageSkipReason(stepId, options) {
   return null;
 }
 
+export function hasInternalBrowserJourneys(sourceRoot, fileExists = existsSync) {
+  return fileExists(join(sourceRoot, 'e2e', 'specs', '01-app-loads.spec.ts'));
+}
+
 export async function main() {
   const lock = acquireQualityLock({ command: 'quality:prepackage', rootDir });
   try {
@@ -93,7 +97,7 @@ export async function main() {
     console.log('Gian prepackage quality gate');
     console.log(`Revision: ${revision}${dirty ? ' (working tree has changes)' : ''}`);
     const curatedSource = !existsSync(join(rootDir, 'AGENTS.md'));
-    const e2eAvailable = existsSync(join(rootDir, 'e2e', 'specs'));
+    const e2eAvailable = hasInternalBrowserJourneys(rootDir);
 
     for (const step of PREPACKAGE_STEPS) {
       if (failed) {

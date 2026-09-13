@@ -7,6 +7,8 @@ const releaseWorkflowUrl = new URL('../.github/workflows/release.yml', import.me
 const securityWorkflowUrl = new URL('../.github/workflows/security-audit.yml', import.meta.url);
 const proxyCertificationWorkflowUrl = new URL('../.github/workflows/proxy-certification.yml', import.meta.url);
 const proxyReleaseWorkflowUrl = new URL('../.github/workflows/proxy-release.yml', import.meta.url);
+const proxyUiSpecUrl = new URL('../e2e/specs/12-proxy-v2-mock.spec.ts', import.meta.url);
+const proxyUiNavigationUrl = new URL('../e2e/fixtures/navigation.ts', import.meta.url);
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 
 test('hosted workflows pin every source, release, and audit gate to Node 24', async () => {
@@ -60,9 +62,11 @@ test('nightly and manual CI run isolated E2E and retain failure artifacts', asyn
 });
 
 test('Proxy publication consumes a qualified macOS ARM64 certificate and never tag-builds', async () => {
-  const [certification, release] = await Promise.all([
+  const [certification, release, proxyUiSpec, proxyUiNavigation] = await Promise.all([
     readFile(proxyCertificationWorkflowUrl, 'utf8'),
     readFile(proxyReleaseWorkflowUrl, 'utf8'),
+    readFile(proxyUiSpecUrl, 'utf8'),
+    readFile(proxyUiNavigationUrl, 'utf8'),
   ]);
   assert.match(certification, /runs-on: \[self-hosted, macOS, ARM64, gian-proxy-certification\]/);
   assert.match(certification, /pnpm verify:proxy --/);
@@ -71,6 +75,9 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.match(certification, /pnpm --filter @gian\/host\.\.\. build/);
   assert.doesNotMatch(certification, /pnpm --filter @gian\/host build/);
   assert.match(certification, /artifacts\/proxies/);
+  assert.match(proxyUiSpec, /GIAN_E2E_PROXY_MOCK/);
+  assert.match(proxyUiSpec, /\.\.\/fixtures\/navigation\.js/);
+  assert.match(proxyUiNavigation, /export async function openNewSession/);
   assert.match(release, /workflow_dispatch:/);
   assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
   assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
