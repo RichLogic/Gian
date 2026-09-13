@@ -53,10 +53,7 @@ jobs:
 
       - name: Verify candidates with the production Runtime extractor
         run: |
-          pnpm --filter @gian/shared build
-          pnpm --filter @gian/proxy-protocol build
-          pnpm --filter @gian/proxy-catalog-contract build
-          pnpm --filter @gian/host build
+          pnpm --filter @gian/host... build
           node scripts/verify-managed-runtime-candidates.mjs
 
       - name: Issue pre-Catalog artifact certificate
