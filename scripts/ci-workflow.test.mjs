@@ -89,6 +89,7 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
   assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
   assert.match(release, /scripts\/verify-proxy-release-certificate\.mjs/);
+  assert.match(release, /pnpm install --frozen-lockfile/);
   assert.match(release, /--run-id/);
   assert.match(release, /--run-attempt/);
   assert.match(release, /--repository/);

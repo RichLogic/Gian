@@ -55,10 +55,19 @@ jobs:
       - name: Require certified revision on main
         run: git merge-base --is-ancestor "${{ steps.certification.outputs.sha }}" origin/main
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: pnpm
+
+      - name: Install source dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Download certification artifact
         env:
