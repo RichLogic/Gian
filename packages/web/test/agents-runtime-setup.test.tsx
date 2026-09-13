@@ -9,7 +9,7 @@ import type {
   RuntimeProbeResponse,
   UserAgentStatus,
 } from '@gian/shared';
-import { AgentsView } from '../src/views/AgentsView.js';
+import { AgentsView, __resetIntegrationInstallTerminals } from '../src/views/AgentsView.js';
 import { __resetCatalogDocCache } from '../src/agents/ProxyDetailPanel.js';
 import { ProxyRuntimeSetup } from '../src/agents/ProxyRuntimeSetup.js';
 import { renderWithOperations } from './operation-test-utils.js';
@@ -252,6 +252,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     seq = 0;
     __resetFeedback();
     __resetCatalogDocCache();
+    __resetIntegrationInstallTerminals();
     delete (window as { gianDesktop?: unknown }).gianDesktop;
     runtimeSelected.mockReset();
     projectionChanged.mockReset();

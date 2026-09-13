@@ -7,6 +7,7 @@
  */
 import type {
   ManagedRuntimeGeneration,
+  ManagedRuntimeInstallProgress,
   ProxyCatalogList,
   RuntimeDiscoverResponse,
   RuntimeProbeResponse,
@@ -47,6 +48,16 @@ const REST_TIMEOUT_MS = 30_000;
 
 interface CatalogPluginInput {
   pluginId: string;
+  /** Ephemeral renderer callback; only the REST executor consumes it. It is
+   * never serialized or sent to the Host as request data. */
+  onProgress?: (progress: ManagedRuntimeInstallProgress) => void;
+}
+
+function reportCatalogProgress(
+  input: CatalogPluginInput,
+  progress: ManagedRuntimeInstallProgress,
+): void {
+  try { input.onProgress?.(progress); } catch { /* presentation callback */ }
 }
 
 const catalogSync: OperationDefinition<Record<string, never>, ProxyCatalogList> = {
@@ -59,7 +70,12 @@ const catalogSync: OperationDefinition<Record<string, never>, ProxyCatalogList> 
 const catalogInstallProxy: OperationDefinition<CatalogPluginInput, CatalogMutationReceipt> = {
   policy: 'pending',
   entityKey: input => catalogEntityKey(input.pluginId),
-  execute: input => installCatalogProxy(input.pluginId),
+  execute: async input => {
+    reportCatalogProgress(input, { stage: 'proxy', status: 'started' });
+    const receipt = await installCatalogProxy(input.pluginId);
+    reportCatalogProgress(input, { stage: 'proxy', status: 'completed' });
+    return receipt;
+  },
   timeoutMs: INSTALL_TIMEOUT_MS,
 };
 
@@ -70,14 +86,21 @@ interface CatalogRuntimeInstallInput extends CatalogPluginInput {
 const catalogInstallRuntime: OperationDefinition<CatalogRuntimeInstallInput, ManagedRuntimeGeneration> = {
   policy: 'pending',
   entityKey: input => runtimeEntityKey(input.pluginId),
-  execute: input => installManagedRuntime(input.pluginId, input.agentId),
+  execute: input => input.onProgress
+    ? installManagedRuntime(input.pluginId, input.agentId, input.onProgress)
+    : installManagedRuntime(input.pluginId, input.agentId),
   timeoutMs: RUNTIME_INSTALL_TIMEOUT_MS,
 };
 
 const catalogUpdateProxy: OperationDefinition<CatalogPluginInput, CatalogMutationReceipt> = {
   policy: 'pending',
   entityKey: input => catalogEntityKey(input.pluginId),
-  execute: input => updateCatalogProxy(input.pluginId),
+  execute: async input => {
+    reportCatalogProgress(input, { stage: 'proxy', status: 'started' });
+    const receipt = await updateCatalogProxy(input.pluginId);
+    reportCatalogProgress(input, { stage: 'proxy', status: 'completed' });
+    return receipt;
+  },
   timeoutMs: INSTALL_TIMEOUT_MS,
 };
 

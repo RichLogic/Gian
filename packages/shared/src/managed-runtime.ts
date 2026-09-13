@@ -109,3 +109,31 @@ export interface ManagedRuntimeInstallPlan {
   }>;
   certificate: RuntimeGenerationCertificateRef;
 }
+
+/** User-visible progress emitted by the Host while it installs one complete
+ * certified Agent Integration. These are operation facts, not shell output:
+ * the Web renderer presents them in a read-only installation terminal. */
+export type ManagedRuntimeInstallProgressStage =
+  | 'catalog'
+  | 'proxy'
+  | 'runtime-discovery'
+  | 'runtime-download'
+  | 'runtime-verify'
+  | 'combination-verify'
+  | 'activation';
+
+export interface ManagedRuntimeInstallProgress {
+  stage: ManagedRuntimeInstallProgressStage;
+  status: 'started' | 'progress' | 'completed';
+  componentId?: string;
+  version?: string;
+  receivedBytes?: number;
+  totalBytes?: number;
+}
+
+/** NDJSON frames used only when the Runtime install endpoint is requested as
+ * a progress stream. Ordinary callers keep the existing JSON response. */
+export type ManagedRuntimeInstallStreamFrame =
+  | { type: 'progress'; progress: ManagedRuntimeInstallProgress }
+  | { type: 'result'; generation: ManagedRuntimeGeneration }
+  | { type: 'error'; error: { code?: string; message: string } };

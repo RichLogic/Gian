@@ -5,6 +5,10 @@ import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import { CatalogMarkdown } from './CatalogMarkdown.js';
 import { catalogInstallationStatus, compatibilityMessage } from './catalog-model.js';
+import {
+  IntegrationInstallTerminal,
+  type IntegrationInstallTerminalState,
+} from './IntegrationInstallTerminal.js';
 
 export type ProxyDetailSection = 'basic' | 'tutorial' | 'versions';
 
@@ -75,6 +79,9 @@ export function ProxyDetailPanel({
   busy,
   onAction,
   onCreateAgent,
+  installTerminal,
+  onInstallTerminalHide,
+  onInstallTerminalShow,
   onClose,
 }: {
   item: ProxyCatalogItem;
@@ -85,6 +92,9 @@ export function ProxyDetailPanel({
   busy: boolean;
   onAction: (action: 'install_runtime' | 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
   onCreateAgent: () => void;
+  installTerminal?: IntegrationInstallTerminalState;
+  onInstallTerminalHide?: () => void;
+  onInstallTerminalShow?: () => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -247,6 +257,14 @@ export function ProxyDetailPanel({
               <span className="delta muted">{t('agents.runtime.current')}</span>
             )}
           </div>
+
+          {installTerminal && (
+            <IntegrationInstallTerminal
+              terminal={installTerminal}
+              onHide={() => onInstallTerminalHide?.()}
+              onShow={() => onInstallTerminalShow?.()}
+            />
+          )}
 
           <DocBody url={item.documentation.overview} generation={docGeneration} />
         </section>

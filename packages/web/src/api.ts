@@ -20,6 +20,8 @@ import type {
   RuntimeDiscoverResponse,
   RuntimeProbeRequest,
   RuntimeProbeResponse,
+  ManagedRuntimeInstallProgress,
+  ManagedRuntimeInstallStreamFrame,
   ManagedRuntimeStatus,
   ManagedRuntimeGeneration,
 } from '@gian/shared';
@@ -654,17 +656,128 @@ export async function loadManagedRuntimeStatus(pluginId: string): Promise<Manage
 export async function installManagedRuntime(
   pluginId: string,
   agentId?: string,
+  onProgress?: (progress: ManagedRuntimeInstallProgress) => void,
 ): Promise<ManagedRuntimeGeneration> {
   const response = await fetch(
     `/api/proxies/${encodeURIComponent(pluginId)}/runtime/install`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(onProgress ? { accept: 'application/x-ndjson' } : {}),
+      },
       body: JSON.stringify(agentId ? { agentId } : {}),
     },
   );
+  if (!response.ok) return agentResponse<{ generation: ManagedRuntimeGeneration }>(response)
+    .then(body => body.generation);
+  if (onProgress && response.headers.get('content-type')?.includes('application/x-ndjson')) {
+    return readManagedRuntimeInstallStream(response, onProgress);
+  }
   const body = await agentResponse<{ generation: ManagedRuntimeGeneration }>(response);
   return body.generation;
+}
+
+const RUNTIME_PROGRESS_STAGES = new Set<ManagedRuntimeInstallProgress['stage']>([
+  'catalog',
+  'proxy',
+  'runtime-discovery',
+  'runtime-download',
+  'runtime-verify',
+  'combination-verify',
+  'activation',
+]);
+const RUNTIME_PROGRESS_STATUSES = new Set<ManagedRuntimeInstallProgress['status']>([
+  'started',
+  'progress',
+  'completed',
+]);
+const MAX_RUNTIME_PROGRESS_LINE_BYTES = 64 * 1024;
+const MAX_RUNTIME_PROGRESS_FRAMES = 20_000;
+
+function parsedRuntimeProgress(value: unknown): ManagedRuntimeInstallProgress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (!RUNTIME_PROGRESS_STAGES.has(input.stage as ManagedRuntimeInstallProgress['stage'])
+    || !RUNTIME_PROGRESS_STATUSES.has(input.status as ManagedRuntimeInstallProgress['status'])) {
+    return null;
+  }
+  for (const key of ['componentId', 'version'] as const) {
+    if (input[key] !== undefined && (typeof input[key] !== 'string' || input[key].length > 256)) return null;
+  }
+  for (const key of ['receivedBytes', 'totalBytes'] as const) {
+    if (input[key] !== undefined
+      && (!Number.isSafeInteger(input[key]) || Number(input[key]) < 0)) return null;
+  }
+  return input as unknown as ManagedRuntimeInstallProgress;
+}
+
+async function readManagedRuntimeInstallStream(
+  response: Response,
+  onProgress: (progress: ManagedRuntimeInstallProgress) => void,
+): Promise<ManagedRuntimeGeneration> {
+  if (!response.body) throw new Error('Runtime install progress stream is unavailable.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let pending = '';
+  let frames = 0;
+  let generation: ManagedRuntimeGeneration | null = null;
+
+  const consume = (line: string): void => {
+    if (line === '') return;
+    if (new TextEncoder().encode(line).length > MAX_RUNTIME_PROGRESS_LINE_BYTES) {
+      throw new Error('Runtime install progress frame is too large.');
+    }
+    frames += 1;
+    if (frames > MAX_RUNTIME_PROGRESS_FRAMES) {
+      throw new Error('Runtime install progress stream exceeded its frame limit.');
+    }
+    let frame: ManagedRuntimeInstallStreamFrame;
+    try {
+      frame = JSON.parse(line) as ManagedRuntimeInstallStreamFrame;
+    } catch {
+      throw new Error('Runtime install progress stream returned invalid JSON.');
+    }
+    if (frame.type === 'progress') {
+      const progress = parsedRuntimeProgress(frame.progress);
+      if (!progress) throw new Error('Runtime install progress stream returned an invalid event.');
+      try { onProgress(progress); } catch { /* presentation callback */ }
+      return;
+    }
+    if (frame.type === 'error') {
+      if (!frame.error || typeof frame.error.message !== 'string' || frame.error.message.length > 2048) {
+        throw new Error('Runtime install progress stream returned an invalid error.');
+      }
+      throw new Error(frame.error.message);
+    }
+    if (frame.type === 'result') {
+      if (!frame.generation || typeof frame.generation !== 'object' || generation) {
+        throw new Error('Runtime install progress stream returned an invalid result.');
+      }
+      generation = frame.generation;
+      return;
+    }
+    throw new Error('Runtime install progress stream returned an unknown frame.');
+  };
+
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    pending += decoder.decode(chunk.value, { stream: true });
+    let newline = pending.indexOf('\n');
+    while (newline >= 0) {
+      consume(pending.slice(0, newline));
+      pending = pending.slice(newline + 1);
+      newline = pending.indexOf('\n');
+    }
+    if (new TextEncoder().encode(pending).length > MAX_RUNTIME_PROGRESS_LINE_BYTES) {
+      throw new Error('Runtime install progress frame is too large.');
+    }
+  }
+  pending += decoder.decode();
+  if (pending !== '') consume(pending);
+  if (!generation) throw new Error('Runtime install progress stream ended without a result.');
+  return generation;
 }
 
 export interface AgentDraftDefaults {

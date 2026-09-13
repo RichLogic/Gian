@@ -11,6 +11,7 @@ const prefixes = [
 test('managed Runtime download follows only approved release redirects without credentials', async () => {
   const bytes = Buffer.from('runtime');
   const calls: Array<{ url: string; authorization: string | null; redirect?: RequestRedirect }> = [];
+  const progress: Array<[number, number]> = [];
   const result = await downloadManagedRuntimeAsset({
     url: 'https://github.com/openai/codex/releases/download/rust-v1.2.3/runtime.tar.gz',
     sha256: 'a'.repeat(64),
@@ -28,7 +29,7 @@ test('managed Runtime download follows only approved release redirects without c
         headers: { location: 'https://release-assets.githubusercontent.com/runtime' },
       })
       : new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.length) } });
-  }) as typeof fetch);
+  }) as typeof fetch, (received, total) => progress.push([received, total]));
 
   assert.deepEqual(result, bytes);
   assert.deepEqual(calls, [
@@ -43,6 +44,7 @@ test('managed Runtime download follows only approved release redirects without c
       redirect: 'manual',
     },
   ]);
+  assert.deepEqual(progress.at(-1), [bytes.length, bytes.length]);
 });
 
 test('managed Runtime download accepts a direct pinned vendor asset', async () => {
@@ -53,6 +55,29 @@ test('managed Runtime download accepts a direct pinned vendor asset', async () =
     size: bytes.length,
   }, prefixes, undefined, (async () => new Response(bytes, { status: 200 })) as typeof fetch);
   assert.deepEqual(result, bytes);
+});
+
+test('managed Runtime download progress is bounded and always reports completion', async () => {
+  const bytes = Buffer.alloc(2 * 1024 * 1024 + 512 * 1024, 7);
+  const progress: number[] = [];
+  const response = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+        controller.enqueue(bytes.subarray(offset, Math.min(bytes.length, offset + 64 * 1024)));
+      }
+      controller.close();
+    },
+  });
+  await downloadManagedRuntimeAsset({
+    url: 'https://downloads.claude.ai/claude-code-releases/1.2.3/darwin-arm64/claude',
+    sha256: 'c'.repeat(64),
+    size: bytes.length,
+  }, prefixes, undefined, (async () => new Response(response, {
+    status: 200,
+    headers: { 'content-length': String(bytes.length) },
+  })) as typeof fetch, received => progress.push(received));
+
+  assert.deepEqual(progress, [1024 * 1024, 2 * 1024 * 1024, bytes.length]);
 });
 
 test('managed Runtime download rejects untrusted sources, redirects, and size drift', async () => {

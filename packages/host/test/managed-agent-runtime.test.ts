@@ -347,8 +347,14 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
   registerAgentRoutes(app, {
     agents: manager,
     runtimeDelivery: {
-      install: async (_pluginId: string, agentId?: string) => {
+      install: async (
+        _pluginId: string,
+        agentId?: string,
+        onProgress?: (progress: { stage: 'catalog'; status: 'started' | 'completed' }) => void,
+      ) => {
         deliveredAgentId = agentId;
+        onProgress?.({ stage: 'catalog', status: 'started' });
+        onProgress?.({ stage: 'catalog', status: 'completed' });
         return generation(
           dataDir,
           join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs'),
@@ -406,4 +412,24 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
   });
   assert.equal(installed.status, 200);
   assert.equal(deliveredAgentId, createdBody.agent.id);
+
+  const streamed = await app.request('/api/proxies/claude/runtime/install', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/x-ndjson',
+    },
+    body: JSON.stringify({ agentId: createdBody.agent.id }),
+  });
+  assert.equal(streamed.status, 200);
+  assert.match(streamed.headers.get('content-type') ?? '', /application\/x-ndjson/);
+  const frames = (await streamed.text()).trim().split('\n').map(line => JSON.parse(line) as {
+    type: string;
+    progress?: { stage: string; status: string };
+  });
+  assert.deepEqual(frames.slice(0, 2), [
+    { type: 'progress', progress: { stage: 'catalog', status: 'started' } },
+    { type: 'progress', progress: { stage: 'catalog', status: 'completed' } },
+  ]);
+  assert.equal(frames.at(-1)?.type, 'result');
 });

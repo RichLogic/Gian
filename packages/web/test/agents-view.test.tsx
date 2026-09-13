@@ -1,15 +1,16 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ProductExecutor,
+  ManagedRuntimeGeneration,
   ProxyCatalogEntry,
   ProxyCatalogItem,
   ProxyCatalogList,
   ProxyCapabilities,
   UserAgentStatus,
 } from '@gian/shared';
-import { AgentsView } from '../src/views/AgentsView.js';
+import { AgentsView, __resetIntegrationInstallTerminals } from '../src/views/AgentsView.js';
 import { __resetCatalogDocCache } from '../src/agents/ProxyDetailPanel.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import { Toaster } from '../src/components/Toaster.js';
@@ -268,6 +269,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     seq = 0;
     __resetFeedback();
     __resetCatalogDocCache();
+    __resetIntegrationInstallTerminals();
     delete (window as { gianDesktop?: unknown }).gianDesktop;
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
@@ -325,6 +327,8 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(install);
     await waitFor(() => expect(api.installCatalogProxy)
       .toHaveBeenCalledWith('io.acme.installable'));
+    expect((await within(panel).findByTestId('proxy-install-terminal')).getAttribute('data-status'))
+      .toBe('completed');
     // A confirmed install refreshes the projection.
     await waitFor(() => expect(vi.mocked(api.loadProxyCatalog).mock.calls.length).toBeGreaterThan(1));
 
@@ -352,6 +356,45 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(true);
     expect(api.installManagedRuntime).not.toHaveBeenCalled();
     expect(api.createAgent).not.toHaveBeenCalled();
+  });
+
+  it('opens an Integration installation TTY and streams real Host progress', async () => {
+    mockApi([], catalogList([MANAGED_INSTALLABLE]));
+    let finishInstall: (generation: ManagedRuntimeGeneration) => void = () => undefined;
+    const installation = new Promise<ManagedRuntimeGeneration>(resolve => { finishInstall = resolve; });
+    vi.mocked(api.installManagedRuntime).mockImplementation((_pluginId, _agentId, onProgress) => {
+      onProgress?.({ stage: 'catalog', status: 'started' });
+      onProgress?.({ stage: 'catalog', status: 'completed' });
+      onProgress?.({
+        stage: 'runtime-download', status: 'started', componentId: 'acme-cli', version: '1.0.0',
+        receivedBytes: 0, totalBytes: 100,
+      });
+      onProgress?.({
+        stage: 'runtime-download', status: 'progress', componentId: 'acme-cli', version: '1.0.0',
+        receivedBytes: 50, totalBytes: 100,
+      });
+      return installation;
+    });
+    renderAgents();
+    const row = await screen.findByTestId('catalog-item-io.acme.managed');
+    fireEvent.click(within(row).getByLabelText('View Integration'));
+    const panel = await screen.findByTestId('proxy-detail-panel');
+    fireEvent.click(within(panel).getByTestId('proxy-action-install-runtime'));
+
+    const terminal = await within(panel).findByTestId('proxy-install-terminal');
+    expect(terminal.getAttribute('data-status')).toBe('running');
+    expect(within(terminal).getByRole('log').textContent).toContain('Checking the signed Catalog');
+    expect(within(terminal).getByRole('log').textContent)
+      .toContain('Downloading acme-cli 1.0.0: 50%');
+    fireEvent.click(within(terminal).getByRole('button', { name: 'Hide' }));
+    fireEvent.click(await within(panel).findByTestId('proxy-install-terminal-show'));
+    expect(await within(panel).findByTestId('proxy-install-terminal')).toBeTruthy();
+
+    await act(async () => finishInstall({} as ManagedRuntimeGeneration));
+    await waitFor(() => expect(
+      within(panel).getByTestId('proxy-install-terminal').getAttribute('data-status'),
+    ).toBe('completed'));
+    expect(within(panel).getByRole('log').textContent).toContain('Installation completed successfully');
   });
 
   it('keeps an untrusted Proxy with no Runtime installable only from Agent Integrations', async () => {
@@ -401,6 +444,8 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(update);
     await waitFor(() => expect(api.updateCatalogProxy)
       .toHaveBeenCalledWith('io.acme.updatable'));
+    expect((await within(panel).findByTestId('proxy-install-terminal')).getAttribute('data-status'))
+      .toBe('completed');
   });
 
   it('renders three scroll anchors and sanitizes the continuous Catalog document', async () => {

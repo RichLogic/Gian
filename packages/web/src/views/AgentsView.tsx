@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import type {
+  ManagedRuntimeInstallProgress,
   ManagedRuntimeStatus,
   ProxyCatalogEntry,
   ProxyCatalogItem,
   ProxyCatalogList,
-  TerminalPreferences,
   UserAgentStatus,
 } from '@gian/shared';
 import { productExecutorForPluginId } from '@gian/shared';
@@ -27,11 +27,13 @@ import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import { Splitter } from '../components/Splitter.js';
 import { usePanel2Width } from '../components/RailLayout.js';
-import type { TerminalWire } from '../components/terminal-wire.js';
 import { agentProxyDisplay, catalogInstallationStatus } from '../agents/catalog-model.js';
 import { CatalogBadgeList } from '../agents/badges.js';
 import { AgentDetailPanel } from '../agents/AgentDetailPanel.js';
-import type { AgentTerminalControl } from '../agents/AgentDetailPanel.js';
+import {
+  appendIntegrationInstallProgress,
+  type IntegrationInstallTerminalState,
+} from '../agents/IntegrationInstallTerminal.js';
 import { ProxyDetailPanel } from '../agents/ProxyDetailPanel.js';
 import { AgentDialog, type CreateAgentDialogInput } from './agent-dialog.js';
 
@@ -40,20 +42,12 @@ type Selection =
   | { kind: 'proxy'; pluginId: string }
   | null;
 
-interface AgentTerminalState {
-  termId: string;
-  visible: boolean;
-  started: boolean;
-}
+/** Installation progress survives closing/reopening Agents inside one renderer.
+ * The authorized Host operation itself continues independently. */
+const liveIntegrationTerminals = new Map<string, IntegrationInstallTerminalState>();
 
-/** Agent CLI PTYs intentionally outlive this page being hidden. The Host owns
- * the process and replay buffer; this page-level registry only retains ids. */
-const liveAgentTerminals = new Map<string, AgentTerminalState>();
-
-export interface AgentsTerminalHost {
-  preferences: TerminalPreferences;
-  makeWire: (termId: string, agentId: string, spawn: boolean) => TerminalWire;
-  close: (termId: string) => void;
+export function __resetIntegrationInstallTerminals(): void {
+  liveIntegrationTerminals.clear();
 }
 
 function useMediaQuery(queryText: string): boolean {
@@ -89,7 +83,7 @@ function InfoIcon() {
   );
 }
 
-export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost }) {
+export function AgentsView() {
   const t = useT();
   const dispatch = useOperationDispatch();
   const store = useOperationStore();
@@ -104,9 +98,9 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   const [addDialogPluginId, setAddDialogPluginId] = useState<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
-  const [terminals, setTerminals] = useState<Record<string, AgentTerminalState>>(() => (
-    Object.fromEntries(liveAgentTerminals)
-  ));
+  const [integrationTerminals, setIntegrationTerminals] = useState<
+    Record<string, IntegrationInstallTerminalState>
+  >(() => Object.fromEntries(liveIntegrationTerminals));
   const narrow = useMediaQuery('(max-width: 1100px)');
   const catalogSyncRuns = usePendingOperations(CATALOG_SYNC_ENTITY_KEY);
   const catalogSyncing = catalogSyncRuns.length > 0;
@@ -151,13 +145,6 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   }
 
   useEffect(() => { void refresh(); }, []);
-  useEffect(() => {
-    liveAgentTerminals.clear();
-    for (const [agentId, terminal] of Object.entries(terminals)) {
-      liveAgentTerminals.set(agentId, terminal);
-    }
-  }, [terminals]);
-
   async function run(
     name: 'agent.delete' | 'agent.patch',
     input: Parameters<typeof dispatch>[1],
@@ -178,12 +165,61 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
     agentId?: string,
   ): Promise<void> {
     setError('');
-    const settled = await waitForRunSettle(store, dispatch(name, { pluginId, ...(agentId ? { agentId } : {}) }).id);
+    const showsTerminal = name !== 'catalog.rollbackProxy';
+    const terminalId = `${pluginId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const updateTerminal = (
+      update: (current: IntegrationInstallTerminalState) => IntegrationInstallTerminalState,
+    ): void => {
+      const current = liveIntegrationTerminals.get(pluginId);
+      if (!current || current.id !== terminalId) return;
+      const next = update(current);
+      liveIntegrationTerminals.set(pluginId, next);
+      setIntegrationTerminals(previous => ({ ...previous, [pluginId]: next }));
+    };
+    let onProgress: ((progress: ManagedRuntimeInstallProgress) => void) | undefined;
+    if (showsTerminal) {
+      const terminal: IntegrationInstallTerminalState = {
+        id: terminalId,
+        action: name === 'catalog.updateProxy' ? 'update' : 'install',
+        visible: true,
+        status: 'running',
+        events: [],
+        error: '',
+      };
+      liveIntegrationTerminals.set(pluginId, terminal);
+      setIntegrationTerminals(previous => ({ ...previous, [pluginId]: terminal }));
+      onProgress = progress => updateTerminal(current => ({
+        ...current,
+        events: appendIntegrationInstallProgress(current.events, progress),
+      }));
+    }
+    const settled = await waitForRunSettle(store, dispatch(name, {
+      pluginId,
+      ...(agentId ? { agentId } : {}),
+      ...(onProgress ? { onProgress } : {}),
+    }).id);
     if (settled.phase === 'confirmed') {
+      if (showsTerminal) updateTerminal(current => ({ ...current, status: 'completed' }));
       await refresh();
       return;
     }
-    setError(settled.error ?? 'Catalog operation failed');
+    const operationError = settled.phase === 'timed-out'
+      ? t('agents.installTerminal.unknownHelp')
+      : settled.error ?? 'Catalog operation failed';
+    if (showsTerminal) updateTerminal(current => ({
+      ...current,
+      status: settled.phase === 'timed-out' ? 'unknown' : 'failed',
+      error: operationError,
+    }));
+    setError(operationError);
+  }
+
+  function setIntegrationTerminalVisibility(pluginId: string, visible: boolean): void {
+    const current = liveIntegrationTerminals.get(pluginId);
+    if (!current) return;
+    const next = { ...current, visible };
+    liveIntegrationTerminals.set(pluginId, next);
+    setIntegrationTerminals(previous => ({ ...previous, [pluginId]: next }));
   }
 
   async function syncCatalog(): Promise<void> {
@@ -310,61 +346,8 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
         defaults: agent.defaults,
       },
     })) {
-      const terminal = terminals[agent.id];
-      if (terminal) {
-        terminalHost?.close(terminal.termId);
-        setTerminals(previous => {
-          const next = { ...previous };
-          delete next[agent.id];
-          return next;
-        });
-      }
       setSelection(null);
     }
-  }
-
-  function openTerminal(agentId: string) {
-    setTerminals(previous => {
-      const current = previous[agentId];
-      if (current) return { ...previous, [agentId]: { ...current, visible: true } };
-      return {
-        ...previous,
-        [agentId]: {
-          termId: `agent-cli-${agentId}-${Date.now()}`,
-          visible: true,
-          started: false,
-        },
-      };
-    });
-  }
-
-  function terminalControl(agentId: string): AgentTerminalControl | undefined {
-    if (!terminalHost) return undefined;
-    const state = terminals[agentId];
-    return {
-      termId: state?.termId ?? null,
-      visible: state?.visible ?? false,
-      started: state?.started ?? false,
-      preferences: terminalHost.preferences,
-      makeWire: terminalHost.makeWire,
-      onOpen: () => openTerminal(agentId),
-      onSpawned: () => setTerminals(previous => {
-        const current = previous[agentId];
-        return current ? { ...previous, [agentId]: { ...current, started: true } } : previous;
-      }),
-      onHide: () => setTerminals(previous => {
-        const current = previous[agentId];
-        return current ? { ...previous, [agentId]: { ...current, visible: false } } : previous;
-      }),
-      onStop: () => setTerminals(previous => {
-        const current = previous[agentId];
-        if (!current) return previous;
-        terminalHost.close(current.termId);
-        const next = { ...previous };
-        delete next[agentId];
-        return next;
-      }),
-    };
   }
 
   const selectedAgent = selection?.kind === 'agent'
@@ -491,6 +474,9 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                 : undefined}
               docGeneration={catalog?.source.sequence ?? null}
               showBack={narrow}
+              installTerminal={integrationTerminals[selectedProxy.pluginId]}
+              onInstallTerminalHide={() => setIntegrationTerminalVisibility(selectedProxy.pluginId, false)}
+              onInstallTerminalShow={() => setIntegrationTerminalVisibility(selectedProxy.pluginId, true)}
               onAction={action => { void runCatalog(
                 action === 'install_runtime' ? 'catalog.installRuntime'
                   : action === 'install_proxy' ? 'catalog.installProxy'
@@ -504,7 +490,6 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
             <AgentDetailPanel
               agent={selectedAgent}
               display={agentProxyDisplay(selectedAgent, catalogItems, legacyProxies)}
-              terminal={terminalControl(selectedAgent.id)}
               showBack={narrow}
               errorNotice={errorNotice}
               onRename={name => run('agent.patch', { agentId: selectedAgent.id, patch: { name } })}
@@ -582,6 +567,9 @@ function ProxyDetailWithBusy({
   showBack,
   onAction,
   onCreateAgent,
+  installTerminal,
+  onInstallTerminalHide,
+  onInstallTerminalShow,
   onClose,
 }: {
   item: ProxyCatalogItem;
@@ -591,6 +579,9 @@ function ProxyDetailWithBusy({
   showBack: boolean;
   onAction: (action: 'install_runtime' | 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
   onCreateAgent: () => void;
+  installTerminal?: IntegrationInstallTerminalState;
+  onInstallTerminalHide: () => void;
+  onInstallTerminalShow: () => void;
   onClose: () => void;
 }) {
   const runs = usePendingOperations(catalogEntityKey(item.pluginId));
@@ -606,6 +597,9 @@ function ProxyDetailWithBusy({
       busy={runs.length > 0 || runtimeRuns.length > 0 || syncRuns.length > 0}
       onAction={onAction}
       onCreateAgent={onCreateAgent}
+      installTerminal={installTerminal}
+      onInstallTerminalHide={onInstallTerminalHide}
+      onInstallTerminalShow={onInstallTerminalShow}
       onClose={onClose}
     />
   );

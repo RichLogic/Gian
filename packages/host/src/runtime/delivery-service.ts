@@ -1,4 +1,4 @@
-import type { ManagedRuntimeGeneration } from '@gian/shared';
+import type { ManagedRuntimeGeneration, ManagedRuntimeInstallProgress } from '@gian/shared';
 import { parseProxyPluginId } from '@gian/shared';
 
 import type { AgentManager } from '../agents/manager.js';
@@ -15,6 +15,20 @@ export class ManagedRuntimeDeliveryError extends Error {
   }
 }
 
+type ProgressReporter = (progress: ManagedRuntimeInstallProgress) => void;
+
+function reportProgress(
+  reporter: ProgressReporter | undefined,
+  progress: ManagedRuntimeInstallProgress,
+): void {
+  try {
+    reporter?.(progress);
+  } catch {
+    // Progress is best-effort presentation. The Host owns the install after
+    // authorization and must finish safely even if the renderer disconnects.
+  }
+}
+
 /** Installs one complete certified Proxy + Runtime combination. Proxy bytes
  * come from the Catalog-bound Gian Release coordinate; managed CLI bytes are
  * written only below dataDir/runtimes by ManagedRuntimeInstaller. */
@@ -28,7 +42,11 @@ export class ManagedRuntimeDeliveryService {
     resolver: RuntimeResolver;
   }) {}
 
-  async install(pluginId: string, agentId?: string): Promise<ManagedRuntimeGeneration> {
+  async install(
+    pluginId: string,
+    agentId?: string,
+    onProgress?: ProgressReporter,
+  ): Promise<ManagedRuntimeGeneration> {
     const id = parseProxyPluginId(pluginId);
     if (agentId) {
       const agent = this.options.agents.getAgent(agentId);
@@ -39,7 +57,7 @@ export class ManagedRuntimeDeliveryService {
         );
       }
     }
-
+    reportProgress(onProgress, { stage: 'catalog', status: 'started' });
     let item = await this.options.catalog.get(id);
     if (!item) {
       // Startup refresh is intentionally asynchronous so an offline Catalog
@@ -62,14 +80,20 @@ export class ManagedRuntimeDeliveryService {
         `${id} has no Runtime combination compatible with this Gian version.`,
       );
     }
+    reportProgress(onProgress, { stage: 'catalog', status: 'completed' });
+    let proxyChanged = false;
     if (item.installation.state === 'not_installed'
       || item.installation.state === 'quarantined'
       || item.installation.state === 'invalid') {
+      reportProgress(onProgress, { stage: 'proxy', status: 'started' });
       await this.options.catalog.install(id);
       item = await this.options.catalog.get(id);
+      proxyChanged = true;
     } else if (item.installation.state === 'installed' && item.installation.updateAvailable) {
+      reportProgress(onProgress, { stage: 'proxy', status: 'started' });
       await this.options.catalog.update(id);
       item = await this.options.catalog.get(id);
+      proxyChanged = true;
     }
     if (item?.installation.state !== 'installed') {
       throw new ManagedRuntimeDeliveryError(
@@ -77,9 +101,11 @@ export class ManagedRuntimeDeliveryService {
         `${id} Proxy could not be installed from its Gian Release.`,
       );
     }
+    if (proxyChanged) reportProgress(onProgress, { stage: 'proxy', status: 'completed' });
 
     let externalEntryPath: string | undefined;
     if (this.options.catalog.managedRuntimeKind(id) === 'external-app') {
+      reportProgress(onProgress, { stage: 'runtime-discovery', status: 'started' });
       const discovered = await this.options.runtimeControl.discover(id);
       externalEntryPath = discovered.candidates[0]?.path;
       if (!externalEntryPath) {
@@ -88,16 +114,21 @@ export class ManagedRuntimeDeliveryService {
           `${discovered.runtime.displayName ?? id} is not installed on this machine.`,
         );
       }
+      reportProgress(onProgress, { stage: 'runtime-discovery', status: 'completed' });
     }
 
     const plan = await this.options.catalog.managedRuntimePlan(id, externalEntryPath);
     const status = await this.options.agents.managedRuntimeStatus(id);
     if (status.active) {
-      if (status.active.generationId === plan.generationId) return status.active;
+      if (status.active.generationId === plan.generationId) {
+        reportProgress(onProgress, { stage: 'activation', status: 'completed' });
+        return status.active;
+      }
     }
-    const staged = await this.options.installer.install(plan);
+    const staged = await this.options.installer.install(plan, undefined, onProgress);
 
     if (staged.runtime) {
+      reportProgress(onProgress, { stage: 'combination-verify', status: 'started' });
       const launch = await this.options.agents.trustedLaunch(id);
       if (!launch) {
         throw new ManagedRuntimeDeliveryError(
@@ -124,8 +155,12 @@ export class ManagedRuntimeDeliveryService {
       } finally {
         await resolved.lease?.release();
       }
+      reportProgress(onProgress, { stage: 'combination-verify', status: 'completed' });
     }
 
-    return this.options.activation.activate(id, staged.generationId);
+    reportProgress(onProgress, { stage: 'activation', status: 'started' });
+    const active = await this.options.activation.activate(id, staged.generationId);
+    reportProgress(onProgress, { stage: 'activation', status: 'completed' });
+    return active;
   }
 }

@@ -4,6 +4,7 @@ import type {
   ConfigValue,
   Executor,
   LegacyExecutorId,
+  ManagedRuntimeInstallStreamFrame,
   ProductExecutor,
   ProxyCatalog,
 } from '@gian/shared';
@@ -104,6 +105,61 @@ function installErrorStatus(error: unknown): 400 | 409 | 410 | 502 {
     || code === 'PLUGIN_CURRENT_UNMANAGED'
   )) return 400;
   return 502;
+}
+
+function runtimeInstallProgressResponse(
+  delivery: ManagedRuntimeDeliveryService,
+  pluginId: string,
+  agentId?: string,
+): Response {
+  const encoder = new TextEncoder();
+  let open = true;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const write = (frame: ManagedRuntimeInstallStreamFrame): void => {
+        if (!open) return;
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+        } catch {
+          open = false;
+        }
+      };
+      const close = (): void => {
+        if (!open) return;
+        open = false;
+        try { controller.close(); } catch { /* renderer disconnected */ }
+      };
+      void delivery.install(pluginId, agentId, progress => {
+        write({ type: 'progress', progress });
+      }).then(generation => {
+        write({ type: 'result', generation });
+        close();
+      }).catch(error => {
+        const failure = errorResponse(error);
+        write({
+          type: 'error',
+          error: {
+            message: failure.error,
+            ...(failure.code ? { code: failure.code } : {}),
+          },
+        });
+        close();
+      });
+    },
+    cancel() {
+      // The Host-authorized installation keeps running. Disconnecting only
+      // drops presentation output; it must not leave a partial generation.
+      open = false;
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    },
+  });
 }
 
 function publicAgentStatus<T extends { cliPath?: unknown }>(
@@ -363,6 +419,13 @@ export function registerAgentRoutes(
       const agentId = (body as { agentId?: unknown }).agentId;
       if (agentId !== undefined && (typeof agentId !== 'string' || agentId.trim() === '')) {
         return c.json({ error: 'agentId must be a non-empty string' }, 400);
+      }
+      if (c.req.header('accept')?.includes('application/x-ndjson')) {
+        return runtimeInstallProgressResponse(
+          options.runtimeDelivery,
+          pluginId,
+          typeof agentId === 'string' ? agentId : undefined,
+        );
       }
       const generation = await options.runtimeDelivery.install(
         pluginId,

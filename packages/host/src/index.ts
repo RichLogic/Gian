@@ -218,10 +218,12 @@ async function main(): Promise<void> {
   const runtimeInstaller = new ManagedRuntimeInstaller({
     dataDir,
     store: agentManager.managedRuntimeGenerationStore(),
-    download: (asset, signal) => downloadManagedRuntimeAsset(
+    download: (asset, signal, onProgress) => downloadManagedRuntimeAsset(
       asset,
       catalogPolicy.runtimeAssetPrefixes ?? [],
       signal,
+      fetch,
+      onProgress,
     ),
     probeVersion: async ({ executable, pluginId }) => {
       const launch = await agentManager.trustedLaunch(pluginId);

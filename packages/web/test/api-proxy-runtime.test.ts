@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   discoverProxyRuntime,
+  installManagedRuntime,
   loadManagedRuntimeStatus,
   pickAgentHome,
   probeProxyRuntime,
@@ -114,6 +115,56 @@ describe('Proxy Runtime API (discover/probe)', () => {
     const status = await loadManagedRuntimeStatus('io.acme/runtime');
     expect(seenUrl).toBe('/api/proxies/io.acme%2Fruntime/runtime');
     expect(status.active).toBeNull();
+  });
+
+  it('streams bounded Host install progress before returning the managed generation', async () => {
+    let seenAccept = '';
+    const generation = { generationId: 'generation-1', pluginId: 'io.acme.external' };
+    const source = [
+      JSON.stringify({ type: 'progress', progress: { stage: 'catalog', status: 'started' } }),
+      JSON.stringify({
+        type: 'progress',
+        progress: {
+          stage: 'runtime-download', status: 'progress', componentId: 'acme-cli', version: '1.0.0',
+          receivedBytes: 50, totalBytes: 100,
+        },
+      }),
+      JSON.stringify({ type: 'result', generation }),
+      '',
+    ].join('\n');
+    mockFetch(async (_input, init) => {
+      seenAccept = new Headers(init?.headers).get('accept') ?? '';
+      const bytes = new TextEncoder().encode(source);
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, 17));
+          controller.enqueue(bytes.slice(17));
+          controller.close();
+        },
+      }), { headers: { 'content-type': 'application/x-ndjson; charset=utf-8' } });
+    });
+    const progress: Array<{ stage: string; status: string }> = [];
+
+    const result = await installManagedRuntime('io.acme.external', undefined, event => {
+      progress.push({ stage: event.stage, status: event.status });
+    });
+
+    expect(seenAccept).toBe('application/x-ndjson');
+    expect(result.generationId).toBe('generation-1');
+    expect(progress).toEqual([
+      { stage: 'catalog', status: 'started' },
+      { stage: 'runtime-download', status: 'progress' },
+    ]);
+  });
+
+  it('fails a streamed install with the Host error instead of accepting a partial result', async () => {
+    mockFetch(async () => new Response(
+      `${JSON.stringify({ type: 'error', error: { code: 'RUNTIME_DIGEST_MISMATCH', message: 'digest mismatch' } })}\n`,
+      { headers: { 'content-type': 'application/x-ndjson' } },
+    ));
+
+    await expect(installManagedRuntime('io.acme.external', undefined, () => undefined))
+      .rejects.toThrow('digest mismatch');
   });
 
   it('opens the draft or saved-Agent HOME picker without sending a path', async () => {

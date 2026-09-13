@@ -32,6 +32,7 @@ export async function downloadManagedRuntimeAsset(
   allowedPrefixes: readonly string[],
   signal?: AbortSignal,
   fetchImpl: typeof fetch = fetch,
+  onProgress?: (receivedBytes: number, totalBytes: number) => void,
 ): Promise<Buffer> {
   if (!isApprovedRuntimeAssetUrl(asset.url, allowedPrefixes)) {
     throw downloadError('RUNTIME_SOURCE_FORBIDDEN', 'Runtime asset URL is outside the App-pinned official channels.');
@@ -77,6 +78,7 @@ export async function downloadManagedRuntimeAsset(
     const reader = response.body.getReader();
     const chunks: Buffer[] = [];
     let received = 0;
+    let reported = 0;
     while (true) {
       signal?.throwIfAborted();
       const result = await reader.read();
@@ -88,6 +90,15 @@ export async function downloadManagedRuntimeAsset(
         throw downloadError('RUNTIME_SIZE_MISMATCH', 'Runtime response exceeded the Catalog size.');
       }
       chunks.push(chunk);
+      if (received === asset.size || received - reported >= 1024 * 1024) {
+        reported = received;
+        try {
+          onProgress?.(received, asset.size);
+        } catch {
+          // A disconnected progress consumer must never abort an authorized
+          // installation that the Host has already started.
+        }
+      }
     }
     if (received !== asset.size) {
       throw downloadError('RUNTIME_SIZE_MISMATCH', 'Runtime response size differs from the Catalog coordinate.');

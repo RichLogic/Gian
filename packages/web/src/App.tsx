@@ -1825,16 +1825,7 @@ export function App() {
             >
               {mode === 'agents' && (
                 <Suspense fallback={null}>
-                  <AgentsView terminalHost={{
-                    preferences: displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES,
-                    makeWire: (termId, agentId, spawn) => makeWorkbenchWire(
-                      ws,
-                      termId,
-                      { target: { kind: 'agent_cli', agent_id: agentId } },
-                      spawn ? ops.dispatch : undefined,
-                    ),
-                    close: termId => { ops.dispatch('term.close', { termId }); },
-                  }} />
+                  <AgentsView />
                 </Suspense>
               )}
               {mode === 'custom' && (

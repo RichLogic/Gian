@@ -224,7 +224,24 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
   font: 500 var(--fz-12)/1 var(--font-sans);
 }
 .tty .term-bar .spacer { flex: 1; }
-.agent-terminal-body { height: 216px; min-height: 160px; padding: 6px; background: var(--surface); }
+.integration-install-terminal { margin-top: 12px; }
+.integration-install-terminal .term-bar .st { font-size: var(--fz-11); }
+.integration-terminal-output {
+  box-sizing: border-box;
+  width: 100%;
+  height: 216px;
+  min-height: 160px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 500 var(--fz-12)/1.7 var(--font-mono);
+}
+.integration-terminal-reopen { padding-top: 12px; }
 
 .proxy-document { scroll-behavior: smooth; }
 .ag-anchors {

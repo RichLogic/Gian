@@ -36,4 +36,11 @@ describe('agents-page.css', () => {
     expect(css).toMatch(/\.agents-view:has\(> \.p2\) > \.main-pane\s*\{\s*max-width:\s*50%/);
     expect(css).toMatch(/\.p2 \.kv-grid dt\s*\{[^}]*align-self:\s*start/s);
   });
+
+  it('gives the Integration installation TTY a bounded scrollable output area', () => {
+    const output = css.match(/\.integration-terminal-output\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(output).toMatch(/height:\s*216px/);
+    expect(output).toMatch(/overflow:\s*auto/);
+    expect(output).toMatch(/font:\s*500 var\(--fz-12\).*var\(--font-mono\)/);
+  });
 });

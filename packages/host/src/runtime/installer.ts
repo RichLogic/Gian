@@ -4,6 +4,7 @@ import { dirname, join, relative } from 'node:path';
 import {
   isCanonicalAbsolutePath,
   parseProxyPluginId,
+  type ManagedRuntimeInstallProgress,
   type ManagedRuntimeDistribution,
   type ManagedRuntimeGeneration,
   type ManagedRuntimeInstallPlan,
@@ -20,6 +21,20 @@ const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const COMPONENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+
+type ProgressReporter = (progress: ManagedRuntimeInstallProgress) => void;
+
+function reportProgress(
+  reporter: ProgressReporter | undefined,
+  progress: ManagedRuntimeInstallProgress,
+): void {
+  try {
+    reporter?.(progress);
+  } catch {
+    // Progress is observational. Losing its consumer must not corrupt or
+    // cancel a Host-owned install that may already have changed disk state.
+  }
+}
 
 function canonicalRelativePath(value: string): boolean {
   return value.length > 0
@@ -76,6 +91,7 @@ export class ManagedRuntimeInstaller {
     download: (
       asset: Extract<ManagedRuntimeDistribution, { kind: 'native-binary' }>['asset'],
       signal?: AbortSignal,
+      onProgress?: (receivedBytes: number, totalBytes: number) => void,
     ) => Promise<Buffer>;
     probeVersion: (input: {
       executable: string;
@@ -90,6 +106,7 @@ export class ManagedRuntimeInstaller {
   async install(
     plan: ManagedRuntimeInstallPlan,
     signal?: AbortSignal,
+    onProgress?: ProgressReporter,
   ): Promise<ManagedRuntimeGeneration> {
     const pluginId = parseProxyPluginId(plan.pluginId);
     if (!COMPONENT_ID.test(plan.generationId)) {
@@ -139,11 +156,16 @@ export class ManagedRuntimeInstaller {
     }
 
     const runtime = plan.runtime
-      ? await this.installDistribution(pluginId, plan.runtime, signal)
+      ? await this.installDistribution(pluginId, plan.runtime, signal, onProgress)
       : null;
     const companions = [];
     for (const companion of plan.companions) {
-      const installed = await this.installDistribution(pluginId, companion.distribution, signal);
+      const installed = await this.installDistribution(
+        pluginId,
+        companion.distribution,
+        signal,
+        onProgress,
+      );
       if (installed.ownership !== 'managed') {
         throw new ManagedRuntimeInstallError('RUNTIME_PLAN_INVALID', 'Runtime companions must be Gian-managed.');
       }
@@ -174,8 +196,15 @@ export class ManagedRuntimeInstaller {
     pluginId: string,
     distribution: ManagedRuntimeDistribution,
     signal?: AbortSignal,
+    onProgress?: ProgressReporter,
   ): Promise<NonNullable<ManagedRuntimeGeneration['runtime']>> {
     if (distribution.kind === 'external-app') {
+      reportProgress(onProgress, {
+        stage: 'runtime-verify',
+        status: 'started',
+        componentId: distribution.runtimeId,
+        version: distribution.version,
+      });
       if (pluginId !== 'zcode' && pluginId !== 'com.zhipu.zcode') {
         throw new ManagedRuntimeInstallError(
           'RUNTIME_EXTERNAL_FORBIDDEN',
@@ -199,6 +228,12 @@ export class ManagedRuntimeInstaller {
       if (observed !== distribution.version) {
         throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'External Runtime reported a different version.');
       }
+      reportProgress(onProgress, {
+        stage: 'runtime-verify',
+        status: 'completed',
+        componentId: distribution.runtimeId,
+        version: distribution.version,
+      });
       return {
         runtimeId: distribution.runtimeId,
         version: distribution.version,
@@ -209,7 +244,24 @@ export class ManagedRuntimeInstaller {
     }
 
     signal?.throwIfAborted();
-    const bytes = await this.options.download(distribution.asset, signal);
+    reportProgress(onProgress, {
+      stage: 'runtime-download',
+      status: 'started',
+      componentId: distribution.runtimeId,
+      version: distribution.version,
+      receivedBytes: 0,
+      totalBytes: distribution.asset.size,
+    });
+    const bytes = await this.options.download(distribution.asset, signal, (receivedBytes, totalBytes) => {
+      reportProgress(onProgress, {
+        stage: 'runtime-download',
+        status: 'progress',
+        componentId: distribution.runtimeId,
+        version: distribution.version,
+        receivedBytes,
+        totalBytes,
+      });
+    });
     signal?.throwIfAborted();
     if (bytes.length !== distribution.asset.size || bytes.length > MAX_ARTIFACT_BYTES) {
       throw new ManagedRuntimeInstallError('RUNTIME_SIZE_MISMATCH', 'Runtime artifact size does not match its coordinate.');
@@ -218,6 +270,20 @@ export class ManagedRuntimeInstaller {
     if (digest !== distribution.asset.sha256) {
       throw new ManagedRuntimeInstallError('RUNTIME_DIGEST_MISMATCH', 'Runtime artifact digest does not match its coordinate.');
     }
+    reportProgress(onProgress, {
+      stage: 'runtime-download',
+      status: 'completed',
+      componentId: distribution.runtimeId,
+      version: distribution.version,
+      receivedBytes: bytes.length,
+      totalBytes: distribution.asset.size,
+    });
+    reportProgress(onProgress, {
+      stage: 'runtime-verify',
+      status: 'started',
+      componentId: distribution.runtimeId,
+      version: distribution.version,
+    });
 
     const versionRoot = join(this.runtimeRoot, distribution.runtimeId, distribution.version);
     const entryPath = join(versionRoot, distribution.entryRelativePath);
@@ -263,6 +329,12 @@ export class ManagedRuntimeInstaller {
     } finally {
       await rm(staging, { recursive: true, force: true });
     }
+    reportProgress(onProgress, {
+      stage: 'runtime-verify',
+      status: 'completed',
+      componentId: distribution.runtimeId,
+      version: distribution.version,
+    });
     return {
       runtimeId: distribution.runtimeId,
       version: distribution.version,

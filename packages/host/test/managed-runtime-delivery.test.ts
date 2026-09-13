@@ -4,7 +4,11 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { parseProxyPluginId, type ManagedRuntimeInstallPlan } from '@gian/shared';
+import {
+  parseProxyPluginId,
+  type ManagedRuntimeInstallPlan,
+  type ManagedRuntimeInstallProgress,
+} from '@gian/shared';
 
 import { ManagedRuntimeActivationService } from '../src/runtime/activation-service.js';
 import { ManagedRuntimeDeliveryService } from '../src/runtime/delivery-service.js';
@@ -94,8 +98,9 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
   const installer = new ManagedRuntimeInstaller({
     dataDir,
     store,
-    download: async () => {
+    download: async (_asset, _signal, onProgress) => {
       order.push('runtime');
+      onProgress?.(runtimeBytes.length, runtimeBytes.length);
       return runtimeBytes;
     },
     probeVersion: async ({ expectedVersion }) => expectedVersion,
@@ -134,13 +139,29 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
     } as never,
   });
 
-  const active = await service.install('claude', 'agent-1');
+  const progress: ManagedRuntimeInstallProgress[] = [];
+  const active = await service.install('claude', 'agent-1', event => progress.push(event));
   const runtimePath = join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude');
   assert.equal(active.state, 'active');
   assert.equal(active.runtime?.entryPath, runtimePath);
   assert.deepEqual(await readFile(runtimePath), runtimeBytes);
   assert.deepEqual(order.slice(0, 3), ['catalog', 'proxy', 'runtime']);
   assert.equal(runtimePath.startsWith(join(dataDir, 'runtimes')), true);
+  assert.deepEqual(progress.map(event => `${event.stage}:${event.status}`), [
+    'catalog:started',
+    'catalog:completed',
+    'proxy:started',
+    'proxy:completed',
+    'runtime-download:started',
+    'runtime-download:progress',
+    'runtime-download:completed',
+    'runtime-verify:started',
+    'runtime-verify:completed',
+    'combination-verify:started',
+    'combination-verify:completed',
+    'activation:started',
+    'activation:completed',
+  ]);
 });
 
 test('delivery rejects a Runtime install for an Agent bound to another Proxy', async () => {

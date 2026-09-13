@@ -1,8 +1,7 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   AgentProxyDefaults,
   ConfigValue,
-  TerminalPreferences,
   UserAgentStatus,
 } from '@gian/shared';
 import { loadProxyCapabilities, loadResolvedProxyCatalog } from '../api.js';
@@ -15,30 +14,12 @@ import {
 import { agentIdEntityKey } from '../operations/agents.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
-import type { TerminalWire } from '../components/terminal-wire.js';
-
-const Terminal = lazy(() => import('../components/Terminal.js').then(module => ({
-  default: module.Terminal,
-})));
-
-export interface AgentTerminalControl {
-  termId: string | null;
-  visible: boolean;
-  started: boolean;
-  preferences: TerminalPreferences;
-  makeWire: (termId: string, agentId: string, spawn: boolean) => TerminalWire;
-  onOpen: () => void;
-  onSpawned: () => void;
-  onHide: () => void;
-  onStop: () => void;
-}
 
 /** One saved Agent owns identity, HOME and defaults. Its shared Proxy + CLI
  * Runtime lifecycle belongs to the Agent Integrations surface, never here. */
 export function AgentDetailPanel({
   agent,
   display,
-  terminal,
   showBack,
   errorNotice,
   onRename,
@@ -51,7 +32,6 @@ export function AgentDetailPanel({
 }: {
   agent: UserAgentStatus;
   display: ProxyLogoDisplay;
-  terminal?: AgentTerminalControl;
   showBack: boolean;
   errorNotice: React.ReactNode;
   onRename: (name: string) => Promise<boolean>;
@@ -81,11 +61,6 @@ export function AgentDetailPanel({
     setUseCustomHome(agent.home?.kind === 'custom');
     if (agent.home?.kind === 'custom') setCustomHome(agent.home.path);
   }, [agent.home]);
-  useEffect(() => {
-    if (!terminal?.visible || terminal.started) return;
-    terminal.onSpawned();
-  }, [terminal]);
-
   // Capability-driven Defaults exist only for official Proxy kinds: the
   // capabilities endpoint and the defaults validator are still kind-keyed.
   useEffect(() => {
@@ -232,7 +207,6 @@ export function AgentDetailPanel({
     && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError);
   const customHomeEnabled = useCustomHome;
   const externalHome = agent.home === null;
-  const terminalAvailable = !!terminal && agent.home !== null && agent.cli.state === 'ready';
 
   return (
     <>
@@ -359,40 +333,6 @@ export function AgentDetailPanel({
                        }} />
                 {t('agents.home.useCustom')}
               </label>
-            </div>
-          )}
-          {terminalAvailable && !terminal?.visible && (
-            <div className="act-row">
-              <span className="delta muted">{t('agents.terminal.homeHelp')}</span>
-              <button type="button" className="btn xs secondary"
-                      title={t('agents.terminal.open')}
-                      aria-label={t('agents.terminal.open')}
-                      onClick={terminal.onOpen}>
-                {t('agents.terminal.open')}
-              </button>
-            </div>
-          )}
-          {terminal?.visible && terminal.termId && (
-            <div className="tty" data-testid="agent-cli-terminal">
-              <div className="term-bar">
-                <span>{t('agents.terminal.title')}</span>
-                <span className="spacer" />
-                <button type="button" className="btn xs ghost" onClick={terminal.onHide}>
-                  {t('agents.terminal.hide')}
-                </button>
-                <button type="button" className="btn xs danger-ghost" onClick={terminal.onStop}>
-                  {t('agents.terminal.stop')}
-                </button>
-              </div>
-              <div className="agent-terminal-body">
-                <Suspense fallback={null}>
-                  <Terminal
-                    instanceKey={`agent-cli:${terminal.termId}`}
-                    preferences={terminal.preferences}
-                    wire={terminal.makeWire(terminal.termId, agent.id, !terminal.started)}
-                  />
-                </Suspense>
-              </div>
             </div>
           )}
         </section>
