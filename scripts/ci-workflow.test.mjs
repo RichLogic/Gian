@@ -68,6 +68,10 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.match(certification, /pnpm verify:proxy --/);
   assert.match(certification, /--stage artifacts/);
   assert.match(certification, /build-managed-runtime-candidates\.mjs/);
+  assert.match(
+    certification,
+    /pnpm --filter @gian\/proxy-protocol build[\s\S]*pnpm --filter @gian\/proxy-catalog-contract build[\s\S]*pnpm --filter @gian\/host build/,
+  );
   assert.match(certification, /artifacts\/proxies/);
   assert.match(release, /workflow_dispatch:/);
   assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
