@@ -23,8 +23,6 @@ export function AgentDetailPanel({
   showBack,
   errorNotice,
   onRename,
-  onSetHome,
-  onPickHome,
   onSetDefaults,
   onDelete,
   onOpenProxy,
@@ -35,8 +33,6 @@ export function AgentDetailPanel({
   showBack: boolean;
   errorNotice: React.ReactNode;
   onRename: (name: string) => Promise<boolean>;
-  onSetHome: (home: { kind: 'managed' } | { kind: 'custom'; path: string }) => Promise<boolean>;
-  onPickHome: () => Promise<string | null>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
   onDelete: () => void;
   /** Present only when the Agent's pluginId has a Catalog entry. */
@@ -48,8 +44,6 @@ export function AgentDetailPanel({
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
   const busy = agentRuns.length > 0;
   const [name, setName] = useState(agent.name);
-  const [customHome, setCustomHome] = useState(agent.home?.kind === 'custom' ? agent.home.path : '');
-  const [useCustomHome, setUseCustomHome] = useState(agent.home?.kind === 'custom');
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [resolvedCapabilities, setResolvedCapabilities] = useState<unknown>(null);
   const [resolvedModel, setResolvedModel] = useState('');
@@ -57,10 +51,6 @@ export function AgentDetailPanel({
   const resolveSequence = useRef(0);
   const [capabilityError, setCapabilityError] = useState(false);
   useEffect(() => setName(agent.name), [agent.name]);
-  useEffect(() => {
-    setUseCustomHome(agent.home?.kind === 'custom');
-    if (agent.home?.kind === 'custom') setCustomHome(agent.home.path);
-  }, [agent.home]);
   // Capability-driven Defaults exist only for official Proxy kinds: the
   // capabilities endpoint and the defaults validator are still kind-keyed.
   useEffect(() => {
@@ -205,7 +195,6 @@ export function AgentDetailPanel({
 
   const defaultsEditable = !!kind && agent.ready
     && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError);
-  const customHomeEnabled = useCustomHome;
   const externalHome = agent.home === null;
 
   return (
@@ -246,30 +235,6 @@ export function AgentDetailPanel({
       <div className="p2-body">
         {errorNotice}
 
-        {agent.cli.state !== 'ready' && (
-          <div className="notice warn">
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <b>{t('agents.detail.cliNotFoundTitle')}</b>
-              {' — '}
-              {t('agents.detail.cliNotFoundBody').replace('{bin}', kind ?? String(agent.pluginId ?? ''))}
-              {onOpenProxy && (
-                <>
-                  <br />
-                  <button
-                    type="button"
-                    className="btn sm primary"
-                    style={{ marginTop: 8 }}
-                    disabled={busy}
-                    onClick={onOpenProxy}
-                  >
-                    {t('agents.detail.viewInCatalog')}
-                  </button>
-                </>
-              )}
-            </span>
-          </div>
-        )}
-
         <section className="ag-sec">
           <span className="s2-subhead">{t('agents.integration')}</span>
           <div className="sec-line">
@@ -294,45 +259,9 @@ export function AgentDetailPanel({
             <p className="s2-help">{t('agents.home.externalHelp')}</p>
           ) : (
             <div className="sec-line">
-              {customHomeEnabled ? (
-                <div className="cli-path-row">
-                  <input className="input mono" value={customHome}
-                         aria-label={t('agents.home.custom')} disabled={busy}
-                         onChange={event => setCustomHome(event.target.value)}
-                         onBlur={() => {
-                           const path = customHome.trim();
-                           if (path && path !== (agent.home?.kind === 'custom' ? agent.home.path : '')) {
-                             void onSetHome({ kind: 'custom', path });
-                           }
-                         }} />
-                  <button type="button" className="btn xs secondary" disabled={busy}
-                          onClick={() => { void onPickHome().then(path => {
-                            if (!path) return;
-                            setCustomHome(path);
-                            void onSetHome({ kind: 'custom', path });
-                          }); }}>
-                    {t('settings.agents.browse')}
-                  </button>
-                </div>
-              ) : (
-                <span className="mono cli-path-val">{agent.home?.path ?? '—'}</span>
-              )}
-              <span className="hint">
-                {customHomeEnabled ? t('agents.home.customHelp') : t('agents.home.defaultHelp')}
+              <span className="mono cli-path-val" data-testid="agent-home-path">
+                {agent.home?.path ?? '—'}
               </span>
-              <label className="home-custom">
-                <input type="checkbox" checked={customHomeEnabled} disabled={busy}
-                       onChange={event => {
-                         if (event.target.checked) {
-                           setUseCustomHome(true);
-                           setCustomHome('');
-                         } else {
-                           setUseCustomHome(false);
-                           void onSetHome({ kind: 'managed' });
-                         }
-                       }} />
-                {t('agents.home.useCustom')}
-              </label>
             </div>
           )}
         </section>

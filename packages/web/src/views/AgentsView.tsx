@@ -493,8 +493,6 @@ export function AgentsView() {
               showBack={narrow}
               errorNotice={errorNotice}
               onRename={name => run('agent.patch', { agentId: selectedAgent.id, patch: { name } })}
-              onSetHome={home => run('agent.patch', { agentId: selectedAgent.id, patch: { home } })}
-              onPickHome={() => pickHome(selectedAgent.id)}
               onSetDefaults={defaults => run('agent.patch', {
                 agentId: selectedAgent.id,
                 patch: { defaults },

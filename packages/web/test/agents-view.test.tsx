@@ -715,7 +715,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(restartApp).not.toHaveBeenCalled();
   }, 10_000);
 
-  it('keeps Runtime management out of My Agent and writes a custom HOME without restart', async () => {
+  it('shows the fixed HOME read-only and keeps CLI controls out of My Agent', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);
     (window as { gianDesktop?: unknown }).gianDesktop = { appVariant: 'production', restartApp };
     const saved = agent({ id: 'a-path', name: 'Writer' });
@@ -728,16 +728,13 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(panel.textContent).not.toContain('/bin/claude');
     expect(panel.textContent).toContain('Agent Integration');
     expect(panel.textContent).toContain('Claude Code');
-    fireEvent.click(within(panel).getByLabelText('Use custom HOME'));
-    const homeInput = within(panel).getByLabelText('Custom HOME');
-    fireEvent.change(homeInput, { target: { value: '/Users/test/claude-mix' } });
-    fireEvent.blur(homeInput);
-    await waitFor(() => {
-      expect(api.updateAgent).toHaveBeenCalledWith('a-path', {
-        home: { kind: 'custom', path: '/Users/test/claude-mix' },
-      });
-    });
-    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(within(panel).getByTestId('agent-home-path').textContent)
+      .toBe('/Users/test/.gian/homes/claude/a-1');
+    expect(within(panel).queryByLabelText('Use custom HOME')).toBeNull();
+    expect(within(panel).queryByLabelText('Custom HOME')).toBeNull();
+    expect(within(panel).queryByRole('button', { name: /Browse/ })).toBeNull();
+    expect(within(panel).queryByRole('button', { name: /CLI terminal|CLI Shell/ })).toBeNull();
+    expect(api.updateAgent).not.toHaveBeenCalled();
     expect(restartApp).not.toHaveBeenCalled();
   }, 10_000);
 
