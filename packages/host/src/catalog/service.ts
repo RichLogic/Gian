@@ -85,20 +85,20 @@ export class CatalogService {
   async install(pluginId: string): Promise<PluginInstallReceipt> {
     const view = await this.captureView();
     const item = await this.requireProjectedFrom(view, pluginId);
-    const legacy = item.installation.state === 'quarantined'
+    const replaceUntrusted = item.installation.state === 'quarantined'
       || item.installation.state === 'invalid';
     if (
       item.compatibility.state !== 'compatible'
-      || (item.installation.state !== 'not_installed' && !legacy)
+      || (item.installation.state !== 'not_installed' && !replaceUntrusted)
     ) {
       throw new PluginStoreError(
         'CATALOG_INSTALL_FORBIDDEN',
-        `${item.pluginId} can be installed only when compatible and not installed or legacy.`,
+        `${item.pluginId} can be installed only when compatible and not already trusted.`,
       );
     }
     const receipt = await this.options.plugins.install(
       this.coordinateFrom(view, pluginId),
-      { replaceLegacyCurrent: legacy },
+      { replaceUntrustedCurrent: replaceUntrusted },
     );
     this.retirePluginGeneration(item.pluginId);
     return receipt;

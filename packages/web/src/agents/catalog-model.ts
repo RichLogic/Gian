@@ -26,10 +26,15 @@ export type CatalogBadge =
 export function catalogBadges(item: ProxyCatalogItem): CatalogBadge[] {
   if (item.compatibility.state !== 'compatible') return ['update-required'];
   if (item.installation.state === 'not_installed') return ['not-installed'];
+  // Proxy + CLI Runtime are one Integration. Untrusted historical Proxy bytes
+  // or a partial install are still Not installed until one complete generation
+  // is active; Update required is reserved for an already usable Integration.
+  if (item.runtime.state !== 'ready' && item.runtime.state !== 'not_required') {
+    return ['not-installed'];
+  }
   if (
     item.installation.state !== 'installed'
     || item.installation.updateAvailable
-    || (item.runtime.state !== 'ready' && item.runtime.state !== 'not_required')
   ) return ['update-required'];
   return ['installed'];
 }

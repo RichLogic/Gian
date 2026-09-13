@@ -98,12 +98,12 @@ describe('catalogBadges', () => {
     }))).toEqual(['update-required']);
   });
 
-  it('flags runtime setup for an installed item needing a Runtime', () => {
+  it('treats an installed Proxy without its Runtime as not installed', () => {
     expect(catalogBadges(item({
       installation: { state: 'installed', installedVersion: '1.0.0' },
       runtime: { state: 'setup_required', displayName: 'Fixture CLI' },
       availableActions: ['open_setup', 'select_runtime'],
-    }))).toEqual(['update-required']);
+    }))).toEqual(['not-installed']);
   });
 
   it('distinguishes app-too-old from proxy-too-old', () => {
@@ -126,6 +126,14 @@ describe('catalogBadges', () => {
       installation: { state: 'quarantined', installedVersion: '0.9.0' },
       availableActions: [],
     }))).toEqual(['update-required']);
+  });
+
+  it('treats an untrusted Proxy without a complete Runtime generation as not installed', () => {
+    expect(catalogBadges(item({
+      installation: { state: 'quarantined', installedVersion: '0.9.0' },
+      runtime: { state: 'setup_required', displayName: 'Fixture CLI' },
+      availableActions: ['install_runtime'],
+    }))).toEqual(['not-installed']);
   });
 });
 

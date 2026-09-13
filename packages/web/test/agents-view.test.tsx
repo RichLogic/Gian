@@ -114,7 +114,7 @@ const MANAGED_INSTALLABLE = catalogItem({
   runtime: { state: 'setup_required', displayName: 'Acme CLI' },
   availableActions: ['install_runtime'],
 });
-const LEGACY_MANAGED = catalogItem({
+const UNTRUSTED_MANAGED = catalogItem({
   pluginId: 'io.acme.legacy',
   displayName: 'Acme Legacy',
   installation: {
@@ -362,21 +362,21 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     );
   });
 
-  it('keeps a legacy Integration clickable and updates it before creating a new Agent', async () => {
-    mockApi([], catalogList([LEGACY_MANAGED]));
+  it('keeps an untrusted Proxy with no Runtime clickable and freshly installs before Agent creation', async () => {
+    mockApi([], catalogList([UNTRUSTED_MANAGED]));
     renderAgents();
     const integration = await screen.findByTestId('catalog-item-io.acme.legacy');
-    expect(within(integration).getByText('Update required')).toBeTruthy();
+    expect(within(integration).getByText('Not installed')).toBeTruthy();
     fireEvent.click(within(integration).getByTestId('catalog-open-io.acme.legacy'));
     const detail = await screen.findByTestId('proxy-detail-panel');
-    expect(within(detail).getByTestId('proxy-action-install-runtime').textContent).toBe('Update');
+    expect(within(detail).getByTestId('proxy-action-install-runtime').textContent).toBe('Install');
     fireEvent.click(within(detail).getByLabelText('Close'));
 
     fireEvent.click(screen.getByTestId('agents-add'));
     fireEvent.click(await screen.findByTestId('catalog-open-io.acme.legacy'));
     const draft = await screen.findByTestId('agent-draft-panel');
     const save = within(draft).getByTestId('agent-draft-save');
-    expect(save.textContent).toBe('Update & Create');
+    expect(save.textContent).toBe('Install & Create');
     fireEvent.click(save);
     await waitFor(() => expect(api.installManagedRuntime)
       .toHaveBeenCalledWith('io.acme.legacy', undefined));

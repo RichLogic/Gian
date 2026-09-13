@@ -65,7 +65,7 @@ async function writeFakeClaude(path, version, probePidPath) {
   await chmod(path, 0o700);
 }
 
-async function seedLegacyProxy(dataDir, pluginId, version) {
+async function seedUntrustedProxy(dataDir, pluginId, version) {
   const versionDir = join(dataDir, 'plugins', pluginId, version);
   await mkdir(versionDir, { recursive: true, mode: 0o700 });
   await writeFile(join(versionDir, 'proxy.mjs'), 'export {};\n', { mode: 0o600 });
@@ -852,12 +852,12 @@ export async function main(args = process.argv.slice(2)) {
   ));
   const expectedCodexProxyVersion = expectedCodexManifest.pluginVersion;
   assert.equal(typeof expectedCodexProxyVersion, 'string');
-  const legacyCodexProxyVersion = '0.2.12';
-  assert.notEqual(expectedCodexProxyVersion, legacyCodexProxyVersion);
-  // Existing production profiles may contain a safe SemVer current pointer
-  // from before PluginStore receipts existed. Keep Claude completely fresh,
-  // while Codex proves the packaged upgrade path does not disable Add Agent.
-  await seedLegacyProxy(dataDir, 'codex', legacyCodexProxyVersion);
+  const previousCodexProxyVersion = '0.2.12';
+  assert.notEqual(expectedCodexProxyVersion, previousCodexProxyVersion);
+  // Historical bytes may occupy a safe SemVer current pointer. Keep Claude
+  // completely empty, while Codex proves a fresh signed install ignores those
+  // untrusted bytes and does not disable Add Agent.
+  await seedUntrustedProxy(dataDir, 'codex', previousCodexProxyVersion);
   // This machine-global decoy must remain unused. The packaged product may
   // execute only the Runtime downloaded below its own dataDir/runtimes tree.
   await writeFakeClaude(fakeClaude, '9.8.8', fakeClaudeProbePid);
@@ -918,10 +918,10 @@ export async function main(args = process.argv.slice(2)) {
     const beforeUpgradeResponse = await desktopFetch(origin, desktopToken, '/api/proxies');
     assert.equal(beforeUpgradeResponse.status, 200);
     const beforeUpgrade = await beforeUpgradeResponse.json();
-    const legacyCodex = beforeUpgrade.catalog.items.find(item => item.pluginId === 'codex');
-    assert.equal(legacyCodex?.installation.state, 'quarantined');
-    assert.equal(legacyCodex?.installation.latestVersion, expectedCodexProxyVersion);
-    assert.equal(legacyCodex?.availableActions.includes('install_runtime'), true);
+    const untrustedCodex = beforeUpgrade.catalog.items.find(item => item.pluginId === 'codex');
+    assert.equal(untrustedCodex?.installation.state, 'quarantined');
+    assert.equal(untrustedCodex?.installation.latestVersion, expectedCodexProxyVersion);
+    assert.equal(untrustedCodex?.availableActions.includes('install_runtime'), true);
 
     const upgradeResponse = await desktopFetch(
       origin,
@@ -944,7 +944,7 @@ export async function main(args = process.argv.slice(2)) {
       expectedCodexProxyVersion,
     );
     await assertFile(join(dataDir, 'plugins', 'codex', expectedCodexProxyVersion, 'install-receipt.json'));
-    await assertFile(join(dataDir, 'plugins', 'codex', legacyCodexProxyVersion, 'proxy.mjs'));
+    await assertFile(join(dataDir, 'plugins', 'codex', previousCodexProxyVersion, 'proxy.mjs'));
 
     const afterUpgradeResponse = await desktopFetch(origin, desktopToken, '/api/proxies');
     assert.equal(afterUpgradeResponse.status, 200);

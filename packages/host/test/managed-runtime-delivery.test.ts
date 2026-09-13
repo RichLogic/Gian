@@ -159,7 +159,7 @@ test('delivery rejects a Runtime install for an Agent bound to another Proxy', a
   );
 });
 
-test('delivery upgrades a legacy Proxy projection before staging its certified Runtime', async () => {
+test('delivery freshly installs over an untrusted Proxy pointer before staging Runtime', async () => {
   const calls: string[] = [];
   let installation: 'quarantined' | 'installed' = 'quarantined';
   const generation = {
