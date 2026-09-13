@@ -13,7 +13,12 @@ import {
 test('catalog reconciles every current standard test exactly once', () => {
   const { catalog, entries } = loadValidatedCatalog();
   const counts = Object.groupBy(entries, entry => entry.scope);
-  const hasE2eSources = existsSync(new URL('../e2e/specs', import.meta.url));
+  const discoveredE2eCount = discoverStandardTests(catalog)
+    .filter(path => path.startsWith('e2e/specs/'))
+    .length;
+  const hasInternalTraceability = existsSync(
+    new URL('../docs/quality/traceability.md', import.meta.url),
+  );
   const missingOptionalRoots = (catalog.optionalDiscoveryRoots ?? []).filter(root => (
     !existsSync(new URL(`../${root}/`, import.meta.url))
   ));
@@ -26,7 +31,10 @@ test('catalog reconciles every current standard test exactly once', () => {
   assert.ok(counts.unit.length >= 1);
   assert.ok(counts.integration.length >= 1);
   assert.ok(counts.system.length >= 1);
-  assert.equal(counts.e2e?.length ?? 0, hasE2eSources ? 16 : 0);
+  assert.equal(counts.e2e?.length ?? 0, discoveredE2eCount);
+  if (hasInternalTraceability) {
+    assert.equal(discoveredE2eCount, 16, 'the private source must retain its complete E2E suite');
+  }
   assert.deepEqual(catalog.defaultScopes, ['unit', 'integration']);
   assert.deepEqual(catalog.fullScopes, ['unit', 'integration', 'system']);
   for (const group of catalog.groups) {
