@@ -141,7 +141,7 @@ jobs:
         run: |
           ASSET_DIR=certification/artifacts/proxies
           RUNTIME_MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
-          RUNTIME="$(jq -ce --arg provider "${PROVIDER}" '[.candidates[] | select(.provider == $provider)][0] // null' "${RUNTIME_MANIFEST}")"
+          RUNTIME="$(jq -c --arg provider "${PROVIDER}" '[.candidates[] | select(.provider == $provider)][0] // null' "${RUNTIME_MANIFEST}")"
           RUNTIME_NAME="$(jq -r 'if . then .asset.name else "" end' <<<"${RUNTIME}")"
           RUNTIME_PUBLISH="$(jq -r 'if . then .asset.publish else false end' <<<"${RUNTIME}")"
           RELEASE_ASSETS=(

@@ -96,6 +96,8 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.match(release, /An authorized maintainer must create/);
   assert.match(release, /validate_existing_release/);
   assert.match(release, /for ATTEMPT in 1 2 3/);
+  assert.match(release, /RUNTIME="\$\(jq -c --arg provider/);
+  assert.doesNotMatch(release, /jq -ce --arg provider "\$\{PROVIDER\}" '\[\.candidates/);
   assert.doesNotMatch(release, /--target/);
   assert.doesNotMatch(release, /git push origin "refs\/tags\/\$\{TAG\}"/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
