@@ -93,6 +93,8 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.match(release, /--run-id/);
   assert.match(release, /--run-attempt/);
   assert.match(release, /--repository/);
+  assert.match(release, /--target "\$\{CERTIFIED_SHA\}"/);
+  assert.doesNotMatch(release, /git push origin "refs\/tags\/\$\{TAG\}"/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
 });
 
