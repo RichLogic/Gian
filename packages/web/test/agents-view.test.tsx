@@ -209,7 +209,9 @@ function mockApi(agents: UserAgentStatus[], catalog: ProxyCatalogList | Error = 
     if (url.includes('/docs/overview')) {
       return '# Overview\n\nWelcome. [safe](https://example.com/docs) [bad](javascript:alert(1))';
     }
-    if (url.includes('/docs/usage')) return '## Usage\n\nDo the thing.';
+    if (url.includes('/docs/usage')) {
+      return '## Usage\n\nDo the thing. [safe](https://example.com/docs) [bad](javascript:alert(1))';
+    }
     if (url.includes('/docs/setup')) return '## Setup\n\nInstall it.';
     if (url.includes('/docs/troubleshooting')) return '## Troubleshooting\n\nRestart it.';
     return null;
@@ -448,7 +450,68 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       .toBe('completed');
   });
 
-  it('renders three scroll anchors and sanitizes the continuous Catalog document', async () => {
+  it('limits Basic information to Runtime path, Runtime version, and Proxy version', async () => {
+    mockApi([], catalogList([READY]));
+    vi.mocked(api.loadManagedRuntimeStatus).mockResolvedValue({
+      pluginId: 'io.acme.ready',
+      active: {
+        schemaVersion: 1,
+        generationId: 'io.acme.ready-1.0.0-darwin-arm64',
+        pluginId: 'io.acme.ready',
+        platform: 'darwin-arm64',
+        proxy: {
+          pluginVersion: '1.0.0',
+          manifestSha256: 'a'.repeat(64),
+          artifactSha256: 'b'.repeat(64),
+          entryPath: '/Users/test/.gian/plugins/io.acme.ready/1.0.0/spawn.js',
+          processScope: 'shared',
+          protocolRange: '^2.0',
+        },
+        runtime: {
+          runtimeId: 'acme-cli',
+          version: '2.3.0',
+          artifactSha256: 'c'.repeat(64),
+          entryPath: '/Users/test/.gian/runtimes/acme-cli/2.3.0/bin/acme',
+          ownership: 'managed',
+        },
+        companions: [{
+          id: 'helper',
+          version: '4.5.0',
+          artifactSha256: 'd'.repeat(64),
+          entryPath: '/Users/test/.gian/runtimes/helper/4.5.0/bin/helper',
+        }],
+        certificate: { id: 'cert-1', sha256: 'e'.repeat(64) },
+        state: 'active',
+        installedAt: '2026-09-14T00:00:00.000Z',
+        activatedAt: '2026-09-14T00:00:01.000Z',
+      } as ManagedRuntimeGeneration,
+      staged: [],
+    });
+    renderAgents();
+    const card = await screen.findByTestId('catalog-item-io.acme.ready');
+    fireEvent.click(within(card).getByLabelText('View Integration'));
+    const panel = await screen.findByTestId('proxy-detail-panel');
+    const basic = within(panel).getByTestId('proxy-basic-information');
+    await waitFor(() => expect(basic.textContent)
+      .toContain('/Users/test/.gian/runtimes/acme-cli/2.3.0/bin/acme'));
+
+    expect([...basic.querySelectorAll('dt')].map(node => node.textContent)).toEqual([
+      'Runtime path',
+      'Runtime version',
+      'Proxy version',
+    ]);
+    expect(basic.textContent).toContain('2.3.0');
+    expect(basic.textContent).toContain('1.0.0');
+    expect(basic.textContent).not.toContain('darwin-arm64');
+    expect(basic.textContent).not.toContain('io.acme.ready');
+    expect(basic.textContent).not.toContain('shared');
+    expect(basic.textContent).not.toContain('helper');
+    expect(panel.textContent).not.toContain('io.acme.ready tagline');
+    expect(panel.textContent).not.toContain('Current Runtime state is up to date');
+    expect(api.loadCatalogDocument).not.toHaveBeenCalledWith('/api/proxies/io.acme.ready/docs/overview');
+  });
+
+  it('renders three scroll anchors and sanitizes the continuous tutorial document', async () => {
     mockApi([]);
     renderAgents();
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
@@ -457,15 +520,15 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     for (const section of ['basic', 'tutorial', 'versions']) {
       expect(within(panel).getByTestId(`proxy-anchor-${section}`)).toBeTruthy();
     }
-    // Overview doc loads and its unsafe link degrades to plain text.
-    expect(await within(panel).findByRole('heading', { level: 1, name: 'Overview' })).toBeTruthy();
-    const doc = within(panel).getAllByTestId('catalog-doc')[0]!;
+    // Tutorial docs load and an unsafe link degrades to plain text.
+    expect(await within(panel).findByText(/Do the thing\./)).toBeTruthy();
+    const doc = within(panel).getAllByTestId('catalog-doc')
+      .find(node => node.textContent?.includes('Do the thing.'))!;
     const links = doc.querySelectorAll('a');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe('https://example.com/docs');
     expect(doc.textContent).toContain('bad');
 
-    expect(await within(panel).findByText('Do the thing.')).toBeTruthy();
     expect(api.loadCatalogDocument).toHaveBeenCalledWith('/api/proxies/io.acme.ready/docs/usage');
   });
 
@@ -781,11 +844,11 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       .mockResolvedValueOnce({ proxies: LEGACY_PROXIES, catalog: seqList(7) })
       .mockResolvedValue({ proxies: LEGACY_PROXIES, catalog: seqList(8) });
     vi.mocked(api.syncProxyCatalog).mockResolvedValue(seqList(8));
-    let overviewCalls = 0;
+    let setupCalls = 0;
     vi.mocked(api.loadCatalogDocument).mockImplementation(async url => {
-      if (url.includes('/docs/overview')) {
-        overviewCalls += 1;
-        return `# Overview v${overviewCalls}`;
+      if (url.includes('/docs/setup')) {
+        setupCalls += 1;
+        return `## Setup v${setupCalls}`;
       }
       return null;
     });
@@ -793,14 +856,14 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
-    expect(await within(panel).findByRole('heading', { level: 1, name: 'Overview v1' })).toBeTruthy();
-    expect(overviewCalls).toBe(1);
+    expect(await within(panel).findByRole('heading', { level: 2, name: 'Setup v1' })).toBeTruthy();
+    expect(setupCalls).toBe(1);
 
     // Sync advances the Catalog generation: same doc URL, new content —
     // the cache key includes the generation, so this refetches.
     fireEvent.click(screen.getByTestId('catalog-sync'));
-    expect(await within(panel).findByRole('heading', { level: 1, name: 'Overview v2' })).toBeTruthy();
-    expect(overviewCalls).toBe(2);
+    expect(await within(panel).findByRole('heading', { level: 2, name: 'Setup v2' })).toBeTruthy();
+    expect(setupCalls).toBe(2);
   });
 
   it('a successful sync recovers the full projection after an initial load failure', async () => {

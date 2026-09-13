@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ManagedRuntimeStatus, ProxyCatalogItem, UserAgentStatus } from '@gian/shared';
 import { loadCatalogDocument } from '../api.js';
 import { useT } from '../i18n/index.js';
@@ -113,6 +113,12 @@ export function ProxyDetailPanel({
   const generation = runtime?.active ?? null;
   const compat = compatibilityMessage(item);
   const actions = item.availableActions;
+  const hasManagementAction = actions.some(action => (
+    action === 'install_runtime'
+    || action === 'install_proxy'
+    || action === 'update_proxy'
+    || action === 'rollback_proxy'
+  ));
   const installationStatus = catalogInstallationStatus(item);
   const canUse = actions.includes('create_agent');
   const cliPath = generation?.runtime?.entryPath ?? developmentFallback?.cli.path ?? null;
@@ -183,27 +189,7 @@ export function ProxyDetailPanel({
 
         <section className="ag-sec proxy-doc-section" ref={node => { sectionRefs.current.basic = node; }}>
           <span className="s2-subhead">{t('agents.proxy.sections.basic')}</span>
-          <p className="s2-help">{item.tagline}</p>
-          <dl className="kv-grid">
-            <dt>{t('agents.runtime.proxyVersionLabel')}</dt>
-            <dd><span className="mono">{proxyVersion ?? t('agents.proxy.versions.none')}</span></dd>
-            <dt>Runtime</dt>
-            <dd>
-              <span className="mono">{cliVersion ?? t('agents.runtime.notInstalled')}</span>
-              {generation && <span className="hint">{t('agents.runtime.certified')}</span>}
-            </dd>
-            {generation?.companions.map(companion => (
-              <Fragment key={companion.id}>
-                <dt>{companion.id}</dt>
-                <dd><span className="mono">{companion.version}</span></dd>
-              </Fragment>
-            ))}
-            <dt>{t('agents.runtime.platform')}</dt>
-            <dd>{generation?.platform ?? '—'}</dd>
-            <dt>{t('agents.detail.pluginId')}</dt>
-            <dd><span className="mono cli-path-val">{item.pluginId}</span></dd>
-            <dt>{t('agents.runtime.process')}</dt>
-            <dd>{generation?.proxy.processScope ?? '—'}</dd>
+          <dl className="kv-grid" data-testid="proxy-basic-information">
             <dt>{t('agents.runtime.cliPath')}</dt>
             <dd>
               <span className="rt-line">
@@ -217,9 +203,13 @@ export function ProxyDetailPanel({
                 )}
               </span>
             </dd>
+            <dt>{t('agents.runtime.versionLabel')}</dt>
+            <dd><span className="mono">{cliVersion ?? t('agents.runtime.notInstalled')}</span></dd>
+            <dt>{t('agents.runtime.proxyVersionLabel')}</dt>
+            <dd><span className="mono">{proxyVersion ?? t('agents.proxy.versions.none')}</span></dd>
           </dl>
 
-          <div className="act-row">
+          {hasManagementAction && <div className="act-row">
             {actions.includes('install_runtime') && (
               <button type="button" className="btn xs primary" disabled={busy}
                       data-testid="proxy-action-install-runtime" onClick={() => onAction('install_runtime')}>
@@ -253,10 +243,7 @@ export function ProxyDetailPanel({
                 {t('agents.catalog.action.rollback')}
               </button>
             )}
-            {!actions.some(action => action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy' || action === 'rollback_proxy') && (
-              <span className="delta muted">{t('agents.runtime.current')}</span>
-            )}
-          </div>
+          </div>}
 
           {installTerminal && (
             <IntegrationInstallTerminal
@@ -265,8 +252,6 @@ export function ProxyDetailPanel({
               onShow={() => onInstallTerminalShow?.()}
             />
           )}
-
-          <DocBody url={item.documentation.overview} generation={docGeneration} />
         </section>
 
         <section className="ag-sec proxy-doc-section" ref={node => { sectionRefs.current.tutorial = node; }}>
