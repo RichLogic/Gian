@@ -266,6 +266,48 @@ test('compiler, source client, and cache produce an offline trusted Catalog snap
   }
 });
 
+test('concurrent Catalog sync callers share the initial signed generation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-catalog-singleflight-'));
+  try {
+    const first = compileSequence(2);
+    const store = new CatalogStore({ rootDir: root, policy: first.policy });
+    let latestCalls = 0;
+    let releaseLatest: () => void = () => undefined;
+    const latestReleased = new Promise<void>((resolve) => { releaseLatest = resolve; });
+    let latestStarted = false;
+    const base = memoryNetwork(new Map([[2, first.bundle]]));
+    const client = new CatalogSourceClient({
+      store,
+      policy: first.policy,
+      network: {
+        async latest(input) {
+          latestCalls += 1;
+          latestStarted = true;
+          await latestReleased;
+          return base.latest(input);
+        },
+        download: input => base.download(input),
+      },
+    });
+
+    const background = client.sync();
+    await waitUntil(() => latestStarted);
+    const explicitInstallSync = client.sync();
+    releaseLatest();
+    const [backgroundResult, explicitResult] = await Promise.all([
+      background,
+      explicitInstallSync,
+    ]);
+
+    assert.equal(latestCalls, 1);
+    assert.equal(backgroundResult.state, 'ready');
+    assert.equal(explicitResult.state, 'ready');
+    assert.equal(explicitResult.sequence, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('signature, rollback, same-sequence conflict, and network failure keep last-known-good', async () => {
   const root = await mkdtemp(join(tmpdir(), 'gian-catalog-fail-'));
   try {

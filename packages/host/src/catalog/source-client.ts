@@ -29,6 +29,7 @@ export class CatalogSourceClient {
   private readonly totalBudgetMs: number;
   private readonly perRequestMs: number;
   private readonly downloadConcurrency: number;
+  private inFlight: Promise<CatalogSnapshot> | null = null;
 
   constructor(
     private readonly options: {
@@ -60,7 +61,18 @@ export class CatalogSourceClient {
     );
   }
 
-  async sync(signal?: AbortSignal): Promise<CatalogSnapshot> {
+  sync(signal?: AbortSignal): Promise<CatalogSnapshot> {
+    if (this.inFlight) return this.inFlight;
+    const run = this.performSync(signal);
+    let shared: Promise<CatalogSnapshot>;
+    shared = run.finally(() => {
+      if (this.inFlight === shared) this.inFlight = null;
+    });
+    this.inFlight = shared;
+    return shared;
+  }
+
+  private async performSync(signal?: AbortSignal): Promise<CatalogSnapshot> {
     const owned = new AbortController();
     const totalBudget = AbortSignal.timeout(this.totalBudgetMs);
     const parent = signal

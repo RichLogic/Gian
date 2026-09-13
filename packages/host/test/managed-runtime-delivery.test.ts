@@ -48,11 +48,16 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
     certificate: { id: 'release-certificate-1', sha256: 'c'.repeat(64) },
   };
   let installed = false;
+  let catalogSynced = false;
   const catalog = {
-    get: async () => ({
+    get: async () => catalogSynced ? ({
       compatibility: { state: 'compatible' },
       installation: { state: installed ? 'installed' : 'not_installed' },
-    }),
+    }) : null,
+    sync: async () => {
+      order.push('catalog');
+      catalogSynced = true;
+    },
     install: async () => {
       order.push('proxy');
       await mkdir(dirname(proxyEntry), { recursive: true });
@@ -134,7 +139,7 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
   assert.equal(active.state, 'active');
   assert.equal(active.runtime?.entryPath, runtimePath);
   assert.deepEqual(await readFile(runtimePath), runtimeBytes);
-  assert.deepEqual(order.slice(0, 2), ['proxy', 'runtime']);
+  assert.deepEqual(order.slice(0, 3), ['catalog', 'proxy', 'runtime']);
   assert.equal(runtimePath.startsWith(join(dataDir, 'runtimes')), true);
 });
 

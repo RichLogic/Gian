@@ -42,6 +42,15 @@ export class ManagedRuntimeDeliveryService {
 
     let item = await this.options.catalog.get(id);
     if (!item) {
+      // Startup refresh is intentionally asynchronous so an offline Catalog
+      // never delays Host readiness. An explicit install, however, is a
+      // network-authorized user action and must await one current signed
+      // snapshot instead of racing the background refresh against an empty
+      // fresh-profile store.
+      await this.options.catalog.sync();
+      item = await this.options.catalog.get(id);
+    }
+    if (!item) {
       throw new ManagedRuntimeDeliveryError(
         'RUNTIME_CATALOG_MISSING',
         `${id} is not present in the trusted Catalog.`,
