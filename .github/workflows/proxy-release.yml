@@ -116,8 +116,7 @@ jobs:
           test "$(shasum -a 256 "certification/artifacts/runtimes/${ASSET}" | awk '{print $1}')" = "${EXPECTED_SHA}"
           test "$(stat -f '%z' "certification/artifacts/runtimes/${ASSET}")" = "${EXPECTED_SIZE}"
 
-      - name: Validate an existing immutable release tag
-        id: tag
+      - name: Require the authorized immutable release tag
         env:
           TAG: ${{ steps.plugin.outputs.tag }}
           CERTIFIED_SHA: ${{ steps.certification.outputs.sha }}
@@ -126,9 +125,9 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
             test "$(git rev-list -n 1 "${TAG}")" = "${CERTIFIED_SHA}"
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            echo "::error::An authorized maintainer must create ${TAG} at ${CERTIFIED_SHA}."
+            exit 1
           fi
 
       - name: Publish only the certified Proxy artifact
@@ -138,8 +137,6 @@ jobs:
           PROVIDER: ${{ steps.plugin.outputs.id }}
           VERSION: ${{ steps.plugin.outputs.version }}
           ASSET: ${{ steps.plugin.outputs.asset }}
-          CERTIFIED_SHA: ${{ steps.certification.outputs.sha }}
-          TAG_EXISTS: ${{ steps.tag.outputs.exists }}
         shell: bash
         run: |
           ASSET_DIR=certification/artifacts/proxies
@@ -155,14 +152,42 @@ jobs:
           if [ "${RUNTIME_PUBLISH}" = true ]; then
             RELEASE_ASSETS+=("certification/artifacts/runtimes/${RUNTIME_NAME}")
           fi
-          if [ "${TAG_EXISTS}" = true ]; then
-            RELEASE_TAG_ARGS=(--verify-tag)
-          else
-            RELEASE_TAG_ARGS=(--target "${CERTIFIED_SHA}")
+
+          validate_existing_release() {
+            local release_json path name expected_size expected_digest
+            release_json="$(gh release view "${TAG}" --json tagName,isDraft,isPrerelease,assets 2>/dev/null)" || return 1
+            test "$(jq -r '.tagName' <<<"${release_json}")" = "${TAG}" || return 1
+            test "$(jq -r '.isDraft' <<<"${release_json}")" = false || return 1
+            test "$(jq -r '.isPrerelease' <<<"${release_json}")" = false || return 1
+            test "$(jq '.assets | length' <<<"${release_json}")" -eq "${#RELEASE_ASSETS[@]}" || return 1
+            for path in "${RELEASE_ASSETS[@]}"; do
+              name="${path##*/}"
+              expected_size="$(stat -f '%z' "${path}")"
+              expected_digest="sha256:$(shasum -a 256 "${path}" | awk '{print $1}')"
+              jq -e \
+                --arg name "${name}" \
+                --argjson size "${expected_size}" \
+                --arg digest "${expected_digest}" \
+                '[.assets[] | select(.name == $name and .size == $size and .digest == $digest)] | length == 1' \
+                <<<"${release_json}" >/dev/null || return 1
+            done
+          }
+
+          if validate_existing_release; then
+            echo "${TAG} already contains the exact certified assets."
+            exit 0
           fi
-          gh release create "${TAG}" \
-            "${RELEASE_ASSETS[@]}" \
-            "${RELEASE_TAG_ARGS[@]}" \
-            --generate-notes \
-            --latest=false \
-            --title "Gian ${PROVIDER} Proxy ${VERSION}"
+          for ATTEMPT in 1 2 3; do
+            if gh release create "${TAG}" \
+              "${RELEASE_ASSETS[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --latest=false \
+              --title "Gian ${PROVIDER} Proxy ${VERSION}"; then
+              validate_existing_release
+              exit $?
+            fi
+            if validate_existing_release; then exit 0; fi
+            if [ "${ATTEMPT}" -eq 3 ]; then exit 1; fi
+            sleep $((ATTEMPT * 5))
+          done
