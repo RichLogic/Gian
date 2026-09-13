@@ -104,10 +104,7 @@ export function ProxyDetailPanel({
   const compat = compatibilityMessage(item);
   const actions = item.availableActions;
   const installationStatus = catalogInstallationStatus(item);
-  const canUse = actions.includes('create_agent')
-    || actions.includes('install_runtime')
-    || actions.includes('install_proxy')
-    || actions.includes('update_proxy');
+  const canUse = actions.includes('create_agent');
   const cliPath = generation?.runtime?.entryPath ?? developmentFallback?.cli.path ?? null;
   const cliVersion = generation?.runtime?.version ?? developmentFallback?.cli.version ?? null;
   const proxyVersion = generation?.proxy.pluginVersion

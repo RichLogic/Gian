@@ -1,16 +1,15 @@
 import { useEffect, useState } from 'react';
 import type {
   ManagedRuntimeStatus,
-  ProductExecutor,
   ProxyCatalogEntry,
   ProxyCatalogItem,
   ProxyCatalogList,
   TerminalPreferences,
   UserAgentStatus,
 } from '@gian/shared';
+import { productExecutorForPluginId } from '@gian/shared';
 import {
   loadAgents,
-  loadAgentDraftDefaults,
   loadManagedRuntimeStatus,
   loadProxyCatalog,
 } from '../api.js';
@@ -29,18 +28,16 @@ import { AgentLogo } from '../components/AgentLogo.js';
 import { Splitter } from '../components/Splitter.js';
 import { usePanel2Width } from '../components/RailLayout.js';
 import type { TerminalWire } from '../components/terminal-wire.js';
-import { agentProxyDisplay, draftNameError } from '../agents/catalog-model.js';
+import { agentProxyDisplay, catalogInstallationStatus } from '../agents/catalog-model.js';
 import { CatalogBadgeList } from '../agents/badges.js';
 import { AgentDetailPanel } from '../agents/AgentDetailPanel.js';
 import type { AgentTerminalControl } from '../agents/AgentDetailPanel.js';
-import { AgentDraftPanel } from '../agents/AgentDraftPanel.js';
-import type { AgentDraftState } from '../agents/AgentDraftPanel.js';
 import { ProxyDetailPanel } from '../agents/ProxyDetailPanel.js';
+import { AgentDialog, type CreateAgentDialogInput } from './agent-dialog.js';
 
 type Selection =
   | { kind: 'agent'; id: string }
   | { kind: 'proxy'; pluginId: string }
-  | { kind: 'draft'; pluginId: string }
   | null;
 
 interface AgentTerminalState {
@@ -83,15 +80,6 @@ function PlusIcon() {
   );
 }
 
-function BackIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="m15 18-6-6 6-6" />
-    </svg>
-  );
-}
-
 function InfoIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -99,23 +87,6 @@ function InfoIcon() {
       <circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" />
     </svg>
   );
-}
-
-function nextDraftName(base: string, agents: UserAgentStatus[]): string {
-  const taken = new Set(agents.map(agent => agent.name.trim().toLowerCase()));
-  if (!taken.has(base.trim().toLowerCase())) return base;
-  for (let n = 2; ; n += 1) {
-    const candidate = `${base} ${n}`;
-    if (!taken.has(candidate.toLowerCase())) return candidate;
-  }
-}
-
-function canDraftAgent(item: ProxyCatalogItem): boolean {
-  if (item.compatibility.state !== 'compatible') return false;
-  return item.availableActions.some(action => (
-    action === 'create_agent' || action === 'install_runtime'
-      || action === 'install_proxy' || action === 'update_proxy'
-  ));
 }
 
 export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost }) {
@@ -129,12 +100,10 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   const [loading, setLoading] = useState(true);
   const [catalogLoadError, setCatalogLoadError] = useState('');
   const [error, setError] = useState('');
-  const [pageMode, setPageMode] = useState<'agents' | 'add'>('agents');
   const [selection, setSelection] = useState<Selection>(null);
-  const [draft, setDraft] = useState<AgentDraftState | null>(null);
-  const [draftPluginId, setDraftPluginId] = useState<string | null>(null);
-  const [draftHomeSupported, setDraftHomeSupported] = useState(true);
-  const [draftSaving, setDraftSaving] = useState(false);
+  const [addDialogPluginId, setAddDialogPluginId] = useState<string | null>(null);
+  const [addSaving, setAddSaving] = useState(false);
+  const [addError, setAddError] = useState('');
   const [terminals, setTerminals] = useState<Record<string, AgentTerminalState>>(() => (
     Object.fromEntries(liveAgentTerminals)
   ));
@@ -280,95 +249,36 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   const integrationItems = signedCatalogItems.length > 0
     ? catalogItems.filter(item => item.installation.latestVersion !== null)
     : catalogItems;
+  const installedIntegrationItems = integrationItems.filter(item => (
+    catalogInstallationStatus(item) === 'installed'
+    && item.availableActions.includes('create_agent')
+  ));
 
-  function legacyKindFor(pluginId: string): ProductExecutor | null {
-    return legacyProxies.find(entry => entry.id === pluginId)?.id ?? null;
-  }
-
-  function startAddAgent() {
-    setPageMode('add');
-    setSelection(null);
-    setDraft(null);
-    setDraftPluginId(null);
-    setDraftHomeSupported(true);
+  function openAddAgent(pluginId?: string) {
+    setAddDialogPluginId(pluginId ?? '');
+    setAddError('');
     if (catalogItems.length === 0 && !catalogSyncing) void syncCatalog();
   }
 
-  function leaveAddAgent() {
-    setPageMode('agents');
-    setSelection(null);
-    setDraft(null);
-    setDraftPluginId(null);
-    setDraftHomeSupported(true);
-  }
-
-  async function startDraft(item: ProxyCatalogItem) {
-    if (!canDraftAgent(item)) return;
-    if (draft && draftPluginId === item.pluginId) {
-      setSelection({ kind: 'draft', pluginId: item.pluginId });
-      return;
-    }
-    let name = nextDraftName(item.displayName, agents);
-    let homeSupported = true;
-    const legacyKind = legacyKindFor(item.pluginId);
-    if (legacyKind) {
-      try {
-        const defaults = await loadAgentDraftDefaults(legacyKind);
-        if (defaults.name && !draftNameError(defaults.name, agents)) name = defaults.name;
-        homeSupported = defaults.home !== null;
-      } catch {
-        // Catalog identity is enough to keep the draft usable.
-      }
-    }
-    setSelection({ kind: 'draft', pluginId: item.pluginId });
-    setDraft({ name, customHome: null });
-    setDraftPluginId(item.pluginId);
-    setDraftHomeSupported(homeSupported);
-  }
-
-  async function saveDraft() {
-    if (!draft || selection?.kind !== 'draft') return;
-    if (draftNameError(draft.name, agents)) return;
-    setError('');
-    setDraftSaving(true);
+  async function createAgentFromDialog(input: CreateAgentDialogInput) {
+    setAddError('');
+    setAddSaving(true);
     try {
-      const item = catalogItems.find(candidate => candidate.pluginId === selection.pluginId);
-      const preparation = item?.availableActions.includes('install_runtime')
-        ? 'catalog.installRuntime'
-        : item?.availableActions.includes('install_proxy')
-          ? 'catalog.installProxy'
-          : item?.availableActions.includes('update_proxy')
-            ? 'catalog.updateProxy'
-            : null;
-      if (preparation) {
-        const prepared = await waitForRunSettle(store, dispatch(preparation, {
-          pluginId: selection.pluginId,
-        }).id);
-        if (prepared.phase !== 'confirmed') {
-          setError(prepared.error ?? 'Agent Integration installation failed');
-          return;
-        }
-      }
       const settled = await waitForRunSettle(store, dispatch('agent.create', {
-        name: draft.name.trim(),
-        pluginId: selection.pluginId,
-        home: draft.customHome === null
-          ? { kind: 'managed' }
-          : { kind: 'custom', path: draft.customHome.trim() },
+        name: input.name,
+        pluginId: input.pluginId,
+        ...(input.home ? { home: input.home } : {}),
       }).id);
       if (settled.phase !== 'confirmed') {
-        setError(settled.error ?? 'Agent operation failed');
+        setAddError(settled.error ?? 'Agent creation failed');
         return;
       }
       const result = settled.result as CreateAgentOperationResult;
-      setPageMode('agents');
-      setDraft(null);
-      setDraftPluginId(null);
-      setDraftHomeSupported(true);
+      setAddDialogPluginId(null);
       setSelection({ kind: 'agent', id: result.agent.id });
       await refresh();
     } finally {
-      setDraftSaving(false);
+      setAddSaving(false);
     }
   }
 
@@ -377,7 +287,8 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
       ...(agentId ? { agentId } : {}),
     }).id);
     if (settled.phase === 'confirmed') return settled.result as string | null;
-    setError(settled.error ?? 'HOME picker failed');
+    if (agentId) setError(settled.error ?? 'HOME picker failed');
+    else setAddError(settled.error ?? 'HOME picker failed');
     return null;
   }
 
@@ -462,10 +373,7 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
   const selectedProxy = selection?.kind === 'proxy'
     ? integrationItems.find(item => item.pluginId === selection.pluginId) ?? null
     : null;
-  const draftItem = selection?.kind === 'draft'
-    ? integrationItems.find(item => item.pluginId === selection.pluginId) ?? null
-    : null;
-  const panelOpen = !!selectedAgent || !!selectedProxy || (!!draftItem && !!draft);
+  const panelOpen = !!selectedAgent || !!selectedProxy;
   const source = catalog?.source ?? null;
   const errorNotice = error ? <div className="notice danger" role="alert">{error}</div> : null;
   const catalogNotice = (
@@ -500,35 +408,24 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
           <div className="page">
             <div className="page-head">
               <div className="ph-row">
-                {pageMode === 'add' && (
-                  <button type="button" className="btn icon ghost"
-                          title={t('agents.add.back')} aria-label={t('agents.add.back')}
-                          onClick={leaveAddAgent}>
-                    <BackIcon />
-                  </button>
-                )}
-                <h1>{pageMode === 'agents' ? t('nav.agents') : t('settings.agents.add')}</h1>
+                <h1>{t('nav.agents')}</h1>
                 {!loading && (
                   <span className="sub">
-                    {pageMode === 'agents'
-                      ? t('agents.agentCount').replace('{count}', String(agents.length))
-                      : t('agents.proxyCount').replace('{count}', String(catalogItems.length))}
+                    {t('agents.agentCount').replace('{count}', String(agents.length))}
                   </span>
                 )}
                 <span className="spacer" />
-                {pageMode === 'agents' && (
-                  <button type="button" className="btn sm primary" data-testid="agents-add"
-                          onClick={startAddAgent}>
-                    <PlusIcon />{t('settings.agents.add')}
-                  </button>
-                )}
+                <button type="button" className="btn sm primary" data-testid="agents-add"
+                        onClick={() => openAddAgent()}>
+                  <PlusIcon />{t('settings.agents.add')}
+                </button>
               </div>
             </div>
 
             <div className="page-body">
               {loading && agents.length === 0 && catalogItems.length === 0 ? (
                 <p className="s2-help">{t('settings.agents.loading')}</p>
-              ) : pageMode === 'agents' ? (
+              ) : (
                 <>
                   {!panelOpen && errorNotice}
                   <div className="s2-subhead">
@@ -541,7 +438,7 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                         <button key={agent.id} type="button"
                                 className={`catalog-item ${selectedAgent?.id === agent.id ? 'active' : ''}`}
                                 data-testid={`agent-row-${agent.id}`}
-                                onClick={() => { setDraft(null); setSelection({ kind: 'agent', id: agent.id }); }}>
+                                onClick={() => { setSelection({ kind: 'agent', id: agent.id }); }}>
                           <AgentLogo proxy={agent.proxy} logo={display.logo ?? undefined}
                                      fallback={display.name} size={28} />
                           <span className="grow">
@@ -569,29 +466,6 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                     ))}
                   </div>
                 </>
-              ) : (
-                <>
-                  {errorNotice}
-                  {catalogNotice}
-                  <div className="s2-subhead">
-                    {t('agents.draft.pickProxy')} · {integrationItems.length}
-                  </div>
-                  <div className="catalog" data-testid="proxy-catalog-list">
-                    {integrationItems.map(item => (
-                      <CatalogRow key={item.pluginId} item={item}
-                                  active={selection?.kind !== 'agent'
-                                    && selection?.pluginId === item.pluginId}
-                                  onPick={() => {
-                                    if (canDraftAgent(item)) void startDraft(item);
-                                    else setSelection({ kind: 'proxy', pluginId: item.pluginId });
-                                  }}
-                                  onInfo={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }} />
-                    ))}
-                  </div>
-                  {catalog && integrationItems.length === 0 && (
-                    <p className="s2-help">{t('agents.catalog.empty')}</p>
-                  )}
-                </>
               )}
             </div>
           </div>
@@ -606,34 +480,14 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
       {panelOpen && (
         <aside className={`p2 agents-detail ${narrow ? 'replacing' : ''}`}
                style={!narrow && p2Width.customized ? { width: p2Width.width } : undefined}
-               data-testid={selection?.kind === 'draft' ? 'agent-draft-panel'
-                 : selection?.kind === 'proxy' ? 'proxy-detail-panel' : 'agents-detail-panel'}>
-          {draftItem && draft && selection?.kind === 'draft' ? (
-            <AgentDraftPanel
-              draft={draft}
-              draftError={draftNameError(draft.name, agents)}
-              item={draftItem}
-              runtime={runtimeByPlugin[draftItem.pluginId] ?? null}
-              developmentFallback={window.gianDesktop?.appVariant === 'development'
-                ? agents.find(agent => agent.pluginId === draftItem.pluginId
-                  || agent.proxy === legacyKindFor(draftItem.pluginId))
-                : undefined}
-              homeSupported={draftHomeSupported}
-              showBack={narrow}
-              busy={draftSaving}
-              onChange={setDraft}
-              onPickHome={() => pickHome()}
-              onOpenProxy={() => setSelection({ kind: 'proxy', pluginId: draftItem.pluginId })}
-              onSave={() => { void saveDraft(); }}
-              onClose={() => { setSelection(null); }}
-            />
-          ) : selectedProxy ? (
+               data-testid={selection?.kind === 'proxy' ? 'proxy-detail-panel' : 'agents-detail-panel'}>
+          {selectedProxy ? (
             <ProxyDetailWithBusy
               item={selectedProxy}
               runtime={runtimeByPlugin[selectedProxy.pluginId] ?? null}
               developmentFallback={window.gianDesktop?.appVariant === 'development'
                 ? agents.find(agent => agent.pluginId === selectedProxy.pluginId
-                  || agent.proxy === legacyKindFor(selectedProxy.pluginId))
+                  || agent.proxy === productExecutorForPluginId(selectedProxy.pluginId))
                 : undefined}
               docGeneration={catalog?.source.sequence ?? null}
               showBack={narrow}
@@ -643,7 +497,7 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
                   : action === 'update_proxy' ? 'catalog.updateProxy' : 'catalog.rollbackProxy',
                 selectedProxy.pluginId,
               ); }}
-              onCreateAgent={() => { void startDraft(selectedProxy); }}
+              onCreateAgent={() => openAddAgent(selectedProxy.pluginId)}
               onClose={() => setSelection(null)}
             />
           ) : selectedAgent ? (
@@ -668,6 +522,18 @@ export function AgentsView({ terminalHost }: { terminalHost?: AgentsTerminalHost
             />
           ) : null}
         </aside>
+      )}
+      {addDialogPluginId !== null && (
+        <AgentDialog
+          integrations={installedIntegrationItems}
+          agents={agents}
+          initialPluginId={addDialogPluginId}
+          busy={addSaving}
+          error={addError}
+          onPickHome={() => pickHome()}
+          onSubmit={input => { void createAgentFromDialog(input); }}
+          onClose={() => { if (!addSaving) setAddDialogPluginId(null); }}
+        />
       )}
     </div>
   );

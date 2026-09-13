@@ -46,7 +46,7 @@ export function catalogInstallationStatus(item: ProxyCatalogItem): CatalogBadge 
 /** Actions the page may render for one item — verbatim Host projection,
  *  filtered to the actions with a real backing endpoint or local flow.
  *  (`open_setup` / `select_runtime` land on the Setup tab's Runtime
- *  discover/probe flow, `create_agent` opens the draft; install/update/
+ *  discover/probe flow, `create_agent` opens the creation modal; install/update/
  *  rollback hit the Host API.) */
 export function catalogActions(item: ProxyCatalogItem): ProxyCatalogItem['availableActions'] {
   return item.availableActions;

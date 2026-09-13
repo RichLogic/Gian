@@ -33,7 +33,7 @@ export function WorkspaceDialog({
 
 /** Backdrop + Escape chrome shared by both modes. `busy` blocks dismissal so
  *  an in-flight create/rename is never orphaned mid-run. */
-function DialogShell({
+export function DialogShell({
   title,
   busy,
   onClose,

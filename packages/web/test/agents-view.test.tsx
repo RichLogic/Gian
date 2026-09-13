@@ -276,7 +276,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
 
-  it('keeps My Agents separate, then shows every Proxy in Add Agent', async () => {
+  it('opens a Workspace-style Add Agent dialog without replacing the Agents page', async () => {
     mockApi([agent({ name: 'Writer' })]);
     renderAgents();
     expect(await screen.findByText(/My Agents · 1/)).toBeTruthy();
@@ -285,13 +285,16 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.queryByTestId('proxy-catalog-list')).toBeNull();
     expect(screen.queryByRole('searchbox')).toBeNull();
     fireEvent.click(screen.getByTestId('agents-add'));
-    expect(await screen.findByText(/Choose an Agent Integration · 5/)).toBeTruthy();
-    for (const item of CATALOG_ITEMS) {
-      expect(screen.getByTestId(`catalog-item-${item.pluginId}`)).toBeTruthy();
-    }
-    expect(screen.getAllByText('Update required')).toHaveLength(3);
-    expect(screen.getByText('Installed')).toBeTruthy();
-    expect(screen.getByText('Not installed')).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(screen.getByRole('heading', { level: 1, name: 'Agents' })).toBeTruthy();
+    expect(screen.getByTestId('agent-integrations-list')).toBeTruthy();
+    expect(screen.queryByTestId('proxy-catalog-list')).toBeNull();
+    expect(screen.queryByTestId('agent-draft-panel')).toBeNull();
+    const integration = within(dialog).getByRole('combobox', { name: 'Agent Integration' });
+    expect(within(integration).getAllByRole('option')).toHaveLength(1);
+    expect(within(integration).getByRole('option', { name: 'Acme Ready' })).toBeTruthy();
+    expect(within(integration).queryByRole('option', { name: 'Acme Installable' })).toBeNull();
+    expect(within(integration).queryByRole('option', { name: 'Acme Updatable' })).toBeNull();
   });
 
   it('opens a My Agent Integration on the home management surface', async () => {
@@ -314,7 +317,6 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
   it('gates install by Host availableActions and shows the incompatibility reason', async () => {
     mockApi([]);
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const installable = await screen.findByTestId('catalog-item-io.acme.installable');
     fireEvent.click(within(installable).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -341,28 +343,18 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(within(proxyPanel).getByText(/too old for this Gian App/)).toBeTruthy();
   });
 
-  it('installs the certified Integration before saving the Agent', async () => {
+  it('requires installation in Agent Integrations before an Agent can be created', async () => {
     mockApi([], catalogList([MANAGED_INSTALLABLE]));
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.managed'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    const save = within(draft).getByTestId('agent-draft-save');
-    expect(save.textContent).toBe('Install & Create');
-    fireEvent.click(save);
-    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
-      name: 'Acme Managed',
-      pluginId: 'io.acme.managed',
-      home: { kind: 'managed' },
-    }));
-    await waitFor(() => expect(api.installManagedRuntime)
-      .toHaveBeenCalledWith('io.acme.managed', undefined));
-    expect(vi.mocked(api.installManagedRuntime).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(api.createAgent).mock.invocationCallOrder[0]!,
-    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).getByText(/Install an Agent Integration/)).toBeTruthy();
+    expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(true);
+    expect(api.installManagedRuntime).not.toHaveBeenCalled();
+    expect(api.createAgent).not.toHaveBeenCalled();
   });
 
-  it('keeps an untrusted Proxy with no Runtime clickable and freshly installs before Agent creation', async () => {
+  it('keeps an untrusted Proxy with no Runtime installable only from Agent Integrations', async () => {
     mockApi([], catalogList([UNTRUSTED_MANAGED]));
     renderAgents();
     const integration = await screen.findByTestId('catalog-item-io.acme.legacy');
@@ -370,20 +362,11 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(within(integration).getByTestId('catalog-open-io.acme.legacy'));
     const detail = await screen.findByTestId('proxy-detail-panel');
     expect(within(detail).getByTestId('proxy-action-install-runtime').textContent).toBe('Install');
+    expect(within(detail).queryByTestId('proxy-action-create-agent')).toBeNull();
     fireEvent.click(within(detail).getByLabelText('Close'));
-
     fireEvent.click(screen.getByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.legacy'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    const save = within(draft).getByTestId('agent-draft-save');
-    expect(save.textContent).toBe('Install & Create');
-    fireEvent.click(save);
-    await waitFor(() => expect(api.installManagedRuntime)
-      .toHaveBeenCalledWith('io.acme.legacy', undefined));
-    await waitFor(() => expect(api.createAgent).toHaveBeenCalled());
-    expect(vi.mocked(api.installManagedRuntime).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(api.createAgent).mock.invocationCallOrder[0]!,
-    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).queryByRole('option', { name: 'Acme Legacy' })).toBeNull();
   });
 
   it('keeps installed-only local leftovers out of Integrations and Add Agent', async () => {
@@ -401,14 +384,14 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(await screen.findByText(/Agent Integrations · 1/)).toBeTruthy();
     expect(screen.queryByTestId('catalog-item-grok')).toBeNull();
     fireEvent.click(screen.getByTestId('agents-add'));
-    expect(await screen.findByText(/Choose an Agent Integration · 1/)).toBeTruthy();
-    expect(screen.queryByTestId('catalog-item-grok')).toBeNull();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).getByRole('option', { name: 'Acme Ready' })).toBeTruthy();
+    expect(within(dialog).queryByRole('option', { name: 'grok' })).toBeNull();
   });
 
   it('shows the update action in the Runtime action row and runs it', async () => {
     mockApi([]);
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.updatable');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -423,7 +406,6 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
   it('renders three scroll anchors and sanitizes the continuous Catalog document', async () => {
     mockApi([]);
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -442,50 +424,49 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(api.loadCatalogDocument).toHaveBeenCalledWith('/api/proxies/io.acme.ready/docs/usage');
   });
 
-  it('Add Agent turns panel 1 into the Proxy list and a row opens the draft', async () => {
+  it('creates an Agent from the modal with an autogenerated name and managed HOME', async () => {
     mockApi([agent({ name: 'Writer' })]);
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.queryByTestId('agent-draft-panel')).toBeNull();
-    expect(await screen.findByTestId('catalog-item-io.acme.ready')).toBeTruthy();
-    expect(screen.getByTestId('catalog-item-io.acme.installable')).toBeTruthy();
-
-    fireEvent.click(screen.getByTestId('catalog-open-io.acme.ready'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    const nameInput = (await within(draft).findByLabelText('Name')) as HTMLInputElement;
-    expect(nameInput.value).toBe('Acme Ready');
-    expect(draft.textContent).toContain('io.acme.ready');
-    // The pluginId stays immutable on the draft (no proxy switcher).
-    expect(within(draft).queryByRole('combobox')).toBeNull();
-
-    fireEvent.click(within(draft).getByTestId('agent-draft-save'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).queryByLabelText('Name')).toBeNull();
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeTruthy();
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
     await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
       name: 'Acme Ready',
       pluginId: 'io.acme.ready',
       home: { kind: 'managed' },
     }));
-    await waitFor(() => expect(screen.queryByTestId('agent-draft-panel')).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New Agent' })).toBeNull());
+    expect(api.installManagedRuntime).not.toHaveBeenCalled();
+    expect(api.installCatalogProxy).not.toHaveBeenCalled();
   });
 
-  it('a Proxy row starts the draft directly', async () => {
-    mockApi([agent({ name: 'Writer' })]);
+  it('creates an Agent with a user-selected existing HOME', async () => {
+    mockApi([]);
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.ready'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    // Straight into the form — the picker step is skipped.
-    const nameInput = (await within(draft).findByLabelText('Name')) as HTMLInputElement;
-    expect(nameInput.value).toBe('Acme Ready');
-    expect(screen.getByTestId('proxy-catalog-list')).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
+    const home = within(dialog).getByLabelText('HOME Path') as HTMLInputElement;
+    expect(home.value).toBe('');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Browse/ }));
+    await waitFor(() => expect(home.value).toBe('/Users/test/custom-home'));
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready',
+      pluginId: 'io.acme.ready',
+      home: { kind: 'custom', path: '/Users/test/custom-home' },
+    }));
   });
 
-  it('Add Agent on an empty catalog runs the sync that populates the picker', async () => {
+  it('Add Agent on an empty catalog opens a disabled modal and starts Catalog sync', async () => {
     mockApi([], catalogList([]));
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    expect(await screen.findByText(/Choose an Agent Integration · 0/)).toBeTruthy();
-    expect(screen.queryByTestId('agent-draft-panel')).toBeNull();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).getByText(/Install an Agent Integration/)).toBeTruthy();
+    expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(true);
     await waitFor(() => expect(api.syncProxyCatalog).toHaveBeenCalled());
   });
 
@@ -493,40 +474,33 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     (window as { gianDesktop?: unknown }).gianDesktop = { appVariant: 'development' };
     mockApi([], catalogList([]));
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     expect(await screen.findByTestId('catalog-item-claude')).toBeTruthy();
     expect(screen.getByText('Claude kind')).toBeTruthy();
   });
 
-  it('Add Agent on a populated catalog opens the Proxy list without a redundant sync', async () => {
+  it('Add Agent on a populated catalog opens the modal without a redundant sync', async () => {
     mockApi([]);
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    expect(await screen.findByTestId('catalog-item-io.acme.ready')).toBeTruthy();
-    expect(screen.queryByTestId('agent-draft-panel')).toBeNull();
+    expect(await screen.findByRole('dialog', { name: 'New Agent' })).toBeTruthy();
     expect(api.syncProxyCatalog).not.toHaveBeenCalled();
   });
 
-  it('narrow windows keep the Proxy list until a draft opens, then Back returns', async () => {
+  it('narrow windows keep the Agents page mounted behind the modal', async () => {
     mockViewport({ narrow: true, phone: false });
     mockApi([]);
     const { container } = renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    await screen.findByTestId('catalog-item-io.acme.ready');
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
     expect(container.querySelector('main.main')).not.toBeNull();
-    fireEvent.click(screen.getByTestId('catalog-open-io.acme.ready'));
-    const picker = await screen.findByTestId('agent-draft-panel');
-    // The list column is replaced, not squeezed.
-    expect(container.querySelector('main.main')).toBeNull();
-    fireEvent.click(within(picker).getByLabelText('Back'));
-    await waitFor(() => expect(screen.queryByTestId('agent-draft-panel')).toBeNull());
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(dialog.isConnected).toBe(false));
     expect(container.querySelector('main.main')).not.toBeNull();
   });
 
   it('shows a draggable main | panel-2 seam while the detail is open', async () => {
     mockApi([]);
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -541,18 +515,18 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect((await screen.findByTestId('proxy-detail-panel')).style.width).toBe('520px');
   });
 
-  it('rejects duplicate draft names before saving', async () => {
+  it('autogenerates a unique Agent name instead of exposing a name field', async () => {
     mockApi([agent({ name: 'Acme Ready' })]);
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.ready'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    // The prefilled name collides → numbered suggestion.
-    const nameInput = within(draft).getByLabelText('Name') as HTMLInputElement;
-    expect(nameInput.value).toBe('Acme Ready 2');
-    fireEvent.change(nameInput, { target: { value: 'acme ready' } });
-    expect(within(draft).getByText(/already exists/)).toBeTruthy();
-    expect((within(draft).getByTestId('agent-draft-save') as HTMLButtonElement).disabled).toBe(true);
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).queryByLabelText('Name')).toBeNull();
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready 2',
+      pluginId: 'io.acme.ready',
+      home: { kind: 'managed' },
+    }));
   });
 
   it('narrow windows (900px) replace the list with the detail and Back returns', async () => {
@@ -598,7 +572,6 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       items: CATALOG_ITEMS,
     });
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     expect(await screen.findByTestId('catalog-source-state')).toBeTruthy();
     expect(screen.getByText(/last synced Catalog/)).toBeTruthy();
     // Stale items stay usable (last-known-good).
@@ -611,8 +584,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     mockApi([agent({ name: 'Writer' })], new Error('boom'));
     renderAgents();
     expect(await screen.findByText(/My Agents · 1/)).toBeTruthy();
-    fireEvent.click(screen.getByTestId('agents-add'));
-    expect(screen.getByText(/could not be loaded: boom/)).toBeTruthy();
+    expect(await screen.findByText(/could not be loaded: boom/)).toBeTruthy();
   });
 
   it('does not render search in either Agents mode', async () => {
@@ -621,7 +593,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     await screen.findByText(/My Agents · 1/);
     expect(screen.queryByRole('searchbox')).toBeNull();
     fireEvent.click(screen.getByTestId('agents-add'));
-    await screen.findByTestId('proxy-catalog-list');
+    await screen.findByRole('dialog', { name: 'New Agent' });
     expect(screen.queryByRole('searchbox')).toBeNull();
   });
 
@@ -635,7 +607,6 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     });
     mockApi([], catalogList([official]));
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-claude');
     expect((within(card).getByTestId('catalog-open-claude') as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(within(card).getByTestId('catalog-open-claude'));
@@ -658,16 +629,15 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
   //  create/delete/path changes take effect immediately; no restart confirm,
   //  no restartApp, no restartRequired affordance anywhere. ────────────────
 
-  it('saves a draft immediately on desktop without any restart', async () => {
+  it('creates from the modal immediately on desktop without any restart', async () => {
     const restartApp = vi.fn().mockResolvedValue(true);
     (window as { gianDesktop?: unknown }).gianDesktop = { appVariant: 'production', restartApp };
     mockApi([]);
     renderAgents();
 
     fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.ready'));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    fireEvent.click(within(draft).getByTestId('agent-draft-save'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
 
     // No restart dialog, no relaunch: the create goes straight to the Host.
     expect(screen.queryByRole('alertdialog', { name: 'Restart Gian?' })).toBeNull();
@@ -778,7 +748,6 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       return null;
     });
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -800,6 +769,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
     expect(await screen.findByText(/could not be loaded: boom/)).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
 
     vi.mocked(api.loadProxyCatalog).mockResolvedValue({
       proxies: LEGACY_PROXIES,
@@ -809,7 +779,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     await waitFor(() => expect(screen.queryByText(/could not be loaded/)).toBeNull());
     expect(await screen.findByTestId('catalog-item-io.acme.ready')).toBeTruthy();
     // My Agents recovers its legacy display data too.
-    fireEvent.click(screen.getByLabelText('Back to My Agents'));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: /Writer/ }).textContent).toContain('Claude Code');
   });
 
@@ -827,46 +797,46 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.queryByRole('searchbox')).toBeNull();
   });
 
-  it('keyboard activation keeps Proxy selection and details as separate sibling buttons', async () => {
+  it('keyboard activation keeps Integration selection on its detail surface', async () => {
     mockApi([]);
     const user = userEvent.setup();
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.ready');
     within(card).getByTestId('catalog-open-io.acme.ready').focus();
     await user.keyboard('{Enter}');
-    expect(await screen.findByTestId('agent-draft-panel')).toBeTruthy();
-    expect(screen.queryByTestId('proxy-detail-panel')).toBeNull();
-    // Dismiss the draft, then activate the sibling info control.
-    fireEvent.click(within(screen.getByTestId('agent-draft-panel')).getByLabelText('Close'));
-    within(card).getByLabelText('View Integration').focus();
-    await user.keyboard('{Enter}');
     expect(await screen.findByTestId('proxy-detail-panel')).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'New Agent' })).toBeNull();
   });
 
-  it('preserves a draft while opening Proxy details and returning', async () => {
-    mockApi([]);
+  it('opens Add Agent from an installed Integration detail with that Integration preselected', async () => {
+    const readyTwo = catalogItem({
+      pluginId: 'io.acme.ready-two',
+      displayName: 'Acme Ready Two',
+      installation: {
+        state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official',
+      },
+      availableActions: ['create_agent'],
+    });
+    mockApi([], catalogList([READY, readyTwo]));
     renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.ready'));
-    let panel = await screen.findByTestId('agent-draft-panel');
-    fireEvent.change(within(panel).getByLabelText('Name'), { target: { value: 'My preserved draft' } });
-    fireEvent.click(within(panel).getByLabelText('View Integration'));
-    panel = await screen.findByTestId('proxy-detail-panel');
+    const row = await screen.findByTestId('catalog-item-io.acme.ready-two');
+    fireEvent.click(within(row).getByLabelText('View Integration'));
+    const panel = await screen.findByTestId('proxy-detail-panel');
     fireEvent.click(within(panel).getByTestId('proxy-action-create-agent'));
-    panel = await screen.findByTestId('agent-draft-panel');
-    expect((within(panel).getByLabelText('Name') as HTMLInputElement).value).toBe('My preserved draft');
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect((within(dialog).getByRole('combobox', { name: 'Agent Integration' }) as HTMLSelectElement).value)
+      .toBe('io.acme.ready-two');
+    expect(screen.getByTestId('proxy-detail-panel')).toBeTruthy();
   });
 
-  it('shows both-missing Runtime state without exposing an editable CLI path', async () => {
+  it('does not expose Runtime installation or CLI path controls in Add Agent', async () => {
     mockApi([]);
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId('catalog-open-io.acme.installable'));
-    const panel = await screen.findByTestId('agent-draft-panel');
-    expect(panel.textContent).toContain('Not installed');
-    expect(panel.textContent).toContain('~/.gian/runtimes');
-    expect(within(panel).queryByPlaceholderText('/absolute/path/to/cli')).toBeNull();
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(dialog.textContent).not.toContain('Runtime');
+    expect(dialog.textContent).not.toContain('~/.gian/runtimes');
+    expect(within(dialog).queryByPlaceholderText('/absolute/path/to/cli')).toBeNull();
   });
 
   it('keeps Integration installation status out of My Agent details', async () => {

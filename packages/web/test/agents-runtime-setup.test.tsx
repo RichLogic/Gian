@@ -283,7 +283,6 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
   it('does not expose the legacy Runtime path selector in the managed Proxy detail', async () => {
     mockApi([]);
     await renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -465,7 +464,6 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     expect(await within(panel).findByTestId('runtime-unavailable')).toBeTruthy();
     expect(api.discoverProxyRuntime).not.toHaveBeenCalled();
     // The product detail remains documentation-only.
-    fireEvent.click(screen.getByTestId('agents-add'));
     const card = await screen.findByTestId('catalog-item-io.acme.needs-app');
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const detail = await screen.findByTestId('proxy-detail-panel');
@@ -481,7 +479,6 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     });
     mockApi([], [both]);
     await renderAgents();
-    fireEvent.click(await screen.findByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -570,7 +567,6 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     mockApi([], [updatable]);
     vi.mocked(api.updateCatalogProxy).mockResolvedValue({ pluginId: PLUGIN_ID, pluginVersion: '1.1.0' });
     await renderAgents();
-    fireEvent.click(screen.getByTestId('agents-add'));
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
     fireEvent.click(within(card).getByLabelText('View Integration'));
     const panel = await screen.findByTestId('proxy-detail-panel');
@@ -588,7 +584,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     expect(within(panel).queryByTestId('runtime-path-input')).toBeNull();
   });
 
-  it('keeps a lower-level probe result out of the managed Agent draft payload', async () => {
+  it('keeps a lower-level probe result out of the Add Agent modal', async () => {
     mockApi([]);
     await renderAgents();
     const panel = await openSetupTab();
@@ -599,16 +595,12 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     expect(runtimeSelected).toHaveBeenCalledWith(PLUGIN_ID, '1.0.0', '/usr/local/bin/acme');
 
     fireEvent.click(screen.getByTestId('agents-add'));
-    fireEvent.click(await screen.findByTestId(`catalog-open-${PLUGIN_ID}`));
-    const draft = await screen.findByTestId('agent-draft-panel');
-    expect(within(draft).queryByLabelText('Path')).toBeNull();
-
-    fireEvent.click(within(draft).getByTestId('agent-draft-save'));
-    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
-      name: 'Acme External',
-      pluginId: PLUGIN_ID,
-      home: { kind: 'managed' },
-    }));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).queryByLabelText('Path')).toBeNull();
+    expect(within(dialog).queryByPlaceholderText('/usr/local/bin/acme')).toBeNull();
+    expect(within(dialog).getByText(/Install an Agent Integration/)).toBeTruthy();
+    expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(true);
+    expect(api.createAgent).not.toHaveBeenCalled();
   });
 
   it('never records a stale lower-level path for managed Agent creation', async () => {
