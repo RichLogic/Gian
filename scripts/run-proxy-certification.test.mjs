@@ -5,6 +5,7 @@ import {
   parseProxyCertificationOptions,
   proxyCertificationPlan,
   validateCandidateTuple,
+  validateRuntimeArtifactTuple,
 } from './run-proxy-certification.mjs';
 import { validateProxyReleaseCertificate } from './verify-proxy-release-certificate.mjs';
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
@@ -41,6 +42,26 @@ test('nightly certification includes full deterministic and every-Proxy UI evide
     assert.ok(ui.args.includes(provider));
   }
   assert.equal(plan.some(step => step.lane === 'real-provider'), false);
+});
+
+test('artifact certification breaks the first-publication cycle without weakening Proxy evidence', () => {
+  const options = parseProxyCertificationOptions([
+    '--stage', 'artifacts',
+    '--base', 'artifact-base',
+  ]);
+  const plan = proxyCertificationPlan(options);
+  assert.deepEqual(plan.map(step => step.id), [
+    'acceptance-catalog',
+    'signed-catalog',
+    'artifact-contract',
+    'full-deterministic',
+    'proxy-ui',
+    'preview',
+    'proxy-artifacts',
+    'real-provider',
+  ]);
+  assert.equal(plan.some(step => step.id === 'package'), false);
+  assert.equal(plan.at(-1).authorizationEnvironment, 'GIAN_ALLOW_REAL_AGENT_TURN');
 });
 
 test('release certification cannot omit preview, package, or real Provider evidence', () => {
@@ -128,7 +149,32 @@ test('release candidate binding requires the exact fresh packaged Proxy and veri
   assert.match(issues, /not verified/);
 });
 
-test('publish admission accepts only a fresh full-shipping Release certificate for the exact revision', () => {
+test('artifact certificate binds the downloadable Runtime to the exact exercised entry', () => {
+  const candidateTuple = shippingProxyIds.map(provider => ({
+    provider,
+    cli: { version: '1.2.3', sha256: 'a'.repeat(64), size: 12 },
+  }));
+  const runtimeProviders = shippingProxyIds.filter(provider => provider !== 'zcode');
+  const manifest = {
+    schemaVersion: 1,
+    platform: 'darwin-arm64',
+    candidates: runtimeProviders.map(provider => ({
+      provider,
+      version: '1.2.3',
+      format: 'raw',
+      entry: { sha256: 'a'.repeat(64), size: 12 },
+      asset: { url: 'https://downloads.example.test/runtime', sha256: 'b'.repeat(64), size: 24 },
+    })),
+  };
+  assert.deepEqual(validateRuntimeArtifactTuple({ candidateTuple }, manifest).issues, []);
+  manifest.candidates[0].entry.sha256 = 'c'.repeat(64);
+  assert.match(
+    validateRuntimeArtifactTuple({ candidateTuple }, manifest).issues.join('\n'),
+    /differs from the real Provider candidate/,
+  );
+});
+
+test('Proxy publication accepts a fresh full-shipping artifact certificate for the exact revision', () => {
   const candidatePackages = proxyDefinitions
     .filter(definition => definition.shipping)
     .map(definition => ({
@@ -143,9 +189,10 @@ test('publish admission accepts only a fresh full-shipping Release certificate f
     }));
   const certificate = {
     schemaVersion: 1,
-    certificateId: `release-${'c'.repeat(40)}`,
-    stage: 'release',
-    admissionEligible: true,
+    certificateId: `artifacts-${'c'.repeat(40)}`,
+    stage: 'artifacts',
+    admissionEligible: false,
+    artifactPublicationEligible: true,
     qualified: true,
     status: 'PASS',
     revision: 'release-sha',
@@ -162,7 +209,6 @@ test('publish admission accepts only a fresh full-shipping Release certificate f
       'proxy-ui',
       'preview',
       'proxy-artifacts',
-      'package',
       'real-provider',
       'candidate-binding',
     ].map(id => ({ id, status: 'PASS' })),
@@ -181,6 +227,15 @@ test('publish admission accepts only a fresh full-shipping Release certificate f
         size: 123,
       },
     })),
+    runtimeArtifacts: candidatePackages
+      .filter(candidate => candidate.pluginId !== 'com.zhipu.zcode')
+      .map(candidate => ({
+        provider: candidate.provider,
+        version: candidate.runtime.verifiedCliVersions[0],
+        format: 'raw',
+        entry: { sha256: 'b'.repeat(64), size: 123 },
+        asset: { sha256: 'c'.repeat(64), size: 456 },
+      })),
   };
   assert.deepEqual(validateProxyReleaseCertificate(certificate, {
     revision: 'release-sha',

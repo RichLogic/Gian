@@ -185,7 +185,7 @@ test('release broker returns a fixed error without exposing credential-bearing f
   }
 });
 
-test('release broker accepts a structured latest-Catalog lookup and rejects other catalog repos', async () => {
+test('release broker serves Catalog and Proxy assets from Gian and rejects other repositories', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gian-github-broker-catalog-'));
   const socketPath = join(directory, 'broker.sock');
   const token = 'github-token-sentinel';
@@ -193,7 +193,7 @@ test('release broker accepts a structured latest-Catalog lookup and rejects othe
   const broker = new GitHubReleaseMetadataBroker({
     socketPath,
     allowedRepository: 'RichLogic/Gian',
-    allowedCatalogRepository: 'RichLogic/Gian-Proxy-Catalog',
+    allowedCatalogRepository: 'RichLogic/Gian',
     async fetchReleaseMetadata(request) {
       calls.push({ operation: request.operation, repository: request.repository });
       return Response.json(
@@ -207,11 +207,11 @@ test('release broker accepts a structured latest-Catalog lookup and rejects othe
     await broker.start();
     const latest = await requestBroker({
       socketPath,
-      body: { repository: 'RichLogic/Gian-Proxy-Catalog', operation: 'latest-catalog' },
+      body: { repository: 'RichLogic/Gian', operation: 'latest-catalog' },
     });
     const otherRepo = await requestBroker({
       socketPath,
-      body: { repository: 'RichLogic/Gian', operation: 'latest-catalog' },
+      body: { repository: 'RichLogic/Other', operation: 'latest-catalog' },
     });
     assert.equal(latest.status, 200);
     assert.equal(latest.headers.etag, '"seq-2"');
@@ -231,19 +231,19 @@ test('release broker accepts a structured latest-Catalog lookup and rejects othe
         asset: 'gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz',
       },
     });
-    const catalogAssetOnArtifactRepo = await requestBroker({
+    const releaseAssetOnOtherRepo = await requestBroker({
       socketPath,
       body: {
-        repository: 'RichLogic/Gian-Proxy-Catalog',
+        repository: 'RichLogic/Other',
         operation: 'release-asset',
         tag: 'proxy-fixture-v0.1.0',
         asset: 'gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz',
       },
     });
     assert.equal(releaseAsset.status, 200);
-    assert.equal(catalogAssetOnArtifactRepo.status, 400);
+    assert.equal(releaseAssetOnOtherRepo.status, 400);
     assert.deepEqual(calls, [
-      { operation: 'latest-catalog', repository: 'RichLogic/Gian-Proxy-Catalog' },
+      { operation: 'latest-catalog', repository: 'RichLogic/Gian' },
       { operation: 'release-asset', repository: 'RichLogic/Gian' },
     ]);
   } finally {

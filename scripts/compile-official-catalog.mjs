@@ -47,7 +47,7 @@ const bundle = await compileOfficialCatalogSource({
   sequence,
   issuedAt,
   signingKey: {
-    keyId: process.env.GIAN_CATALOG_KEY_ID || 'gian-official-catalog-2026',
+    keyId: process.env.GIAN_CATALOG_KEY_ID || 'gian-official-catalog-2026-09',
     privateKey: pem,
   },
 });

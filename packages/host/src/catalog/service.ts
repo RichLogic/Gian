@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   assertCatalogImageMagic,
   CATALOG_DOCUMENT_KEYS,
+  isApprovedRuntimeAssetUrl,
   type CompiledCatalogEntryV1,
 } from '@gian/proxy-catalog-contract';
 import type { ManifestV4 } from '@gian/proxy-protocol';
@@ -136,6 +137,22 @@ export class CatalogService {
       throw new PluginStoreError(
         'RUNTIME_COMBINATION_MISSING',
         `${id} has no certified Runtime combination in the trusted Catalog.`,
+      );
+    }
+    const runtimePrefixes = this.options.policy.runtimeAssetPrefixes
+      ?? this.options.policy.artifactRepositories.map(
+        repository => `https://github.com/${repository}/releases/download/`,
+      );
+    const managedDistributions = [
+      ...(combination.runtime?.kind === 'native-binary' ? [combination.runtime] : []),
+      ...combination.companions.map(companion => companion.distribution),
+    ];
+    if (managedDistributions.some(distribution => (
+      !isApprovedRuntimeAssetUrl(distribution.asset.url, runtimePrefixes)
+    ))) {
+      throw new PluginStoreError(
+        'RUNTIME_SOURCE_FORBIDDEN',
+        `${id} Runtime asset is outside the App-pinned official channels.`,
       );
     }
     const installed = view.installedById.get(id) ?? null;

@@ -7,15 +7,17 @@ const releaseWorkflowUrl = new URL('../.github/workflows/release.yml', import.me
 const securityWorkflowUrl = new URL('../.github/workflows/security-audit.yml', import.meta.url);
 const proxyCertificationWorkflowUrl = new URL('../.github/workflows/proxy-certification.yml', import.meta.url);
 const proxyReleaseWorkflowUrl = new URL('../.github/workflows/proxy-release.yml', import.meta.url);
+const catalogReleaseWorkflowUrl = new URL('../.github/workflows/catalog-release.yml', import.meta.url);
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 
 test('hosted workflows pin every source, release, and audit gate to Node 24', async () => {
-  const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease] = await Promise.all([
+  const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease, catalogRelease] = await Promise.all([
     readFile(workflowUrl, 'utf8'),
     readFile(releaseWorkflowUrl, 'utf8'),
     readFile(securityWorkflowUrl, 'utf8'),
     readFile(proxyCertificationWorkflowUrl, 'utf8'),
     readFile(proxyReleaseWorkflowUrl, 'utf8'),
+    readFile(catalogReleaseWorkflowUrl, 'utf8'),
   ]);
 
   assert.match(workflow, /\n  pull_request:\n/);
@@ -27,6 +29,7 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
     securityWorkflow,
     proxyCertification,
     proxyRelease,
+    catalogRelease,
   ]) {
     assert.match(configuredWorkflow, /node-version: 24/);
     assert.doesNotMatch(configuredWorkflow, /node-version: 22/);
@@ -66,13 +69,23 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   ]);
   assert.match(certification, /runs-on: \[self-hosted, macOS, ARM64, gian-proxy-certification\]/);
   assert.match(certification, /pnpm verify:proxy --/);
-  assert.match(certification, /--stage release/);
+  assert.match(certification, /--stage artifacts/);
+  assert.match(certification, /build-managed-runtime-candidates\.mjs/);
   assert.match(certification, /artifacts\/proxies/);
   assert.match(release, /workflow_dispatch:/);
   assert.doesNotMatch(release, /push:\s*[\s\S]*tags:/);
   assert.match(release, /scripts\/proxy-release-metadata\.mjs/);
   assert.match(release, /scripts\/verify-proxy-release-certificate\.mjs/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
+});
+
+test('Catalog publication stays in Gian and requires the protected signing secret', async () => {
+  const workflow = await readFile(catalogReleaseWorkflowUrl, 'utf8');
+  assert.match(workflow, /secrets\.GIAN_CATALOG_SIGNING_KEY_PEM/);
+  assert.match(workflow, /verify-official-catalog-release-source\.mjs/);
+  assert.match(workflow, /stage-official-catalog-release\.mjs/);
+  assert.match(workflow, /catalog-v1\.\$\{SEQUENCE\}\.0/);
+  assert.doesNotMatch(workflow, /generateKeyPair|openssl/);
 });
 
 test('release and desktop packaging fail closed before expensive builds', async () => {
@@ -86,6 +99,20 @@ test('release and desktop packaging fail closed before expensive builds', async 
     releaseWorkflow,
     /- name: Verify source[\s\S]*?pnpm quality:traceability[\s\S]*?pnpm typecheck[\s\S]*?pnpm test:all/,
   );
+  for (const secret of [
+    'CSC_LINK',
+    'CSC_KEY_PASSWORD',
+    'APPLE_API_KEY_BASE64',
+    'APPLE_API_KEY_ID',
+    'APPLE_API_ISSUER',
+  ]) assert.match(releaseWorkflow, new RegExp(`secrets\\.${secret}`));
+  assert.match(releaseWorkflow, /pnpm quality:package/);
+  assert.match(releaseWorkflow, /make:mac:release/);
+  assert.match(releaseWorkflow, /codesign --verify --deep --strict/);
+  assert.match(releaseWorkflow, /xcrun stapler validate/);
+  assert.match(releaseWorkflow, /spctl --assess --type execute/);
+  assert.match(releaseWorkflow, /--latest/);
+  assert.doesNotMatch(releaseWorkflow, /--prerelease/);
   assert.equal(
     desktopPackage.scripts['bundle:build'].split(' && ')[0],
     'node ../../scripts/prepare-desktop-runtime.mjs',

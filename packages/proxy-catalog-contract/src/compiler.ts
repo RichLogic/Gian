@@ -32,7 +32,7 @@ import {
   type CompiledRuntimeSummary,
 } from './schemas.js';
 import { assertCatalogMarkdown } from './catalog-markdown.js';
-import { isApprovedGitHubReleaseAssetUrl } from './url-policy.js';
+import { isApprovedGitHubReleaseAssetUrl, isApprovedRuntimeAssetUrl } from './url-policy.js';
 
 export interface CatalogSigningKey {
   keyId: string;
@@ -52,6 +52,7 @@ export interface CompileCatalogBundleInput {
   issuedAt: string;
   plugins: readonly CatalogCompilerPluginInput[];
   allowedArtifactRepositories: readonly string[];
+  allowedRuntimeAssetPrefixes?: readonly string[];
   signingKey: CatalogSigningKey;
 }
 
@@ -177,7 +178,7 @@ function projectRuntime(sidecar: {
 function assertCertifiedCombination(
   entry: CatalogEntryV1,
   runtime: CompiledRuntimeSummary | null,
-  allowedArtifactRepositories: readonly string[],
+  allowedRuntimeAssetPrefixes: readonly string[],
 ): void {
   const combination = entry.channels.stable.combination;
   if (!combination) return;
@@ -186,7 +187,7 @@ function assertCertifiedCombination(
     ...combination.companions.map(companion => companion.distribution),
   ];
   for (const distribution of distributions) {
-    if (!isApprovedGitHubReleaseAssetUrl(distribution.asset.url, allowedArtifactRepositories)) {
+    if (!isApprovedRuntimeAssetUrl(distribution.asset.url, allowedRuntimeAssetPrefixes)) {
       throw new Error(`Runtime artifact URL is not allowed for ${entry.pluginId}.`);
     }
   }
@@ -265,7 +266,13 @@ export function compileCatalogBundle(input: CompileCatalogBundleInput): Compiled
       }
     }
     const projection = projectManifestSidecar(sidecar, entry);
-    assertCertifiedCombination(entry, projection.runtime, input.allowedArtifactRepositories);
+    assertCertifiedCombination(
+      entry,
+      projection.runtime,
+      input.allowedRuntimeAssetPrefixes ?? input.allowedArtifactRepositories.map(
+        repository => `https://github.com/${repository}/releases/download/`,
+      ),
+    );
 
     const documentation = {} as CompiledCatalogEntryV1['documentation'];
     for (const key of CATALOG_DOCUMENT_KEYS) {

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const requiredStepIds = [
+const artifactRequiredStepIds = [
   'acceptance-catalog',
   'signed-catalog',
   'artifact-contract',
@@ -14,7 +14,6 @@ const requiredStepIds = [
   'proxy-ui',
   'preview',
   'proxy-artifacts',
-  'package',
   'real-provider',
   'candidate-binding',
 ];
@@ -39,11 +38,15 @@ export function validateProxyReleaseCertificate(
 ) {
   const issues = [];
   if (certificate?.schemaVersion !== 1) issues.push('certificate schemaVersion must be 1');
-  if (!/^release-[a-f0-9]{40}$/u.test(certificate?.certificateId ?? '')) {
+  if (!/^(?:artifacts|release)-[a-f0-9]{40}$/u.test(certificate?.certificateId ?? '')) {
     issues.push('certificate has no valid immutable certificateId');
   }
-  if (certificate?.stage !== 'release') issues.push('certificate stage must be release');
-  if (certificate?.admissionEligible !== true) issues.push('certificate is not admission eligible');
+  if (certificate?.stage !== 'artifacts' && certificate?.stage !== 'release') {
+    issues.push('certificate stage must be artifacts or release');
+  }
+  if (certificate?.artifactPublicationEligible !== true) {
+    issues.push('certificate is not eligible for artifact publication');
+  }
   if (certificate?.qualified !== true) issues.push('certificate is not qualified');
   if (certificate?.status !== 'PASS') issues.push('certificate status is not PASS');
   if (certificate?.dirty !== false) issues.push('certificate revision was dirty');
@@ -71,6 +74,9 @@ export function validateProxyReleaseCertificate(
   }
 
   const steps = Array.isArray(certificate?.steps) ? certificate.steps : [];
+  const requiredStepIds = certificate?.stage === 'release'
+    ? [...artifactRequiredStepIds, 'package']
+    : artifactRequiredStepIds;
   for (const id of requiredStepIds) {
     const matches = steps.filter(step => step?.id === id);
     if (matches.length !== 1 || matches[0]?.status !== 'PASS') {
@@ -83,6 +89,7 @@ export function validateProxyReleaseCertificate(
 
   const packages = candidateByProvider(certificate?.candidatePackages);
   const tuples = candidateByProvider(certificate?.candidateTuple);
+  const runtimeArtifacts = candidateByProvider(certificate?.runtimeArtifacts);
   for (const id of shippingProxyIds) {
     const definition = proxyDefinitions.find(candidate => candidate.id === id);
     const packageCandidate = packages.get(id);
@@ -112,6 +119,19 @@ export function validateProxyReleaseCertificate(
       || !Number.isSafeInteger(tuple.cli?.size)
       || tuple.cli.size <= 0) {
       issues.push(`${id} CLI tuple has no exact artifact identity`);
+    }
+    if (definition.pluginId !== 'com.zhipu.zcode') {
+      const runtime = runtimeArtifacts.get(id);
+      if (!runtime
+        || runtime.version !== tuple.cli?.version
+        || runtime.entry?.sha256 !== tuple.cli?.sha256
+        || runtime.entry?.size !== tuple.cli?.size
+        || !['raw', 'tar.gz'].includes(runtime.format)
+        || !/^[a-f0-9]{64}$/u.test(runtime.asset?.sha256 ?? '')
+        || !Number.isSafeInteger(runtime.asset?.size)
+        || runtime.asset.size <= 0) {
+        issues.push(`${id} managed Runtime artifact is not bound to the tested CLI tuple`);
+      }
     }
   }
 

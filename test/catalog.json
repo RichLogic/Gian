@@ -761,6 +761,8 @@
       "patterns": [
         "scripts/check-functional-evidence.test.mjs",
         "scripts/check-version-consistency.test.mjs",
+        "scripts/catalog-release.test.mjs",
+        "scripts/build-managed-runtime-candidates.test.mjs",
         "scripts/desktop-runtime-portability.test.mjs",
         "scripts/docs-adr.test.mjs",
         "scripts/process-resource-monitor.test.mjs",

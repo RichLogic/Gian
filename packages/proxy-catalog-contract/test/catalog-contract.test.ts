@@ -15,6 +15,7 @@ import {
   downloadAssetSchema,
   isCanonicalRelativePath,
   isHttpsUrl,
+  isApprovedRuntimeAssetUrl,
   platformIdSchema,
   verifyCatalogAssetManifestBytes,
 } from '../src/index.js';
@@ -25,6 +26,20 @@ import {
   validCatalogEntry,
   validCatalogIndex,
 } from './fixtures.js';
+
+test('Runtime URL policy accepts only exact App-pinned vendor prefixes', () => {
+  const prefixes = ['https://downloads.claude.ai/claude-code-releases/'];
+  assert.equal(isApprovedRuntimeAssetUrl(
+    'https://downloads.claude.ai/claude-code-releases/2.1.159/darwin-arm64/claude',
+    prefixes,
+  ), true);
+  for (const value of [
+    'https://downloads.claude.ai.evil.test/claude-code-releases/2.1.159/claude',
+    'https://downloads.claude.ai/other/claude',
+    'https://downloads.claude.ai/claude-code-releases/../private',
+    'https://downloads.claude.ai/claude-code-releases/2.1.159/claude?token=x',
+  ]) assert.equal(isApprovedRuntimeAssetUrl(value, prefixes), false, value);
+});
 
 test('unknown reverse-domain fixture validates end to end at the contract layer', () => {
   const entry = catalogEntryV1Schema.parse(validCatalogEntry());

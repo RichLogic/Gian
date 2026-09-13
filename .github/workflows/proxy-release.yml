@@ -85,6 +85,22 @@ jobs:
           --provider "${{ steps.plugin.outputs.id }}"
           --version "${{ steps.plugin.outputs.version }}"
 
+      - name: Verify the certified managed Runtime artifact
+        env:
+          PROVIDER: ${{ steps.plugin.outputs.id }}
+        shell: bash
+        run: |
+          if [ "${PROVIDER}" = zcode ]; then exit 0; fi
+          MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
+          test -f "${MANIFEST}"
+          RUNTIME="$(jq -ce --arg provider "${PROVIDER}" '.candidates[] | select(.provider == $provider)' "${MANIFEST}")"
+          ASSET="$(jq -r '.asset.name' <<<"${RUNTIME}")"
+          EXPECTED_SHA="$(jq -r '.asset.sha256' <<<"${RUNTIME}")"
+          EXPECTED_SIZE="$(jq -r '.asset.size' <<<"${RUNTIME}")"
+          test -f "certification/artifacts/runtimes/${ASSET}"
+          test "$(shasum -a 256 "certification/artifacts/runtimes/${ASSET}" | awk '{print $1}')" = "${EXPECTED_SHA}"
+          test "$(stat -f '%z' "certification/artifacts/runtimes/${ASSET}")" = "${EXPECTED_SIZE}"
+
       - name: Create or validate immutable release tag
         env:
           TAG: ${{ steps.plugin.outputs.tag }}
@@ -109,10 +125,20 @@ jobs:
         shell: bash
         run: |
           ASSET_DIR=certification/artifacts/proxies
+          RUNTIME_MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
+          RUNTIME="$(jq -ce --arg provider "${PROVIDER}" '[.candidates[] | select(.provider == $provider)][0] // null' "${RUNTIME_MANIFEST}")"
+          RUNTIME_NAME="$(jq -r 'if . then .asset.name else "" end' <<<"${RUNTIME}")"
+          RUNTIME_PUBLISH="$(jq -r 'if . then .asset.publish else false end' <<<"${RUNTIME}")"
+          RELEASE_ASSETS=(
+            "${ASSET_DIR}/${ASSET}"
+            "${ASSET_DIR}/${ASSET}.sha256"
+            "${ASSET_DIR}/${ASSET}.manifest.json"
+          )
+          if [ "${RUNTIME_PUBLISH}" = true ]; then
+            RELEASE_ASSETS+=("certification/artifacts/runtimes/${RUNTIME_NAME}")
+          fi
           gh release create "${TAG}" \
-            "${ASSET_DIR}/${ASSET}" \
-            "${ASSET_DIR}/${ASSET}.sha256" \
-            "${ASSET_DIR}/${ASSET}.manifest.json" \
+            "${RELEASE_ASSETS[@]}" \
             --verify-tag \
             --generate-notes \
             --latest=false \

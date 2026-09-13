@@ -41,6 +41,7 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
         sha256: runtimeSha,
         size: runtimeBytes.byteLength,
       },
+      format: 'raw',
       entryRelativePath: 'bin/claude',
     },
     companions: [],

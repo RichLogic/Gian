@@ -74,6 +74,46 @@ export function isApprovedGitHubReleaseAssetUrl(
   return parseGitHubReleaseAssetUrl(value, allowedRepositories) !== null;
 }
 
+/** Runtime bytes may come from an official vendor channel rather than the
+ * Gian Proxy repository. Prefixes are compile-time trust roots; the signed
+ * Catalog still binds exact size and SHA-256. */
+export function isApprovedRuntimeAssetUrl(
+  value: string,
+  allowedPrefixes: readonly string[],
+): boolean {
+  if (!isHttpsUrl(value)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.port || url.username || url.password || url.search || url.hash) return false;
+  try {
+    if (url.pathname.split('/').some(part => {
+      const decoded = decodeURIComponent(part);
+      return decoded === '.' || decoded === '..' || /[\u0000-\u001f\u007f]/.test(decoded);
+    })) return false;
+  } catch {
+    return false;
+  }
+  return allowedPrefixes.some(prefix => {
+    try {
+      const root = new URL(prefix);
+      return root.protocol === 'https:'
+        && !root.port
+        && !root.username
+        && !root.password
+        && !root.search
+        && !root.hash
+        && root.pathname.endsWith('/')
+        && url.href.startsWith(root.href);
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function isApprovedRedirectUrl(value: string): boolean {
   if (!isHttpsUrl(value)) return false;
   try {

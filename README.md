@@ -64,14 +64,13 @@ Beta intentionally does not include an autonomous Task Manager or Discord/Slack 
 
 <img src=".github/assets/readme/gian-changes.webp" alt="Gian Changes inspector listing unstaged dashboard files beside an agent conversation" width="100%">
 
-## Install the macOS beta
+## Install Gian for macOS
 
-Gian is currently an **unsigned macOS beta for Apple Silicon**. It is not yet notarized, so macOS Gatekeeper will warn the first time you open it.
+Official Gian releases are Developer ID signed and Apple notarized for Apple Silicon.
 
-1. Download [`Gian-0.5.4-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.5.4/Gian-0.5.4-arm64.dmg) from the [current beta release](https://github.com/RichLogic/Gian/releases/tag/v0.5.4).
+1. Download [`Gian-0.6.0-arm64.dmg`](https://github.com/RichLogic/Gian/releases/download/v0.6.0/Gian-0.6.0-arm64.dmg) from the [latest release](https://github.com/RichLogic/Gian/releases/latest).
 2. Open the DMG and drag Gian into **Applications**.
-3. In Finder, Control-click Gian and choose **Open**, then choose **Open** again in the Gatekeeper dialog.
-4. If macOS does not offer that option, open **System Settings > Privacy & Security** and choose **Open Anyway** for Gian.
+3. Open Gian normally from **Applications**. macOS verifies its Developer ID signature and notarization ticket.
 
 Regular users do **not** need Node.js, pnpm, a source checkout, or a separately installed Gian service.
 

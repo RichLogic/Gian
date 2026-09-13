@@ -202,7 +202,7 @@ function compileSequence(
   });
   const policy: OfficialCatalogSourcePolicy = {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: { 'gian-official-catalog-2026': keys.publicKeyHex },
   };
@@ -707,7 +707,7 @@ test('Catalog sync total budget, concurrency, abort, broker ETag, and anonymous 
     });
     assert.equal(asset.toString(), 'body');
     assert.ok(fetched.every((url) => url.startsWith('https://')));
-    assert.ok(fetched.some((url) => url.includes('api.github.com/repos/RichLogic/Gian-Proxy-Catalog/releases')));
+    assert.ok(fetched.some((url) => url.includes('api.github.com/repos/RichLogic/Gian/releases')));
     assert.ok(!fetched.some((url) => url.includes('authorization')));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -863,7 +863,7 @@ test('unique-claim stale reclaim, invalid lock, probe failure, and release owner
 test('anonymous Catalog metadata and assets cancel oversized chunked bodies before allocation', { timeout: 5_000 }, async () => {
   const policy: OfficialCatalogSourcePolicy = {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: { 'gian-official-catalog-2026': 'a'.repeat(64) },
   };
@@ -1287,7 +1287,7 @@ test('Catalog sync aborts sibling downloads on first failure and settles before 
 test('anonymous latest rejects an invalid ETag before buffering the response body', { timeout: 5_000 }, async () => {
   const policy: OfficialCatalogSourcePolicy = {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: { 'gian-official-catalog-2026': 'a'.repeat(64) },
   };

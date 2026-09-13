@@ -4,9 +4,8 @@ This file records user-facing changes in published Gian builds. It is updated
 whenever a version is packaged and tagged for release; local test packages are
 not listed.
 
-Releases through 0.6.0 are unsigned macOS Apple Silicon beta builds. Signed
-and notarized native notifications and automatic updates remain disabled
-until Developer ID signing and notarization are available.
+Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
+0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
 ## [0.6.0] - 2026-09-12
 
@@ -36,7 +35,11 @@ until Developer ID signing and notarization are available.
   Project menus, task assignment, capped lists, improved History visuals, and
   consistent narrow-window navigation.
 - Updated the target shipping set to Claude Proxy 0.2.4, Codex Proxy 0.2.15,
-  Kimi Proxy 0.2.9, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
+  Kimi Proxy 0.2.10, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
+- Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
+  unavailable legacy 0.38.0 distribution.
+- Established Developer ID signing, Apple notarization, Gatekeeper validation,
+  and latest-stable GitHub publication for official macOS releases.
 
 ### Fixed
 
@@ -52,7 +55,7 @@ until Developer ID signing and notarization are available.
 
 ### Known limitations
 
-- The macOS build remains unsigned and supports Apple Silicon only.
+- The macOS build currently supports Apple Silicon only.
 - Fresh Agent onboarding requires the matching certified Proxy coordinates in
   the signed stable Catalog; a missing Catalog entry blocks package acceptance.
 - Grok remains outside the shipping product surface.

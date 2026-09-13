@@ -45,7 +45,20 @@ jobs:
       - name: Install isolated Chromium runtime
         run: pnpm exec playwright install chromium
 
-      - name: Issue full Release certificate
+      - name: Prepare exact managed Runtime candidates
+        run: >-
+          node scripts/build-managed-runtime-candidates.mjs
+          --output artifacts/runtimes
+          --github-env "${GITHUB_ENV}"
+
+      - name: Verify candidates with the production Runtime extractor
+        run: |
+          pnpm --filter @gian/shared build
+          pnpm --filter @gian/proxy-catalog-contract build
+          pnpm --filter @gian/host build
+          node scripts/verify-managed-runtime-candidates.mjs
+
+      - name: Issue pre-Catalog artifact certificate
         shell: bash
         env:
           GIAN_ALLOW_ELECTRON_PREVIEW: '1'
@@ -56,7 +69,7 @@ jobs:
           BASE_REF="${{ inputs.base_ref }}"
           if [ -z "${BASE_REF}" ]; then BASE_REF="${GITHUB_SHA}^"; fi
           pnpm verify:proxy -- \
-            --stage release \
+            --stage artifacts \
             --base "${BASE_REF}" \
             --output output/proxy-certification/release
 
@@ -70,3 +83,4 @@ jobs:
           path: |
             output/proxy-certification/release
             artifacts/proxies
+            artifacts/runtimes

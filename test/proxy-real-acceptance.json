@@ -10,6 +10,7 @@
     "stages": {
       "development": ["catalog", "affected-deterministic"],
       "nightly": ["catalog", "full-deterministic", "proxy-ui"],
+      "artifacts": ["catalog", "full-deterministic", "proxy-ui", "preview", "real-provider"],
       "release": ["catalog", "full-deterministic", "proxy-ui", "preview", "package", "real-provider"]
     }
   },
@@ -218,7 +219,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.9",
+      "pluginVersion": "0.2.10",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {

@@ -12,7 +12,7 @@ import { catalogEntryV1Schema, isCanonicalRelativePath, type CatalogEntryV1 } fr
 import { compileCatalogBundle, type CatalogSigningKey } from './compiler.js';
 import { assertCatalogImageMagic } from './media.js';
 import { CATALOG_DOCUMENT_KEYS } from './constants.js';
-import { isApprovedGitHubReleaseAssetUrl } from './url-policy.js';
+import { isApprovedGitHubReleaseAssetUrl, isApprovedRuntimeAssetUrl } from './url-policy.js';
 
 function isSentinelHash(sha256: string): boolean {
   return /^[0-9a-f]{64}$/.test(sha256) && new Set(sha256).size === 1;
@@ -26,6 +26,13 @@ const REQUIRED_OFFICIAL_PLUGIN_IDS = [
   'com.zhipu.zcode',
 ] as const;
 const DEFAULT_ARTIFACT_REPOSITORIES = ['RichLogic/Gian'] as const;
+const DEFAULT_RUNTIME_ASSET_PREFIXES = [
+  'https://downloads.claude.ai/claude-code-releases/',
+  'https://github.com/openai/codex/releases/download/',
+  'https://github.com/MoonshotAI/kimi-code/releases/download/',
+  'https://github.com/MoonshotAI/kimi-cli/releases/download/',
+  'https://github.com/RichLogic/Gian/releases/download/',
+] as const;
 
 export interface OfficialCatalogSourcePlugin {
   directory: string;
@@ -116,10 +123,14 @@ export async function loadOfficialCatalogSource(sourceRoot: string): Promise<Off
 
 export function verifyOfficialCatalogSource(
   plugins: readonly OfficialCatalogSourcePlugin[],
-  options?: { allowedArtifactRepositories?: readonly string[] },
+  options?: {
+    allowedArtifactRepositories?: readonly string[];
+    allowedRuntimeAssetPrefixes?: readonly string[];
+  },
 ): void {
   if (plugins.length === 0) throw new Error('Official Catalog source is empty.');
   const allowed = options?.allowedArtifactRepositories ?? DEFAULT_ARTIFACT_REPOSITORIES;
+  const runtimePrefixes = options?.allowedRuntimeAssetPrefixes ?? DEFAULT_RUNTIME_ASSET_PREFIXES;
   const seen = new Set<string>();
   for (const plugin of plugins) {
     if (seen.has(plugin.entry.pluginId)) {
@@ -152,7 +163,7 @@ export function verifyOfficialCatalogSource(
       ];
       for (const asset of assets) {
         rejectSentinel(asset.sha256, `${plugin.entry.pluginId} Runtime`);
-        if (!isApprovedGitHubReleaseAssetUrl(asset.url, allowed)) {
+        if (!isApprovedRuntimeAssetUrl(asset.url, runtimePrefixes)) {
           throw new Error(`${plugin.entry.pluginId} Runtime URL is not an allowed artifact URL.`);
         }
       }
@@ -171,15 +182,18 @@ export async function compileOfficialCatalogSource(input: {
   issuedAt: string;
   signingKey: CatalogSigningKey;
   allowedArtifactRepositories?: readonly string[];
+  allowedRuntimeAssetPrefixes?: readonly string[];
 }): Promise<ReturnType<typeof compileCatalogBundle>> {
   const allowedArtifactRepositories = input.allowedArtifactRepositories ?? [...DEFAULT_ARTIFACT_REPOSITORIES];
+  const allowedRuntimeAssetPrefixes = input.allowedRuntimeAssetPrefixes ?? [...DEFAULT_RUNTIME_ASSET_PREFIXES];
   const plugins = await loadOfficialCatalogSource(input.sourceRoot);
-  verifyOfficialCatalogSource(plugins, { allowedArtifactRepositories });
+  verifyOfficialCatalogSource(plugins, { allowedArtifactRepositories, allowedRuntimeAssetPrefixes });
   return compileCatalogBundle({
     sourceId: 'gian-official',
     sequence: input.sequence,
     issuedAt: input.issuedAt,
     allowedArtifactRepositories,
+    allowedRuntimeAssetPrefixes,
     signingKey: input.signingKey,
     plugins: plugins.map((plugin) => ({
       entry: plugin.entry,

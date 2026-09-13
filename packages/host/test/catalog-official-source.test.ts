@@ -35,7 +35,7 @@ test('official source sidecars project external Runtime and CatalogService repor
     }
     const policy = {
       sourceId: 'gian-official' as const,
-      repository: 'RichLogic/Gian-Proxy-Catalog',
+      repository: 'RichLogic/Gian',
       artifactRepositories: ['RichLogic/Gian'],
       pinnedPublicKeys: {
         [signingKey.keyId]: createPublicKey(signingKey.privateKey)

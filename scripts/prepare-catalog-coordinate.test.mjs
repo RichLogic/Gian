@@ -17,7 +17,6 @@ const requiredSteps = [
   'proxy-ui',
   'preview',
   'proxy-artifacts',
-  'package',
   'real-provider',
   'candidate-binding',
 ];
@@ -36,11 +35,14 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
         verifiedCliVersions: [...definition.runtime.verifiedCliVersions],
       },
     }));
+  const runtimeAssetName = `gian-runtime-${provider}-${candidatePackages
+    .find(candidate => candidate.provider === provider).runtime.verifiedCliVersions[0]}-darwin-arm64`;
   return {
     schemaVersion: 1,
-    certificateId: `release-${'c'.repeat(40)}`,
-    stage: 'release',
-    admissionEligible: true,
+    certificateId: `artifacts-${'c'.repeat(40)}`,
+    stage: 'artifacts',
+    admissionEligible: false,
+    artifactPublicationEligible: true,
     qualified: true,
     status: 'PASS',
     revision: 'c'.repeat(40),
@@ -65,6 +67,32 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
         size: candidate.provider === provider ? runtimeSize : 1,
       },
     })),
+    runtimeArtifacts: candidatePackages
+      .filter(candidate => candidate.pluginId !== 'com.zhipu.zcode')
+      .map(candidate => {
+        const selected = candidate.provider === provider;
+        const version = candidate.runtime.verifiedCliVersions[0];
+        const name = selected
+          ? runtimeAssetName
+          : `gian-runtime-${candidate.provider}-${version}-darwin-arm64`;
+        const sha256 = selected ? runtimeSha256 : 'b'.repeat(64);
+        const size = selected ? runtimeSize : 1;
+        return {
+          provider: candidate.provider,
+          version,
+          format: 'raw',
+          entryRelativePath: `bin/${candidate.provider}`,
+          entry: { sha256, size },
+          asset: {
+            name,
+            path: name,
+            url: `https://github.com/RichLogic/Gian/releases/download/proxy-${candidate.provider}-v0.0.0/${name}`,
+            sha256,
+            size,
+            publish: true,
+          },
+        };
+      }),
   };
 }
 
@@ -85,6 +113,10 @@ test('Catalog coordinate binds immutable darwin-arm64 URLs to exact certified by
   const certificateBytes = Buffer.from(`${JSON.stringify(certificate, null, 2)}\n`);
   const runtimeAsset = 'gian-runtime-codex-0.146.0-darwin-arm64';
   const certificatePath = join(root, 'certificate.json');
+  const certifiedRuntime = certificate.runtimeArtifacts.find(candidate => candidate.provider === 'codex');
+  certifiedRuntime.asset.name = runtimeAsset;
+  certifiedRuntime.asset.path = runtimeAsset;
+  certifiedRuntime.asset.url = `https://github.com/RichLogic/Gian/releases/download/${metadata.tag}/${runtimeAsset}`;
   await writeFile(join(root, metadata.asset), archive);
   await writeFile(join(root, `${metadata.asset}.manifest.json`), manifest);
   await writeFile(join(root, runtimeAsset), runtime);
@@ -107,6 +139,7 @@ test('Catalog coordinate binds immutable darwin-arm64 URLs to exact certified by
   );
   assert.equal(coordinate.artifacts['darwin-arm64'].size, archive.length);
   assert.equal(coordinate.combination.runtime.kind, 'native-binary');
+  assert.equal(coordinate.combination.runtime.format, 'raw');
   assert.equal(
     coordinate.combination.runtime.asset.sha256,
     createHash('sha256').update(runtime).digest('hex'),

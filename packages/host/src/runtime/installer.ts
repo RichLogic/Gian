@@ -10,19 +10,16 @@ import {
 } from '@gian/shared';
 
 import { fsyncDirectory } from '../catalog/atomic.js';
+import { ManagedRuntimeInstallError } from './errors.js';
 import { ManagedRuntimeGenerationStore } from './generation-store.js';
+import { extractManagedRuntimeArchive } from './safe-extract.js';
+
+export { ManagedRuntimeInstallError } from './errors.js';
 
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const COMPONENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-
-export class ManagedRuntimeInstallError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
-    this.name = 'ManagedRuntimeInstallError';
-  }
-}
 
 function canonicalRelativePath(value: string): boolean {
   return value.length > 0
@@ -54,6 +51,7 @@ function validateDistribution(value: ManagedRuntimeDistribution): void {
       || !Number.isSafeInteger(value.asset.size)
       || value.asset.size <= 0
       || value.asset.size > MAX_ARTIFACT_BYTES
+      || (value.format !== 'raw' && value.format !== 'tar.gz')
       || !canonicalRelativePath(value.entryRelativePath)
     ) {
       throw new ManagedRuntimeInstallError('RUNTIME_PLAN_INVALID', 'Native Runtime coordinate is invalid.');
@@ -225,9 +223,21 @@ export class ManagedRuntimeInstaller {
     const entryPath = join(versionRoot, distribution.entryRelativePath);
     const staging = join(this.runtimeRoot, distribution.runtimeId, `.staging-${randomUUID()}`);
     const stagedEntry = join(staging, distribution.entryRelativePath);
-    await mkdir(dirname(stagedEntry), { recursive: true, mode: 0o700 });
     try {
-      await writeFile(stagedEntry, bytes, { flag: 'wx', mode: 0o700 });
+      if (distribution.format === 'raw') {
+        await mkdir(dirname(stagedEntry), { recursive: true, mode: 0o700 });
+        await writeFile(stagedEntry, bytes, { flag: 'wx', mode: 0o700 });
+      } else {
+        await mkdir(staging, { recursive: true, mode: 0o700 });
+        await extractManagedRuntimeArchive(bytes, staging);
+      }
+      const stagedMetadata = await lstat(stagedEntry);
+      if (stagedMetadata.isSymbolicLink() || !stagedMetadata.isFile()) {
+        throw new ManagedRuntimeInstallError(
+          'RUNTIME_ARCHIVE_ENTRY',
+          'Runtime entry is not a regular file in the downloaded artifact.',
+        );
+      }
       await chmod(stagedEntry, 0o700);
       const observed = await this.options.probeVersion({
         executable: stagedEntry,
@@ -245,14 +255,10 @@ export class ManagedRuntimeInstaller {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST' && (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') {
           throw error;
         }
-        const existing = await realpath(entryPath);
-        const metadata = await lstat(entryPath);
-        if (metadata.isSymbolicLink() || !metadata.isFile() || await sha256(existing) !== digest) {
-          throw new ManagedRuntimeInstallError(
-            'RUNTIME_VERSION_CONFLICT',
-            'An immutable Runtime version already exists with different content.',
-          );
-        }
+        throw new ManagedRuntimeInstallError(
+          'RUNTIME_VERSION_CONFLICT',
+          'An unmanaged or concurrent Runtime version directory already exists.',
+        );
       }
     } finally {
       await rm(staging, { recursive: true, force: true });

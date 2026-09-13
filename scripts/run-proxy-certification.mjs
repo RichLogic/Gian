@@ -13,7 +13,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const stages = new Set(['development', 'nightly', 'release']);
+const stages = new Set(['development', 'nightly', 'artifacts', 'release']);
 const realTurnAuthorization = 'GIAN_ALLOW_REAL_AGENT_TURN';
 const previewAuthorization = 'GIAN_ALLOW_ELECTRON_PREVIEW';
 const packageAuthorization = 'GIAN_ALLOW_PACKAGE';
@@ -56,9 +56,9 @@ export function parseProxyCertificationOptions(argv = []) {
     else throw new Error(`Unknown Proxy certification argument ${arg}.`);
   }
   if (!stages.has(options.stage)) {
-    throw new Error('--stage must be development, nightly, or release.');
+    throw new Error('--stage must be development, nightly, artifacts, or release.');
   }
-  if ((options.stage === 'development' || options.stage === 'release') && !options.base) {
+  if ((options.stage === 'development' || options.stage === 'artifacts' || options.stage === 'release') && !options.base) {
     throw new Error(`--base is required for ${options.stage} certification.`);
   }
   if (!options.output) throw new Error('--output requires a value.');
@@ -70,7 +70,7 @@ export function parseProxyCertificationOptions(argv = []) {
     throw new Error(`Certification only accepts shipping Proxies: ${unknown.join(', ')}.`);
   }
   if (
-    options.stage === 'release'
+    (options.stage === 'artifacts' || options.stage === 'release')
     && (selected.length !== shippingProxyIds.length
       || shippingProxyIds.some(provider => !selected.includes(provider)))
   ) {
@@ -123,12 +123,14 @@ export function proxyCertificationPlan(options) {
     ['release:proxies'],
     { authorizationEnvironment: packageAuthorization },
   ));
-  steps.push(pnpmStep(
-    'package',
-    'package',
-    ['quality:package'],
-    { authorizationEnvironment: packageAuthorization },
-  ));
+  if (options.stage === 'release') {
+    steps.push(pnpmStep(
+      'package',
+      'package',
+      ['quality:package'],
+      { authorizationEnvironment: packageAuthorization },
+    ));
+  }
   steps.push(nodeStep(
     'real-provider',
     'real-provider',
@@ -258,6 +260,38 @@ export function validateCandidateTuple(certificate, run) {
   return { tuples, issues };
 }
 
+export function validateRuntimeArtifactTuple(certificate, runtimeManifest) {
+  const issues = [];
+  if (runtimeManifest?.schemaVersion !== 1 || runtimeManifest?.platform !== 'darwin-arm64') {
+    return { candidates: [], issues: ['managed Runtime candidate manifest is invalid'] };
+  }
+  const candidates = Array.isArray(runtimeManifest.candidates) ? runtimeManifest.candidates : [];
+  const artifacts = new Map(candidates.map(candidate => [candidate.provider, candidate]));
+  const tuples = new Map((certificate.candidateTuple ?? []).map(tuple => [tuple.provider, tuple]));
+  for (const provider of shippingProxyIds.filter(id => id !== 'zcode')) {
+    const candidate = artifacts.get(provider);
+    const tuple = tuples.get(provider);
+    if (!candidate || !tuple) {
+      issues.push(`${provider} has no managed Runtime artifact candidate`);
+      continue;
+    }
+    if (candidate.version !== tuple.cli?.version
+      || candidate.entry?.sha256 !== tuple.cli?.sha256
+      || candidate.entry?.size !== tuple.cli?.size) {
+      issues.push(`${provider} Runtime entry differs from the real Provider candidate`);
+    }
+    if (!['raw', 'tar.gz'].includes(candidate.format)
+      || !/^[a-f0-9]{64}$/u.test(candidate.asset?.sha256 ?? '')
+      || !Number.isSafeInteger(candidate.asset?.size)
+      || candidate.asset.size <= 0
+      || typeof candidate.asset?.url !== 'string'
+      || !candidate.asset.url.startsWith('https://')) {
+      issues.push(`${provider} Runtime artifact identity is invalid`);
+    }
+  }
+  return { candidates, issues };
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = parseProxyCertificationOptions(argv);
   const catalog = validateProxyRealAcceptanceCatalog(await loadProxyRealAcceptanceCatalog());
@@ -266,6 +300,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({
       stage: options.stage,
       admissionEligible: options.stage === 'release',
+      artifactPublicationEligible: options.stage === 'artifacts' || options.stage === 'release',
       shippingProxyIds,
       providers: options.providers,
       steps: plan.map(step => ({
@@ -283,9 +318,10 @@ export async function main(argv = process.argv.slice(2)) {
   const git = await revisionState();
   const certificate = {
     schemaVersion: 1,
-    certificateId: `release-${git.revision}`,
+    certificateId: `${options.stage}-${git.revision}`,
     stage: options.stage,
     admissionEligible: options.stage === 'release',
+    artifactPublicationEligible: options.stage === 'artifacts' || options.stage === 'release',
     qualified: false,
     status: 'FAIL',
     revision: git.revision,
@@ -324,12 +360,16 @@ export async function main(argv = process.argv.slice(2)) {
     if (result.status !== 'PASS') prerequisiteFailed = true;
   }
 
-  if (certificate.admissionEligible) {
+  if (certificate.artifactPublicationEligible) {
     try {
       const realEvidencePath = resolve(outputDir, 'real-provider', 'results.json');
       const realRun = JSON.parse(await readFile(realEvidencePath, 'utf8'));
       const binding = validateCandidateTuple(certificate, realRun);
       certificate.candidateTuple = binding.tuples;
+      const runtimeManifestPath = resolve(rootDir, 'artifacts/runtimes/runtime-candidates.json');
+      const runtimeManifest = JSON.parse(await readFile(runtimeManifestPath, 'utf8'));
+      const runtimeBinding = validateRuntimeArtifactTuple(certificate, runtimeManifest);
+      certificate.runtimeArtifacts = runtimeBinding.candidates;
       certificate.realProviderEvidence = {
         path: realEvidencePath,
         startedAt: realRun.startedAt,
@@ -338,8 +378,8 @@ export async function main(argv = process.argv.slice(2)) {
       certificate.steps.push({
         id: 'candidate-binding',
         lane: 'certificate',
-        status: binding.issues.length === 0 ? 'PASS' : 'FAIL',
-        issues: binding.issues,
+        status: binding.issues.length === 0 && runtimeBinding.issues.length === 0 ? 'PASS' : 'FAIL',
+        issues: [...binding.issues, ...runtimeBinding.issues],
       });
     } catch (error) {
       certificate.steps.push({
@@ -355,10 +395,10 @@ export async function main(argv = process.argv.slice(2)) {
   const hasFailure = certificate.steps.some(step => step.status === 'FAIL');
   const hasBlocked = certificate.steps.some(step => step.status === 'BLOCKED' || step.status === 'SKIP');
   certificate.status = hasFailure ? 'FAIL' : hasBlocked ? 'BLOCKED' : 'PASS';
-  certificate.qualified = certificate.admissionEligible
+  certificate.qualified = certificate.artifactPublicationEligible
     && certificate.status === 'PASS'
     && !certificate.dirty;
-  if (certificate.status === 'PASS' && certificate.admissionEligible && certificate.dirty) {
+  if (certificate.status === 'PASS' && certificate.artifactPublicationEligible && certificate.dirty) {
     certificate.status = 'BLOCKED';
     certificate.blockedReason = 'Release certification requires a clean revision.';
   }

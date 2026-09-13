@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
 import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
 import { validateProxyReleaseCertificate } from './verify-proxy-release-certificate.mjs';
@@ -17,6 +18,39 @@ function canonicalRelativePath(value) {
     && !value.endsWith('/')
     && !value.includes('\\')
     && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+}
+
+function runtimeArchiveEntry(archive, wanted) {
+  const unpacked = gunzipSync(archive, { maxOutputLength: 768 * 1024 * 1024 });
+  let offset = 0;
+  while (offset + 512 <= unpacked.length) {
+    const header = unpacked.subarray(offset, offset + 512);
+    offset += 512;
+    if (header.every(byte => byte === 0)) break;
+    const raw = header.subarray(0, 100).toString('utf8').replace(/\0/g, '');
+    const prefix = header.subarray(345, 500).toString('utf8').replace(/\0/g, '');
+    const name = (prefix ? `${prefix}/${raw}` : raw).replace(/^\.\//, '').replace(/\/$/, '');
+    const type = header[156] ?? 0;
+    const sizeText = header.subarray(124, 136).toString('utf8').replace(/\0/g, '').trim();
+    const size = sizeText ? Number.parseInt(sizeText, 8) : 0;
+    if (!Number.isSafeInteger(size) || size < 0 || offset + size > unpacked.length) {
+      throw new Error('Runtime archive contains an invalid member.');
+    }
+    if ((type === 0 || type === 0x30) && name === wanted) {
+      return Buffer.from(unpacked.subarray(offset, offset + size));
+    }
+    offset += Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`Runtime archive does not contain ${wanted}.`);
+}
+
+function exactHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
 }
 
 function certifiedProvider(certificate, provider) {
@@ -36,6 +70,8 @@ export async function prepareCatalogCoordinate({
   certificatePath,
   runtimeAsset = null,
   runtimeEntry = null,
+  runtimeFormat = 'raw',
+  runtimeUrl = null,
   repository = 'RichLogic/Gian',
 }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
@@ -84,6 +120,13 @@ export async function prepareCatalogCoordinate({
       artifactSha256: tuple.cli.sha256,
     };
   } else {
+    const runtimeCandidate = certificate.runtimeArtifacts
+      ?.find(candidate => candidate.provider === provider);
+    if (!runtimeCandidate) throw new Error(`${provider} has no certified managed Runtime artifact.`);
+    runtimeAsset = runtimeAsset ?? runtimeCandidate.asset?.name;
+    runtimeEntry = runtimeEntry ?? runtimeCandidate.entryRelativePath;
+    runtimeFormat = runtimeCandidate.format;
+    runtimeUrl = runtimeCandidate.asset?.url;
     if (!runtimeAsset) throw new Error('runtimeAsset is required for a managed CLI Runtime.');
     if (basename(runtimeAsset) !== runtimeAsset) {
       throw new Error('runtimeAsset must be a filename inside artifactDir.');
@@ -96,19 +139,35 @@ export async function prepareCatalogCoordinate({
       readFile(runtimePath),
       stat(runtimePath),
     ]);
-    const runtimeSha256 = digest(runtimeBytes);
-    if (runtimeSha256 !== tuple.cli.sha256 || runtimeInfo.size !== tuple.cli.size) {
+    if (runtimeFormat !== 'raw' && runtimeFormat !== 'tar.gz') {
+      throw new Error('runtimeFormat must be raw or tar.gz.');
+    }
+    if (runtimeUrl !== null && !exactHttpsUrl(runtimeUrl)) {
+      throw new Error('runtimeUrl must be an exact HTTPS URL without credentials, query, or fragment.');
+    }
+    const entryBytes = runtimeFormat === 'raw'
+      ? runtimeBytes
+      : runtimeArchiveEntry(runtimeBytes, runtimeEntry);
+    if (digest(entryBytes) !== tuple.cli.sha256 || entryBytes.length !== tuple.cli.size) {
       throw new Error(`${provider} Runtime asset differs from the certified CLI candidate.`);
+    }
+    const runtimeSha256 = digest(runtimeBytes);
+    if (runtimeCandidate.asset?.sha256 !== runtimeSha256
+      || runtimeCandidate.asset?.size !== runtimeInfo.size
+      || runtimeCandidate.entry?.sha256 !== tuple.cli.sha256
+      || runtimeCandidate.entry?.size !== tuple.cli.size) {
+      throw new Error(`${provider} Runtime artifact differs from the certificate.`);
     }
     runtime = {
       kind: 'native-binary',
       runtimeId: metadata.runtime.id,
       version: tuple.cli.version,
       asset: {
-        url: `${base}/${runtimeAsset}`,
+        url: runtimeUrl ?? `${base}/${runtimeAsset}`,
         sha256: runtimeSha256,
         size: runtimeInfo.size,
       },
+      format: runtimeFormat,
       entryRelativePath: runtimeEntry,
     };
   }
@@ -145,6 +204,8 @@ function parseArgs(argv) {
     certificatePath: null,
     runtimeAsset: null,
     runtimeEntry: null,
+    runtimeFormat: 'raw',
+    runtimeUrl: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -153,6 +214,8 @@ function parseArgs(argv) {
     else if (arg === '--certificate') result.certificatePath = argv[++index];
     else if (arg === '--runtime-asset') result.runtimeAsset = argv[++index];
     else if (arg === '--runtime-entry') result.runtimeEntry = argv[++index];
+    else if (arg === '--runtime-format') result.runtimeFormat = argv[++index];
+    else if (arg === '--runtime-url') result.runtimeUrl = argv[++index];
     else if (arg === '--repository') result.repository = argv[++index];
     else if (arg === '--output') result.output = argv[++index];
     else throw new Error(`Unknown Catalog coordinate argument ${arg}.`);

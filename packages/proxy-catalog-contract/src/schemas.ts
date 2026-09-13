@@ -138,6 +138,7 @@ export const managedRuntimeNativeBinarySchema = z.strictObject({
   runtimeId: catalogRuntimeIdSchema,
   version: semverSchema,
   asset: downloadAssetSchema,
+  format: z.enum(['raw', 'tar.gz']),
   entryRelativePath: relativePathSchema('Runtime entry'),
 });
 

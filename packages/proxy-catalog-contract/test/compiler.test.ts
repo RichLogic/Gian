@@ -124,6 +124,7 @@ test('compiler binds a certified managed Runtime artifact to the Proxy Manifest'
         sha256: '9'.repeat(64),
         size: 1024,
       },
+      format: 'raw',
       entryRelativePath: 'bin/fixture',
     },
     companions: [],

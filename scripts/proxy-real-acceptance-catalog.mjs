@@ -152,8 +152,8 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
     throw new Error('certification.realEvidenceMaxAgeHours must be a positive integer.');
   }
   const stages = requireRecord(certification.stages, 'certification.stages');
-  if (!sameMembers(Object.keys(stages), ['development', 'nightly', 'release'])) {
-    throw new Error('certification.stages must define development, nightly, and release.');
+  if (!sameMembers(Object.keys(stages), ['development', 'nightly', 'artifacts', 'release'])) {
+    throw new Error('certification.stages must define development, nightly, artifacts, and release.');
   }
   for (const stage of Object.keys(stages)) {
     requireStringArray(stages[stage], `certification.stages.${stage}`);

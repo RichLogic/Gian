@@ -83,6 +83,8 @@ export type ManagedRuntimeDistribution =
     runtimeId: string;
     version: string;
     asset: ManagedRuntimeDownloadAsset;
+    /** Raw executable or a gzip-compressed ustar Runtime tree. */
+    format: 'raw' | 'tar.gz';
     entryRelativePath: string;
   }
   | {

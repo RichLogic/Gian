@@ -1,0 +1,95 @@
+name: Release Signed Gian Catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      sequence:
+        description: Monotonic Catalog sequence number
+        required: true
+        type: string
+      issued_at:
+        description: Reproducible ISO-8601 issue time
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog-release
+  cancel-in-progress: false
+
+jobs:
+  publish-signed-catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify installable Catalog source
+        run: |
+          pnpm --filter @gian/shared build
+          pnpm --filter @gian/proxy-protocol build
+          pnpm --filter @gian/proxy-catalog-contract build
+          pnpm catalog:verify
+          node scripts/verify-official-catalog-release-source.mjs
+
+      - name: Compile and verify production signature
+        env:
+          GIAN_CATALOG_SIGNING_KEY_PEM: ${{ secrets.GIAN_CATALOG_SIGNING_KEY_PEM }}
+          SEQUENCE: ${{ inputs.sequence }}
+          ISSUED_AT: ${{ inputs.issued_at }}
+        run: |
+          test -n "${GIAN_CATALOG_SIGNING_KEY_PEM}"
+          node scripts/compile-official-catalog.mjs \
+            --sequence "${SEQUENCE}" \
+            --issued-at "${ISSUED_AT}" \
+            --out output/catalog-release/bundle
+          node scripts/stage-official-catalog-release.mjs \
+            --bundle output/catalog-release/bundle \
+            --output output/catalog-release/assets
+
+      - name: Create immutable Catalog tag
+        env:
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          TAG="catalog-v1.${SEQUENCE}.0"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Catalog tag already exists: ${TAG}" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${GITHUB_SHA}" -m "Signed Gian Catalog ${TAG}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Publish immutable Catalog assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEQUENCE: ${{ inputs.sequence }}
+        run: |
+          TAG="catalog-v1.${SEQUENCE}.0"
+          gh release create "${TAG}" \
+            output/catalog-release/assets/* \
+            --verify-tag \
+            --latest=false \
+            --title "Gian Catalog ${TAG}" \
+            --notes "Signed immutable Gian Proxy and Runtime Catalog."

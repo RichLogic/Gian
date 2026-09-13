@@ -53,6 +53,7 @@ function fixture() {
             runtimeId: 'claude',
             version: '2.1.159',
             asset: runtimeAsset,
+            format: 'raw',
             entryRelativePath: 'bin/claude',
           },
           companions: [],
@@ -100,7 +101,7 @@ test('trusted Catalog builds the exact managed Runtime install plan from the ins
   };
   const policy: OfficialCatalogSourcePolicy = {
     sourceId: 'gian-official',
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian',
     artifactRepositories: ['RichLogic/Gian'],
     pinnedPublicKeys: {},
   };

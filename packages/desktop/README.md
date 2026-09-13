@@ -83,15 +83,12 @@ The intended protected GitHub Actions job uses these configuration names
 - `GIAN_GITHUB_CLIENT_ID` — Actions repository variable containing the public
   GitHub OAuth Device Flow Client ID.
 
-The current `.github/workflows/release.yml` is still the legacy unsigned
-prerelease publisher and must not be used to ship the signed 0.4.3 release.
-Enabling tag-triggered signing/notarization and automatic publication to the
-public repository requires explicit authorization because that workflow will
-consume protected credentials and upload artifacts outside the development
-repository. Once authorized, it must verify manifest version, artifact URL,
-size and SHA-512; verify the App with `codesign`, `spctl`, and `stapler`; upload
-a draft; verify the uploaded assets; and only then promote a normal latest
-release. Proxy plugins remain on their independent `proxy-*-v*` workflow.
+The tag-triggered `.github/workflows/release.yml` is the signed stable
+publisher. It requires the protected Developer ID certificate and App Store
+Connect API-key secrets, runs the packaged product gate, notarizes the App,
+verifies it with `codesign`, `spctl`, and `stapler`, and only then publishes a
+normal latest Release. Proxy plugins remain on their independent
+`proxy-*-v*` workflow.
 
 Local `package:mac` and `make:mac` builds remain unsigned and do not embed the
 stable release marker, so native notification delivery and automatic updates
