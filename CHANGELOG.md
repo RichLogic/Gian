@@ -34,7 +34,7 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 - Redesigned the primary sidebar and detail panes with persistent sections,
   Project menus, task assignment, capped lists, improved History visuals, and
   consistent narrow-window navigation.
-- Updated the target shipping set to Claude Proxy 0.2.4, Codex Proxy 0.2.15,
+- Updated the target shipping set to Claude Proxy 0.2.4, Codex Proxy 0.2.16,
   Kimi Proxy 0.2.10, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
 - Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
   unavailable legacy 0.38.0 distribution.
@@ -59,6 +59,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 - DSH Catalog startup now tolerates optional Cordis services that are not
   injected, and managed Kimi Runtime qualification reuses the protected user
   configuration without replacing the user's own Kimi binary.
+- Updated the managed Codex Runtime to 0.153.4 so Gian can expose GPT-6 Astra
+  when the signed-in Codex account advertises it.
 
 ### Known limitations
 

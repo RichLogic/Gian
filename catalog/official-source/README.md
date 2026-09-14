@@ -8,7 +8,7 @@ the currently visible official Proxies:
 | Plugin ID | Product name | Version |
 |---|---|---|
 | `claude` | Claude Code | 0.2.4 |
-| `codex` | Codex | 0.2.15 |
+| `codex` | Codex | 0.2.16 |
 | `kimi` | Kimi Code | 0.2.10 |
 | `ai.deepseek.harness` | DeepSeek Harness | 0.1.6 |
 | `com.zhipu.zcode` | ZCode | 0.1.1 |

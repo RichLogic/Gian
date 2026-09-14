@@ -169,7 +169,7 @@ async function installRuntime(
 
 test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
   assert.deepEqual(buildInitializeParams(), {
-    clientInfo: { name: 'codex-proxy', version: '0.2.15' },
+    clientInfo: { name: 'codex-proxy', version: '0.2.16' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,

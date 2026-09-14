@@ -10,7 +10,7 @@ The process bridges two newline-delimited JSON protocols:
 
 Codex CLI 0.100.0 is the minimum version with the umbrella
 `codex app-server --listen stdio://` form. Gian's managed Proxy manifest
-currently recommends 0.146.0, so no version recommendation bump is required.
+currently recommends 0.153.4, which includes the GPT-6 Astra model catalog.
 
 The entry point may take an absolute managed binary path:
 

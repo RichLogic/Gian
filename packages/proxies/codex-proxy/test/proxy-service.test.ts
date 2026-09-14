@@ -1372,7 +1372,7 @@ test('gian.proxy/2 exposes Codex capacity failures as retryable turn errors', as
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.15',
+    '0.2.16',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
@@ -1651,7 +1651,7 @@ test('gian.proxy/2 accumulates Codex plan deltas into full snapshots', async () 
   const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = new CodexProtocolV2Adapter(
     harness.service,
-    '0.2.15',
+    '0.2.16',
     (method, params) => {
       notifications.push({ method, params });
       proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });

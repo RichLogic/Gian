@@ -173,7 +173,7 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.15",
+      "pluginVersion": "0.2.16",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
