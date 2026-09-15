@@ -32,6 +32,11 @@ export function assertSourceCertificate(certificate, run, manifest) {
     || run.repository?.full_name !== certificate.repository) throw new Error('Untrusted/incomplete source certificate');
   if (JSON.stringify(certificate.manifest) !== JSON.stringify(manifest)) throw new Error('Curated source differs from certified GianDev tree');
 }
+export function assertPublicSource(manifest) {
+  if (!manifest.length || manifest.some(entry => !isPublicPath(entry.path))) {
+    throw new Error('Public source is empty or contains internal files');
+  }
+}
 export function releaseAssets(directory) {
   return readdirSync(directory).filter(name => /\.(dmg|zip|blockmap)$/.test(name) || ['latest-mac.yml', 'SHA256SUMS'].includes(name)).sort().map(name => {
     const bytes = readFileSync(join(directory, name));
@@ -57,6 +62,8 @@ export function main(args = process.argv.slice(2)) {
   const [mode, ...values] = args;
   if (mode === 'source') {
     writeFileSync('source-certificate.json', JSON.stringify({ schema: 1, sha: process.env.GITHUB_SHA, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, node: process.version, repository: process.env.GITHUB_REPOSITORY, full: process.env.FULL === 'true', status: 'PASS', manifest: publicManifest() }, null, 2) + '\n');
+  } else if (mode === 'verify-public-source') {
+    assertPublicSource(publicManifest('HEAD', process.cwd(), true));
   } else if (mode === 'verify-source') {
     if (publicManifest('HEAD', process.cwd(), true).some(entry => !isPublicPath(entry.path))) throw new Error('Internal files are present in public source');
     assertSourceCertificate(json(values[0]), json(values[1]), publicManifest());

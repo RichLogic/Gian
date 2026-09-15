@@ -2,22 +2,60 @@ name: Release Gian
 
 on:
   workflow_dispatch:
-    inputs:
-      source_run_id:
-        description: Successful full CI run on GianDev main
-        required: true
-        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  macos-arm64:
+  source:
+    name: Release source / ${{ matrix.lane }}
     if: github.repository == 'RichLogic/Gian' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [policy, typecheck, build, unit, integration, system]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Verify public source boundaries
+        run: node scripts/delivery-certificate.mjs verify-public-source
+      - run: pnpm install --frozen-lockfile
+      - name: Check this release revision
+        env:
+          LANE: ${{ matrix.lane }}
+        run: |
+          if [[ "$LANE" == typecheck || "$LANE" == build ]]; then
+            pnpm "$LANE"
+          else
+            node scripts/source-gate.mjs "$LANE" HEAD full
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-source-${{ matrix.lane }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos-arm64:
+    needs: source
+    if: github.repository == 'RichLogic/Gian' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     environment: production
     runs-on: macos-15
     timeout-minutes: 120
@@ -38,18 +76,8 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Verify certified curated source
-        env:
-          GH_TOKEN: ${{ secrets.GIAN_DEV_READ_TOKEN }}
-          SOURCE_RUN: ${{ inputs.source_run_id }}
-        run: |
-          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
-          mkdir -p source-evidence
-          gh api "repos/RichLogic/Gian-Dev/actions/runs/$SOURCE_RUN" > source-evidence/run.json
-          SOURCE_SHA="$(node -p "require('./source-evidence/run.json').head_sha")"
-          SOURCE_ATTEMPT="$(node -p "require('./source-evidence/run.json').run_attempt")"
-          gh run download "$SOURCE_RUN" --repo RichLogic/Gian-Dev --name "source-certificate-$SOURCE_SHA-$SOURCE_ATTEMPT" --dir source-evidence
-          node scripts/delivery-certificate.mjs verify-source source-evidence/source-certificate.json source-evidence/run.json
+      - name: Verify public source boundaries
+        run: node scripts/delivery-certificate.mjs verify-public-source
 
       - name: Verify signed stable release configuration
         env:

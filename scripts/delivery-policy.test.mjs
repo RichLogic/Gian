@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { assertExecutionAllowed } from './execution-policy.mjs';
 import { assertHeadlessTests, requiresFullSuite } from './source-gate.mjs';
-import { assertSourceCertificate, assertDesktopAcceptance, isPublicPath, DESKTOP_CHECKS, DESKTOP_PLAN } from './delivery-certificate.mjs';
+import { assertSourceCertificate, assertPublicSource, assertDesktopAcceptance, isPublicPath, DESKTOP_CHECKS, DESKTOP_PLAN } from './delivery-certificate.mjs';
 import { allocatePorts, validatePorts } from './dev-ports.mjs';
 import { assertDevOAuthConfiguration, assertDevSigningEntitlements, devPackageConfiguration, requireDevOAuthClientId } from './dev-package-config.mjs';
 
@@ -39,6 +39,14 @@ test('source certification requires exact full main CI provenance and curated co
   assert.equal(isPublicPath('docs/secret.md'), false);
   assert.equal(isPublicPath('AGENTS.md'), false);
   assert.equal(isPublicPath('packages/host/src/index.ts'), true);
+});
+
+test('independent public release rejects empty source and every private path category', () => {
+  assert.doesNotThrow(() => assertPublicSource([{ path: 'package.json' }, { path: 'packages/host/src/index.ts' }]));
+  assert.throws(() => assertPublicSource([]), /empty or contains internal files/);
+  for (const path of ['AGENTS.md', 'docs/secret.md', 'e2e/specs/private.spec.ts', '.ai/STATE.md', '.github/workflows/ci.yml']) {
+    assert.throws(() => assertPublicSource([{ path: 'package.json' }, { path }]), /internal files/);
+  }
 });
 
 test('Dev packaging overrides production identity, signatures and feeds without losing native resources', () => {
