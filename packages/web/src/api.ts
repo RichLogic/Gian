@@ -682,6 +682,7 @@ const RUNTIME_PROGRESS_STAGES = new Set<ManagedRuntimeInstallProgress['stage']>(
   'catalog',
   'proxy',
   'runtime-discovery',
+  'runtime-plan',
   'runtime-download',
   'runtime-verify',
   'combination-verify',

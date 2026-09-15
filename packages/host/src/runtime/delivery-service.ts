@@ -119,13 +119,11 @@ export class ManagedRuntimeDeliveryService {
 
     const plan = await this.options.catalog.managedRuntimePlan(id, externalEntryPath);
     const status = await this.options.agents.managedRuntimeStatus(id);
-    if (status.active) {
-      if (status.active.generationId === plan.generationId) {
-        reportProgress(onProgress, { stage: 'activation', status: 'completed' });
-        return status.active;
-      }
-    }
     const staged = await this.options.installer.install(plan, undefined, onProgress);
+    if (status.active?.generationId === plan.generationId) {
+      reportProgress(onProgress, { stage: 'activation', status: 'completed' });
+      return status.active;
+    }
 
     if (staged.runtime) {
       reportProgress(onProgress, { stage: 'combination-verify', status: 'started' });
@@ -145,16 +143,10 @@ export class ManagedRuntimeDeliveryService {
         runtime: launch.runtime,
         selectedPath: staged.runtime.entryPath,
       });
-      try {
-        if (resolved.readinessIssue) {
-          throw new ManagedRuntimeDeliveryError(
-            resolved.readinessIssue.code,
-            resolved.readinessIssue.message,
-          );
-        }
-      } finally {
-        await resolved.lease?.release();
-      }
+      // Runtime setup must be possible before an Agent HOME/account exists.
+      // The resolver still validates the executable contract and version;
+      // a configuration readiness issue does not invalidate certified bytes.
+      await resolved.lease?.release();
       reportProgress(onProgress, { stage: 'combination-verify', status: 'completed' });
     }
 

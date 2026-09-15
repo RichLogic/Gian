@@ -95,6 +95,10 @@ export function IntegrationInstallTerminal({
         return progress.status === 'completed'
           ? `✓ ${t('agents.installTerminal.discovery.completed')}`
           : `› ${t('agents.installTerminal.discovery.started')}`;
+      case 'runtime-plan':
+        return progress.status === 'completed'
+          ? `✓ ${t('agents.installTerminal.plan.completed')}`
+          : `› ${t('agents.installTerminal.plan.started')}`;
       case 'runtime-download': {
         if (progress.status === 'completed') {
           return `✓ ${fill(t('agents.installTerminal.download.completed'), values)}`;

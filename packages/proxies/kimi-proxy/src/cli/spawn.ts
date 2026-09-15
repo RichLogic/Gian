@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { planRuntimeInstallation } from '../runtime/install.js';
 
 import { KimiProxyService } from '../core/service.js';
 import { createTaskQueue } from '../core/task-queue.js';
@@ -43,7 +44,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.10';
+  return '0.3.0';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
   if (runSelfTest(argv)) return;
   if (isRuntimeBootstrapOffer()) {
     await serveRuntimeBootstrap({
+      installPlan: planRuntimeInstallation,
       pluginId: process.env.GIAN_PLUGIN_ID ?? 'kimi',
       pluginName: 'Kimi Code',
       pluginVersion: PLUGIN_VERSION,

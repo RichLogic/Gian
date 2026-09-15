@@ -173,20 +173,20 @@ test('resolveClaudeSettingsPath skips binary executables and uses ~/.claude', ()
   }
 });
 
-test('resolveClaudeSettingsPath falls through invalid JSON to the next candidate', () => {
+test('resolveClaudeSettingsPath never borrows global models when explicit HOME settings are invalid', () => {
   const root = makeTmpDir();
   try {
     const confDir = join(root, 'env-conf');
     writeSettings(confDir, 'not json {');
     const home = join(root, 'home');
-    const expected = writeSettings(join(home, '.claude'), '{}');
+    writeSettings(join(home, '.claude'), '{"availableModels":["other-home-private-model"]}');
     assert.equal(
       resolveClaudeSettingsPath({
         env: { CLAUDE_CONFIG_DIR: confDir },
         home,
         executable: join(root, 'missing-bin'),
       }),
-      expected,
+      null,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -204,6 +204,20 @@ test('resolveClaudeSettingsPath returns null when nothing usable exists', () => 
       }),
       null,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an empty explicit Agent HOME never borrows another HOME model list', () => {
+  const root = makeTmpDir();
+  try {
+    const home = join(root, 'home');
+    writeSettings(join(home, '.claude'), '{"availableModels":["other-home-private-model"]}');
+    assert.equal(resolveClaudeSettingsPath({
+      env: { CLAUDE_CONFIG_DIR: join(root, 'empty-agent') },
+      home, executable: join(root, 'missing-bin'),
+    }), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

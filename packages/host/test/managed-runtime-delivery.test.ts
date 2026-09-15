@@ -14,8 +14,9 @@ import { ManagedRuntimeActivationService } from '../src/runtime/activation-servi
 import { ManagedRuntimeDeliveryService } from '../src/runtime/delivery-service.js';
 import { ManagedRuntimeGenerationStore } from '../src/runtime/generation-store.js';
 import { ManagedRuntimeInstaller } from '../src/runtime/installer.js';
+import { fixtureInstallPlan } from './runtime-install-fixtures.js';
 
-test('fresh delivery installs the Proxy first and owns the CLI below dataDir/runtimes', async t => {
+test('fresh delivery installs certified bytes before Agent HOME setup and owns the CLI below dataDir/runtimes', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-runtime-delivery-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const proxyEntry = join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs');
@@ -96,6 +97,7 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
     }),
   };
   const installer = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir,
     store,
     download: async (_asset, _signal, onProgress) => {
@@ -127,21 +129,22 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
           agentId: 'agent-1',
           pluginId: parseProxyPluginId('claude'),
           runtimeId: 'claude',
-          path: join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude'),
+          path: join(dataDir, 'runtimes', 'managed', 'claude', '2.1.159', runtimeSha, 'bin', 'claude'),
           version: '2.1.159',
           configHome: null,
           contentFingerprint: runtimeSha,
           verifiedVersions: ['2.1.159'],
           verification: 'verified',
         },
-        lease: { release: async () => undefined },
+        lease: null,
+        readinessIssue: { code: 'profile_missing', message: 'Configure the Agent HOME.', repairable: true },
       }),
     } as never,
   });
 
   const progress: ManagedRuntimeInstallProgress[] = [];
   const active = await service.install('claude', 'agent-1', event => progress.push(event));
-  const runtimePath = join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude');
+  const runtimePath = join(dataDir, 'runtimes', 'managed', 'claude', '2.1.159', runtimeSha, 'bin', 'claude');
   assert.equal(active.state, 'active');
   assert.equal(active.runtime?.entryPath, runtimePath);
   assert.deepEqual(await readFile(runtimePath), runtimeBytes);
@@ -152,6 +155,8 @@ test('fresh delivery installs the Proxy first and owns the CLI below dataDir/run
     'catalog:completed',
     'proxy:started',
     'proxy:completed',
+    'runtime-plan:started',
+    'runtime-plan:completed',
     'runtime-download:started',
     'runtime-download:progress',
     'runtime-download:completed',
@@ -311,6 +316,7 @@ test('ZCode delivery discovers the local App Runtime and never downloads a CLI',
     certificate: { id: 'zcode-release-1', sha256: 'c'.repeat(64) },
   };
   const installer = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir,
     store,
     download: async () => { throw new Error('ZCode Runtime must not be downloaded'); },

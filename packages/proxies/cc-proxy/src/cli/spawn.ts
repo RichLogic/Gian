@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { planRuntimeInstallation } from '../runtime/install.js';
 
 import { CcProxyService } from '../core/service.js';
 import { createTaskQueue } from '../core/task-queue.js';
@@ -44,7 +45,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.5';
+  return '0.3.0';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -76,6 +77,7 @@ async function main(): Promise<void> {
   if (runSelfTest(argv)) return;
   if (isRuntimeBootstrapOffer()) {
     await serveRuntimeBootstrap({
+      installPlan: planRuntimeInstallation,
       pluginId: process.env.GIAN_PLUGIN_ID ?? 'claude',
       pluginName: 'Claude Code',
       pluginVersion: PLUGIN_VERSION,

@@ -626,6 +626,8 @@ export const EN: Messages = {
   'agents.installTerminal.proxy.completed': 'Gian Proxy installed.',
   'agents.installTerminal.discovery.started': 'Finding the certified local Runtime…',
   'agents.installTerminal.discovery.completed': 'Certified local Runtime found.',
+  'agents.installTerminal.plan.started': 'Checking the Proxy installation recipe...',
+  'agents.installTerminal.plan.completed': 'Proxy installation recipe verified.',
   'agents.installTerminal.download.started': 'Downloading {component} {version}…',
   'agents.installTerminal.download.progress': 'Downloading {component} {version}: {percent}% ({received} / {total})',
   'agents.installTerminal.download.completed': 'Downloaded {component} {version}.',

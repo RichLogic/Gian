@@ -22,9 +22,23 @@ import { isCanonicalAbsolutePath } from '@gian/shared';
 import { pickPath } from '../pick-path.js';
 import { isCatalogDocumentKey, type CatalogService } from '../../catalog/service.js';
 import { PluginStoreError } from '../../plugin-store/errors.js';
+import { redactSensitiveText } from '../../logging/redact.js';
 
 function executor(raw: string): LegacyExecutorId | null {
   return executorIdForPluginId(raw);
+}
+
+export function integrationErrorResponse(
+  error: unknown,
+  context: { pluginId: string; operation: string; stage?: string },
+): { error: string; code?: string } {
+  const failure = errorResponse(error);
+  console.error('[integration]', JSON.stringify({
+    time: new Date().toISOString(), ...context,
+    code: failure.code ?? 'INTERNAL',
+    message: redactSensitiveText(failure.error).slice(0, 4096),
+  }));
+  return failure;
 }
 
 function errorResponse(error: unknown): { error: string; code?: string } {
@@ -114,6 +128,7 @@ function runtimeInstallProgressResponse(
 ): Response {
   const encoder = new TextEncoder();
   let open = true;
+  let stage = 'catalog';
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       const write = (frame: ManagedRuntimeInstallStreamFrame): void => {
@@ -130,12 +145,13 @@ function runtimeInstallProgressResponse(
         try { controller.close(); } catch { /* renderer disconnected */ }
       };
       void delivery.install(pluginId, agentId, progress => {
+        stage = progress.stage;
         write({ type: 'progress', progress });
       }).then(generation => {
         write({ type: 'result', generation });
         close();
       }).catch(error => {
-        const failure = errorResponse(error);
+        const failure = integrationErrorResponse(error, { pluginId, operation: 'runtime.install', stage });
         write({
           type: 'error',
           error: {
@@ -308,11 +324,12 @@ export function registerAgentRoutes(
     runtimeControl?: RuntimeControlPlane;
     runtimeDelivery?: ManagedRuntimeDeliveryService;
     closeProxy: (id: Executor) => Promise<void>;
-    capabilities: (id: Executor) => Promise<ProxyCatalog>;
+    capabilities: (id: Executor, agentId?: string) => Promise<ProxyCatalog>;
     resolveDefaultsCatalog?: (
       id: Executor,
       catalog: ProxyCatalog,
       config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
+      agentId?: string,
     ) => Promise<ProxyCatalog>;
     catalogService?: CatalogService;
     /** Test seam around the native folder picker; production uses pickPath. */
@@ -410,6 +427,7 @@ export function registerAgentRoutes(
   app.post('/api/proxies/:pluginId/runtime/install', async c => {
     if (!options.runtimeDelivery) return c.json({ error: 'managed Runtime delivery unavailable' }, 404);
     const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    let stage = 'catalog';
     try {
       parseProxyPluginId(pluginId);
       const body = await readBoundedJson(c);
@@ -430,10 +448,11 @@ export function registerAgentRoutes(
       const generation = await options.runtimeDelivery.install(
         pluginId,
         typeof agentId === 'string' ? agentId : undefined,
+        progress => { stage = progress.stage; },
       );
       return c.json({ generation });
     } catch (error) {
-      return c.json(errorResponse(error), runtimeDeliveryStatus(error));
+      return c.json(integrationErrorResponse(error, { pluginId, operation: 'runtime.install', stage }), runtimeDeliveryStatus(error));
     }
   });
 
@@ -474,7 +493,7 @@ export function registerAgentRoutes(
       const receipt = await options.catalogService.install(pluginId);
       return c.json({ receipt });
     } catch (error) {
-      return c.json(errorResponse(error), installErrorStatus(error));
+      return c.json(integrationErrorResponse(error, { pluginId, operation: 'proxy.install' }), installErrorStatus(error));
     }
   });
 
@@ -486,7 +505,7 @@ export function registerAgentRoutes(
       const receipt = await options.catalogService.update(pluginId);
       return c.json({ receipt });
     } catch (error) {
-      return c.json(errorResponse(error), installErrorStatus(error));
+      return c.json(integrationErrorResponse(error, { pluginId, operation: 'proxy.update' }), installErrorStatus(error));
     }
   });
 
@@ -635,9 +654,9 @@ export function registerAgentRoutes(
           return c.json({ error: 'defaults require an official Agent' }, 400);
         }
         const next = { ...current.defaults, ...defaultsPatch };
-        const catalog = await options.capabilities(kind);
+        const catalog = await options.capabilities(kind, id);
         const validationCatalog = options.resolveDefaultsCatalog && next.model
-          ? await options.resolveDefaultsCatalog(kind, catalog, modelConfig(catalog, next.model))
+          ? await options.resolveDefaultsCatalog(kind, catalog, modelConfig(catalog, next.model), id)
           : catalog;
         validateProxyDefaults(kind, next, defaultsPatch, validationCatalog);
         patch.defaults = defaultsPatch;

@@ -1,4 +1,5 @@
 export * from './constants.js';
+export * from './runtime-install.js';
 export * from './conformance.js';
 export * from './customization.js';
 export * from './errors.js';

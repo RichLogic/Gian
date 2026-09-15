@@ -63,7 +63,8 @@ export async function discoverDshRuntimes(): Promise<{
 }
 
 async function runVersion(path: string): Promise<string> {
-  const result = await runBoundedCommand(path, ['--version'], {
+  const script = /\.(?:c?js|mjs)$/.test(path);
+  const result = await runBoundedCommand(script ? process.execPath : path, script ? [path, '--version'] : ['--version'], {
     timeoutMs: 8_000,
     env: { ...process.env, DSH_TELEMETRY_DISABLED: '1', NO_COLOR: '1', FORCE_COLOR: '0' },
   });

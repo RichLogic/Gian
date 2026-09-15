@@ -217,6 +217,7 @@ async function main(): Promise<void> {
   agentManager.setCatalogService(catalogService);
   const runtimeInstaller = new ManagedRuntimeInstaller({
     dataDir,
+    hostVersion: releaseVersion,
     store: agentManager.managedRuntimeGenerationStore(),
     download: (asset, signal, onProgress) => downloadManagedRuntimeAsset(
       asset,
@@ -240,7 +241,8 @@ async function main(): Promise<void> {
         selectedPath: executable,
       });
       try {
-        if (resolved.readinessIssue) throw new Error(resolved.readinessIssue.message);
+        // Installation verifies executable identity, not an Agent's account
+        // or HOME configuration. Those remain Provider-owned setup concerns.
         if (!resolved.profile.version) throw new Error(`${pluginId} Runtime reported no version.`);
         return resolved.profile.version;
       } finally {

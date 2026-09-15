@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "id": "grok",
   "displayName": "Grok Build",
-  "pluginVersion": "0.3.3",
+  "pluginVersion": "0.3.4",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",

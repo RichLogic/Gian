@@ -325,6 +325,7 @@
     {
       "id": "host-process-git-runtime",
       "patterns": [
+        "packages/host/test/runtime-install-fixtures.ts",
         "packages/host/src/proxy/**",
         "packages/host/src/runtime/**",
         "packages/host/src/term/**",

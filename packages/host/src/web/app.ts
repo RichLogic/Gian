@@ -448,8 +448,17 @@ export function createApp(ctx: AppContext): AppHandle {
       ...(runtimeDelivery ? { runtimeDelivery } : {}),
       closeProxy: executor => proxy.closeByExecutor(executor),
       ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}),
-      capabilities: executor => sessions.warmCapabilities(executor),
-      resolveDefaultsCatalog: async (executor, catalog, config) => {
+      capabilities: async (executor, agentId) => agentId
+        ? (await sessions.agentCapabilities(executor, agentId)).catalog
+        : sessions.warmCapabilities(executor),
+      resolveDefaultsCatalog: async (executor, catalog, config, agentId) => {
+        if (agentId) {
+          const scoped = await sessions.agentCapabilities(executor, agentId);
+          if (scoped.capabilities['catalog.resolve'] === undefined) return scoped.catalog;
+          return sessions.resolveAgentCatalog(executor, agentId, {
+            catalogRevision: scoped.catalog.catalogRevision, ...config,
+          });
+        }
         if (sessions.getProtocolCapabilities(executor)?.['catalog.resolve'] === undefined) {
           return catalog;
         }

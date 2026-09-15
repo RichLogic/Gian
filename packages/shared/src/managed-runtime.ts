@@ -117,6 +117,7 @@ export type ManagedRuntimeInstallProgressStage =
   | 'catalog'
   | 'proxy'
   | 'runtime-discovery'
+  | 'runtime-plan'
   | 'runtime-download'
   | 'runtime-verify'
   | 'combination-verify'

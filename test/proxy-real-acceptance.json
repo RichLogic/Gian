@@ -31,6 +31,7 @@
     "session.fork": "sessionForkResultSchema",
     "runtime.discover": "runtimeDiscoverResultSchema",
     "runtime.probe": "runtimeProbeResultSchema",
+    "runtime.install.plan": "runtimeInstallPlanResultSchema",
     "customization.list": "customizationListResultSchema",
     "customization.detail": "customizationDetailResultSchema",
     "turn.start": "turnStartResultSchema",
@@ -131,7 +132,7 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.2.5",
+      "pluginVersion": "0.3.0",
       "processScope": "session",
       "binary": "~/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -173,7 +174,7 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.2.16",
+      "pluginVersion": "0.3.0",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
@@ -221,7 +222,7 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.2.10",
+      "pluginVersion": "0.3.0",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -262,7 +263,7 @@
     },
     "grok": {
       "displayName": "Grok Build",
-      "pluginVersion": "0.3.3",
+      "pluginVersion": "0.3.4",
       "processScope": "session",
       "binary": "grok",
       "cheapestConfig": {
@@ -307,7 +308,7 @@
     "dsh": {
       "displayName": "DeepSeek Harness",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.7",
+      "pluginVersion": "0.3.0",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
@@ -347,7 +348,7 @@
     "zcode": {
       "displayName": "ZCode",
       "pluginId": "com.zhipu.zcode",
-      "pluginVersion": "0.1.2",
+      "pluginVersion": "0.3.0",
       "processScope": "shared",
       "binary": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       "interactionDelayMs": 25000,
@@ -695,13 +696,14 @@
       "category": "runtime",
       "trigger": "control",
       "purpose": "Validate the Manifest v4 no-Runtime bootstrap and Proxy-owned runtime discovery/probe contract without creating a Provider Session.",
-      "methods": ["runtime.discover", "runtime.probe"],
+      "methods": ["runtime.discover", "runtime.probe", "runtime.install.plan"],
       "notifications": [],
       "steps": [
         "start packaged Proxy with the Host bootstrap marker",
         "initialize at exact gian.proxy/2.2",
         "discover bounded Runtime candidates",
         "probe one candidate and verify the echoed path/profile",
+        "request installer v1 recipe and verify bounded layout plus exact certified identity",
         "shutdown without creating a Session"
       ],
       "providers": {

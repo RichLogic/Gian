@@ -446,9 +446,9 @@ function readFileHead(path: string, maxBytes: number): Buffer | null {
  *   b. a CLAUDE_CONFIG_DIR assignment inside the configured CLI when that CLI
  *      is a text wrapper script (binary executables are skipped),
  *   c. `~/.claude/settings.json`.
- * The first candidate that exists and parses as JSON wins; anything failing
- * silently falls through so discovery can never crash the proxy. Returns
- * null when no usable settings file is found.
+ * An explicit CLAUDE_CONFIG_DIR is authoritative: a missing or invalid
+ * settings file there must not borrow another Agent's global models.
+ * Only legacy, unscoped discovery falls through wrapper/global candidates.
  */
 export function resolveClaudeSettingsPath(options?: {
   env?: NodeJS.ProcessEnv;
@@ -464,7 +464,14 @@ export function resolveClaudeSettingsPath(options?: {
   const fromEnv = env.CLAUDE_CONFIG_DIR?.trim();
   if (fromEnv) {
     const expanded = expandHome(fromEnv, home);
-    if (isAbsolute(expanded)) candidates.push(join(expanded, 'settings.json'));
+    if (!isAbsolute(expanded)) return null;
+    const path = join(expanded, 'settings.json');
+    try {
+      JSON.parse(readFileSync(path, 'utf8'));
+      return path;
+    } catch {
+      return null;
+    }
   }
 
   const head = readFileHead(executable, SCRIPT_PROBE_BYTES);

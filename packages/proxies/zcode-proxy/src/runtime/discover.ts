@@ -56,7 +56,7 @@ export async function discoverZcodeRuntimes(): Promise<{
 }
 
 async function runVersion(path: string): Promise<string> {
-  const result = await runBoundedCommand(path, ['--version'], { timeoutMs: 10_000 });
+  const result = await runBoundedCommand(process.execPath, [path, '--version'], { timeoutMs: 10_000 });
   const version = firstVersion(`${result.stdout}\n${result.stderr}`);
   if (!version) throw new Error('`zcode --version` did not report a semantic version');
   return version;

@@ -9,6 +9,14 @@ import {
   RUNTIME_BOOTSTRAP_VALUE,
 } from './constants.js';
 import type { RuntimeDiscoverResult, RuntimeProbeResult } from './schemas.js';
+import { BoundedCommandError } from './bounded-command.js';
+import { redactSensitiveProtocolText } from './redact.js';
+import {
+  runtimeInstallPlanParamsSchema,
+  runtimeInstallPlanResultSchema,
+  type RuntimeInstallPlanParams,
+  type RuntimeInstallPlanResult,
+} from './runtime-install.js';
 
 export function isRuntimeBootstrapOffer(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[RUNTIME_BOOTSTRAP_ENV] === RUNTIME_BOOTSTRAP_VALUE;
@@ -21,6 +29,7 @@ export interface RuntimeBootstrapServerOptions {
   processScope: 'shared' | 'session';
   discover: () => Promise<RuntimeDiscoverResult>;
   probe: (path: string) => Promise<RuntimeProbeResult>;
+  installPlan?: (params: RuntimeInstallPlanParams) => RuntimeInstallPlanResult | Promise<RuntimeInstallPlanResult>;
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
 }
@@ -84,7 +93,10 @@ export async function serveRuntimeBootstrap(options: RuntimeBootstrapServerOptio
               version: options.pluginVersion,
             },
             process: { scope: options.processScope },
-            capabilities: { 'runtime.discover': 1, 'runtime.probe': 1 },
+            capabilities: {
+              'runtime.discover': 1, 'runtime.probe': 1,
+              ...(options.installPlan ? { 'runtime.install.plan': 1 } : {}),
+            },
           },
         });
         continue;
@@ -123,6 +135,19 @@ export async function serveRuntimeBootstrap(options: RuntimeBootstrapServerOptio
         });
         continue;
       }
+      if (method === 'runtime.install.plan' && options.installPlan) {
+        const parsed = runtimeInstallPlanParamsSchema.safeParse(params);
+        if (!parsed.success) {
+          throw Object.assign(new Error('Invalid Runtime installation plan request.'), {
+            rpcCode: JSONRPC_ERROR_CODES.INVALID_PARAMS,
+          });
+        }
+        writeLine(stdout, {
+          jsonrpc: JSONRPC_VERSION, id,
+          result: runtimeInstallPlanResultSchema.parse(await options.installPlan(parsed.data)),
+        });
+        continue;
+      }
       if (method === 'shutdown') {
         writeLine(stdout, { jsonrpc: JSONRPC_VERSION, id, result: { ok: true } });
         input.close();
@@ -144,7 +169,9 @@ export async function serveRuntimeBootstrap(options: RuntimeBootstrapServerOptio
           code: typeof (error as { rpcCode?: unknown }).rpcCode === 'number'
             ? (error as { rpcCode: number }).rpcCode
             : JSONRPC_ERROR_CODES.INTERNAL_ERROR,
-          message: error instanceof Error ? error.message : String(error),
+          message: redactSensitiveProtocolText(error instanceof BoundedCommandError
+            ? `${error.message}: ${error.stderr.trim().slice(0, 2048)}`
+            : error instanceof Error ? error.message : String(error)),
         },
       });
     }

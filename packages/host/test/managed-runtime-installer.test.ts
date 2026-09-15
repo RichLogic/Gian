@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,8 @@ import type { ManagedRuntimeInstallPlan } from '@gian/shared';
 import { ManagedRuntimeGenerationStore } from '../src/runtime/generation-store.js';
 import { ManagedRuntimeInstallError, ManagedRuntimeInstaller } from '../src/runtime/installer.js';
 import { extractManagedRuntimeArchive } from '../src/runtime/safe-extract.js';
+import { fixtureInstallPlan } from './runtime-install-fixtures.js';
+import { createRuntimeInstallPlanner } from '@gian/proxy-protocol';
 
 async function executable(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -114,6 +116,7 @@ test('native binary install verifies bytes and stages an immutable generation', 
   const store = new ManagedRuntimeGenerationStore(root);
   await store.initialize();
   const installer = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir: root,
     store,
     download: async asset => {
@@ -125,7 +128,7 @@ test('native binary install verifies bytes and stages an immutable generation', 
   const installed = await installer.install(input);
   assert.equal(installed.state, 'staged');
   assert.equal(installed.runtime?.ownership, 'managed');
-  assert.equal(installed.runtime?.entryPath, join(root, 'runtimes', 'claude', '2.1.159', 'bin', 'claude'));
+  assert.equal(installed.runtime?.entryPath, join(root, 'runtimes', 'managed', 'claude', '2.1.159', createHash('sha256').update(bytes).digest('hex'), 'bin', 'claude'));
   assert.deepEqual(await readFile(installed.runtime!.entryPath), bytes);
   assert.equal((await store.list('claude'))[0]?.generationId, input.generationId);
 
@@ -150,6 +153,7 @@ test('managed Runtime tar.gz installs the complete tree and probes its declared 
   await store.initialize();
   let probed: string | null = null;
   const installer = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir: root,
     store,
     download: async () => archive,
@@ -160,15 +164,15 @@ test('managed Runtime tar.gz installs the complete tree and probes its declared 
   });
 
   const installed = await installer.install(input);
-  const versionRoot = join(root, 'runtimes', 'claude', '2.1.159');
+  const versionRoot = join(root, 'runtimes', 'managed', 'claude', '2.1.159', createHash('sha256').update(archive).digest('hex'));
   assert.equal(installed.runtime?.entryPath, join(versionRoot, 'bin', 'claude'));
-  assert.equal(probed, join(root, 'runtimes', 'claude', expectStagingSegment(probed), 'bin', 'claude'));
+  assert.equal(probed, join(root, 'runtimes', expectStagingSegment(probed), 'bin', 'claude'));
   assert.deepEqual(await readFile(join(versionRoot, 'bin', 'claude')), entry);
   assert.deepEqual(await readFile(join(versionRoot, 'lib', 'support.txt')), support);
 });
 
 function expectStagingSegment(path: string | null): string {
-  const match = /\/runtimes\/claude\/(\.staging-[^/]+)\/bin\/claude$/u.exec(path ?? '');
+  const match = /\/runtimes\/(\.staging-[^/]+)\/bin\/claude$/u.exec(path ?? '');
   assert.ok(match?.[1], 'Runtime entry must be probed from the staging generation');
   return match[1];
 }
@@ -196,6 +200,7 @@ test('digest and version mismatches never publish a generation', async t => {
   const store = new ManagedRuntimeGenerationStore(root);
   await store.initialize();
   const badDigest = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir: root,
     store,
     download: async () => Buffer.from('different bytes'),
@@ -209,6 +214,7 @@ test('digest and version mismatches never publish a generation', async t => {
   assert.deepEqual(await store.list('claude'), []);
 
   const wrongVersion = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir: root,
     store,
     download: async () => bytes,
@@ -231,6 +237,7 @@ test('install plans reject untrusted URLs and executable paths', async t => {
   const store = new ManagedRuntimeGenerationStore(root);
   await store.initialize();
   const installer = new ManagedRuntimeInstaller({
+    planInstallation: fixtureInstallPlan,
     dataDir: root,
     store,
     download: async () => { throw new Error('must not download'); },
@@ -243,4 +250,131 @@ test('install plans reject untrusted URLs and executable paths', async t => {
     (error: unknown) => error instanceof ManagedRuntimeInstallError
       && error.code === 'RUNTIME_PLAN_INVALID',
   );
+});
+
+test('new Proxy generation reuses a fully verified Runtime without another download', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-reuse-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.from('certified runtime');
+  const input = plan(root, bytes);
+  await executable(input.proxy.entryPath);
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  let downloads = 0;
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root, store, planInstallation: fixtureInstallPlan,
+    download: async () => { downloads++; return bytes; },
+    probeVersion: async ({ expectedVersion }) => expectedVersion,
+  });
+  const first = await installer.install(input);
+  const second = await installer.install({
+    ...input, generationId: 'claude-generation-2', proxy: { ...input.proxy, pluginVersion: '0.3.0' },
+  });
+  assert.equal(downloads, 1);
+  assert.equal(first.runtime?.entryPath, second.runtime?.entryPath);
+  await writeFile(second.runtime!.entryPath, 'tampered');
+  await assert.rejects(installer.install(input), /different|already exists|conflict/i);
+});
+
+test('DSH legacy launcher is preserved and certified legacy dependency tree is reused', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-dsh-legacy-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = 'node_modules/@deepseek-ai/dsh/lib/bin.js';
+  const archive = gzipUstar(new Map([[entry, Buffer.from('runtime')], ['node_modules/dependency/index.js', Buffer.from('dependency')]]));
+  const input = plan(root, archive);
+  input.pluginId = 'ai.deepseek.harness';
+  if (input.runtime?.kind !== 'native-binary') throw new Error('fixture');
+  Object.assign(input.runtime, { runtimeId: 'dsh', version: '0.1.1-rc.2', format: 'tar.gz', entryRelativePath: entry });
+  await executable(input.proxy.entryPath);
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const legacy = join(root, 'runtimes/deepseek-harness/runtimes/deepseek-harness/0.1.1-rc.2');
+  await mkdir(legacy, { recursive: true });
+  await extractManagedRuntimeArchive(archive, legacy);
+  const wrapper = '#!/bin/sh\nexec old-managed-dsh "$@"\n';
+  await writeFile(join(root, 'runtimes/dsh'), wrapper);
+  const planner = createRuntimeInstallPlanner({
+    runtimeId: 'dsh', kind: 'managed', format: 'tar.gz', entryRelativePath: entry,
+    legacyDirectories: version => [`deepseek-harness/runtimes/deepseek-harness/${version}`],
+  });
+  let downloads = 0;
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root, store, planInstallation: async (_plan, request) => planner(request),
+    download: async () => { downloads++; return archive; },
+    probeVersion: async ({ expectedVersion }) => expectedVersion,
+  });
+  const result = await installer.install(input);
+  assert.equal(result.runtime?.entryPath, join(legacy, entry));
+  assert.equal(await readFile(join(root, 'runtimes/dsh'), 'utf8'), wrapper);
+  await installer.install({ ...input, generationId: 'dsh-next-proxy' });
+  assert.equal(downloads, 1);
+});
+
+test('recipe traversal, identity drift and directory symlinks are rejected before writes', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-recipe-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.from('runtime');
+  const input = plan(root, bytes);
+  await executable(input.proxy.entryPath);
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const make = (alter: (value: Awaited<ReturnType<typeof fixtureInstallPlan>>) => unknown) => new ManagedRuntimeInstaller({
+    dataDir: root, store,
+    planInstallation: async (plan, request) => alter(await fixtureInstallPlan(plan, request)) as never,
+    download: async () => bytes, probeVersion: async ({ expectedVersion }) => expectedVersion,
+  });
+  await assert.rejects(make(value => ({ ...value, runtimeId: 'other' })).install(input), /identity/);
+  await assert.rejects(make(value => ({ ...value, operation: { ...value.operation, directory: '../escape' } })).install(input));
+  const outside = await mkdtemp(join(tmpdir(), 'gian-runtime-outside-'));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await symlink(outside, join(root, 'runtimes', 'managed'));
+  await assert.rejects(make(value => value).install(input), /symlink/);
+});
+
+test('an old Proxy without installer v1 fails explicitly before any Runtime download', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-old-installer-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const input = plan(root, Buffer.from('runtime'));
+  await executable(input.proxy.entryPath);
+  const bootstrap = new URL('../../proxy-protocol/dist/src/node.js', import.meta.url).href;
+  await writeFile(input.proxy.entryPath, `
+    import { serveRuntimeBootstrap } from ${JSON.stringify(bootstrap)};
+    await serveRuntimeBootstrap({
+      pluginId: 'claude', pluginName: 'Claude', pluginVersion: '0.2.4', processScope: 'session',
+      discover: async () => ({ candidates: [], setupActions: [] }),
+      probe: async () => { throw new Error('must not probe'); },
+    });
+  `);
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root, store,
+    download: async () => { throw new Error('must not download'); },
+    probeVersion: async () => { throw new Error('must not probe'); },
+  });
+  await assert.rejects(installer.install(input), (error: unknown) => (
+    error instanceof ManagedRuntimeInstallError && error.code === 'RUNTIME_INSTALLER_UNSUPPORTED'
+  ));
+});
+
+test('a version probe cannot bless mutated Runtime bytes with a certified receipt', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-probe-mutation-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.from('certified');
+  const input = plan(root, bytes);
+  await executable(input.proxy.entryPath);
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root, store, planInstallation: fixtureInstallPlan,
+    download: async () => bytes,
+    probeVersion: async ({ executable: path, expectedVersion }) => {
+      await writeFile(path, 'mutated');
+      return expectedVersion;
+    },
+  });
+  await assert.rejects(installer.install(input), (error: unknown) => (
+    error instanceof ManagedRuntimeInstallError && error.code === 'RUNTIME_MUTATED'
+  ));
+  assert.deepEqual(await store.list('claude'), []);
 });

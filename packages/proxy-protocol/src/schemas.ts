@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 
 import { z } from 'zod';
+import { runtimeInstallPlanParamsSchema, runtimeInstallPlanResultSchema } from './runtime-install.js';
 
 import {
   ACTIVITY_STATUSES,
@@ -854,6 +855,7 @@ export const proxyRequestSchema = z.discriminatedUnion('method', [
   requestSchema('session.fork', sessionForkParamsSchema),
   requestSchema('runtime.discover', runtimeDiscoverParamsSchema),
   requestSchema('runtime.probe', runtimeProbeParamsSchema),
+  requestSchema('runtime.install.plan', runtimeInstallPlanParamsSchema),
   requestSchema('customization.list', customizationListParamsSchema),
   requestSchema('customization.detail', customizationDetailParamsSchema),
 ]);
@@ -1405,6 +1407,7 @@ export const resultSchemas = {
   'session.fork': sessionForkResultSchema,
   'runtime.discover': runtimeDiscoverResultSchema,
   'runtime.probe': runtimeProbeResultSchema,
+  'runtime.install.plan': runtimeInstallPlanResultSchema,
   'customization.list': customizationListResultSchema,
   'customization.detail': customizationDetailResultSchema,
 } as const;

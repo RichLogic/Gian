@@ -122,6 +122,7 @@ describe('Proxy Runtime API (discover/probe)', () => {
     const generation = { generationId: 'generation-1', pluginId: 'io.acme.external' };
     const source = [
       JSON.stringify({ type: 'progress', progress: { stage: 'catalog', status: 'started' } }),
+      JSON.stringify({ type: 'progress', progress: { stage: 'runtime-plan', status: 'started' } }),
       JSON.stringify({
         type: 'progress',
         progress: {
@@ -153,6 +154,7 @@ describe('Proxy Runtime API (discover/probe)', () => {
     expect(result.generationId).toBe('generation-1');
     expect(progress).toEqual([
       { stage: 'catalog', status: 'started' },
+      { stage: 'runtime-plan', status: 'started' },
       { stage: 'runtime-download', status: 'progress' },
     ]);
   });

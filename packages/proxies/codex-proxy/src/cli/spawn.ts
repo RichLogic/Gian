@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { planRuntimeInstallation } from '../runtime/install.js';
 import { createTaskQueue } from '../core/task-queue.js';
 import { CodexProxyService } from '../core/service.js';
 import { CodexProtocolV2Adapter } from '../protocol/v2-adapter.js';
@@ -41,7 +42,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.2.16';
+  return '0.3.0';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
   if (runSelfTest(argv)) return;
   if (isRuntimeBootstrapOffer()) {
     await serveRuntimeBootstrap({
+      installPlan: planRuntimeInstallation,
       pluginId: process.env.GIAN_PLUGIN_ID ?? 'codex',
       pluginName: 'Codex',
       pluginVersion: PLUGIN_VERSION,

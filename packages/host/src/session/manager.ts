@@ -17,13 +17,14 @@ import type {
   TraceSnapshot,
   UserAgent,
 } from '@gian/shared';
-import { isApprovalMode, sessionRuntimeCliPath } from '@gian/shared';
+import { isApprovalMode, sessionRuntimeCliPath, resolvePluginIdInput } from '@gian/shared';
 import type { SessionBindingPlanner } from './binding-planner.js';
 import { agentMatchesSessionKind, pluginIdForSessionIdentity } from './compatibility-executor.js';
 import { existsSync } from 'node:fs';
 import { ensureSessionAttachmentDir } from '../storage/attachments.js';
 import type { Db } from '../storage/db.js';
 import type { ProxyManager } from '../proxy/manager.js';
+import { normalizeProtocolCatalog } from '../proxy/protocol-v2-session-client.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { ApprovalManager } from '../approval/index.js';
 import type { QueueManager } from '../queue/index.js';
@@ -1503,6 +1504,34 @@ export class SessionManager {
       ? cliPath
       : this.agentResolver?.cliPathForKind(executor) ?? null;
     return this.proxySessions.warmCapabilities(executor, path);
+  }
+
+  /** Agent inspection uses the same exact generation and HOME as its next
+   * Session, never the kind/CLI-only legacy capability cache. */
+  async agentCapabilities(pluginId: string, agentId: string): Promise<{
+    catalog: import('@gian/shared').ProxyCatalog;
+    capabilities: Record<string, unknown>;
+  }> {
+    const borrowed = await this.proxy.acquireInspectionHost(resolvePluginIdInput(pluginId) ?? pluginId, { agentId });
+    try {
+      const initialized = await borrowed.host.initialize();
+      return { catalog: await borrowed.host.catalog(), capabilities: initialized.capabilities };
+    } finally {
+      await borrowed.release();
+    }
+  }
+
+  async resolveAgentCatalog(
+    pluginId: string,
+    agentId: string,
+    params: { catalogRevision: string; sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
+  ): Promise<ResolvedProxyCatalog> {
+    const borrowed = await this.proxy.acquireInspectionHost(resolvePluginIdInput(pluginId) ?? pluginId, { agentId });
+    try {
+      return normalizeProtocolCatalog(await borrowed.host.request<ResolvedProxyCatalog>('catalog.resolve', params));
+    } finally {
+      await borrowed.release();
+    }
   }
 
   /** Slash commands for an executor. With cwd, includes project-level. */

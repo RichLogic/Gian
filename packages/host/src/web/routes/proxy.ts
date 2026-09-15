@@ -24,7 +24,7 @@ export function registerProxyRoutes(
     c: { req: { query: (name: string) => string | undefined } },
     pluginId: string,
   ):
-    | { cliPath: string | null | undefined }
+    | { cliPath: string | null | undefined; agentId?: string }
     | { error: string } => {
     const agentId = c.req.query('agent');
     if (agentId === undefined) return { cliPath: undefined };
@@ -34,7 +34,7 @@ export function registerProxyRoutes(
       if (resolvePluginIdInput(agent.pluginId) !== pluginId) {
         return { error: `agent ${agentId} does not use ${pluginId}` };
       }
-      return { cliPath: agent.cliPath };
+      return { cliPath: agent.cliPath, agentId };
     } catch {
       return { error: `agent not found: ${agentId}` };
     }
@@ -47,6 +47,10 @@ export function registerProxyRoutes(
     if ('error' in target) return c.json({ error: target.error }, 404);
     const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
     try {
+      if (target.agentId) {
+        const scoped = await sessions.agentCapabilities(executor, target.agentId);
+        return c.json({ ...scoped.catalog, capabilities: scoped.capabilities });
+      }
       const catalog = await sessions.warmCapabilities(executor, cliPath);
       return c.json({
         ...catalog,
@@ -75,6 +79,7 @@ export function registerProxyRoutes(
       return c.json({ error: 'catalogRevision is required' }, 400);
     }
     let cliPath: string | null | undefined;
+    let agentId: string | undefined;
     if (typeof body.sessionId === 'string') {
       const session = db.prepare(
         'SELECT executor, proxy_plugin_id, agent_id FROM sessions WHERE id = ?',
@@ -103,6 +108,26 @@ export function registerProxyRoutes(
       const target = agentCliPath(c, executor);
       if ('error' in target) return c.json({ error: target.error }, 404);
       cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
+      agentId = target.agentId;
+    }
+    if (agentId) {
+      try {
+        const scoped = await sessions.agentCapabilities(executor, agentId);
+        if (scoped.capabilities['catalog.resolve'] === undefined) {
+          return c.json({ error: 'catalog.resolve is not advertised' }, 404);
+        }
+        const map = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+          ? value as Record<string, string | boolean | number | null> : {};
+        return c.json(await sessions.resolveAgentCatalog(executor, agentId, {
+          catalogRevision: body.catalogRevision,
+          sessionConfig: map(body.sessionConfig), turnConfig: map(body.turnConfig),
+        }));
+      } catch (error) {
+        if (error instanceof ProxyProtocolError && error.code === 'CONFIG_VALUE_INVALID') {
+          return c.json({ error: error.message, domainCode: error.code }, 400);
+        }
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+      }
     }
     try {
       await sessions.warmCapabilities(executor, cliPath);
@@ -147,7 +172,9 @@ export function registerProxyRoutes(
     if ('error' in target) return c.json({ error: target.error }, 404);
     const cliPath = c.req.query('agent') !== undefined ? target.cliPath : undefined;
     try {
-      const catalog = await sessions.warmCapabilities(executor, cliPath);
+      const catalog = target.agentId
+        ? (await sessions.agentCapabilities(executor, target.agentId)).catalog
+        : await sessions.warmCapabilities(executor, cliPath);
       const modelOption = catalog.configOptions.find((option) => option.role === 'model');
       return c.json({
         models: (modelOption?.choices ?? []).map((choice) => ({
@@ -177,6 +204,10 @@ export function registerProxyRoutes(
           | undefined
       : undefined;
     try {
+      if (target.agentId) {
+        const scoped = await sessions.agentCapabilities(executor, target.agentId);
+        return c.json({ commands: scoped.catalog.slashCommands });
+      }
       return c.json(await sessions.listSlashCommands(executor, workspace?.path, cliPath));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);

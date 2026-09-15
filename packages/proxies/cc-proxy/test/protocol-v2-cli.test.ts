@@ -61,7 +61,7 @@ test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime versio
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'claude');
-  assert.equal(result.plugin.version, '0.2.5');
+  assert.equal(result.plugin.version, '0.3.0');
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);

@@ -296,6 +296,7 @@ export const PROXY_METHODS = [
   'interaction.respond',
   'runtime.discover',
   'runtime.probe',
+  'runtime.install.plan',
   'customization.list',
   'customization.detail',
   'session.close',

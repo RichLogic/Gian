@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { runtimeInstallPlanResultSchema, type RuntimeInstallPlanParams, type RuntimeInstallPlanResult } from '@gian/proxy-protocol';
 import {
   isCanonicalAbsolutePath,
   parseProxyPluginId,
@@ -14,6 +16,9 @@ import { fsyncDirectory } from '../catalog/atomic.js';
 import { ManagedRuntimeInstallError } from './errors.js';
 import { ManagedRuntimeGenerationStore } from './generation-store.js';
 import { extractManagedRuntimeArchive } from './safe-extract.js';
+import { runRuntimeBootstrap } from './bootstrap.js';
+import { acquireAgentUpdateLock } from '../agents/update-lock.js';
+import { ownedRuntimeDirectory, recordRuntimeArtifact, runtimeFileInventory, sameRuntimeTree, verifiedRuntimeReuse } from './artifact-reuse.js';
 
 export { ManagedRuntimeInstallError } from './errors.js';
 
@@ -88,6 +93,8 @@ export class ManagedRuntimeInstaller {
   constructor(private readonly options: {
     dataDir: string;
     store: ManagedRuntimeGenerationStore;
+    hostVersion?: string;
+    planInstallation?: (plan: ManagedRuntimeInstallPlan, input: RuntimeInstallPlanParams) => Promise<RuntimeInstallPlanResult>;
     download: (
       asset: Extract<ManagedRuntimeDistribution, { kind: 'native-binary' }>['asset'],
       signal?: AbortSignal,
@@ -104,6 +111,21 @@ export class ManagedRuntimeInstaller {
   }
 
   async install(
+    plan: ManagedRuntimeInstallPlan,
+    signal?: AbortSignal,
+    onProgress?: ProgressReporter,
+  ): Promise<ManagedRuntimeGeneration> {
+    const lease = await acquireAgentUpdateLock(
+      this.options.dataDir, `runtime-install-${parseProxyPluginId(plan.pluginId)}`, 'Runtime installation',
+    );
+    try {
+      return await this.installWithClaim(plan, signal, onProgress);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private async installWithClaim(
     plan: ManagedRuntimeInstallPlan,
     signal?: AbortSignal,
     onProgress?: ProgressReporter,
@@ -137,7 +159,7 @@ export class ManagedRuntimeInstaller {
           && existing.companions[index]?.version === companion.distribution.version
           && existing.companions[index]?.artifactSha256 === companion.distribution.asset.sha256
         ));
-      if (
+      if (!(
         existing.proxy.pluginVersion === plan.proxy.pluginVersion
         && existing.proxy.manifestSha256 === plan.proxy.manifestSha256
         && existing.proxy.artifactSha256 === plan.proxy.artifactSha256
@@ -148,20 +170,19 @@ export class ManagedRuntimeInstaller {
         && existing.certificate.sha256 === plan.certificate.sha256
         && runtimeMatches
         && companionsMatch
-      ) return existing;
-      throw new ManagedRuntimeInstallError(
+      )) throw new ManagedRuntimeInstallError(
         'RUNTIME_GENERATION_CONFLICT',
         'Runtime generation id already belongs to a different certified plan.',
       );
     }
 
     const runtime = plan.runtime
-      ? await this.installDistribution(pluginId, plan.runtime, signal, onProgress)
+      ? await this.installDistribution(plan, plan.runtime, signal, onProgress)
       : null;
     const companions = [];
     for (const companion of plan.companions) {
       const installed = await this.installDistribution(
-        pluginId,
+        plan,
         companion.distribution,
         signal,
         onProgress,
@@ -189,28 +210,64 @@ export class ManagedRuntimeInstaller {
       installedAt: new Date().toISOString(),
       activatedAt: null,
     };
+    if (existing) {
+      if (!isDeepStrictEqual(existing.runtime, runtime) || !isDeepStrictEqual(existing.companions, companions)) {
+        throw new ManagedRuntimeInstallError('RUNTIME_GENERATION_CONFLICT', 'Existing generation paths differ from the verified installation.');
+      }
+      return existing;
+    }
     return this.options.store.stage(generation);
   }
 
   private async installDistribution(
-    pluginId: string,
+    plan: ManagedRuntimeInstallPlan,
     distribution: ManagedRuntimeDistribution,
     signal?: AbortSignal,
     onProgress?: ProgressReporter,
   ): Promise<NonNullable<ManagedRuntimeGeneration['runtime']>> {
+    const pluginId = plan.pluginId;
+    reportProgress(onProgress, { stage: 'runtime-plan', status: 'started', componentId: distribution.runtimeId, version: distribution.version });
+    const input: RuntimeInstallPlanParams = {
+      installerVersion: 1,
+      runtimeId: distribution.runtimeId,
+      version: distribution.version,
+      artifactSha256: distribution.kind === 'native-binary' ? distribution.asset.sha256 : distribution.artifactSha256,
+      platform: plan.platform,
+      distribution: distribution.kind === 'native-binary'
+        ? { kind: 'managed', format: distribution.format, entryRelativePath: distribution.entryRelativePath }
+        : { kind: 'external-app', entryPath: distribution.entryPath },
+    };
+    const proposed = this.options.planInstallation
+      ? await this.options.planInstallation(plan, input)
+      : await runRuntimeBootstrap({
+          entryPath: plan.proxy.entryPath, pluginId, pluginVersion: plan.proxy.pluginVersion,
+          processScope: plan.proxy.processScope, dataDir: join(this.options.dataDir, 'runtime-install-probes'),
+          hostVersion: this.options.hostVersion ?? '0.0.0',
+        }, async client => {
+          const initialized = await client.initialize();
+          if (initialized.capabilities['runtime.install.plan'] !== 1) {
+            throw new ManagedRuntimeInstallError(
+              'RUNTIME_INSTALLER_UNSUPPORTED', 'This Proxy does not support Runtime installer v1. Update the Proxy before installing its Runtime.',
+            );
+          }
+          return client.request<RuntimeInstallPlanResult>('runtime.install.plan', input);
+        });
+    const recipe = runtimeInstallPlanResultSchema.parse(proposed);
+    if (recipe.runtimeId !== input.runtimeId || recipe.version !== input.version
+      || recipe.artifactSha256 !== input.artifactSha256) {
+      throw new ManagedRuntimeInstallError('RUNTIME_PLAN_INVALID', 'Proxy changed the certified Runtime identity.');
+    }
+    reportProgress(onProgress, { stage: 'runtime-plan', status: 'completed', componentId: distribution.runtimeId, version: distribution.version });
     if (distribution.kind === 'external-app') {
+      if (recipe.operation.kind !== 'external-app' || recipe.operation.entryPath !== distribution.entryPath) {
+        throw new ManagedRuntimeInstallError('RUNTIME_PLAN_INVALID', 'Proxy changed the external Runtime entry.');
+      }
       reportProgress(onProgress, {
         stage: 'runtime-verify',
         status: 'started',
         componentId: distribution.runtimeId,
         version: distribution.version,
       });
-      if (pluginId !== 'zcode' && pluginId !== 'com.zhipu.zcode') {
-        throw new ManagedRuntimeInstallError(
-          'RUNTIME_EXTERNAL_FORBIDDEN',
-          'Only the ZCode external-App adapter may stage an external Runtime.',
-        );
-      }
       const metadata = await lstat(distribution.entryPath);
       if (!metadata.isFile() || metadata.isSymbolicLink()) {
         throw new ManagedRuntimeInstallError('RUNTIME_EXTERNAL_INVALID', 'External Runtime is not a regular file.');
@@ -228,6 +285,9 @@ export class ManagedRuntimeInstaller {
       if (observed !== distribution.version) {
         throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'External Runtime reported a different version.');
       }
+      if (await sha256(distribution.entryPath) !== digest) {
+        throw new ManagedRuntimeInstallError('RUNTIME_MUTATED', 'External Runtime changed during its version probe.');
+      }
       reportProgress(onProgress, {
         stage: 'runtime-verify',
         status: 'completed',
@@ -243,6 +303,35 @@ export class ManagedRuntimeInstaller {
       };
     }
 
+    const operation = recipe.operation;
+    if (operation.kind !== 'managed' || operation.format !== distribution.format
+      || operation.entryRelativePath !== distribution.entryRelativePath) {
+      throw new ManagedRuntimeInstallError('RUNTIME_PLAN_INVALID', 'Proxy changed the certified artifact layout.');
+    }
+    await mkdir(this.runtimeRoot, { recursive: true, mode: 0o700 });
+    const versionRoot = join(this.runtimeRoot, operation.directory);
+    const candidates = [...new Set([versionRoot, ...operation.candidates.map(path => join(this.runtimeRoot, path))])];
+    const reference = (directory: string) => ({
+      runtimeId: distribution.runtimeId, version: distribution.version,
+      artifactSha256: distribution.asset.sha256,
+      entryPath: join(directory, distribution.entryRelativePath), ownership: 'managed' as const,
+    });
+    for (const directory of candidates) {
+      if (await verifiedRuntimeReuse(this.runtimeRoot, directory, distribution.asset.sha256, distribution.entryRelativePath)) {
+        const ref = reference(directory);
+        const observed = await this.options.probeVersion({
+          executable: ref.entryPath, expectedVersion: distribution.version, pluginId, runtimeId: distribution.runtimeId,
+        });
+        if (observed !== distribution.version) throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'Installed Runtime reported a different version.');
+        if (!await verifiedRuntimeReuse(this.runtimeRoot, directory, distribution.asset.sha256, distribution.entryRelativePath)) {
+          throw new ManagedRuntimeInstallError('RUNTIME_MUTATED', 'Installed Runtime changed during its version probe.');
+        }
+        reportProgress(onProgress, {
+          stage: 'runtime-verify', status: 'completed', componentId: distribution.runtimeId, version: distribution.version,
+        });
+        return ref;
+      }
+    }
     signal?.throwIfAborted();
     reportProgress(onProgress, {
       stage: 'runtime-download',
@@ -285,9 +374,10 @@ export class ManagedRuntimeInstaller {
       version: distribution.version,
     });
 
-    const versionRoot = join(this.runtimeRoot, distribution.runtimeId, distribution.version);
     const entryPath = join(versionRoot, distribution.entryRelativePath);
-    const staging = join(this.runtimeRoot, distribution.runtimeId, `.staging-${randomUUID()}`);
+    // Staging is not placed under a provider-named path that might be a
+    // retained legacy launcher. Never remove or rename such launchers.
+    const staging = join(this.runtimeRoot, `.staging-${randomUUID()}`);
     const stagedEntry = join(staging, distribution.entryRelativePath);
     try {
       if (distribution.format === 'raw') {
@@ -305,6 +395,7 @@ export class ManagedRuntimeInstaller {
         );
       }
       await chmod(stagedEntry, 0o700);
+      const inventory = await runtimeFileInventory(staging);
       const observed = await this.options.probeVersion({
         executable: stagedEntry,
         expectedVersion: distribution.version,
@@ -313,6 +404,39 @@ export class ManagedRuntimeInstaller {
       });
       if (observed !== distribution.version) {
         throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'Runtime artifact reported a different version.');
+      }
+      if (!await sameRuntimeTree(staging, inventory)) {
+        throw new ManagedRuntimeInstallError('RUNTIME_MUTATED', 'Runtime changed during its version probe.');
+      }
+      for (const directory of candidates) {
+        if (await ownedRuntimeDirectory(this.runtimeRoot, directory) && await sameRuntimeTree(directory, inventory)) {
+          const ref = reference(directory);
+          const reusedVersion = await this.options.probeVersion({
+            executable: ref.entryPath, expectedVersion: distribution.version, pluginId, runtimeId: distribution.runtimeId,
+          });
+          if (reusedVersion !== distribution.version) {
+            throw new ManagedRuntimeInstallError('RUNTIME_VERSION_MISMATCH', 'Legacy Runtime reported a different version.');
+          }
+          if (!await sameRuntimeTree(directory, inventory)) {
+            throw new ManagedRuntimeInstallError('RUNTIME_MUTATED', 'Legacy Runtime changed during its version probe.');
+          }
+          await recordRuntimeArtifact(this.runtimeRoot, directory, digest, distribution.entryRelativePath, inventory);
+          reportProgress(onProgress, { stage: 'runtime-verify', status: 'completed', componentId: distribution.runtimeId, version: distribution.version });
+          return ref;
+        }
+      }
+      const parent = dirname(versionRoot);
+      // Validate every existing ancestor before recursive mkdir can follow a
+      // symlink. New directories are created one component at a time.
+      let current = this.runtimeRoot;
+      for (const part of relative(this.runtimeRoot, parent).split(sep).filter(Boolean)) {
+        current = join(current, part);
+        try { await mkdir(current, { mode: 0o700 }); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+        if (!await ownedRuntimeDirectory(this.runtimeRoot, current)) {
+          throw new ManagedRuntimeInstallError('RUNTIME_PATH_OUTSIDE_STORE', 'Runtime installation parent is not an owned directory.');
+        }
       }
       try {
         await rename(staging, versionRoot);
@@ -326,6 +450,7 @@ export class ManagedRuntimeInstaller {
           'An unmanaged or concurrent Runtime version directory already exists.',
         );
       }
+      await recordRuntimeArtifact(this.runtimeRoot, versionRoot, digest, distribution.entryRelativePath, inventory);
     } finally {
       await rm(staging, { recursive: true, force: true });
     }

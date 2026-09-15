@@ -7,6 +7,26 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## Proxy Installer Releases - 2026-09-15
+
+### Added
+
+- Claude, Codex, Kimi, DeepSeek Harness, and ZCode Proxy 0.3.0 provide
+  versioned Runtime installation recipes for compatible Gian Hosts.
+
+### Fixed
+
+- Proxy-only updates can reuse an unchanged, fully verified Runtime rather
+  than reinstall it. Legacy DSH launchers are preserved during migration.
+- JavaScript Runtime version probes use an explicit Node interpreter,
+  including ZCode's externally managed application Runtime.
+
+### Compatibility
+
+- New Runtime installation requires a Host supporting installer v1 and the
+  matching certified official Catalog. Provider Runtime versions are unchanged.
+- Grok remains outside the shipping set and is not included in this release.
+
 ## Proxy Patch Releases - 2026-09-15
 
 ### Fixed

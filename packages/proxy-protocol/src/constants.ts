@@ -56,6 +56,7 @@ export const OPTIONAL_METHOD_CAPABILITIES = {
   'interaction.respond': 'interaction',
   'runtime.discover': 'runtime.discover',
   'runtime.probe': 'runtime.probe',
+  'runtime.install.plan': 'runtime.install.plan',
   'customization.list': 'customization.list',
   'customization.detail': 'customization.list',
 } as const;
@@ -85,15 +86,18 @@ export const CAPABILITY_NAMES = [
   'integration.mcp.streamableHttp',
   'runtime.discover',
   'runtime.probe',
+  'runtime.install.plan',
   'customization.list',
 ] as const;
 
 export const PROTOCOL_V22_ONLY_CAPABILITIES = [
+  'runtime.install.plan',
   'runtime.discover',
   'runtime.probe',
 ] as const;
 
 export const PROTOCOL_V22_ONLY_METHODS = [
+  'runtime.install.plan',
   'runtime.discover',
   'runtime.probe',
 ] as const;

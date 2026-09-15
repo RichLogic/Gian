@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { planRuntimeInstallation } from '../runtime/install.js';
 
 import { GrokProxyService } from '../core/service.js';
 import { GrokProtocolV2Adapter } from '../protocol/v2-adapter.js';
@@ -40,7 +41,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.3';
+  return '0.3.4';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -85,6 +86,7 @@ async function main(): Promise<void> {
   if (runSelfTest(argv)) return;
   if (isRuntimeBootstrapOffer()) {
     await serveRuntimeBootstrap({
+      installPlan: planRuntimeInstallation,
       pluginId: process.env.GIAN_PLUGIN_ID ?? 'grok',
       pluginName: 'Grok Build',
       pluginVersion: PLUGIN_VERSION,

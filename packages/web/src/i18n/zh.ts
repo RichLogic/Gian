@@ -626,6 +626,8 @@ export const ZH: Messages = {
   'agents.installTerminal.proxy.completed': 'Gian Proxy 安装完成。',
   'agents.installTerminal.discovery.started': '正在查找认证的本机 Runtime…',
   'agents.installTerminal.discovery.completed': '已找到认证的本机 Runtime。',
+  'agents.installTerminal.plan.started': '正在检查 Proxy 安装方案…',
+  'agents.installTerminal.plan.completed': 'Proxy 安装方案校验完成。',
   'agents.installTerminal.download.started': '正在下载 {component} {version}…',
   'agents.installTerminal.download.progress': '正在下载 {component} {version}：{percent}%（{received} / {total}）',
   'agents.installTerminal.download.completed': '{component} {version} 下载完成。',

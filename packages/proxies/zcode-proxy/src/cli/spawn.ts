@@ -15,6 +15,7 @@
 import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
+import { planRuntimeInstallation } from '../runtime/install.js';
 import { ZcodeSharedService } from '../service.js';
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_VERSION } from '../identity.js';
 import { discoverZcodeRuntimes, probeZcodeRuntime } from '../runtime/discover.js';
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   }
   if (isRuntimeBootstrapOffer()) {
     await serveRuntimeBootstrap({
+      installPlan: planRuntimeInstallation,
       pluginId: process.env.GIAN_PLUGIN_ID ?? PLUGIN_ID,
       pluginName: PLUGIN_NAME,
       pluginVersion: PLUGIN_VERSION,

@@ -54,7 +54,7 @@ class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;
   readonly validator = new HostProtocolValidator({
     pluginId: 'ai.deepseek.harness',
-    pluginVersion: '0.1.7',
+    pluginVersion: '0.3.0',
     processScope: 'shared',
   });
   readonly notifications: ProxyNotification[] = [];
