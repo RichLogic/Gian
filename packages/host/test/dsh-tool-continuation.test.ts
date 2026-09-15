@@ -27,7 +27,7 @@ test('session.send completes twice in one DSH Session after authenticated reatta
   const logs: string[] = [];
   const host = new ProtocolV2Host({
     entry: fileURLToPath(new URL('../../proxies/dsh-proxy/dist/src/cli/spawn.js', import.meta.url)),
-    pluginId: agent.pluginId!, pluginVersion: '0.1.6', processScope: 'shared', executor: 'dsh',
+    pluginId: agent.pluginId!, pluginVersion: '0.1.7', processScope: 'shared', executor: 'dsh',
     dataDir: dir, hostVersion: '0.5.5', protocolVersions: ['2.1'],
     env: {
       GIAN_DSH_HOST_ENTRY: process.execPath,
