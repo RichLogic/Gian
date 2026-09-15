@@ -131,7 +131,7 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.2.4",
+      "pluginVersion": "0.2.5",
       "processScope": "session",
       "binary": "~/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -307,7 +307,7 @@
     "dsh": {
       "displayName": "DeepSeek Harness",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.1.6",
+      "pluginVersion": "0.1.7",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
@@ -347,7 +347,7 @@
     "zcode": {
       "displayName": "ZCode",
       "pluginId": "com.zhipu.zcode",
-      "pluginVersion": "0.1.1",
+      "pluginVersion": "0.1.2",
       "processScope": "shared",
       "binary": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       "interactionDelayMs": 25000,

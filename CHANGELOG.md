@@ -7,6 +7,15 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## Proxy Patch Releases - 2026-09-15
+
+### Fixed
+
+- Published Claude Proxy 0.2.5, DeepSeek Harness Proxy 0.1.7, and ZCode
+  Proxy 0.1.2 under new immutable versions so Integrations can upgrade from
+  same-version development packages to certified official packages before
+  installing their Runtimes. Provider Runtime versions are unchanged.
+
 ## [0.6.0] - 2026-09-12
 
 ### Added

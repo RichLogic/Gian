@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.1.6';
+export const PLUGIN_VERSION = '0.1.7';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
