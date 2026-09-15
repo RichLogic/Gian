@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { publicManifest } from './delivery-certificate.mjs';
 import {
   buildAffectedPlan,
   checkSelectionMap,
@@ -12,6 +14,15 @@ const inputs = loadSelectionInputs();
 
 test('selection map is structurally valid and has no stale mappings', () => {
   assert.doesNotThrow(() => checkSelectionMap());
+});
+
+test('the real selection map remains valid after public source curation', () => {
+  assert.doesNotThrow(() => validateSelectionMap(inputs.map, {
+    entries: inputs.entries,
+    packageScripts: JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).scripts,
+    specialEntrypoints: inputs.catalog.specialEntrypoints ?? [],
+    repositoryPaths: publicManifest().map(entry => entry.path),
+  }));
 });
 
 test('docs selection patterns must be marked optional so curated public source can omit them', () => {

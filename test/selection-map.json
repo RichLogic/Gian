@@ -81,6 +81,7 @@
       ],
       "optionalPatterns": [
         "docs/**/*.md",
+        ".agents/skills/**",
         "AGENTS.md",
         "CLAUDE.md",
         "docs/mockups/**",
