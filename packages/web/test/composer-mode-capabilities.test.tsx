@@ -254,6 +254,64 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     expect(callbacks.onSetTurnConfig).not.toHaveBeenCalled();
   });
 
+  it('collapses text chips into the Proxy icon + combined drop when the bar is narrow (2026-09-15 owner call)', async () => {
+    // ResizeObserver reports a width below the 620px threshold.
+    let roCallback: ((entries: Array<{ contentRect: { width: number } }>) => void) | null = null;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb: typeof roCallback) { roCallback = cb; }
+      observe() { roCallback?.([{ contentRect: { width: 480 } }]); }
+      unobserve() { /* noop */ }
+      disconnect() { /* noop */ }
+    });
+    loadProxyCapabilitiesMock.mockResolvedValue({
+      catalogRevision: 'rev-narrow',
+      input: [{ type: 'text' }, { type: 'localFile' }],
+      slashCommands: [],
+      specialCatalogs: {
+        model: 'model',
+        thinking: 'thinking',
+        fast: 'fast',
+        approvalMode: 'approval',
+      },
+      configOptions: [
+        { id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false, defaultValue: 'gpt', choices: [{ value: 'gpt', displayName: 'GPT' }] },
+        { id: 'thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false, defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }] },
+        { id: 'fast', displayName: 'Fast', binding: 'turn', control: 'boolean', required: false, defaultValue: false },
+        { id: 'approval', displayName: 'Approval', binding: 'turn', control: 'select', required: false, defaultValue: 'ask', choices: [{ value: 'ask', displayName: 'Ask' }] },
+      ],
+    });
+    const callbacks = renderComposer(makeSession('codex'));
+
+    // The Proxy icon replaces the text chips; approval goes icon-only.
+    await screen.findByTestId('composer-proxy-btn');
+    expect(document.querySelector('.composer-bar')!.classList.contains('narrow')).toBe(true);
+    expect(screen.queryByTestId('composer-agent-icon')).toBeNull();
+    expect(screen.queryByTestId('composer-model-chip')).toBeNull();
+    expect(screen.queryByTestId('composer-thinking-chip')).toBeNull();
+    expect(screen.queryByTestId('composer-fast-chip')).toBeNull();
+    expect(document.querySelector('.cmp-approval-btn .name')).toBeNull();
+
+    // The combined up-drop: Model row (top), Thinking row, Fast toggle.
+    await userEvent.click(screen.getByTestId('composer-proxy-btn'));
+    const modelRow = await screen.findByTestId('proxy-pop-model');
+    const effortRow = screen.getByTestId('proxy-pop-effort');
+    const fastToggle = screen.getByTestId('proxy-pop-fast');
+    expect(modelRow.compareDocumentPosition(effortRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(effortRow.compareDocumentPosition(fastToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Thinking row expands an inline choice list (multi-level).
+    await userEvent.click(effortRow);
+    await userEvent.click(await screen.findByRole('button', { name: 'High' }));
+    expect(callbacks.onSetEffort).toHaveBeenCalledWith('high');
+
+    // Fast row is a switch that flips the service tier.
+    await userEvent.click(screen.getByTestId('composer-proxy-btn'));
+    await userEvent.click(screen.getByTestId('proxy-pop-fast').querySelector('input')!);
+    expect(callbacks.onSetServiceTier).toHaveBeenCalledWith('fast');
+
+    vi.unstubAllGlobals();
+  });
+
   it('shows Fast when the catalog advertises role=fast on a non-codex executor', async () => {
     loadProxyCapabilitiesMock.mockResolvedValue({
       catalogRevision: 'rev-fast',
@@ -310,22 +368,23 @@ describe('Composer mode dropdown from proxy capabilities', () => {
       'composer-thinking-chip',
       'separator',
       'composer-fast-chip',
+      'context',
       'spacer',
       null,
       'Add context',
-      'context',
       'Send',
     ]);
-    // 2026-09-10 owner call: the Agent icon leads the bar; the context-usage
-    // ring trails the right cluster (after the mode chip and the attach "+").
+    // 2026-09-15 owner call: the Agent icon leads the bar; the context-usage
+    // ring trails the last left-cluster control (after fast, or after
+    // thinking when no fast chip is shown) with no separator.
     expect(index('[data-testid="composer-agent-icon"]')).toBe(0);
     expect(index('[data-testid="composer-model-chip"]')).toBeLessThan(index('[data-testid="composer-thinking-chip"]'));
     expect(index('[data-testid="composer-thinking-chip"]')).toBeLessThan(index('[data-testid="composer-fast-chip"]'));
-    expect(index('[data-testid="composer-fast-chip"]')).toBeLessThan(index('.spacer'));
+    expect(index('[data-testid="composer-fast-chip"]')).toBeLessThan(index('.context-usage-anchor'));
+    expect(index('.context-usage-anchor')).toBeLessThan(index('.spacer'));
     expect(index('.spacer')).toBeLessThan(index('.cmp-approval-btn'));
     expect(index('.cmp-approval-btn')).toBeLessThan(index('[aria-label="Add context"]'));
-    expect(index('[aria-label="Add context"]')).toBeLessThan(index('.context-usage-anchor'));
-    expect(index('.context-usage-anchor')).toBeLessThan(index('[aria-label="Send"]'));
+    expect(index('[aria-label="Add context"]')).toBeLessThan(index('[aria-label="Send"]'));
     // The mode chip carries the shield-plus mark.
     expect(bar.querySelector('.cmp-approval-btn .cmp-approval-ico')).not.toBeNull();
     expect(bar.querySelector('[data-testid="composer-model-chip"] .agent-logo')).toBeNull();

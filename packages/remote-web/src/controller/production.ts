@@ -3,15 +3,22 @@ import {
   CONTENT_WINDOW_CHUNKS,
   PAIRING_TTL_MS,
   RemoteProtocolError,
+  addSnapshotPart,
   attachmentResultSchema,
   canonicalEventSchema,
   catalogReadResultSchema,
   commandStatusResultSchema,
+  createSnapshotPartAssembly,
   filePreviewResultSchema,
+  finalizeSnapshotParts,
   formatPairingCode,
   generateCanonicalId,
   generateUuidV7,
   parseClosed,
+  stateSnapshotPartSchema,
+  stateSnapshotPendingSchema,
+  transcriptPageSchema,
+  type SnapshotPartAssembly,
   remoteStateSnapshotSchema,
   selfRevokePayload,
   signBytes,
@@ -119,6 +126,10 @@ export const READ_STALL_RECONNECT_MS = 30_000;
 export const READ_COMMAND_TIMEOUT_MS = 90_000;
 export const RECONNECT_BASE_MS = 400;
 export const RECONNECT_MAX_MS = 10_000;
+/** A host.online/host.offline notice means the Host state changed just now;
+ *  retry quickly instead of assuming a long outage. */
+export const HOST_OFFLINE_RECONNECT_MAX_MS = 5_000;
+export const SNAPSHOT_ASSEMBLY_TIMEOUT_MS = 10_000;
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 5_000;
 
 export function nextPairingPollDelay(delayMs: number): number {
@@ -152,6 +163,13 @@ export function createProductionController(options: ProductionControllerOptions)
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let connectInFlight: Promise<void> | null = null;
   let refreshInFlight: Promise<void> | null = null;
+  const snapshotAssemblies = new Map<string, {
+    commandId: string;
+    hostId: string;
+    epoch: number;
+    assembly?: SnapshotPartAssembly;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   const pending = new Map<string, PendingWaiter & {
     resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
@@ -294,7 +312,10 @@ export function createProductionController(options: ProductionControllerOptions)
     reconnectTimer = null;
   }
 
-  function scheduleReconnect(hostId: string): void {
+  function scheduleReconnect(
+    hostId: string,
+    options: { maxMs?: number; connection?: RemoteUiState['connection'] } = {},
+  ): void {
     if (
       closed
       || reconnectTimer
@@ -306,8 +327,8 @@ export function createProductionController(options: ProductionControllerOptions)
     runtime.reconnects += 1;
     const attempt = runtime.reconnects;
     const exponent = Math.min(16, Math.max(0, attempt - 1));
-    const delayMs = Math.min(reconnectMaxMs, reconnectBaseMs * (2 ** exponent));
-    update({ connection: { kind: 'relay_reconnecting', attempt } });
+    const delayMs = Math.min(options.maxMs ?? reconnectMaxMs, reconnectBaseMs * (2 ** exponent));
+    update({ connection: options.connection ?? { kind: 'relay_reconnecting', attempt } });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       void connectHost(hostId).catch(() => undefined);
@@ -342,6 +363,11 @@ export function createProductionController(options: ProductionControllerOptions)
   }
 
   function markDisconnectedPending(hostId: string): void {
+    for (const [id, entry] of snapshotAssemblies) {
+      if (entry.hostId !== hostId) continue;
+      clearTimeout(entry.timer);
+      snapshotAssemblies.delete(id);
+    }
     const recovered = takePendingOnDisconnect(pending, hostId);
     const runtime = hostRuntime(hostId);
     runtime.recoverable.push(...recovered);
@@ -623,9 +649,60 @@ export function createProductionController(options: ProductionControllerOptions)
       if (state.currentHostId !== boundHostId) return;
       const runtime = hostRuntime(boundHostId);
       if (typeof message.replay_from === 'number') runtime.lastEventSequence = Number(message.replay_from) - 1;
-      if (typeof message.revision === 'string') runtime.snapshotRevision = message.revision;
+      // resume.ok describes the replay destination, not the state already
+      // applied here. Each replayed patch advances the local revision.
       update({ connection: { kind: 'online' } });
-      if (state.view.kind === 'chat') hydrateSessionDetached(state.view.sessionId, 'initial', true);
+      if (state.view.kind === 'chat' && message.transcript_included !== true) hydrateSessionDetached(state.view.sessionId, 'initial', true);
+      return;
+    }
+    if (message.type === 'transcript.page') {
+      if (state.currentHostId !== boundHostId) return;
+      const page = parseClosed(transcriptPageSchema, message);
+      const sessionId = page.session_id;
+      if (state.view.kind !== 'chat' || state.view.sessionId !== sessionId) return;
+      const session = state.sessions.find((item) => item.id === sessionId);
+      const exec = session?.agent.proxy || 'claude';
+      const next = applyTranscriptPage(
+        state,
+        sessionId,
+        page.items,
+        exec,
+        page.has_more,
+        page.cursor,
+        false,
+      );
+      update({ transcripts: next.transcripts });
+      return;
+    }
+    if (message.type === 'state.snapshot.part') {
+      if (state.currentHostId !== boundHostId) return;
+      const snapshotId = typeof message.snapshot_id === 'string' ? message.snapshot_id : '';
+      const entry = snapshotAssemblies.get(snapshotId);
+      if (!entry || entry.hostId !== boundHostId || entry.epoch !== boundEpoch) return;
+      try {
+        const part = parseClosed(stateSnapshotPartSchema, message);
+        entry.assembly ??= createSnapshotPartAssembly(part);
+        addSnapshotPart(entry.assembly, part);
+        if (entry.assembly.parts.size !== entry.assembly.part_total) return;
+        const snapshot = await finalizeSnapshotParts(entry.assembly);
+        if (hostRuntime(boundHostId).epoch !== boundEpoch || closed) return;
+        if (snapshotAssemblies.get(snapshotId) !== entry) return;
+        const runtime = hostRuntime(boundHostId);
+        if (snapshot.host.id !== boundHostId || snapshot.snapshot_id !== snapshotId
+          || snapshot.host_generation !== entry.assembly.host_generation
+          || snapshot.revision !== entry.assembly.revision
+          || snapshot.event_sequence !== entry.assembly.event_sequence
+          || (runtime.hostGeneration === snapshot.host_generation
+            && runtime.lastEventSequence >= snapshot.event_sequence)) {
+          throw new RemoteProtocolError('SNAPSHOT_REQUIRED', 'snapshot binding changed during transfer');
+        }
+        clearTimeout(entry.timer);
+        snapshotAssemblies.delete(snapshotId);
+        await onControl({ type: 'command.result', command_id: entry.commandId, ok: true, data: snapshot }, boundHostId, boundEpoch);
+      } catch {
+        // Keep the read pending so ordinary disconnect recovery retries it.
+        relay?.close('snapshot_invalid');
+      }
       return;
     }
     if (message.type === 'event') {
@@ -759,6 +836,22 @@ export function createProductionController(options: ProductionControllerOptions)
       const commandId = String(message.command_id ?? '');
       const pendingCommand = pending.get(commandId);
       if (!pendingCommand || pendingCommand.hostId !== boundHostId) return;
+      if (message.ok && pendingCommand.method === 'state.refresh'
+        && (message.data as { type?: string } | undefined)?.type === 'state.snapshot.pending') {
+        const receipt = parseClosed(stateSnapshotPendingSchema, message.data);
+        const previous = snapshotAssemblies.get(receipt.snapshot_id);
+        if (previous) return;
+        const transport = boundRelay();
+        if (!transport || transport.epoch !== boundEpoch) return;
+        const timer = setTimeout(() => {
+          const entry = snapshotAssemblies.get(receipt.snapshot_id);
+          if (entry?.commandId !== commandId) return;
+          transport.relay.close('snapshot_timeout');
+        }, SNAPSHOT_ASSEMBLY_TIMEOUT_MS);
+        snapshotAssemblies.set(receipt.snapshot_id, { commandId, hostId: boundHostId, epoch: boundEpoch, timer });
+        update({ connection: { kind: 'resyncing', synced: 0, total: 1 } });
+        return;
+      }
       pending.delete(commandId);
       if (!message.ok) {
         const code = String((message.error as { code?: string } | undefined)?.code ?? 'UNKNOWN_OUTCOME');
@@ -957,10 +1050,15 @@ export function createProductionController(options: ProductionControllerOptions)
     }
     if (notice.type === 'host.offline') {
       if (state.currentHostId !== boundHostId) return;
-      scheduleReconnect(boundHostId);
+      markDisconnectedPending(boundHostId);
+      scheduleReconnect(boundHostId, {
+        maxMs: HOST_OFFLINE_RECONNECT_MAX_MS,
+        connection: { kind: 'host_offline', lastSeenAt: Date.now() },
+      });
       return;
     }
     if (notice.type === 'host.online' && state.currentHostId === boundHostId) {
+      if (relay?.isOpen) return;
       cancelReconnect();
       void connectHost(boundHostId).catch(() => undefined);
     }
@@ -1122,6 +1220,8 @@ export function createProductionController(options: ProductionControllerOptions)
           current_revision: runtime.snapshotRevision,
           ...(state.view.kind === 'chat' ? { subscribed_session_id: state.view.sessionId } : {}),
         }).catch(() => undefined);
+      } else if (!refreshInFlight) {
+        requestState();
       }
     } catch (error) {
       nextRelay.close('handshake_failed');
@@ -1733,6 +1833,8 @@ export function createProductionController(options: ProductionControllerOptions)
       browserEvents?.removeEventListener('online', handleBrowserOnline);
       ++pairingGeneration;
       cancelReconnect();
+      for (const entry of snapshotAssemblies.values()) clearTimeout(entry.timer);
+      snapshotAssemblies.clear();
       if (state.currentHostId) bumpEpoch(state.currentHostId);
       if (pollTimer) clearTimeout(pollTimer);
       abortAllDownloads();

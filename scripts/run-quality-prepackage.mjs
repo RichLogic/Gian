@@ -78,9 +78,12 @@ export function hasInternalBrowserJourneys(sourceRoot, fileExists = existsSync) 
 }
 
 export async function main() {
+  const { assertExecutionAllowed } = await import('./execution-policy.mjs');
+  assertExecutionAllowed('desktop');
   const lock = acquireQualityLock({ command: 'quality:prepackage', rootDir });
   try {
     const env = sanitizedTestEnv();
+    if (process.env.GIAN_ALLOW_DESKTOP_E2E === '1') env.GIAN_ALLOW_DESKTOP_E2E = '1';
     delete env.FORCE_COLOR;
     env.NO_COLOR = '1';
     const revision = gitValue(['rev-parse', '--short', 'HEAD']);

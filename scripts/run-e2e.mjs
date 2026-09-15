@@ -234,6 +234,8 @@ function interruptedExitCode(signal) {
 }
 
 export async function main(args = process.argv.slice(2)) {
+  const { assertExecutionAllowed } = await import('./execution-policy.mjs');
+  assertExecutionAllowed('desktop');
   const proxyMock = args.includes('--proxy-mock');
   args = args.filter(arg => arg !== '--proxy-mock');
   const providerIndex = args.indexOf('--proxy-provider');

@@ -74,6 +74,16 @@ function PlusIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 11a8 8 0 1 0 2 5.3" />
+      <path d="M20 4v7h-7" />
+    </svg>
+  );
+}
+
 function InfoIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -364,10 +374,6 @@ export function AgentsView() {
       {catalogLoadError && (
         <div className="notice danger" role="alert">
           <span className="grow">{t('agents.catalog.loadError').replace('{message}', catalogLoadError)}</span>
-          <button type="button" className="btn xs secondary" data-testid="catalog-sync"
-                  onClick={() => { void syncCatalog(); }}>
-            {t('common.retry')}
-          </button>
         </div>
       )}
       {source && (source.state === 'stale' || source.state === 'error') && (
@@ -375,17 +381,17 @@ export function AgentsView() {
           <span className="grow">
             {t(`agents.catalog.source.${source.state}`).replace('{message}', source.error?.message ?? '')}
           </span>
-          <button type="button" className="btn xs secondary" data-testid="catalog-sync"
-                  disabled={catalogSyncing} onClick={() => { void syncCatalog(); }}>
-            {catalogSyncing ? t('agents.catalog.syncing') : t('agents.catalog.refresh')}
-          </button>
         </div>
       )}
     </>
   );
 
   return (
-    <div className="agents-view" data-testid="agents-view" data-loading={loading ? 'true' : 'false'}>
+    <div
+      className={`agents-view${!narrow && panelOpen && p2Width.customized ? ' p2-sized' : ''}`}
+      data-testid="agents-view"
+      data-loading={loading ? 'true' : 'false'}
+    >
       {(!narrow || !panelOpen) && (
         <main className="main main-pane">
           <div className="page">
@@ -436,8 +442,19 @@ export function AgentsView() {
                   </div>
                   {agents.length === 0 && <p className="s2-help">{t('settings.agents.empty')}</p>}
                   {catalogNotice}
-                  <div className="s2-subhead">
-                    {t('agents.integrations').replace('{count}', String(integrationItems.length))}
+                  <div className="s2-subhead agents-integrations-head">
+                    <span>{t('agents.integrations').replace('{count}', String(integrationItems.length))}</span>
+                    <button
+                      type="button"
+                      className="btn icon ghost agents-integrations-refresh"
+                      data-testid="agent-integrations-refresh"
+                      aria-label={t('agents.catalog.refreshIntegrations')}
+                      title={t('agents.catalog.refreshIntegrations')}
+                      disabled={catalogSyncing}
+                      onClick={() => { void syncCatalog(); }}
+                    >
+                      {catalogSyncing ? <span className="spinner" aria-hidden="true" /> : <RefreshIcon />}
+                    </button>
                   </div>
                   <div className="catalog" data-testid="agent-integrations-list">
                     {integrationItems.map(item => (
@@ -462,7 +479,11 @@ export function AgentsView() {
 
       {panelOpen && (
         <aside className={`p2 agents-detail ${narrow ? 'replacing' : ''}`}
-               style={!narrow && p2Width.customized ? { width: p2Width.width } : undefined}
+               style={!narrow && p2Width.customized
+                 // The inline geometry must win over the `.p2` 50/50 flex +
+                 // min-width clamp or dragging the seam does nothing.
+                 ? { width: p2Width.width, minWidth: 340, flex: '0 0 auto' }
+                 : undefined}
                data-testid={selection?.kind === 'proxy' ? 'proxy-detail-panel' : 'agents-detail-panel'}>
           {selectedProxy ? (
             <ProxyDetailWithBusy

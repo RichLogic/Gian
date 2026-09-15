@@ -38,6 +38,7 @@ export type OperationName =
   | 'session.setEffort'
   | 'session.setServiceTier'
   | 'session.assignTask'
+  | 'session.rebindAgent'
   | 'session.reorder'
   | 'session.setNativeConfig'
   | 'session.setTurnConfig'
@@ -156,6 +157,7 @@ export const OPERATION_POLICIES = {
   'session.setEffort': 'optimistic',
   'session.setServiceTier': 'optimistic',
   'session.assignTask': 'optimistic',
+  'session.rebindAgent': 'pending',
   'session.reorder': 'optimistic',
   // Pending, not optimistic (Phase 2a decision, inventory §4 note 6): the
   // rendered value lives in `native_config_options[].currentValue` — a nested

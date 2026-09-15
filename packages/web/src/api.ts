@@ -65,6 +65,22 @@ export async function loadArchivedSessions(): Promise<Session[]> {
   return parseSessionList(await res.json());
 }
 
+export async function rebindDeletedSessionAgent(
+  sessionId: string,
+  agentId: string,
+): Promise<Session> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/rebind-agent`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  const body = await response.json() as { session?: Session; error?: string };
+  if (!response.ok || !body.session) {
+    throw new Error(body.error ?? `Session Agent repair failed (${response.status})`);
+  }
+  return body.session;
+}
+
 // NOTE: the REST archive/delete session helpers were removed in Phase 3a of
 // the UI Operation Layer — all archive/delete entry points (including the git
 // pane's session delete, Phase 3b) dispatch the WS-backed session.archive /

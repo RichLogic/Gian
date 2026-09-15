@@ -1,8 +1,10 @@
 import { join } from 'node:path';
 
 export const PROD_HOST_URL = 'http://127.0.0.1:8990';
-export const DEV_HOST_URL = 'http://127.0.0.1:8991';
-export const DEV_WEB_URL = 'http://127.0.0.1:5191';
+export const DEV_HOST_URL = 'http://127.0.0.1:8992';
+export const DEV_WEB_URL = 'http://127.0.0.1:5192';
+export const DEV_PACKAGE_HOST_URL = 'http://127.0.0.1:8991';
+export type DesktopBuildChannel = 'stable' | 'dev' | 'source';
 
 export interface DesktopTargets {
   hostUrl: string;
@@ -25,6 +27,7 @@ export interface DesktopApplicationIdentity {
 
 export interface ResolveDesktopTargetsOptions {
   isPackaged: boolean;
+  channel?: DesktopBuildChannel;
   platform: NodeJS.Platform;
   env?: Readonly<Record<string, string | undefined>>;
 }
@@ -42,10 +45,12 @@ function normalizeHttpOrigin(value: string, label: string): string {
 
 export function resolveDesktopTargets({
   isPackaged,
+  channel,
   platform,
   env = process.env,
 }: ResolveDesktopTargetsOptions): DesktopTargets {
-  const defaultHostUrl = isPackaged ? PROD_HOST_URL : DEV_HOST_URL;
+  if (channel === 'dev' && env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] !== '1') env = {};
+  const defaultHostUrl = channel === 'dev' ? DEV_PACKAGE_HOST_URL : isPackaged ? PROD_HOST_URL : DEV_HOST_URL;
   const hostUrl = normalizeHttpOrigin(
     env['GIAN_DESKTOP_HOST_URL'] ?? defaultHostUrl,
     'GIAN_DESKTOP_HOST_URL',
@@ -69,7 +74,7 @@ export function resolveDesktopTargets({
     manageHost:
       isPackaged &&
       platform === 'darwin' &&
-      (hostUrl === PROD_HOST_URL || smokeManagesCustomHost) &&
+      (hostUrl === PROD_HOST_URL || (channel === 'dev' && hostUrl === DEV_PACKAGE_HOST_URL) || smokeManagesCustomHost) &&
       !managementDisabled,
   };
 }
@@ -120,9 +125,10 @@ export function resolveDesktopApplicationIdentity(
   isPackaged: boolean,
   appDataPath: string,
   env: Readonly<Record<string, string | undefined>> = {},
+  channel?: DesktopBuildChannel,
 ): DesktopApplicationIdentity {
   const userDataOverride = env['GIAN_DESKTOP_USER_DATA_DIR']?.trim() || null;
-  return isPackaged
+  return isPackaged && channel !== 'dev'
     ? { name: 'Gian', userDataPath: userDataOverride, variant: 'production' }
     : {
         name: 'GianDev',

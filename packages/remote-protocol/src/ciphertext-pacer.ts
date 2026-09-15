@@ -1,7 +1,8 @@
 import {
   CIPHERTEXT_PACE_BYTES_PER_SECOND,
   CIPHERTEXT_PACE_WINDOW_MS,
-  RELAY_FRAME_PACE_INTERVAL_MS,
+  RELAY_FRAME_BURST_CAPACITY,
+  RELAY_FRAME_REFILL_PER_SECOND,
 } from './constants.js';
 import { RemoteProtocolError } from './errors.js';
 
@@ -36,17 +37,28 @@ export function createCiphertextPacer(
   };
 }
 
-/** Reserve evenly spaced send slots so a burst cannot trip the Relay's
- *  rolling frame-count limit. Concurrent callers retain reservation order. */
-export function createRelayFramePacer(intervalMs = RELAY_FRAME_PACE_INTERVAL_MS) {
-  let nextAt = 0;
+/** Token bucket for frame sends. Absorbs bursts up to the bucket capacity,
+ *  then refills at a sustained rate that stays below the Relay's rolling
+ *  frame-count limit. Callers reserve slots in arrival order. */
+export function createRelayFrameTokenBucket(
+  capacity = RELAY_FRAME_BURST_CAPACITY,
+  refillPerSecond = RELAY_FRAME_REFILL_PER_SECOND,
+) {
+  let tokens = capacity;
+  let last = Date.now();
   return {
     async wait(): Promise<void> {
-      const now = Date.now();
-      const sendAt = Math.max(now, nextAt);
-      nextAt = sendAt + intervalMs;
-      const delay = sendAt - now;
-      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      for (;;) {
+        const now = Date.now();
+        tokens = Math.min(capacity, tokens + ((now - last) * refillPerSecond) / 1000);
+        last = now;
+        if (tokens >= 1) {
+          tokens -= 1;
+          return;
+        }
+        const deficitMs = Math.ceil(((1 - tokens) * 1000) / refillPerSecond);
+        await new Promise((resolve) => setTimeout(resolve, Math.max(deficitMs, 5)));
+      }
     },
   };
 }

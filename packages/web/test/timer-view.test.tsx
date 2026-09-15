@@ -1,5 +1,6 @@
 /**
- * Timer list page (Issue #51): the five semantic columns, status filter,
+ * Timer list page (Issue #51): the four quiet columns (2026-09-15 owner:
+ * no conversation column, no raw cron), status filter,
  * cursor pagination, loading/empty/error/offline states, row actions with
  * stable Idempotency-Keys, archive's confirmation gate, schedule:changed
  * invalidation, the panel-2 detail open/close (wide) and swap/Back (narrow)
@@ -36,6 +37,7 @@ function renderTimer(
         selectedScheduleId={null}
         onSelectSchedule={() => undefined}
         onOpenScheduledTurn={() => undefined}
+        onOpenConversation={() => undefined}
         onCreateSchedule={() => undefined}
         {...props}
       />
@@ -54,6 +56,7 @@ function StatefulTimerView(props: Partial<Parameters<typeof TimerView>[0]>) {
       selectedScheduleId={selected}
       onSelectSchedule={setSelected}
       onOpenScheduledTurn={() => undefined}
+      onOpenConversation={() => undefined}
       onCreateSchedule={() => undefined}
       {...props}
     />
@@ -115,7 +118,7 @@ describe('TimerView list', () => {
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
 
-  it('renders the five semantic columns with row content', async () => {
+  it('renders the four quiet columns with row content (no conversation, no raw cron)', async () => {
     const router = createFetchRouter([{
       match: url => url.startsWith('/api/schedules'),
       respond: () => scheduleListResponse([makeSchedule()]),
@@ -125,18 +128,20 @@ describe('TimerView list', () => {
 
     const list = await screen.findByTestId('timer-list');
     expect(list).toBeInTheDocument();
-    // Column headers: name/frequency · status · conversation · next run · actions.
+    // Column headers (2026-09-15 owner): name/frequency · status · next run ·
+    // actions — the owning conversation moved to the detail exclusively.
     expect(screen.getByText('Name / Frequency')).toBeInTheDocument();
     expect(screen.getByText('Status')).toBeInTheDocument();
-    expect(screen.getByText('Conversation')).toBeInTheDocument();
     expect(screen.getByText('Next run')).toBeInTheDocument();
+    expect(screen.queryByText('Conversation')).not.toBeInTheDocument();
 
     const row = screen.getByTestId('timer-row-sch-1');
     expect(row).toHaveTextContent('Nightly digest');
-    expect(row).toHaveTextContent('Cron · 0 9 * * *');
+    // Humanized frequency — never the raw cron expression.
+    expect(row).toHaveTextContent('Daily at 09:00');
+    expect(row).not.toHaveTextContent('0 9 * * *');
     expect(row).toHaveTextContent('Active');
-    expect(row).toHaveTextContent('Release watch');
-    expect(row).toHaveTextContent('Claude · Gian');
+    expect(row).not.toHaveTextContent('Release watch');
     // Row actions exist with tooltips.
     expect(screen.getByTestId('timer-action-pause-sch-1')).toHaveAttribute('title', 'Pause');
     expect(screen.getByTestId('timer-action-run-sch-1')).toHaveAttribute('aria-label', 'Run now');
@@ -417,7 +422,7 @@ describe('TimerView list', () => {
     expect(onCreateSchedule).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the fixed five-column layout inside a horizontal scroll wrapper', async () => {
+  it('keeps the fixed four-column layout inside a horizontal scroll wrapper', async () => {
     const router = createFetchRouter([{
       match: url => url.startsWith('/api/schedules'),
       respond: () => scheduleListResponse([makeSchedule()]),
@@ -428,7 +433,7 @@ describe('TimerView list', () => {
     // Narrow-window contract: the wrapper scrolls horizontally; the table
     // keeps stable widths via table-layout: fixed + colgroup.
     expect(list.className).toContain('timer-table-wrap');
-    expect(list.querySelectorAll('colgroup col')).toHaveLength(5);
+    expect(list.querySelectorAll('colgroup col')).toHaveLength(4);
     expect(list.querySelector('table')!.className).toContain('timer-table');
   });
 
@@ -442,5 +447,16 @@ describe('TimerView list', () => {
       /\.timer-row:hover \.timer-actions \.ri-act,[\s\S]*?\.timer-actions \.ri-act:disabled\s*\{([^}]*)\}/,
     )?.[1] ?? '';
     expect(visibleRule).toMatch(/pointer-events:\s*auto/);
+  });
+
+  it('constrains the list scroll area to the centered 820px content column', () => {
+    // Owner request (2026-09-15): Timer panel 1 shares the chat panel-1
+    // fixed-width column with the Agents and Custom pages.
+    const css = readFileSync('src/styles/timer.css', 'utf8');
+    const column = css.match(/\.timer-scroll > \*\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(column).toMatch(/max-width:\s*820px/);
+    expect(column).toMatch(/margin-inline:\s*auto/);
+    const head = css.match(/\.timer-head\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(head).toMatch(/height:\s*var\(--mgmt-header-h\)/);
   });
 });

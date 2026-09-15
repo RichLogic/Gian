@@ -1,4 +1,6 @@
 import { drainProcessGroup, processGroupMembers } from './dev-process-group.mjs';
+import { allocatePorts, validatePorts } from './dev-ports.mjs';
+import { assertExecutionAllowed } from './execution-policy.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -7,6 +9,7 @@ import {
   existsSync,
   openSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
 import {
@@ -18,16 +21,25 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const DEV_HOST_PORT = 8991;
-export const DEV_WEB_PORT = 5191;
-export const DEV_HOST_URL = `http://127.0.0.1:${DEV_HOST_PORT}`;
-export const DEV_WEB_URL = `http://127.0.0.1:${DEV_WEB_PORT}`;
+export let DEV_HOST_PORT = 8992;
+export let DEV_WEB_PORT = 5192;
+export let DEV_HOST_URL = `http://127.0.0.1:${DEV_HOST_PORT}`;
+export let DEV_WEB_URL = `http://127.0.0.1:${DEV_WEB_PORT}`;
 export const DEFAULT_GITHUB_CLIENT_ID = 'Ov23ligpkx0f2qrz4B2k';
 
 export const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
+function setPorts(ports) {
+  validatePorts(ports);
+  DEV_HOST_PORT = ports.host;
+  DEV_WEB_PORT = ports.web;
+  DEV_HOST_URL = `http://127.0.0.1:${ports.host}`;
+  DEV_WEB_URL = `http://127.0.0.1:${ports.web}`;
+}
+const portsPath = join(rootDir, '.gian-runtime', 'ports.json');
+if (existsSync(portsPath)) setPorts(JSON.parse(readFileSync(portsPath, 'utf8')));
 const releaseVersion = JSON.parse(
   readFileSync(join(rootDir, 'package.json'), 'utf8'),
 ).version;
@@ -87,6 +99,10 @@ export function resolveDevEnvironment(
   const isolatedDataDir = typeof env.GIAN_DEV_DATA_DIR === 'string'
     ? env.GIAN_DEV_DATA_DIR.trim()
     : '';
+  const canonical = path => existsSync(path) ? realpathSync(path) : resolve(path);
+  if (isolatedDataDir && ['.gian', '.gian-dev'].some(name => canonical(isolatedDataDir) === canonical(join(homedir(), name)))) {
+    throw new Error('Source worktrees cannot use installed Gian/GianDev data');
+  }
   const desktopUserDataDir = typeof env.GIAN_DESKTOP_USER_DATA_DIR === 'string'
     ? env.GIAN_DESKTOP_USER_DATA_DIR.trim()
     : '';
@@ -105,13 +121,14 @@ export function resolveDevEnvironment(
   return {
     ...clean,
     ...proxyEntries,
+    ...(env.GIAN_ALLOW_DESKTOP_E2E === '1' ? { GIAN_ALLOW_DESKTOP_E2E: '1' } : {}),
     GIAN_HOST: '127.0.0.1',
     GIAN_PORT: String(DEV_HOST_PORT),
     GIAN_HOST_PORT: String(DEV_HOST_PORT),
     GIAN_WEB_PORT: String(DEV_WEB_PORT),
-    GIAN_DATA_DIR: isolatedDataDir || join(homedir(), '.gian-dev'),
+    GIAN_DATA_DIR: isolatedDataDir || join(identity.worktree, '.gian-runtime', 'data'),
     ...(isolatedDataDir ? { GIAN_DEV_DATA_DIR: isolatedDataDir } : {}),
-    ...(desktopUserDataDir ? { GIAN_DESKTOP_USER_DATA_DIR: desktopUserDataDir } : {}),
+    GIAN_DESKTOP_USER_DATA_DIR: desktopUserDataDir || join(identity.worktree, '.gian-runtime', 'desktop-profile'),
     GIAN_DESKTOP_HOST_URL: DEV_HOST_URL,
     GIAN_DESKTOP_WEB_URL: DEV_WEB_URL,
     GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',
@@ -291,11 +308,15 @@ async function runForeground(command, args, env) {
 }
 
 async function ensureServices() {
+  setPorts(await allocatePorts(join(rootDir, '.gian-runtime'), join(homedir(), '.gian-source', 'ports')));
   const identity = resolveRuntimeIdentity();
   const paths = resolveRuntimePaths();
   await ensureRuntimeDirectories(paths);
 
   const existing = await readJson(paths.servicesState);
+  if (existing?.hostUrl && existing.hostUrl !== DEV_HOST_URL && isProcessAlive(existing.supervisorPid)) {
+    throw new Error('This worktree still has services on its old ports. Explicitly stop its supervisor with pnpm dev:down before restarting.');
+  }
   if (
     existing?.runtimeId === identity.runtimeId
     && isProcessAlive(existing.supervisorPid)
@@ -365,6 +386,7 @@ async function ensureServices() {
 }
 
 async function focusOrOpenDesktop(runtime) {
+  assertExecutionAllowed('desktop');
   const { identity, paths } = runtime;
   const env = resolveDevEnvironment(process.env, identity);
   const existing = await readJson(paths.desktopState);
@@ -546,6 +568,9 @@ async function restart(target) {
 
 export async function main(args = process.argv.slice(2)) {
   const { command, target } = parseDevArguments(args);
+  if (['start', 'open', 'chrome'].includes(command) || (command === 'restart' && target !== 'services')) {
+    assertExecutionAllowed('desktop');
+  }
   switch (command) {
     case 'start': return start();
     case 'up': return up();

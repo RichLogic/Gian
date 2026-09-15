@@ -653,6 +653,82 @@ export class SessionManager {
     return this.agentResolver?.agentsForKind(executor) ?? [];
   }
 
+  /** Replace the missing Agent identity on a historical Session without
+   * changing its native Session id, exact Runtime binding, or HOME snapshot. */
+  rebindDeletedAgent(sessionId: string, agentId: string): Session {
+    this.assertOrdinarySession(sessionId);
+    const session = this.getSession(sessionId);
+    if (!session.agent_id || !this.agentResolver) {
+      throw Object.assign(
+        new Error('This session is not bound to a deleted Agent.'),
+        { code: 'SESSION_AGENT_NOT_DELETED' },
+      );
+    }
+
+    let currentAgent: ReturnType<SessionAgentResolver['agentRuntime']> | null = null;
+    try {
+      currentAgent = this.agentResolver.agentRuntime(session.agent_id);
+    } catch {
+      // The only repairable state is an Agent id no longer present in agents.json.
+    }
+    // A retry after an uncertain HTTP outcome is a safe no-op.
+    if (currentAgent?.agent.id === agentId) return session;
+    if (currentAgent) {
+      throw Object.assign(
+        new Error('This session\'s Agent still exists.'),
+        { code: 'SESSION_AGENT_NOT_DELETED' },
+      );
+    }
+    if (this.hasRunningTurn(sessionId) || this.db.prepare(
+      'SELECT 1 FROM proxy_interactions WHERE session_id = ? AND outcome IS NULL LIMIT 1',
+    ).get(sessionId)) {
+      throw Object.assign(
+        new Error('Wait for the active Turn or Interaction before changing the Agent.'),
+        { code: 'SESSION_AGENT_REBIND_BUSY' },
+      );
+    }
+
+    let replacement: ReturnType<SessionAgentResolver['agentRuntime']>;
+    try {
+      replacement = this.agentResolver.agentRuntime(agentId);
+    } catch {
+      throw Object.assign(
+        new Error(`agent not found: ${agentId}`),
+        { code: 'AGENT_NOT_FOUND' },
+      );
+    }
+    const pluginId = pluginIdForSessionIdentity({
+      pluginId: session.proxy_plugin_id,
+      executor: session.executor,
+    });
+    if (replacement.agent.pluginId !== pluginId) {
+      throw Object.assign(
+        new Error(`Choose an Agent that uses the same Proxy (${pluginId}).`),
+        { code: 'AGENT_PROXY_MISMATCH' },
+      );
+    }
+
+    const now = new Date().toISOString();
+    const changed = this.db.prepare(
+      `UPDATE sessions
+          SET agent_id = ?, agent_name = ?, updated_at = ?
+        WHERE id = ? AND agent_id = ?`,
+    ).run(replacement.agent.id, replacement.agent.name, now, sessionId, session.agent_id);
+    if (changed.changes !== 1) {
+      throw Object.assign(
+        new Error('The session Agent changed while it was being repaired.'),
+        { code: 'SESSION_AGENT_REBIND_CONFLICT' },
+      );
+    }
+    const updated = this.getSession(sessionId);
+    this.broadcastSessionUpdated(sessionId, {
+      agent_id: updated.agent_id,
+      agent_name: updated.agent_name,
+      updated_at: updated.updated_at,
+    });
+    return updated;
+  }
+
   async stopTurn(sessionId: string): Promise<void> {
     if (this.sidechats.has(sessionId)) {
       await this.sidechats.interruptTurn(sessionId);

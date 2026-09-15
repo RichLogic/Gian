@@ -777,6 +777,12 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
             sent_at: config.now(),
           }));
           if (ticket.role === 'host') {
+            relay.notifyDevices(ticket.host_id, parseClosed(relayNoticeSchema, {
+              protocol: 'gian.relay/1',
+              type: 'host.online',
+              host_id: ticket.host_id,
+              sent_at: config.now(),
+            }));
             for (const tombstone of repos.pendingTombstones(ticket.host_id)) {
               if (!tombstone.signature || !tombstone.public_key_jwk) continue;
               ws.send(JSON.stringify(signedRevokeNotice({
@@ -822,8 +828,28 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       }
     },
     onClose(_event, ws) {
-      const connectionId = (ws as unknown as { __remoteConnectionId?: string }).__remoteConnectionId;
+      const socketState = ws as unknown as {
+        __remoteConnectionId?: string;
+        __remoteRole?: string;
+        __remoteHostId?: string;
+      };
+      const connectionId = socketState.__remoteConnectionId;
       if (connectionId) relay.detach(connectionId);
+      // A replaced Host socket must not mark the host offline while its
+      // successor is already bound.
+      if (
+        socketState.__remoteRole === 'host'
+        && socketState.__remoteHostId
+        && !relay.hasHost(socketState.__remoteHostId)
+      ) {
+        presence.expire(socketState.__remoteHostId);
+        relay.notifyDevices(socketState.__remoteHostId, parseClosed(relayNoticeSchema, {
+          protocol: 'gian.relay/1',
+          type: 'host.offline',
+          host_id: socketState.__remoteHostId,
+          sent_at: config.now(),
+        }));
+      }
     },
   })));
 

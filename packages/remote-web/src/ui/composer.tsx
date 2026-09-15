@@ -179,15 +179,19 @@ function ModelSheet({
   session,
   onClose,
   mode,
+  initialPage = 'root',
 }: {
   session: RemoteSession;
   onClose: () => void;
   mode: 'wide' | 'mid' | 'narrow';
+  /** Wide-bar chips deep-link straight into a page (2026-09-15 owner sync);
+   *  the narrow-bar proxy icon opens the root. */
+  initialPage?: 'root' | 'model' | 'thinking';
 }) {
   const t = useT();
   const state = useRemoteState();
   const actions = useRemoteActions();
-  const [page, setPage] = useState<'root' | 'model' | 'thinking'>('root');
+  const [page, setPage] = useState<'root' | 'model' | 'thinking'>(initialPage);
   const model = session.model || session.agent.name;
   const agent = state.catalog?.agents.find((candidate) => candidate.id === session.agent.id);
   const advertised = agent?.models ?? [];
@@ -391,12 +395,46 @@ async function readPickedFile(file: File): Promise<Uint8Array> {
   return new Uint8Array();
 }
 
+/** Per-proxy audit (approval) modes (2026-09-15 owner sync): static lists
+ *  mirroring the main composer's built-in fallbacks — the remote catalog
+ *  does not advertise mode choices. */
+const APPROVAL_MODES: Record<string, Array<{ id: string; labelKey: string }>> = {
+  claude: [
+    { id: 'plan', labelKey: 'chat.mode.plan' },
+    { id: 'ask', labelKey: 'chat.mode.ask' },
+    { id: 'auto', labelKey: 'chat.mode.auto' },
+  ],
+  codex: [
+    { id: 'ask', labelKey: 'chat.mode.ask' },
+    { id: 'auto', labelKey: 'chat.mode.auto' },
+    { id: 'full-access', labelKey: 'chat.mode.fullAccess' },
+    { id: 'custom', labelKey: 'chat.mode.custom' },
+  ],
+};
+
+function modeLabelKey(proxy: string, value: string): string {
+  return APPROVAL_MODES[proxy]?.find(mode => mode.id === value)?.labelKey ?? 'chat.mode.ask';
+}
+
+function ShieldIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+         strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+      <path d="M9 12h6" />
+      <path d="M12 9v6" />
+    </svg>
+  );
+}
+
 export function Composer({ session }: { session: RemoteSession }) {
   const t = useT();
   const state = useRemoteState();
   const actions = useRemoteActions();
   const mode = useViewportMode();
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheetPage, setSheetPage] = useState<'root' | 'model' | 'thinking'>('root');
+  const [approvalOpen, setApprovalOpen] = useState(false);
 
   const draft = state.drafts[session.id] ?? emptyDraft();
   const online = mutationsEnabled(state.connection);
@@ -412,6 +450,15 @@ export function Composer({ session }: { session: RemoteSession }) {
   );
   const model = session.model || session.agent.name;
   const effort = labelEffortValue(session.thinking ?? 'default');
+  const serviceTier = session.service_tier === 'fast' ? 'fast' : 'standard';
+  const approvalModes = APPROVAL_MODES[session.agent.proxy] ?? [];
+  const approvalValue = session.approval_mode ?? 'ask';
+
+  const toggleSheet = (page: 'root' | 'model' | 'thinking') => {
+    setSheetPage(page);
+    setSheetOpen(current => (current && sheetPage === page ? false : true));
+    if (!state.catalog || state.catalogInvalidated) actions.refreshCatalog();
+  };
 
   const placeholder = !online
     ? t('chat.placeholder.offline')
@@ -441,21 +488,80 @@ export function Composer({ session }: { session: RemoteSession }) {
           />
         </div>
         <div className="composer-bar">
-          <button
-            type="button"
-            className="composer-model"
-            title={t('chat.model.title')}
-            aria-expanded={sheetOpen}
-            onClick={() => {
-              setSheetOpen((current) => !current);
-              if (!state.catalog || state.catalogInvalidated) actions.refreshCatalog();
-            }}
-          >
-            <span className="rw-agent-dot" data-proxy={session.agent.proxy} aria-hidden="true" />
-            <span className="name">{model}{mode === 'narrow' ? ` · ${effort}` : ''}</span>
-            <span className="caret">▾</span>
-          </button>
+          {mode === 'narrow' ? (
+            /* Narrow: the proxy icon opens the combined Model/Thinking/Fast
+               sheet (2026-09-15 owner sync with the main composer). */
+            <button
+              type="button"
+              className="composer-model icon-only"
+              title={t('chat.sheet.title')}
+              aria-expanded={sheetOpen}
+              onClick={() => toggleSheet('root')}
+            >
+              <span className="rw-agent-dot" data-proxy={session.agent.proxy} aria-hidden="true" />
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="composer-model"
+                title={t('chat.model.title')}
+                aria-expanded={sheetOpen && sheetPage === 'model'}
+                onClick={() => toggleSheet('model')}
+              >
+                <span className="rw-agent-dot" data-proxy={session.agent.proxy} aria-hidden="true" />
+                <span className="name">{model}</span>
+                <span className="caret">▾</span>
+              </button>
+              <span className="composer-sep" aria-hidden="true" />
+              <button
+                type="button"
+                className="composer-opt"
+                data-testid="rw-thinking-chip"
+                title={t('chat.sheet.effort')}
+                aria-expanded={sheetOpen && sheetPage === 'thinking'}
+                onClick={() => toggleSheet('thinking')}
+              >
+                <span className="name">{effort}</span>
+                <span className="caret">▾</span>
+              </button>
+              {session.agent.proxy === 'codex' && (
+                <>
+                  <span className="composer-sep" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className={`composer-opt rw-fast${serviceTier === 'fast' ? ' on' : ''}`}
+                    data-testid="rw-fast-chip"
+                    title={t('chat.sheet.mode.fast')}
+                    aria-pressed={serviceTier === 'fast'}
+                    disabled={!online}
+                    onClick={() => {
+                      actions.updateSessionConfig(session.id, {
+                        service_tier: serviceTier === 'fast' ? 'standard' : 'fast',
+                      });
+                    }}
+                  >
+                    {t('chat.sheet.mode.fast')}
+                  </button>
+                </>
+              )}
+            </>
+          )}
           <span className="spacer" style={{ flex: 1 }} />
+          {approvalModes.length > 0 && (
+            <button
+              type="button"
+              className="composer-opt rw-approval"
+              data-testid="rw-approval-chip"
+              title={t('chat.approval.title')}
+              aria-expanded={approvalOpen}
+              disabled={!online}
+              onClick={() => setApprovalOpen(v => !v)}
+            >
+              <ShieldIcon />
+              {mode !== 'narrow' && <span className="name">{t(modeLabelKey(session.agent.proxy, approvalValue))}</span>}
+            </button>
+          )}
           <AttachMenu sessionId={session.id} disabled={!online} />
           <button
             type="button"
@@ -473,7 +579,34 @@ export function Composer({ session }: { session: RemoteSession }) {
         </div>
       </div>
       {sheetOpen && (
-        <ModelSheet session={session} onClose={() => setSheetOpen(false)} mode={mode} />
+        <ModelSheet session={session} onClose={() => setSheetOpen(false)} mode={mode} initialPage={sheetPage} />
+      )}
+      {approvalOpen && (
+        <div
+          className={`rw-model-menu rw-approval-menu ${mode}`}
+          role="menu"
+          aria-label={t('chat.approval.title')}
+          onKeyDown={(event) => { if (event.key === 'Escape') setApprovalOpen(false); }}
+        >
+          {approvalModes.map(candidate => (
+            <button
+              key={candidate.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={approvalValue === candidate.id}
+              className="rw-model-option"
+              onClick={() => {
+                if (candidate.id !== approvalValue) {
+                  actions.updateSessionConfig(session.id, { approval_mode: candidate.id });
+                }
+                setApprovalOpen(false);
+              }}
+            >
+              <span className="rw-model-option-label">{t(candidate.labelKey)}</span>
+              {approvalValue === candidate.id && <Icon name="check" size={13} />}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );

@@ -238,6 +238,7 @@ export class RemoteProjector {
       model: session.model,
       thinking: session.thinking_effort,
       service_tier: session.service_tier,
+      approval_mode: session.approval_mode,
       status: session.status,
       unread: session.unread === 1,
       queue: {

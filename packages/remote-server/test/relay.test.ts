@@ -9,17 +9,21 @@ import {
   RELAY_PROTOCOL,
   RemoteProtocolError,
   generateCanonicalId,
+  parseClosed,
+  relayNoticeSchema,
   type RelayFrame,
   type RelayHandshake,
   type RelayNotice,
 } from '@gian/remote-protocol';
 
 import { createConfig } from '../src/config.js';
+import { createRemoteApp } from '../src/app.js';
 import { PresenceService } from '../src/presence/leases.js';
 import { ControlOutbox } from '../src/relay/outbox.js';
 import { RelayRouter, type RelayPeer } from '../src/relay/router.js';
 import { openRemoteDatabase } from '../src/storage/db.js';
 import { RemoteRepositories } from '../src/storage/repositories.js';
+import { listenRemoteApp } from './fixture.js';
 
 function ids() {
   return {
@@ -482,4 +486,166 @@ test('crypto handshake is forwarded without ciphertext sequence or outbox', () =
   router.handleHandshake(hostConnection, accept);
   assert.equal(deviceSent.length, 1);
   assert.equal((deviceSent[0] as { type?: string }).type, 'crypto.accept');
+});
+
+test('notifyDevices reaches every authenticated device connection of its host', () => {
+  const { router, online } = createRouter();
+  const hostId = generateCanonicalId();
+  online(hostId);
+  const hostSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const otherHostSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const deviceSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const otherDeviceSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const binding = (role: 'host' | 'device', host: string) => ({
+    host,
+    device: role === 'device' ? generateCanonicalId() : generateCanonicalId(),
+    route: generateCanonicalId(),
+    connection: generateCanonicalId(),
+  });
+  router.attach(fakePeer('host', binding('host', hostId), hostSent));
+  router.attach(fakePeer('device', binding('device', hostId), deviceSent));
+  const otherHostId = generateCanonicalId();
+  online(otherHostId);
+  router.attach(fakePeer('host', binding('host', otherHostId), otherHostSent));
+  router.attach(fakePeer('device', binding('device', otherHostId), otherDeviceSent));
+  const notice = parseClosed(relayNoticeSchema, {
+    protocol: RELAY_PROTOCOL,
+    type: 'host.offline',
+    host_id: hostId,
+    sent_at: 1,
+  });
+  router.notifyDevices(hostId, notice);
+  assert.deepEqual(deviceSent, [notice]);
+  assert.deepEqual(hostSent, []);
+  assert.deepEqual(otherDeviceSent, []);
+  assert.deepEqual(otherHostSent, []);
+});
+
+function openRelaySocket(
+  wsUrl: string,
+  ticket: string,
+  onMessage: (parsed: { type?: string }) => void,
+): { close(): void; bound: Promise<void> } {
+  const ws = new WebSocket(wsUrl);
+  let boundResolve: (() => void) | null = null;
+  const bound = new Promise<void>((resolve, reject) => {
+    boundResolve = resolve;
+    const timer = setTimeout(() => reject(new Error('relay ws bind timeout')), 5_000);
+    ws.addEventListener('error', (event) => {
+      clearTimeout(timer);
+      reject(new Error(String(event)));
+    });
+    ws.addEventListener('open', () => {
+      ws.send(JSON.stringify({ protocol: RELAY_PROTOCOL, type: 'ws.auth', ticket }));
+    });
+    ws.addEventListener('message', (event) => {
+      const parsed = JSON.parse(String(event.data)) as { type?: string };
+      if (parsed.type === 'ws.bound') {
+        clearTimeout(timer);
+        boundResolve?.();
+        boundResolve = null;
+        return;
+      }
+      onMessage(parsed);
+    });
+  });
+  return { close: () => ws.close(), bound };
+}
+
+test('Host WS lifecycle broadcasts host.online and host.offline to devices', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'gian-remote-presence-'));
+  const now = () => Date.UTC(2026, 8, 1);
+  const db = openRemoteDatabase(dataDir);
+  const config = createConfig({
+    dataDir,
+    publicOrigin: 'https://remote.test',
+    adminToken: 'admin-test-token',
+    now,
+  });
+  const handle = await createRemoteApp(config);
+  const listened = await listenRemoteApp(handle, 0);
+  try {
+    const hostId = generateCanonicalId();
+    const deviceId = generateCanonicalId();
+    db.prepare(`
+      INSERT INTO hosts(id, name, public_key_jwk, created_at) VALUES (?, ?, ?, ?)
+    `).run(hostId, 'test-host', '{}', now());
+    db.prepare('INSERT INTO browser_installations(id, created_at) VALUES (?, ?)').run('browser-1', now());
+    handle.services.repos.insertPairing({
+      id: deviceId,
+      browser_installation_id: 'browser-1',
+      host_id: hostId,
+      public_key_jwk: '{}',
+      platform: 'web',
+      user_agent: 'node-test',
+      created_at: now(),
+      crypto_connection_id: null,
+    });
+    handle.services.presence.heartbeat(hostId);
+    const deviceTicket = 'device-ticket';
+    handle.services.repos.createWsTicket({ role: 'device', hostId, deviceId, ticket: deviceTicket });
+    const deviceNotices: string[] = [];
+    const device = openRelaySocket(listened.wsUrl, deviceTicket, (parsed) => {
+      deviceNotices.push(String(parsed.type));
+    });
+    await device.bound;
+
+    const hostTicket = 'host-ticket';
+    handle.services.repos.createWsTicket({ role: 'host', hostId, ticket: hostTicket });
+    const host = openRelaySocket(listened.wsUrl, hostTicket, () => undefined);
+    await host.bound;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(deviceNotices, ['host.online']);
+    assert.equal(handle.services.presence.isOnline(hostId), true);
+
+    // A replacement Host socket keeps the host online when the old one closes.
+    const hostTicket2 = 'host-ticket-2';
+    handle.services.repos.createWsTicket({ role: 'host', hostId, ticket: hostTicket2 });
+    const replacement = openRelaySocket(listened.wsUrl, hostTicket2, () => undefined);
+    await replacement.bound;
+    host.close();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    // The replacement bind announced itself online; closing the replaced
+    // socket must not add an offline notice while it holds the lease.
+    assert.deepEqual(deviceNotices, ['host.online', 'host.online']);
+    assert.equal(handle.services.presence.isOnline(hostId), true);
+
+    replacement.close();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(deviceNotices, ['host.online', 'host.online', 'host.offline']);
+    assert.equal(handle.services.presence.isOnline(hostId), false);
+    device.close();
+  } finally {
+    listened.close();
+  }
+});
+
+test('host frames for a stale route answer route.not_bound instead of dropping silently', () => {
+  const { router, online } = createRouter();
+  const hostId = generateCanonicalId();
+  const deviceId = generateCanonicalId();
+  online(hostId);
+  const hostSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const deviceSent: Array<RelayFrame | RelayNotice | RelayHandshake> = [];
+  const hostBinding = { host: hostId, device: generateCanonicalId(), route: generateCanonicalId(), connection: generateCanonicalId() };
+  const hostPeer = fakePeer('host', hostBinding, hostSent);
+  const deviceBinding = { host: hostId, device: deviceId, route: generateCanonicalId(), connection: generateCanonicalId() };
+  const devicePeer = fakePeer('device', deviceBinding, deviceSent);
+  router.attach(hostPeer);
+  router.attach(devicePeer);
+  // Detach holds the device crypto; the reattached socket is not bound
+  // until its next crypto.accept completes.
+  router.detach(devicePeer.connectionId);
+  router.attach(devicePeer);
+  router.handleFrame(hostPeer.connectionId, controlFrame({
+    host: hostId,
+    device: deviceId,
+    route: deviceBinding.route,
+    connection: hostBinding.connection,
+  }, 0));
+  assert.deepEqual(deviceSent, []);
+  const notices = (hostSent as RelayNotice[]).filter(entry => entry.type === 'route.not_bound');
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0]?.device_id, deviceId);
+  assert.equal(notices[0]?.route_id, deviceBinding.route);
 });

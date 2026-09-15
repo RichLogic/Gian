@@ -335,29 +335,6 @@
   background: var(--surface-2);
 }
 .composer:focus-within .context-usage-ring::after { background: var(--surface); }
-.context-usage-anchor.is-warning .context-usage-ring {
-  background: conic-gradient(
-    var(--warn) 0 var(--context-progress),
-    var(--surface-3) var(--context-progress) 360deg
-  );
-}
-.context-usage-anchor.is-danger .context-usage-ring {
-  background: conic-gradient(
-    var(--danger) 0 var(--context-progress),
-    var(--surface-3) var(--context-progress) 360deg
-  );
-}
-.context-usage-anchor.is-unknown .context-usage-ring {
-  background: conic-gradient(var(--text-3) 0 72deg, var(--surface-3) 72deg 360deg);
-  opacity: 0.65;
-}
-.context-usage-anchor.is-recalculating .context-usage-ring {
-  animation: context-usage-spin 900ms linear infinite;
-  opacity: 0.85;
-}
-@keyframes context-usage-spin {
-  to { transform: rotate(360deg); }
-}
 .context-usage-tooltip {
   position: fixed;
   z-index: 1600;
@@ -461,6 +438,94 @@
 .composer-opt.cmp-static { cursor: default; }
 .composer-opt.cmp-static:hover { background: transparent; color: var(--text); }
 .composer-opt svg { width: 10px; height: 10px; color: var(--text-3); }
+/* The approval shield reads tiny at the shared 10px — Codex-size it
+   (~1.3× the chip text, 2026-09-15 owner call). */
+.composer-opt .cmp-approval-ico svg { width: 16px; height: 16px; }
+
+/* Combined narrow-bar popover: Cursor-style rows — Model / Thinking rows
+   expand an inline choice list, Fast is a toggle. */
+.proxy-pop {
+  width: 264px;
+  padding: 5px;
+}
+.proxy-pop-row {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--text);
+  font: 500 var(--fz-12)/1.3 var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+button.proxy-pop-row:hover { background: var(--surface-2); }
+.proxy-pop-label { flex: none; }
+.proxy-pop-value {
+  margin-left: auto;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: var(--fz-12);
+}
+.proxy-pop-caret {
+  flex: none;
+  color: var(--text-3);
+  transition: transform 120ms var(--ease);
+}
+.proxy-pop-caret.open { transform: rotate(90deg); }
+.proxy-pop-section + .proxy-pop-section,
+.proxy-pop-section + .proxy-pop-row,
+.proxy-pop-row + .proxy-pop-section {
+  border-top: 1px solid var(--hairline-2);
+}
+.proxy-pop .mp-list { padding: 2px 0 2px 8px; }
+.proxy-pop-fast { cursor: default; }
+
+/* Fast toggle switch (same mechanics as the extension toggle). */
+.cmp-switch {
+  position: relative;
+  width: 30px;
+  height: 18px;
+  flex: none;
+  margin-left: auto;
+}
+.cmp-switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.cmp-switch span {
+  position: absolute;
+  inset: 0;
+  border-radius: 9px;
+  background: var(--surface-3);
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+.cmp-switch span::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform 120ms var(--ease), background 120ms var(--ease);
+}
+.cmp-switch input:checked + span { background: var(--accent); }
+.cmp-switch input:checked + span::after {
+  transform: translateX(12px);
+  background: #fff;
+}
+.cmp-switch input:disabled + span { opacity: 0.5; cursor: default; }
 .composer-bar .cmp-model-btn,
 .composer-bar .cmp-think-btn,
 .composer-bar .cmp-fast,
@@ -1828,6 +1893,51 @@
   to   { opacity: 1; transform: scale(1); }
 }
 
+/* Deleted-Agent recovery reuses the compact system modal language while
+   keeping the same-Proxy choices scannable on desktop and narrow windows. */
+.deleted-agent-dialog {
+  width: min(440px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+.deleted-agent-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(320px, 42dvh);
+  margin: 14px 0 4px;
+  overflow: auto;
+}
+.deleted-agent-option {
+  width: 100%;
+  min-height: 48px;
+  text-align: left;
+}
+.deleted-agent-option .mp-row-body {
+  min-width: 0;
+}
+.deleted-agent-option .mp-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deleted-agent-empty,
+.deleted-agent-busy {
+  margin: 14px 0 0;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+  line-height: 1.5;
+}
+.deleted-agent-busy { color: var(--warn); }
+
+@media (max-width: 700px) {
+  .deleted-agent-dialog {
+    max-height: calc(100dvh - 24px);
+  }
+  .deleted-agent-option {
+    min-height: 52px;
+  }
+}
+
 /* ============================================================
    Workspace dialog (2026-09-09): centered New/Edit Repo modal —
    same idiom as the adopt dialog. Inside, the shared .wsn-form
@@ -1855,7 +1965,9 @@
   padding: 18px 20px 4px;
 }
 .ws-dialog-title {
-  font-size: var(--fz-16);
+  /* One dialog-title scale across the management pages' popups
+     (confirm-modal / schedule-confirm-card / DialogShell): 600 --fz-14. */
+  font-size: var(--fz-14);
   font-weight: 600; color: var(--text);
   margin: 0; letter-spacing: -0.005em;
 }

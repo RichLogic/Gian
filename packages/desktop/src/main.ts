@@ -118,6 +118,7 @@ import {
   type ScreenshotPreferences,
 } from './screenshot-preferences.js';
 import { readPickedComposerResources } from './resource-picker.js';
+import { environmentSettings, productionHostIsOccupied } from './dev-environment.js';
 
 const { autoUpdater } = electronUpdater;
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -134,14 +135,18 @@ const desktopPackageMetadata = JSON.parse(
 ) as { gianReleaseChannel?: unknown };
 const signedProductionRelease = app.isPackaged
   && desktopPackageMetadata.gianReleaseChannel === 'stable';
+const devArtifact = app.isPackaged && desktopPackageMetadata.gianReleaseChannel === 'dev';
 
 const applicationIdentity = resolveDesktopApplicationIdentity(
   app.isPackaged,
   app.getPath('appData'),
   process.env,
+  devArtifact ? 'dev' : undefined,
 );
 const applicationName = applicationIdentity.name;
-const displayName = resolveDesktopDisplayName(applicationIdentity, process.env);
+let displayName = resolveDesktopDisplayName(applicationIdentity, process.env);
+let environmentSelected = !devArtifact;
+let productionDataSelected = false;
 
 registerBrowserScheme();
 app.setName(applicationName);
@@ -153,6 +158,7 @@ if (applicationIdentity.userDataPath) {
 
 const targets = resolveDesktopTargets({
   isPackaged: app.isPackaged,
+  channel: devArtifact ? 'dev' : undefined,
   platform: process.platform,
 });
 // Packaged smoke has to follow a real app.relaunch() into a process that is no
@@ -373,6 +379,7 @@ function changeMainWindowZoom(direction: -1 | 1): number {
 
 function startProductionHost(): void {
   if (!app.isPackaged || !desktopToken || !desktopInstanceId) return;
+  if (!environmentSelected) return;
   if (managedHost && managedHost.exitCode === null && !managedHost.killed) return;
 
   const paths = resolveManagedHostPaths({
@@ -841,7 +848,7 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
   if (mainWindow === window) screenshotController?.invalidateTarget();
 
   const promise = (async () => {
-    if (app.isPackaged) {
+    if (app.isPackaged && !devArtifact) {
       legacyHostRetirement ??= retireLegacyHostLaunchAgent({
         homeDir: app.getPath('home'),
       }).then(result => {
@@ -852,6 +859,10 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
     await ensureGitHubReleaseBroker();
     await ensureRemoteIdentityBroker();
     await ensureBrowserUseBroker();
+    if (productionDataSelected && await productionHostIsOccupied()) {
+      dialog.showErrorBox('GianDev', '请先完全退出正式 Gian（8990 仍被占用）。');
+      return false;
+    }
     const readiness = await ensureHostAvailable({
       healthUrl: targets.healthUrl,
       manageHost: targets.manageHost,
@@ -1277,6 +1288,7 @@ ipcMain.handle(
 );
 
 ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
+  if (devArtifact) return false; // Keep the packaged DEV badge instead of the Web theme icon.
   const dock = app.dock;
   if (
     process.platform !== 'darwin'
@@ -1523,6 +1535,11 @@ ipcMain.handle('desktop:browser:set-layout', (event, tabId: unknown, bounds: unk
   return browserController?.setLayout(tabId, bounds, visible) ?? false;
 });
 
+ipcMain.handle('desktop:browser:capture-frame', (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  return browserController?.captureFrame(tabId) ?? null;
+});
+
 ipcMain.handle('desktop:browser:open-external', async (event, tabId: unknown) => {
   if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
   return browserController?.openExternal(tabId) ?? false;
@@ -1595,6 +1612,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    if (!environmentSelected) return;
     if (screenshotController?.getState().capturing) return;
     if (!mainWindow || mainWindow.isDestroyed()) {
       void ensureMainWindow();
@@ -1606,6 +1624,35 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    if (devArtifact) {
+      // Automated CI smoke never selects real production data.
+      if (process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1') {
+        const path = process.env['GIAN_DATA_DIR'];
+        if (!path || path === join(homedir(), '.gian') || path === join(homedir(), '.gian-dev')) {
+          throw new Error('GianDev smoke requires an isolated data directory');
+        }
+        environmentSelected = true;
+      } else {
+        while (!environmentSelected) {
+          const { response } = await dialog.showMessageBox({
+            type: 'question', title: 'GianDev', message: '选择运行环境',
+            detail: 'Prod 会直接读写正式数据，包括数据库升级。',
+            buttons: ['Dev：~/.gian-dev', 'Prod：~/.gian', '退出'],
+            defaultId: 0, cancelId: 2, noLink: true,
+          });
+          if (response === 2) { app.quit(); return; }
+          if (response === 1 && await productionHostIsOccupied()) {
+            await dialog.showMessageBox({ type: 'warning', message: '请先完全退出正式 Gian', detail: '8990 仍被占用，无法选择 Prod。', buttons: ['返回'] });
+            continue;
+          }
+          const selected = environmentSettings(response === 1 ? 'prod' : 'dev', homedir());
+          process.env['GIAN_DATA_DIR'] = selected.dataDir;
+          displayName = selected.title;
+          productionDataSelected = response === 1;
+          environmentSelected = true;
+        }
+      }
+    }
     installDesktopRequestBoundary();
     initializeDesktopServices();
     screenshotPreferencesStore = new FileScreenshotPreferenceStore(

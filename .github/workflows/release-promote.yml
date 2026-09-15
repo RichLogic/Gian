@@ -1,0 +1,54 @@
+name: Promote Gian
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful signed RC build run
+        required: true
+        type: string
+      acceptance_sha256:
+        description: SHA-256 of maintainer-reviewed desktop-acceptance.json attached to the draft
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: gian-public-promotion
+  cancel-in-progress: false
+jobs:
+  promote:
+    if: github.repository == 'RichLogic/Gian' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run_id }}
+        run: |
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          mkdir -p evidence assets
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN" > evidence/run.json
+          node -e 'const r=require("./evidence/run.json"); if(r.conclusion!=="success" || r.path!==".github/workflows/release.yml" || r.event!=="workflow_dispatch" || r.head_branch!=="main" || r.repository.full_name!==process.env.GITHUB_REPOSITORY) throw Error("Invalid build provenance")'
+          gh run download "$BUILD_RUN" --name "release-build-$BUILD_RUN" --dir evidence
+          node -e 'const b=require("./evidence/release-build-receipt.json"),r=require("./evidence/run.json"); if(b.sha!==r.head_sha || String(b.runId)!==String(r.id) || !/^\d+\.\d+\.\d+$/.test(b.version)) throw Error("Invalid build receipt")'
+          echo "TAG=v$(node -p "require('./evidence/release-build-receipt.json').version")" >> "$GITHUB_ENV"
+      - name: Verify exact accepted draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_SHA256: ${{ inputs.acceptance_sha256 }}
+        run: |
+          test "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" = true
+          gh release download "$TAG" --dir assets
+          node scripts/delivery-certificate.mjs verify-acceptance assets/desktop-acceptance.json evidence/release-build-receipt.json assets "$ACCEPTANCE_SHA256"
+      - name: Promote without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "$TAG" --draft=false --latest
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')" = "$TAG"

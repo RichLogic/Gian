@@ -23,8 +23,8 @@ import {
 import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 import {
   formatScheduleDateTime,
+  frequencySummary,
   misfirePolicyLabelKey,
-  triggerSummary,
 } from '../presentation/schedule.js';
 
 export function ScheduleConfirmationHost() {
@@ -138,7 +138,7 @@ function ScheduleConfirmationCard({
           </div>
           <div className="schedule-confirm-row">
             <dt>{t('schedule.form.trigger')}</dt>
-            <dd data-testid="schedule-confirmation-trigger">{triggerSummary(payload.trigger, t)}</dd>
+            <dd data-testid="schedule-confirmation-trigger">{frequencySummary(payload.trigger, t)}</dd>
           </div>
           <div className="schedule-confirm-row">
             <dt>{t('schedule.form.timezone')}</dt>

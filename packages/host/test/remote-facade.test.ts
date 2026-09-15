@@ -5,9 +5,16 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import {
   REMOTE_METHODS,
+  REMOTE_METHOD_RESULTS,
+  SNAPSHOT_SPLIT_THRESHOLD_BYTES,
+  addSnapshotPart,
+  createSnapshotPartAssembly,
+  finalizeSnapshotParts,
   generateCanonicalId,
   generateUuidV7,
   parseRemoteMethodParams,
+  remoteStateSnapshotSchema,
+  type StateSnapshotPart,
 } from '@gian/remote-protocol';
 import type { EventEnvelope } from '@gian/shared';
 import { writeAttachment } from '../src/storage/attachments.js';
@@ -37,7 +44,7 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
       session_id: randomUUID(),
       session_revision: '0',
       name: 'nope',
-      approval_mode: 'auto',
+      path: '/etc/passwd',
     }));
     assert.equal(crafted.ok, false);
     assert.equal(crafted.error?.code, 'INVALID_FRAME');
@@ -51,6 +58,50 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
   } finally {
     teardownRemoteHarness(context);
   }
+});
+
+test('oversized state refresh returns a pending receipt and sends verifiable parts only after the result', async (t) => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const created = await context.runtime.commands.execute(device, command('session.create', {
+      catalog_revision: context.runtime.projector.catalogRevision(),
+      workspace_id: context.workspaceId,
+      task_id: context.taskId,
+      agent_id: remoteStableUuid('agent', 'agent-claude-review'),
+      name: 'Remote session',
+    }));
+    assert.equal(created.ok, true);
+    const initial = await context.runtime.commands.execute(device, command('state.refresh', {}));
+    const snapshot = remoteStateSnapshotSchema.parse(initial.data);
+    const session = snapshot.sessions[0]!;
+    session.queue.entries = Array.from({ length: 32 }, () => ({
+      id: generateCanonicalId(), session_id: session.id, text: 'x'.repeat(16_000), created_at: new Date().toISOString(),
+    }));
+    remoteStateSnapshotSchema.parse(snapshot);
+    assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) > SNAPSHOT_SPLIT_THRESHOLD_BYTES);
+    t.mock.method(context.runtime.projector, 'snapshot', () => snapshot);
+    const sent: StateSnapshotPart[] = [];
+    const sender = { sendControl: async (part: StateSnapshotPart) => { sent.push(part); }, close() {} };
+    const runtimeConnectors = context.runtime as unknown as { connectors: Map<string, typeof sender> };
+    runtimeConnectors.connectors.set(device.id, sender);
+    const hooks: { onResultSent?: () => Promise<void> } = {};
+    const result = await context.runtime.commands.execute(device, command('state.refresh', {}), hooks);
+    assert.equal(result.ok, true, result.error?.message);
+    assert.deepEqual(REMOTE_METHOD_RESULTS['state.refresh'].parse(result.data), {
+      type: 'state.snapshot.pending', snapshot_id: snapshot.snapshot_id,
+    });
+    assert.equal(sent.length, 0);
+    await hooks.onResultSent?.();
+    assert.ok(sent.length > 1);
+    const assembly = createSnapshotPartAssembly(sent[0]!);
+    for (const part of sent.slice(1)) addSnapshotPart(assembly, part);
+    assert.deepEqual(await finalizeSnapshotParts(assembly), snapshot);
+    runtimeConnectors.connectors.delete(device.id);
+    const noTransportHook = await context.runtime.commands.execute(device, command('state.refresh', {}));
+    assert.equal(noTransportHook.ok, false);
+    assert.equal(noTransportHook.error?.code, 'FRAME_TOO_LARGE');
+  } finally { teardownRemoteHarness(context); }
 });
 
 test('Remote exports only incomplete Sessions owned by open Doing Tasks', async () => {
@@ -178,6 +229,58 @@ test('Remote exports only incomplete Sessions owned by open Doing Tasks', async 
       && frame.message.patch.tasks?.remove_ids.includes(context.taskId)
       && frame.message.patch.sessions?.remove_ids.includes(visible.id)
     )));
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('approval_mode projects to RemoteSession and session.update applies it (2026-09-15 audit-mode sync)', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const created = await context.sessions.createSession({
+      workspace_id: context.workspaceId,
+      agent_id: 'agent-claude-review',
+      task_id: context.taskId,
+      type: 'subtask',
+      name: 'Audit session',
+    });
+
+    // The projection carries the canonical approval mode.
+    context.sessions.setApprovalMode(created.id, 'plan');
+    const projected = context.runtime.projector.projectSession(context.sessions.getSession(created.id));
+    assert.equal(projected.approval_mode, 'plan');
+    assertNoLeak(projected);
+
+    // The command path applies an update (the session advertises the option
+    // through turn_config_options so tool-layer validation accepts it).
+    context.db.prepare(
+      `UPDATE sessions SET turn_config_options_json = ? WHERE id = ?`,
+    ).run(JSON.stringify([{
+      id: 'approval_mode',
+      displayName: 'Approval Mode',
+      role: 'approval_mode',
+      binding: 'session',
+      control: 'select',
+      required: false,
+      defaultValue: 'ask',
+      choices: [
+        { value: 'ask', displayName: 'Ask' },
+        { value: 'auto', displayName: 'Auto' },
+        { value: 'full-access', displayName: 'Full Access' },
+      ],
+    }]), created.id);
+    const updated = await context.runtime.commands.execute(device, command('session.update', {
+      session_id: created.id,
+      session_revision: context.sessions.getResourceRevision(created.id),
+      approval_mode: 'full-access',
+    }));
+    assert.equal(updated.ok, true, JSON.stringify(updated.error));
+    assert.equal(context.sessions.getSession(created.id).approval_mode, 'full-access');
+    assert.equal(
+      context.runtime.projector.projectSession(context.sessions.getSession(created.id)).approval_mode,
+      'full-access',
+    );
   } finally {
     teardownRemoteHarness(context);
   }

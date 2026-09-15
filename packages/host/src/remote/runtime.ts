@@ -179,6 +179,9 @@ export class RemoteRuntime {
       fileRefs: this.fileRefs,
       audit: this.audit,
       hostGeneration: this.generation,
+      pushSnapshotParts: async (deviceId, part) => {
+        await this.connectors.get(deviceId)?.sendControl(part);
+      },
       listAgents: deps.listAgents,
       snapshot: device => this.projector.snapshot({
         capabilities: effectiveRemoteCapabilities({
@@ -439,7 +442,14 @@ export class RemoteRuntime {
       device,
       this.authClient ?? undefined,
       this.enrollment.current()?.hostId,
-      { attachments: this.attachments, fileRefs: this.fileRefs },
+      {
+        attachments: this.attachments,
+        fileRefs: this.fileRefs,
+        transcriptPage: (sessionId, deviceId) => {
+          if (!this.projector.isSessionIdVisible(sessionId)) return null;
+          return this.projector.transcriptPage(sessionId, 3, { deviceId });
+        },
+      },
     );
     this.connectors.set(device.id, connector);
     return connector;
@@ -521,6 +531,10 @@ export class RemoteRuntime {
     });
     this.relay.onClose((reason) => {
       if (this.relay === relay) this.relay = null;
+      // Crypto sessions belong to the dead socket; keeping them would make
+      // fanout drop frames silently until the next handshake replaced them.
+      for (const connector of this.connectors.values()) connector.close();
+      this.connectors.clear();
       if (this.shuttingDown || reason === 'replaced') return;
       this.scheduleReconnect();
     });
@@ -684,10 +698,17 @@ export class RemoteRuntime {
       signature: await this.identity.sign(new TextEncoder().encode(cryptoAcceptPayload(acceptFields))),
       sent_at: sentAt,
     });
-    void connector.sendControl({ type: 'snapshot.required', reason: 'crypto_resumed' }).catch(() => undefined);
+    connector.scheduleInitialSnapshot();
   }
 
   private handleNotice(notice: RelayNotice): void {
+    if (notice.type === 'route.not_bound') {
+      if (notice.device_id) {
+        console.error('[remote] relay rejected frames for a stale route; dropping it', notice.device_id);
+        this.relay?.dropRoute(notice.device_id);
+      }
+      return;
+    }
     if (notice.type === 'pairing.claimed' && notice.grant_id && notice.pairing_id && notice.device_public_key) {
       try {
       this.pairings.applyServerClaim({
@@ -941,7 +962,7 @@ export class RemoteRuntime {
       if (this.subscriptions.get(deviceId) !== message.session_id) continue;
       const item = this.projector.projectTranscriptEvent(message, deviceId);
       if (!item) continue;
-      void connector.sendControl({
+      connector.sendTranscript({
         type: 'event',
         host_generation: this.generation,
         event_sequence: this.replay.eventSequence,
@@ -950,7 +971,7 @@ export class RemoteRuntime {
           session_id: message.session_id,
           item,
         },
-      }).catch(() => undefined);
+      });
     }
   }
 

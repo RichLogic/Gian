@@ -112,6 +112,12 @@ export const EN: Messages = {
   'chat.sheet.mode.default': 'Default',
   'chat.sheet.mode.fast': 'Fast',
   'chat.sheet.advanced': 'Advanced',
+  'chat.approval.title': 'Approval mode',
+  'chat.mode.plan': 'Plan',
+  'chat.mode.ask': 'Ask for approval',
+  'chat.mode.auto': 'Auto',
+  'chat.mode.custom': 'Custom',
+  'chat.mode.fullAccess': 'Full access',
   'chat.unknown.banner':
     'The last command outcome is unconfirmed — refresh the state; it is not retried automatically.',
   'chat.unknown.refresh': 'Refresh state',

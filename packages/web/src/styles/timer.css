@@ -6,11 +6,14 @@
 
 /* ── List filters ───────────────────────────────────────────────────────── */
 
+/* Chips align with the centered 820px content column while the hairline band
+   itself stays full-width: (100% - 820px)/2 matches the scroll area's
+   centered children exactly, with the 16px gutter as the narrow floor. */
 .timer-filters {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 8px 16px;
+  padding: 6px max(16px, calc((100% - 820px) / 2));
   border-bottom: 1px solid var(--hairline-2);
 }
 
@@ -37,23 +40,31 @@
 
 /* ── Main: head + states + the five-column table ────────────────────────── */
 
+/* Head row shares the management-page header height with Agents and Custom
+   (panel-1 + panel-2 heads align); its content sits on the same centered
+   820px column as the scroll area — (100% - 820px)/2 matches the scroller's
+   centered children exactly, 16px is the narrow floor. The spacer absorbs
+   compression so the title and actions never wrap inside the fixed row. */
 .timer-head {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 8px;
+  height: var(--mgmt-header-h);
+  padding: 0 max(16px, calc((100% - 820px) / 2));
 }
+
+.timer-head > * { flex: none; }
+.timer-head > .timer-head-spacer { flex: 1; }
 
 .timer-title {
-  font-weight: 600;
-  font-size: var(--fz-15);
-}
-
-.timer-head-spacer {
-  flex: 1;
+  font: 600 var(--fz-15) var(--font-sans);
 }
 
 .timer-offline {
-  margin: 8px 16px 0;
+  width: calc(100% - 32px);
+  max-width: 820px;
+  margin: 12px auto 0;
   padding: 6px 10px;
   border-radius: 6px;
   background: var(--warn-soft);
@@ -68,6 +79,19 @@
   padding: 24px 16px;
   color: var(--text-3);
   font-size: var(--fz-12);
+}
+
+/* Scroll area: the shared .main-scroll padding gives way to the management
+   column rhythm — 16px gutters and the same centered 820px content column
+   the Agents and Custom pages use (chat panel-1 geometry). */
+.timer-scroll {
+  padding: 16px 16px 12px;
+}
+
+.timer-scroll > * {
+  width: 100%;
+  max-width: 820px;
+  margin-inline: auto;
 }
 
 /* Empty state (design 07-B): alarm glyph + title + the Gian-held semantics
@@ -86,17 +110,18 @@
 
 .timer-table {
   width: 100%;
-  min-width: 560px;
+  min-width: 460px;
   border-collapse: collapse;
   table-layout: fixed;
   font-size: var(--fz-12);
 }
 
-.timer-col-name { width: 30%; }
-.timer-col-status { width: 15%; }
-.timer-col-conversation { width: 27%; }
-.timer-col-next { width: 15%; }
-.timer-col-actions { width: 13%; }
+/* Four quiet columns (2026-09-15 owner): the owning conversation and the
+   raw cron expression live in the detail, not the list. */
+.timer-col-name { width: 44%; }
+.timer-col-status { width: 20%; }
+.timer-col-next { width: 20%; }
+.timer-col-actions { width: 16%; }
 
 .timer-table th {
   text-align: left;
@@ -129,8 +154,7 @@
   outline-offset: -2px;
 }
 
-.timer-cell-name .timer-name,
-.timer-cell-conversation .timer-conversation {
+.timer-cell-name .timer-name {
   display: block;
   font-weight: 500;
   white-space: nowrap;
@@ -138,8 +162,7 @@
   text-overflow: ellipsis;
 }
 
-.timer-trigger,
-.timer-owner {
+.timer-trigger {
   display: block;
   color: var(--text-3);
   font-size: var(--fz-11);
@@ -238,14 +261,12 @@
   flex-wrap: wrap;
   row-gap: 4px;
   height: auto;
-  min-height: var(--panel-header-h);
+  min-height: var(--mgmt-header-h);
   padding-top: 6px;
   padding-bottom: 6px;
 }
 
 .schedule-detail-name {
-  font-weight: 600;
-  font-size: var(--fz-13);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -262,7 +283,7 @@
   flex: none;
   display: flex;
   gap: 2px;
-  padding: 0 14px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -337,51 +358,91 @@
   line-height: 1.5;
 }
 
-.schedule-trigger-kinds {
-  display: inline-flex;
+/* Codex-style frequency card (2026-09-15 owner): label left, control right,
+   hairline between rows — users never type a cron expression. */
+.schedule-freq {
   border: 1px solid var(--hairline);
-  border-radius: 7px;
-  overflow: hidden;
-  width: fit-content;
+  border-radius: 8px;
+  background: var(--surface);
 }
 
-.schedule-trigger-kind {
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  font-size: var(--fz-12);
-  padding: 5px 14px;
-  cursor: pointer;
-}
-
-.schedule-trigger-kind + .schedule-trigger-kind {
-  border-left: 1px solid var(--hairline);
-}
-
-.schedule-trigger-kind.active {
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-weight: 600;
-}
-
-.schedule-trigger-kind:focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: -2px;
-}
-
-.schedule-interval {
+.schedule-freq-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 38px;
+  padding: 4px 12px;
+}
+
+.schedule-freq-row + .schedule-freq-row {
+  border-top: 1px solid var(--hairline-2);
+}
+
+.schedule-freq-label {
+  flex: none;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+}
+
+.schedule-freq-row > :last-child {
+  margin-left: auto;
+}
+
+.schedule-freq-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.schedule-interval-value {
-  width: 90px;
+.schedule-freq-select {
+  min-width: 120px;
+}
+
+.schedule-freq-number {
+  width: 72px;
+}
+
+.schedule-freq-unit {
+  color: var(--text-3);
+  font-size: var(--fz-12);
+}
+
+.schedule-freq-weekdays {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.schedule-freq-raw {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
 }
 
 .schedule-hint {
   color: var(--warn);
   font-size: var(--fz-11);
+}
+
+/* "Runs in" row: the immutable control conversation + the Open chat jump
+   (2026-09-15 owner — the binding itself stays read-only). */
+.schedule-runsin {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-runsin .schedule-static {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-openchat {
+  flex: none;
 }
 
 .schedule-form-error,
@@ -441,7 +502,7 @@
   background: var(--surface);
   border-radius: 8px;
   box-shadow: var(--shadow-2);
-  padding: 16px 18px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -453,9 +514,10 @@
   gap: 8px;
 }
 
+/* Dialog titles share one scale across the management pages' popups:
+   confirm-modal / ws-dialog / this card all use 600 --fz-14. */
 .schedule-confirm-title {
-  font-weight: 600;
-  font-size: var(--fz-13);
+  font: 600 var(--fz-14)/1.3 var(--font-sans);
 }
 
 .schedule-confirm-more {

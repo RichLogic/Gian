@@ -3,16 +3,18 @@ import { readFileSync } from 'node:fs';
 import { useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import type { Session, Task, Workspace } from '@gian/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { LocaleProvider } from '../src/i18n/index.js';
 import type { RailLayoutController } from '../src/components/RailLayout.js';
 import type { Mode } from '../src/components/Topbar.js';
 import type { SidebarListMode } from '../src/components/SidebarChrome.js';
 import { PageWithSidebar } from '../src/views/PageWithSidebar.js';
 import { usePanelLayout } from '../src/controllers/use-panel-layout.js';
+import { __resetScheduleBadgeForTest } from '../src/controllers/use-schedules.js';
 import { __resetFeedback, getSnapshot, resolveConfirm } from '../src/feedback.js';
 import { mockFetch } from './setup.js';
 import { renderWithOperations } from './operation-test-utils.js';
+import { makeSchedule } from './schedule-fixtures.js';
 
 const workspace = {
   id: 'ws-1',
@@ -105,6 +107,38 @@ function renderPage(options: { collapsed?: boolean; mode?: 'agents' | 'tasks'; s
 }
 
 describe('persistent primary sidebar', () => {
+  beforeEach(() => {
+    // The schedule badge store is a module-level singleton — reset it so each
+    // test hydrates from its own fetch mock.
+    __resetScheduleBadgeForTest();
+  });
+
+  it('marks sessions owning a live schedule with a row-end timer badge', async () => {
+    const plain = { ...session, id: 'session-2', name: 'Plain chat' } as Session;
+    mockFetch(async input => {
+      const url = String(input);
+      if (url.startsWith('/api/schedules')) {
+        return new Response(JSON.stringify({
+          schedules: [makeSchedule({ control_session_id: session.id })],
+          next_cursor: null,
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    renderPage({ sessions: [session, plain] });
+
+    // Only the bound session carries the lucide timer glyph (2026-09-15 owner).
+    const badge = await screen.findByTestId(`session-schedule-${session.id}`);
+    expect(badge.querySelector('svg')).not.toBeNull();
+    // The glyph hangs in the icon gutter — no slot is reserved on plain rows.
+    expect(screen.queryByTestId('session-schedule-session-2')).toBeNull();
+    expect(screen.getByTestId('session-row-session-2')
+      .querySelector('.ri-schedule-badge')).toBeNull();
+    // Placement: inside .ri-row1, immediately before the title.
+    expect(badge.parentElement?.classList.contains('ri-row1')).toBe(true);
+    expect(badge.nextElementSibling?.classList.contains('ri-title')).toBe(true);
+  });
+
   it('renders nav pages (Agents / Custom / Timer) and the list-switch dropdown row above the list', () => {
     const handlers = renderPage();
     const nav = screen.getByTestId('sb-nav-agents');

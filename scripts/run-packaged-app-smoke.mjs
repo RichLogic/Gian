@@ -807,6 +807,8 @@ function runMigrationCli(nodePath, cliPath, args, env) {
 }
 
 export async function main(args = process.argv.slice(2)) {
+  const { assertExecutionAllowed } = await import('./execution-policy.mjs');
+  assertExecutionAllowed('desktop');
   if (args.length > 1) throw new Error('usage: node scripts/run-packaged-app-smoke.mjs [Gian.app]');
   if (process.platform !== 'darwin') throw new Error('packaged Gian smoke requires macOS');
 

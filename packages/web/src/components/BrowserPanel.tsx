@@ -148,6 +148,11 @@ export function BrowserPanel({
   const [extensions, setExtensions] = useState<GianBrowserExtension[]>([]);
   const extensionsRevisionRef = useRef(-1);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Freeze-frame shown under the ⋯ menu overlay (2026-09-15 owner): Electron's
+  // native webview always paints above renderer HTML, so instead of squeezing
+  // the page narrower (which reflowed it across its media-query breakpoints),
+  // the menu floats over a captured frame while the native view is hidden.
+  const [frozenFrame, setFrozenFrame] = useState<string | null>(null);
   const browser = desktopBridge()?.browser;
   const contextTargetRef = useRef(contextTargetSessionId);
   contextTargetRef.current = contextTargetSessionId;
@@ -274,8 +279,19 @@ export function BrowserPanel({
   }, [menuOpen]);
 
   useEffect(() => {
-    if (!visible) setMenuOpen(false);
+    if (!visible) {
+      setMenuOpen(false);
+      setFrozenFrame(null);
+    }
   }, [visible]);
+
+  // Menu closed → let the native view reattach and repaint before dropping
+  // the freeze frame, so the page never flashes blank.
+  useEffect(() => {
+    if (menuOpen || frozenFrame === null) return;
+    const timer = window.setTimeout(() => setFrozenFrame(null), 150);
+    return () => window.clearTimeout(timer);
+  }, [menuOpen, frozenFrame]);
 
   // Sheet tab name follows the page title; a blank tab falls back to the
   // default name. Guarded by the last reported name so state echoes never
@@ -384,6 +400,10 @@ export function BrowserPanel({
     if (!editing) setAddress(state.url);
   }, [editing, state.url]);
 
+  // The ⋯ menu overlays a freeze frame instead of squeezing the page, so the
+  // native view hides while the menu is open.
+  const nativeVisible = visible && !menuOpen;
+
   useLayoutEffect(() => {
     if (!browser) return;
     const viewport = viewportRef.current;
@@ -402,16 +422,16 @@ export function BrowserPanel({
       const previous = lastSentLayout.current;
       if (
         !previous
-        || previous.visible !== visible
+        || previous.visible !== nativeVisible
         || previous.bounds.x !== bounds.x
         || previous.bounds.y !== bounds.y
         || previous.bounds.width !== bounds.width
         || previous.bounds.height !== bounds.height
       ) {
-        lastSentLayout.current = { bounds, visible };
-        void browser.setLayout(tabId, bounds, visible);
+        lastSentLayout.current = { bounds, visible: nativeVisible };
+        void browser.setLayout(tabId, bounds, nativeVisible);
       }
-      if (visible) frame = requestAnimationFrame(sync);
+      if (nativeVisible) frame = requestAnimationFrame(sync);
     };
 
     sync();
@@ -420,7 +440,7 @@ export function BrowserPanel({
       lastSentLayout.current = { bounds: lastBounds.current, visible: false };
       void browser.setLayout(tabId, lastBounds.current, false);
     };
-  }, [browser, tabId, visible]);
+  }, [browser, tabId, nativeVisible]);
 
   function submitAddress(event: FormEvent): void {
     event.preventDefault();
@@ -479,7 +499,16 @@ export function BrowserPanel({
     if (findOpen) closeFind();
     setDownloadsOpen(false);
     setExtensionsOpen(false);
-    setMenuOpen(true);
+    if (!browser) {
+      setMenuOpen(true);
+      return;
+    }
+    // Capture first, then overlay: the frame is in place before the native
+    // view hides, so the page reads as frozen — never resized.
+    void browser.captureFrame(tabId).then(frame => {
+      setFrozenFrame(frame);
+      setMenuOpen(true);
+    });
   }
 
   function handleFindKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
@@ -701,8 +730,11 @@ export function BrowserPanel({
           )}
         </div>
       )}
-      <div className={`browser-stage${menuOpen ? ' menu-open' : ''}`}>
+      <div className="browser-stage">
         <div className="browser-viewport" ref={viewportRef} aria-label={t('browser.viewport')} />
+        {frozenFrame && (
+          <img className="browser-freeze" src={frozenFrame} alt="" aria-hidden="true" draggable={false} />
+        )}
         {menuOpen && (
           <div className="browser-menu" ref={menuRef} role="menu" aria-label={t('browser.more')}>
             <button type="button" className="browser-menu-item" role="menuitem"

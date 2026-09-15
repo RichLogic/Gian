@@ -44,13 +44,16 @@ export function useResizableWidth(
 
   const setCollapsed = (next: boolean) => setCollapsedState(next);
 
-  const onMouseDown = (e: React.MouseEvent) => {
+  const onMouseDown = (e: React.MouseEvent, startWidthOverride?: number) => {
     e.preventDefault();
     // A function maxPx is evaluated at drag start, so the cap can follow the
     // live container width (panel-2's chat-style quarter-floor rule).
     const max = typeof maxPx === 'function' ? maxPx() : maxPx;
     const startX = e.clientX;
-    const startWidth = width;
+    // First-drag seed: callers may pin the drag's origin to the pane's
+    // currently rendered width so the pane never jumps to a stale default.
+    const startWidth = startWidthOverride ?? width;
+    if (startWidthOverride !== undefined) setWidth(startWidthOverride);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     const onMove = (ev: MouseEvent) => {
@@ -103,6 +106,14 @@ export function usePanel2Width() {
       setCustomized(true);
       try { window.localStorage.setItem(P2_WIDTH_CUSTOM_KEY, '1'); }
       catch { /* localStorage full / disabled — the width itself still drags */ }
+      // Seed the drag from the panel's rendered width (the splitter's next
+      // sibling is the panel-2 aside in all three primary pages), so the
+      // first drag continues from what the user sees instead of jumping to
+      // the hook's stored default.
+      const rendered = (e.currentTarget as HTMLElement).nextElementSibling
+        ?.getBoundingClientRect().width;
+      base.onMouseDown(e, rendered && rendered > 0 ? Math.round(rendered) : undefined);
+      return;
     }
     base.onMouseDown(e);
   };

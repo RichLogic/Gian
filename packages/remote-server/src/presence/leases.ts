@@ -14,4 +14,10 @@ export class PresenceService {
   isOnline(hostId: string): boolean {
     return this.repos.isHostOnline(hostId);
   }
+
+  /** Drop the lease immediately when the Host's live WS closes instead of
+   *  letting devices trust a stale lease for up to the full lease period. */
+  expire(hostId: string): void {
+    this.repos.expirePresence(hostId);
+  }
 }

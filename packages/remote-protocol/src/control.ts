@@ -159,6 +159,7 @@ export const remoteSessionSchema = z.strictObject({
   model: nameSchema.nullable().optional(),
   thinking: nameSchema.nullable().optional(),
   service_tier: nameSchema.nullable().optional(),
+  approval_mode: nameSchema.nullable().optional(),
   status: z.enum(SESSION_STATUSES),
   unread: z.boolean().optional(),
   queue: z.strictObject({
@@ -315,6 +316,7 @@ export const sessionUpdateParamsSchema = z.strictObject({
   model: nameSchema.optional(),
   thinking: nameSchema.optional(),
   service_tier: z.enum(['standard', 'fast']).optional(),
+  approval_mode: nameSchema.optional(),
 });
 export const sessionSendParamsSchema = z.strictObject({
   session_id: canonicalIdSchema,
@@ -528,9 +530,16 @@ export const transcriptItemSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+export const stateSnapshotPendingSchema = z.strictObject({
+  type: z.literal('state.snapshot.pending'),
+  snapshot_id: canonicalIdSchema,
+});
+
+export const stateRefreshResultSchema = z.union([remoteStateSnapshotSchema, stateSnapshotPendingSchema]);
+
 export const REMOTE_METHOD_RESULTS = {
   'catalog.read': catalogReadResultSchema,
-  'state.refresh': remoteStateSnapshotSchema,
+  'state.refresh': stateRefreshResultSchema,
   'session.subscribe': z.strictObject({
     session: remoteSessionSchema,
     cursor: boundedStringSchema,
@@ -626,6 +635,17 @@ export const resumeOkSchema = z.strictObject({
   replay_from: nonNegativeSafeIntegerSchema,
   replay_through: nonNegativeSafeIntegerSchema,
   revision: boundedStringSchema,
+  transcript_included: z.boolean().optional(),
+});
+
+/** Host-pushed transcript history that rides a resume so the device does not
+ *  need a session.page round trip after reconnecting with a subscription. */
+export const transcriptPageSchema = z.strictObject({
+  type: z.literal('transcript.page'),
+  session_id: canonicalIdSchema,
+  cursor: boundedStringSchema.optional(),
+  has_more: z.boolean(),
+  items: z.array(transcriptItemSchema).max(MAX_ARRAY_ITEMS),
 });
 
 export const snapshotRequiredSchema = z.strictObject({
@@ -786,6 +806,7 @@ export const remoteControlMessageSchema = z.discriminatedUnion('type', [
   stateSnapshotPartSchema,
   resumeRequestSchema,
   resumeOkSchema,
+  transcriptPageSchema,
   snapshotRequiredSchema,
   commandRequestSchema,
   commandAcceptedSchema,
@@ -842,6 +863,7 @@ export const CONTROL_INNER_MESSAGE_TYPES = [
   'state.snapshot.part',
   'resume.request',
   'resume.ok',
+  'transcript.page',
   'snapshot.required',
   'command.request',
   'command.accepted',

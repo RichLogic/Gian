@@ -534,6 +534,10 @@ export class RemoteRepositories {
     return Boolean(row && row.expires_at > this.now());
   }
 
+  expirePresence(hostId: string): void {
+    this.db.prepare('DELETE FROM presence_leases WHERE host_id = ?').run(hostId);
+  }
+
   insertTombstone(input: {
     hostId: string;
     deviceId: string;

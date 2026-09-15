@@ -8,9 +8,20 @@ import {
   finalizeSnapshotParts,
   parseRemoteControlMessage,
   RemoteProtocolError,
+  REMOTE_METHOD_RESULTS,
   splitSnapshotParts,
 } from '../src/index.js';
 import { sampleSnapshot } from './helpers.js';
+
+test('state.refresh distinguishes a closed pending receipt from an authoritative snapshot', () => {
+  const snapshot = sampleSnapshot();
+  const pending = { type: 'state.snapshot.pending', snapshot_id: snapshot.snapshot_id };
+  const schema = REMOTE_METHOD_RESULTS['state.refresh'];
+  assert.deepEqual(schema.parse(snapshot), snapshot);
+  assert.deepEqual(schema.parse(pending), pending);
+  assert.equal(schema.safeParse({ ...pending, sessions: [] }).success, false);
+  assert.equal(schema.safeParse({ type: pending.type }).success, false);
+});
 
 test('snapshot parts reassemble to the same closed snapshot', async () => {
   const snapshot = sampleSnapshot();

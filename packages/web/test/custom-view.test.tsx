@@ -440,6 +440,17 @@ describe('CustomView', () => {
     expect(css).toContain('.custom-1line .management-row-copy > span:not(.custom-ord)');
   });
 
+  it('constrains panel 1 to the centered 820px content column', () => {
+    // Owner request (2026-09-15): Custom panel 1 shares the chat panel-1
+    // fixed-width column with the Agents and Timer pages.
+    const css = readFileSync('src/styles/custom.css', 'utf8');
+    const column = css.match(/\.custom-page-body > \*\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(column).toMatch(/max-width:\s*820px/);
+    expect(column).toMatch(/margin-inline:\s*auto/);
+    const head = css.match(/\.custom-page-head\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(head).toMatch(/height:\s*var\(--mgmt-header-h\)/);
+  });
+
   it('renders the detail on the shared .p2 shell with a draggable seam', async () => {
     const item = skillItem();
     mockLoadAgents.mockResolvedValue([makeAgent()]);

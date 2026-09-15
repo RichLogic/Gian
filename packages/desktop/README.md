@@ -65,16 +65,20 @@ Release credentials are fail-closed: the command stops before building when
 any signing, notarization, or OAuth value is missing, and Electron Builder also
 requires a real signing identity.
 
-For a local release build, provide `CSC_LINK`, `CSC_KEY_PASSWORD`,
-`APPLE_API_KEY` (the path to the `.p8` file), `APPLE_API_KEY_ID`,
+For a local release build, import the Developer ID identity into a dedicated,
+unlocked temporary keychain and provide its path as `CSC_KEYCHAIN`. Also
+provide `APPLE_API_KEY` (the path to the `.p8` file), `APPLE_API_KEY_ID`,
 `APPLE_API_ISSUER`, and `GIAN_GITHUB_CLIENT_ID` in the process environment.
+Do not pass `CSC_LINK` directly to Electron Builder 26: the protected workflow
+decodes that secret itself and uses a separate random keychain password before
+invoking the build.
 
 The intended protected GitHub Actions job uses these configuration names
 (never commit their values to the repository):
 
-- `MAC_CSC_LINK` — Actions secret containing the base64-encoded Developer ID
+- `CSC_LINK` — Actions secret containing the base64-encoded Developer ID
   Application `.p12` certificate.
-- `MAC_CSC_KEY_PASSWORD` — Actions secret containing that `.p12` password.
+- `CSC_KEY_PASSWORD` — Actions secret containing that `.p12` password.
 - `APPLE_API_KEY_BASE64` — Actions secret containing the base64-encoded App
   Store Connect API `.p8` key.
 - `APPLE_API_KEY_ID` — Actions secret containing the App Store Connect key ID.
@@ -86,17 +90,19 @@ The intended protected GitHub Actions job uses these configuration names
 The tag-triggered `.github/workflows/release.yml` is the signed stable
 publisher. It requires the protected Developer ID certificate and App Store
 Connect API-key secrets, runs the packaged product gate, notarizes the App,
-verifies it with `codesign`, `spctl`, and `stapler`, and only then publishes a
-normal latest Release. Proxy plugins remain on their independent
+verifies it with `codesign`, `spctl`, and `stapler`, and stages the DMG, ZIP,
+their blockmaps, `latest-mac.yml`, and checksums in a draft Release. The
+workflow verifies every uploaded size and SHA-256 digest before promoting that
+draft to the public latest channel. Proxy plugins remain on their independent
 `proxy-*-v*` workflow.
 
 Local `package:mac` and `make:mac` builds remain unsigned and do not embed the
 stable release marker, so native notification delivery and automatic updates
 stay disabled in those artifacts.
 
-Version 0.4.2 has no App updater, so the move from 0.4.2 to 0.4.3 must be a
-manual DMG installation. Once 0.4.3 is installed, automatic App updates apply
-to upgrades from 0.4.3 to later signed releases on the `latest` channel.
+Unsigned releases cannot enter the App update channel. Install the first
+signed stable release manually; automatic App updates then apply to later
+signed releases on the `latest` channel.
 
 The development controller stores worktree-bound PID/state files and component
 logs under `.gian-runtime/`. Host/Web outlive the Electron window; a hanging

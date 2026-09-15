@@ -23,7 +23,7 @@ export const INDEPENDENT_MANIFESTS = [
   'packages/remote-protocol/package.json',
   'packages/remote-server/package.json',
 ];
-const VERSION_RE = /^\d+\.\d+\.\d+(?:-hotfix)?$/;
+const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const INDEPENDENT_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const HOTFIX_PROTECTED_PREFIXES = [
   'packages/proxies/',

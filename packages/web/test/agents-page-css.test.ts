@@ -20,9 +20,21 @@ describe('agents-page.css', () => {
   it('uses one taller header geometry so both bodies start at the same height', () => {
     const head = css.match(/\.p2-head\s*\{([^}]*)\}/)?.[1] ?? '';
     const pageHead = css.match(/\.page-head\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(head).toMatch(/height:\s*var\(--agents-header-h\)/);
-    expect(pageHead).toMatch(/height:\s*var\(--agents-header-h\)/);
-    expect(head).toMatch(/padding:\s*0 14px/);
+    expect(head).toMatch(/height:\s*var\(--mgmt-header-h\)/);
+    expect(pageHead).toMatch(/height:\s*var\(--mgmt-header-h\)/);
+    expect(head).toMatch(/padding:\s*0 16px/);
+  });
+
+  it('constrains panel 1 to the chat-style centered 820px content column', () => {
+    // Owner request (2026-09-15): Agents/Custom/Timer panel 1 must not
+    // stretch across the main island — head row and body content share the
+    // chat panel-1 column (max-width 820px, auto inline margins).
+    const row = css.match(/\.page-head \.ph-row\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(row).toMatch(/max-width:\s*820px/);
+    expect(row).toMatch(/margin:\s*0 auto/);
+    const column = css.match(/\.agents-view \.page-body > \*\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(column).toMatch(/max-width:\s*820px/);
+    expect(column).toMatch(/margin-inline:\s*auto/);
   });
 
   it('gives panel 2 the same vertical inset as the main card', () => {
@@ -35,6 +47,12 @@ describe('agents-page.css', () => {
   it('caps panel 1 at half and top-aligns field labels with their values', () => {
     expect(css).toMatch(/\.agents-view:has\(> \.p2\) > \.main-pane\s*\{\s*max-width:\s*50%/);
     expect(css).toMatch(/\.p2 \.kv-grid dt\s*\{[^}]*align-self:\s*start/s);
+  });
+
+  it('lifts the 50% cap once the user drags the panel-2 seam', () => {
+    // The inline dragged width must win over the 50/50 flex split — without
+    // this override the seam dragged but nothing moved (2026-09-15 owner).
+    expect(css).toMatch(/\.agents-view\.p2-sized > \.main-pane\s*\{\s*max-width:\s*none/);
   });
 
   it('gives the Integration installation TTY a bounded scrollable output area', () => {

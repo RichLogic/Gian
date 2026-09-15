@@ -60,3 +60,26 @@ test('hotfix gate allows app-only changes against the exact base tag', () => {
     hotfixChangedFiles: ['packages/host/src/index.ts', 'packages/web/src/App.tsx'],
   }), []);
 });
+
+test('version gate accepts prerelease app versions for beta packages', () => {
+  assert.deepEqual(validateVersionConsistency({
+    manifests: manifests('1.2.3-beta1'),
+    changelog: '## [1.2.3-beta1] - 2026-09-14\n',
+    releaseRef: 'v1.2.3-beta1',
+  }), []);
+  assert.deepEqual(validateVersionConsistency({
+    manifests: manifests('1.2.3-rc.1'),
+    changelog: '## [1.2.3-rc.1] - 2026-09-14\n',
+  }), []);
+});
+
+test('version gate rejects malformed prerelease suffixes', () => {
+  for (const appVersion of ['1.2.3-', '1.2.3+', '1.2.3-beta 1', '1.2.3beta1']) {
+    const errors = validateVersionConsistency({
+      manifests: manifests(appVersion),
+      changelog: `## [${appVersion}] - 2026-09-14\n`,
+    });
+    assert.equal(errors.length, 1, appVersion);
+    assert.match(errors[0], /invalid app version/);
+  }
+});

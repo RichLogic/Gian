@@ -6,22 +6,30 @@ import {
   CIPHERTEXT_PACE_WINDOW_MS,
   MAX_CIPHERTEXT_BYTES_PER_SECOND,
   MAX_CONTROL_FRAMES_PER_SECOND,
-  RELAY_FRAME_PACE_INTERVAL_MS,
+  RELAY_FRAME_BURST_CAPACITY,
+  RELAY_FRAME_REFILL_PER_SECOND,
   createCiphertextPacer,
-  createRelayFramePacer,
+  createRelayFrameTokenBucket,
 } from '../src/index.js';
 
-test('default sender pace is strictly below the Server ciphertext cap', () => {
+test('default burst bucket stays below the Server rolling frame cap', () => {
   assert.ok(CIPHERTEXT_PACE_BYTES_PER_SECOND < MAX_CIPHERTEXT_BYTES_PER_SECOND);
   assert.ok(CIPHERTEXT_PACE_WINDOW_MS > 1000);
-  assert.ok(Math.ceil(1000 / RELAY_FRAME_PACE_INTERVAL_MS) < MAX_CONTROL_FRAMES_PER_SECOND);
+  assert.ok(RELAY_FRAME_BURST_CAPACITY + RELAY_FRAME_REFILL_PER_SECOND < MAX_CONTROL_FRAMES_PER_SECOND);
 });
 
-test('relay frame pacer spreads a concurrent burst across reserved send slots', async () => {
-  const pacer = createRelayFramePacer(20);
+test('frame bucket releases a full burst immediately, then refills at the sustained rate', async () => {
+  const bucket = createRelayFrameTokenBucket(3, 60);
   const started = Date.now();
-  await Promise.all([pacer.wait(), pacer.wait(), pacer.wait()]);
-  assert.ok(Date.now() - started >= 30);
+  await Promise.all([bucket.wait(), bucket.wait(), bucket.wait()]);
+  assert.ok(Date.now() - started < 20);
+  await bucket.wait();
+  const afterBurst = Date.now() - started;
+  assert.ok(afterBurst >= 12, `fourth frame arrived too early: ${afterBurst}ms`);
+  const fifth = bucket.wait();
+  const sixth = bucket.wait();
+  await Promise.all([fifth, sixth]);
+  assert.ok(Date.now() - started >= 28, `six frames arrived too early: ${Date.now() - started}ms`);
 });
 
 test('waits when the next frame would exceed the ciphertext budget', async () => {

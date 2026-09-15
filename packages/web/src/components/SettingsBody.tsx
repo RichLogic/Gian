@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type {
   ChatFontFamily,
   ExternalEditor,
@@ -37,6 +37,14 @@ import {
   useKeymap,
 } from '../shortcut-prefs.js';
 import { desktopBridge } from '../desktop-bridge.js';
+import {
+  browserNotificationPermission,
+  loadNotificationPrefs,
+  requestDesktopNotificationPermission,
+  saveNotificationPrefs,
+  type BrowserNotificationPermission,
+  type NotificationPrefs,
+} from '../notifications.js';
 import { confirm, toast } from '../feedback.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
 import { SETTINGS_ONBOARDING_ENTITY_KEY } from '../operations/settings.js';
@@ -84,6 +92,7 @@ export type NavKey =
   | 'openwith'
   | 'archive'
   | 'adopt'
+  | 'notifications'
   | 'updates'
   | 'account'
   | 'remote';
@@ -142,7 +151,13 @@ const NAV_GROUPS: Array<{
       ['openwith', 'settings.section.openwith'],
     ],
   },
-  { labelKey: 'settings.nav.group.application', items: [['updates', 'settings.section.updates']] },
+  {
+    labelKey: 'settings.nav.group.application',
+    items: [
+      ['notifications', 'settings.section.notifications'],
+      ['updates', 'settings.section.updates'],
+    ],
+  },
   {
     labelKey: 'settings.nav.group.account',
     items: [['account', 'settings.section.account']],
@@ -538,9 +553,18 @@ function SettingsBodyInner({
           </div>
         </section>
 
+        {/* ── Notifications ── */}
+        <section id="settings-section-notifications" data-settings-section="notifications"
+                 className="s2-section" style={{ order: 16 }}>
+          <h3 className="s2-sectiontitle">{t('settings.section.notifications')}</h3>
+          <div className="s2-card">
+            <NotificationsBlock />
+          </div>
+        </section>
+
         {/* ── Updates ── */}
         <section id="settings-section-updates" data-settings-section="updates"
-                 className="s2-section" style={{ order: 16 }}>
+                 className="s2-section" style={{ order: 17 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.updates')}</h3>
           <div className="s2-card">
             <UpdatesBlock />
@@ -740,7 +764,7 @@ function SettingsBodyInner({
         </section>
 
         <section id="settings-section-account" data-settings-section="account"
-                 className="s2-section" style={{ order: 17 }}>
+                 className="s2-section" style={{ order: 18 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.account')}</h3>
           <div className="s2-card">
             <AccountBlock identity={identity} onSignOut={onSignOut} />
@@ -749,7 +773,7 @@ function SettingsBodyInner({
 
         {/* ── Remote (WP5): enrollment, pairing, devices, audit ── */}
         <section id="settings-section-remote" data-settings-section="remote"
-                 className="s2-section" style={{ order: 18 }}>
+                 className="s2-section" style={{ order: 19 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.remote')}</h3>
           <SettingsRemotePage controller={remoteController} />
         </section>
@@ -1000,6 +1024,157 @@ function AccountBlock({
         {signingOut ? t('settings.account.signingOut') : t('settings.account.signOut')}
       </button>
     </div>
+  );
+}
+
+function NotificationsBlock() {
+  const t = useT();
+  const notifications = desktopBridge()?.notifications;
+  const native = notifications?.native === true;
+  const [permission, setPermission] = useState<BrowserNotificationPermission>(
+    browserNotificationPermission(),
+  );
+  const [preferences, setPreferences] = useState<NotificationPrefs>(
+    loadNotificationPrefs(),
+  );
+  const [supported, setSupported] = useState(
+    browserNotificationPermission() !== 'unsupported',
+  );
+  const [lastError, setLastError] = useState<'delivery_failed' | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const syncPermission = () => setPermission(browserNotificationPermission());
+    window.addEventListener('focus', syncPermission);
+    if (!native || !notifications) {
+      setPreferences(loadNotificationPrefs());
+      setSupported(browserNotificationPermission() !== 'unsupported');
+      return () => window.removeEventListener('focus', syncPermission);
+    }
+
+    const applyState = (state: import('../desktop-bridge.js').GianDesktopNotificationState) => {
+      setPreferences(state.preferences);
+      setSupported(state.supported);
+      setLastError(state.lastError);
+    };
+    const unsubscribe = notifications.onStateChanged(applyState);
+    void notifications.getState().then(applyState);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('focus', syncPermission);
+    };
+  }, [native, notifications]);
+
+  async function applyPreferences(next: NotificationPrefs) {
+    saveNotificationPrefs(next);
+    setPreferences(next);
+    if (!native || !notifications) return;
+    const state = await notifications.updatePreferences(next);
+    setPreferences(state.preferences);
+    setSupported(state.supported);
+    setLastError(state.lastError);
+  }
+
+  async function setDesktopEnabled(enabled: boolean) {
+    setSaving(true);
+    try {
+      if (enabled) {
+        const nextPermission = await requestDesktopNotificationPermission();
+        setPermission(nextPermission);
+        if (nextPermission !== 'granted') {
+          await applyPreferences({ ...preferences, desktop: false });
+          return;
+        }
+      }
+      await applyPreferences({ ...preferences, desktop: enabled });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setPreference<Key extends keyof NotificationPrefs>(
+    key: Key,
+    value: NotificationPrefs[Key],
+  ) {
+    setSaving(true);
+    try {
+      await applyPreferences({ ...preferences, [key]: value });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const enabled = preferences.desktop && permission === 'granted';
+  const detailControlsDisabled = saving || !supported || !enabled;
+  const permissionDenied = permission === 'denied';
+
+  return (
+    <dl className="kv-grid">
+      <dt>{t('settings.notifications.desktop')}</dt>
+      <dd className="settings-toggle-row">
+        <label className="switch">
+          <input
+            type="checkbox"
+            aria-label={t('settings.notifications.desktop')}
+            checked={enabled}
+            disabled={saving || !supported}
+            onChange={event => { void setDesktopEnabled(event.target.checked); }}
+          />
+          <span>{
+            !supported
+              ? t('settings.notifications.status.unsupported')
+              : permissionDenied
+                ? t('settings.notifications.status.denied')
+                : enabled
+                  ? t('settings.notifications.status.enabled')
+                  : t('settings.notifications.status.disabled')
+          }</span>
+        </label>
+        {permissionDenied && native && notifications && (
+          <button
+            type="button"
+            className="btn sm secondary"
+            onClick={() => { void notifications.openSystemSettings(); }}
+          >
+            {t('settings.notifications.openSettings')}
+          </button>
+        )}
+      </dd>
+      {([
+        ['sessionDone', 'settings.notifications.sessionDone'],
+        ['approvalNeeded', 'settings.notifications.approvalNeeded'],
+        ['errors', 'settings.notifications.errors'],
+        ['sound', 'settings.notifications.sound'],
+      ] as const).map(([key, labelKey]) => (
+        <Fragment key={key}>
+          <dt>{t(labelKey)}</dt>
+          <dd className="settings-toggle-row">
+            <label className="switch">
+              <input
+                type="checkbox"
+                aria-label={t(labelKey)}
+                checked={preferences[key]}
+                disabled={detailControlsDisabled}
+                onChange={event => { void setPreference(key, event.target.checked); }}
+              />
+              <span>{
+                preferences[key]
+                  ? t('settings.notifications.on')
+                  : t('settings.notifications.off')
+              }</span>
+            </label>
+          </dd>
+        </Fragment>
+      ))}
+      {lastError === 'delivery_failed' && (
+        <>
+          <dt>{t('settings.notifications.delivery')}</dt>
+          <dd className="s2-help">{t('settings.notifications.deliveryFailed')}</dd>
+        </>
+      )}
+      <dt>{t('settings.notifications.lifecycle')}</dt>
+      <dd className="s2-help">{t('settings.notifications.lifecycleValue')}</dd>
+    </dl>
   );
 }
 

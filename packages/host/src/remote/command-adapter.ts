@@ -3,15 +3,21 @@ import {
   COMMAND_TIMESTAMP_SKEW_MS,
   REMOTE_METHODS,
   RemoteProtocolError,
+  SNAPSHOT_PART_BYTES,
+  SNAPSHOT_SPLIT_THRESHOLD_BYTES,
+  canonicalJson,
   isRemoteErrorCode,
   parseRemoteMethodParams,
   redactRemoteError,
+  splitSnapshotParts,
   uuidV7TimestampMs,
   type CommandRequest,
   type CommandStatusResult,
   type RemoteErrorCode,
   type RemoteMethod,
   type RemoteSession,
+  type RemoteStateSnapshot,
+  type StateSnapshotPart,
 } from '@gian/remote-protocol';
 import { writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -51,6 +57,8 @@ export interface RemoteCommandAdapterDeps {
   audit: RemoteMutationAudit;
   hostGeneration: string;
   snapshot: (device: RemoteDeviceRecord) => unknown;
+  /** Oversized state.refresh payloads follow a pending snapshot receipt. */
+  pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
   listAgents?: () => Array<{ id: string }>;
   onSubscribe?: (deviceId: string, sessionId: string) => void;
 }
@@ -61,7 +69,10 @@ export class RemoteCommandAdapter {
   async execute(
     device: RemoteDeviceRecord,
     command: CommandRequest,
-    hooks?: { onAccepted?: () => Promise<void> },
+    hooks?: {
+      onAccepted?: () => Promise<void>;
+      onResultSent?: () => Promise<void>;
+    },
   ): Promise<{
     ok: boolean;
     data?: unknown;
@@ -71,7 +82,7 @@ export class RemoteCommandAdapter {
       const claimed = this.claim(device, command);
       if (claimed.kind === 'done') return claimed.result;
       await hooks?.onAccepted?.();
-      const data = await this.dispatch(device, command, claimed.params);
+      const data = await this.dispatch(device, command, claimed.params, hooks);
       assertNoLeak(data);
       if (isMutation(command.method)) {
         this.upsertLedger(device.id, command, 'succeeded', data);
@@ -111,17 +122,44 @@ export class RemoteCommandAdapter {
     return { kind: 'accepted', params };
   }
 
+  // A pending receipt is not a replacement snapshot. The client retains its
+  // state and command waiter until every part has been verified.
+  private async refresh(
+    device: RemoteDeviceRecord,
+    hooks?: { onResultSent?: () => Promise<void> },
+  ): Promise<unknown> {
+    const snapshot = this.deps.snapshot(device) as RemoteStateSnapshot;
+    const payloadBytes = new TextEncoder().encode(canonicalJson(snapshot)).byteLength;
+    if (payloadBytes <= SNAPSHOT_SPLIT_THRESHOLD_BYTES) {
+      return snapshot;
+    }
+    if (!this.deps.pushSnapshotParts || !hooks) {
+      throw new RemoteProtocolError('FRAME_TOO_LARGE', 'snapshot part transport is unavailable');
+    }
+    const parts = await splitSnapshotParts(snapshot, SNAPSHOT_PART_BYTES);
+    hooks.onResultSent = async () => {
+      for (const part of parts) {
+        await this.deps.pushSnapshotParts!(device.id, part);
+      }
+    };
+    return { type: 'state.snapshot.pending', snapshot_id: snapshot.snapshot_id };
+  }
+
   private async dispatch(
     device: RemoteDeviceRecord,
     command: CommandRequest,
     params: unknown,
+    hooks?: {
+      onAccepted?: () => Promise<void>;
+      onResultSent?: () => Promise<void>;
+    },
   ): Promise<unknown> {
     const method = command.method;
     switch (method) {
       case 'catalog.read':
         return this.catalog(device, command);
       case 'state.refresh':
-        return this.deps.snapshot(device);
+        return this.refresh(device, hooks);
       case 'session.subscribe':
         return this.subscribe(device, command, params as { session_id: string });
       case 'session.page':
@@ -257,6 +295,7 @@ export class RemoteCommandAdapter {
         ...(params['service_tier'] !== undefined ? {
           service_tier: hostServiceTier(params['service_tier'] as 'standard' | 'fast'),
         } : {}),
+        ...(params['approval_mode'] !== undefined ? { approval_mode: params['approval_mode'] } : {}),
       },
     });
     return this.deps.projector.projectSession(this.deps.sessions.getSession(String(params['session_id'])));
@@ -621,7 +660,9 @@ export class RemoteCommandAdapter {
   private rejectCraftedFields(params: unknown): void {
     if (!params || typeof params !== 'object') return;
     const record = params as Record<string, unknown>;
-    for (const key of ['role', 'grants', 'caller_id', 'client_id', 'approval_mode', 'session', 'path', 'native_session_id']) {
+    // approval_mode is a legitimate session config field (2026-09-15 audit-
+    // mode sync) — only genuinely privileged/crafted keys stay blocked.
+    for (const key of ['role', 'grants', 'caller_id', 'client_id', 'session', 'path', 'native_session_id']) {
       if (key in record) {
         throw new RemoteProtocolError('INVALID_FRAME', `crafted field ${key} is not accepted`);
       }

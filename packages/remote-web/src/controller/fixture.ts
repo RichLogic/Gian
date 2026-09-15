@@ -311,7 +311,7 @@ type Op =
   | {
       op: 'session-config';
       sessionId: string;
-      config: { model?: string; thinking?: string; service_tier?: 'standard' | 'fast' };
+      config: { model?: string; thinking?: string; service_tier?: 'standard' | 'fast'; approval_mode?: string };
     }
   | { op: 'other' };
 
@@ -610,6 +610,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
           ...(op.config.service_tier !== undefined
             ? { service_tier: op.config.service_tier === 'fast' ? 'fast' : null }
             : {}),
+          ...(op.config.approval_mode !== undefined ? { approval_mode: op.config.approval_mode } : {}),
         });
         return;
       }

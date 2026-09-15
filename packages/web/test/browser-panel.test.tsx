@@ -63,6 +63,7 @@ beforeEach(() => {
     stopFindInPage: vi.fn().mockResolvedValue(true),
     openDevTools: vi.fn().mockResolvedValue(true),
     setLayout: vi.fn().mockResolvedValue(true),
+    captureFrame: vi.fn().mockResolvedValue('data:image/png;base64,Zm9vZQ=='),
     setBackground: vi.fn().mockResolvedValue(true),
     setZoom: vi.fn().mockImplementation(async (_tabId, factor) => ({
       ...initialState,
@@ -132,8 +133,11 @@ function renderPanel(visible = true, contextTargetSessionId: string | null = nul
   );
 }
 
-function openBrowserMenu(): void {
+async function openBrowserMenu(): Promise<void> {
   fireEvent.click(screen.getByRole('button', { name: 'More Browser actions' }));
+  // The menu overlays a captured freeze frame, so it opens after the
+  // captureFrame round-trip resolves.
+  await screen.findByRole('menu', { name: 'More Browser actions' });
 }
 
 describe('BrowserPanel', () => {
@@ -147,7 +151,7 @@ describe('BrowserPanel', () => {
     expect(screen.queryByRole('button', { name: 'Find in page' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Downloads' })).not.toBeInTheDocument();
 
-    openBrowserMenu();
+    await openBrowserMenu();
     expect(screen.getByRole('menu', { name: 'More Browser actions' })).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'Find in page' })).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'Downloads' })).toBeVisible();
@@ -158,7 +162,7 @@ describe('BrowserPanel', () => {
     expect(screen.getByRole('textbox', { name: 'Find text' })).toBeVisible();
     expect(screen.queryByRole('menu', { name: 'More Browser actions' })).not.toBeInTheDocument();
 
-    openBrowserMenu();
+    await openBrowserMenu();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('menu', { name: 'More Browser actions' })).not.toBeInTheDocument();
   });
@@ -222,15 +226,13 @@ describe('BrowserPanel', () => {
     rendered.unmount();
   });
 
-  it('shrinks the native viewport beside the open menu so Electron cannot cover it', async () => {
+  it('floats the menu over a freeze frame instead of resizing the page', async () => {
     const originalRect = HTMLElement.prototype.getBoundingClientRect;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
       if (!this.classList.contains('browser-viewport')) return originalRect.call(this);
-      const menuOpen = this.parentElement?.classList.contains('menu-open') === true;
-      const width = menuOpen ? 180 : 400;
       return {
-        x: 10, y: 20, left: 10, top: 20, right: 10 + width, bottom: 220,
-        width, height: 200, toJSON: () => ({}),
+        x: 10, y: 20, left: 10, top: 20, right: 410, bottom: 220,
+        width: 400, height: 200, toJSON: () => ({}),
       } as DOMRect;
     });
     renderPanel(true, 'session-browser-menu');
@@ -240,13 +242,26 @@ describe('BrowserPanel', () => {
       true,
     ));
 
-    openBrowserMenu();
-    await waitFor(() => expect(browser.setLayout).toHaveBeenCalledWith(
+    await openBrowserMenu();
+    expect(browser.captureFrame).toHaveBeenCalledWith(TAB_ID);
+    // The native view hides while the menu is open — it never gets squeezed
+    // narrower (Electron would paint it over the HTML menu).
+    await waitFor(() => expect(browser.setLayout).toHaveBeenLastCalledWith(
+      TAB_ID, expect.any(Object), false,
+    ));
+    expect(browser.setLayout).not.toHaveBeenCalledWith(
+      TAB_ID, expect.objectContaining({ width: 180 }), expect.anything(),
+    );
+    expect(document.querySelector('.browser-freeze')).not.toBeNull();
+    expect(screen.getByRole('menu', { name: 'More Browser actions' })).toBeVisible();
+
+    // Closing restores the native view at the same bounds.
+    fireEvent.click(screen.getByRole('button', { name: 'More Browser actions' }));
+    await waitFor(() => expect(browser.setLayout).toHaveBeenLastCalledWith(
       TAB_ID,
-      { x: 10, y: 20, width: 180, height: 200 },
+      { x: 10, y: 20, width: 400, height: 200 },
       true,
     ));
-    expect(screen.getByRole('menu', { name: 'More Browser actions' })).toBeVisible();
   });
 
   it('renders Browser in the standard Sheet tab strip', () => {
@@ -385,7 +400,7 @@ describe('BrowserPanel', () => {
   it('drives per-tab zoom from the toolbar controls', async () => {
     renderPanel();
     await screen.findByDisplayValue('https://example.com/');
-    openBrowserMenu();
+    await openBrowserMenu();
     expect(screen.getByRole('button', { name: 'Reset zoom' })).toHaveTextContent('100%');
 
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
@@ -490,7 +505,7 @@ describe('BrowserPanel', () => {
   it('opens detached DevTools only through the trusted Browser bridge', async () => {
     renderPanel();
     await screen.findByDisplayValue('https://example.com/');
-    openBrowserMenu();
+    await openBrowserMenu();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open DevTools' }));
     expect(browser.openDevTools).toHaveBeenCalledWith(TAB_ID);
   });
@@ -498,7 +513,7 @@ describe('BrowserPanel', () => {
   it('shows main-owned downloads and routes cancel and reveal actions', async () => {
     renderPanel();
     await screen.findByDisplayValue('https://example.com/');
-    openBrowserMenu();
+    await openBrowserMenu();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Downloads' }));
     expect(screen.getByText('No downloads')).toBeInTheDocument();
 
@@ -558,7 +573,7 @@ describe('BrowserPanel', () => {
   it('manages unpacked extensions and exposes compatibility warnings honestly', async () => {
     renderPanel();
     await screen.findByDisplayValue('https://example.com/');
-    openBrowserMenu();
+    await openBrowserMenu();
     const extensionsButton = screen.getByRole('menuitem', { name: 'Extensions' });
     fireEvent.click(extensionsButton);
     expect(screen.getByText('No extensions loaded')).toBeInTheDocument();

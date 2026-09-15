@@ -187,23 +187,29 @@ describe('Composer independent catalog controls', () => {
     expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
   });
 
-  it('places the context ring after the mode/attach cluster (2026-09-10 owner call)', async () => {
+  it('places the context ring after the last left-cluster control, before the spacer (2026-09-15 owner call)', async () => {
     renderComposer(makeSession('claude'));
 
     await waitFor(() => {
       expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Sonnet');
     });
-    const approval = document.querySelector('.cmp-approval-btn');
-    const ring = document.querySelector('.context-usage-anchor');
+    const bar = document.querySelector('.composer-bar')!;
+    const ring = bar.querySelector('.context-usage-anchor');
+    const spacer = bar.querySelector('.spacer');
+    const approval = bar.querySelector('.cmp-approval-btn');
     const attach = screen.getByRole('button', { name: 'Add context' });
-    expect(approval).toBeTruthy();
     expect(ring).toBeTruthy();
-    // mode chip → attach "+" → ring.
+    expect(spacer).toBeTruthy();
+    expect(approval).toBeTruthy();
+    // ring → spacer → mode chip → attach "+".
     expect(
-      approval!.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ring!.compareDocumentPosition(spacer!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      attach.compareDocumentPosition(ring!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      spacer!.compareDocumentPosition(approval!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      approval!.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 

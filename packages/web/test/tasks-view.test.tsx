@@ -2,8 +2,9 @@
 //   - subtasksFor: pinned subtasks float to the top (pinned_at DESC), the rest
 //     keep created_at DESC; user-completed subtasks sink to the bottom.
 //   - The sidebar is two collapsible sections: 进行中 (In Progress) and
-//     完成 (Done), task pin was removed (2026-08-03) — tasks sort by
-//     created_at DESC.
+//     完成 (Done), task pin was removed (2026-08-03) — open tasks sort by
+//     compareTasks (manual drag range), the Done group and the 未分配
+//     session group sort by updated_at DESC (2026-09-15 owner).
 //   - Task group rows carry a "⋯" menu (rename / completed-session
 //     visibility / done-toggle / delete with confirm) and a "+" that opens
 //     the task-context new-session form. The menu is portaled to <body> and
@@ -782,25 +783,41 @@ describe('show-more caps (2026-09-08 owner call)', () => {
   // Everything in the Tasks rail caps at 5 rows + 显示更多 (+10 per click)
   // EXCEPT the Doing tasks' open subtasks, which always render in full.
   it('caps the 未分配 section at 5 rows and reveals 10 more per click', async () => {
+    // 未分配 sorts by updated_at DESC (2026-09-15 owner) — the cap shows
+    // loose-6…2.
     const sessions = Array.from({ length: 7 }, (_, i) =>
-      subtask({ id: `loose-${i}`, name: `Loose ${i}`, type: 'coding', task_id: null, created_at: `2026-08-0${i + 1}T00:00:00Z` }));
+      subtask({
+        id: `loose-${i}`,
+        name: `Loose ${i}`,
+        type: 'coding',
+        task_id: null,
+        created_at: `2026-08-0${i + 1}T00:00:00Z`,
+        updated_at: `2026-08-0${i + 1}T00:00:00Z`,
+      }));
     renderTasks({ tasks: [task()], sessions });
     await screen.findByTestId('tasks-section-unassigned');
-    expect(screen.queryByTestId('session-row-loose-4')).toBeInTheDocument();
-    expect(screen.queryByTestId('session-row-loose-5')).toBeNull();
+    expect(screen.queryByTestId('session-row-loose-2')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-loose-1')).toBeNull();
     const more = screen.getByTestId('sb-showmore-unassigned');
     expect(more).toHaveTextContent('Show more (2 more)');
     await userEvent.click(more);
-    expect(screen.getByTestId('session-row-loose-6')).toBeInTheDocument();
+    expect(screen.getByTestId('session-row-loose-0')).toBeInTheDocument();
     expect(screen.queryByTestId('sb-showmore-unassigned')).toBeNull();
   });
 
   it('caps the 完成 section at 5 done tasks and reveals the rest', async () => {
     const doneTasks = Array.from({ length: 7 }, (_, i) =>
-      task({ id: `done-${i}`, name: `Done ${i}`, status: 'done', created_at: `2026-08-0${i + 1}T00:00:00Z` }));
+      task({
+        id: `done-${i}`,
+        name: `Done ${i}`,
+        status: 'done',
+        created_at: `2026-08-0${i + 1}T00:00:00Z`,
+        updated_at: `2026-08-0${i + 1}T00:00:00Z`,
+      }));
     renderTasks({ tasks: doneTasks, sessions: [] });
     await userEvent.click(screen.getByTestId('tasks-section-done'));
-    // Done tasks sort newest first (compareTasks) — the cap shows Done 6…2.
+    // Done tasks sort by updated_at DESC (2026-09-15 owner) — the cap shows
+    // Done 6…2.
     expect(screen.getByText('Done 2')).toBeInTheDocument();
     expect(screen.queryByText('Done 1')).toBeNull();
     await userEvent.click(screen.getByTestId('sb-showmore-done'));

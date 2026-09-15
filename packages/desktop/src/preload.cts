@@ -132,6 +132,8 @@ contextBridge.exposeInMainWorld(
       openDevTools: (tabId: string) => ipcRenderer.invoke('desktop:browser:open-devtools', tabId),
       setLayout: (tabId: string, bounds: GianBrowserBounds, visible: boolean) =>
         ipcRenderer.invoke('desktop:browser:set-layout', tabId, bounds, visible),
+      captureFrame: (tabId: string) =>
+        ipcRenderer.invoke('desktop:browser:capture-frame', tabId) as Promise<string | null>,
       setBackground: (tabId: string, cssColor: string) =>
         ipcRenderer.invoke('desktop:browser:set-background', tabId, cssColor),
       setZoom: (tabId: string, factor: number) =>

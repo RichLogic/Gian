@@ -49,15 +49,8 @@ export function ContextUsageIndicator({ session }: { session: Session }) {
   const ringStyle = {
     '--context-progress': `${(percent ?? 0) * 3.6}deg`,
   } as CSSProperties;
-  const stateClass = recalculating
-    ? ' is-recalculating'
-    : percent !== null && percent >= 90
-      ? ' is-danger'
-      : percent !== null && percent >= 75
-        ? ' is-warning'
-        : percent === null
-          ? ' is-unknown'
-          : '';
+  // The ring is accent-colored in every state (2026-09-15 owner): usage
+  // levels live in the tooltip, not in shifting ring colors.
   const ariaLabel = percent === null
     ? t(recalculating ? 'composer.context.recalculating' : 'composer.context.afterResponse')
     : `${t('composer.context.title')}: ${percent}% ${t('composer.context.used')}`;
@@ -66,7 +59,7 @@ export function ContextUsageIndicator({ session }: { session: Session }) {
     <>
       <span
         ref={anchorRef}
-        className={`context-usage-anchor${stateClass}`}
+        className="context-usage-anchor"
         role="img"
         tabIndex={0}
         aria-label={ariaLabel}

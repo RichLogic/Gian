@@ -95,9 +95,12 @@ export const MAX_DEVICES_PER_HOST = 20;
 export const MAX_CONNECTIONS_PER_DEVICE = 2;
 export const AUTH_RATE_LIMIT_PER_MINUTE = 10;
 export const MAX_CONTROL_FRAMES_PER_SECOND = 100;
-/** Host/Device sender cadence. Fifteen milliseconds keeps every rolling
- *  Server second comfortably below the 100-frame hard limit. */
-export const RELAY_FRAME_PACE_INTERVAL_MS = 15;
+/** Host sender burst bucket. A 20-frame capacity with a 60 frames/s refill
+ *  keeps every rolling Server second (100-frame hard limit) at ≤ 80 frames. */
+export const RELAY_FRAME_BURST_CAPACITY = 20;
+export const RELAY_FRAME_REFILL_PER_SECOND = 60;
+/** Live assistant deltas sharing one transcript item merge within this window. */
+export const TRANSCRIPT_COALESCE_MS = 50;
 export const MAX_CIPHERTEXT_BYTES_PER_SECOND = 16 * 1024 * 1024;
 /** Sender budget. Strictly below the Server cap so sliding-window skew cannot trip RATE_LIMITED. */
 export const CIPHERTEXT_PACE_BYTES_PER_SECOND = 13 * 1024 * 1024;
@@ -109,6 +112,12 @@ export const CONTENT_WINDOW_CHUNKS = 4;
 export const MAX_HELLO_CAPABILITIES = 32;
 export const MAX_SNAPSHOT_PARTS = 64;
 export const MAX_SNAPSHOT_TOTAL_BYTES = 4 * 1024 * 1024;
+/** Snapshots above this serialized size ship as state.snapshot.part frames
+ *  instead of one oversized command result. */
+export const SNAPSHOT_SPLIT_THRESHOLD_BYTES = 384 * 1024;
+/** Payload bytes per part; base64url and framing stay inside the 512 KiB
+ *  relay frame budget. */
+export const SNAPSHOT_PART_BYTES = 256 * 1024;
 export const MAX_STRING_CHARS = 16 * 1024;
 export const MAX_NAME_CHARS = 256;
 export const MAX_ID_CHARS = 64;
@@ -128,12 +137,16 @@ export const ACCESS_TOKEN_TTL_MS = 10 * 60 * 1000;
 export const WS_TICKET_TTL_MS = 60 * 1000;
 export const PRESENCE_LEASE_MS = 30 * 1000;
 export const PRESENCE_HEARTBEAT_MS = 10 * 1000;
+/** After a fresh crypto handshake the Host waits this long for a client-driven
+ *  sync (resume.request or state.refresh) before pushing a full resync. */
+export const SNAPSHOT_PUSH_GRACE_MS = 2 * 1000;
 export const AUTH_SIGNED_AT_SKEW_MS = 5 * 60 * 1000;
 export const AES_GCM_NONCE_BYTES = 12;
 export const AES_GCM_KEY_BITS = 256;
 export const SHA256_HEX_LENGTH = 64;
 
 export const SNAPSHOT_REQUIRED_REASONS = [
+  'crypto_resumed',
   'generation_changed',
   'gap_evicted',
   'revision_mismatch',
@@ -187,6 +200,7 @@ export const RELAY_NOTICE_TYPES = [
   'device.revoked',
   'device.revoked.ack',
   'pairing.claimed',
+  'route.not_bound',
 ] as const;
 
 export const RELAY_HANDSHAKE_TYPES = [

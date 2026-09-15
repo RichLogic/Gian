@@ -120,6 +120,17 @@ export function compareTasks(a: Task, b: Task): number {
   return b.created_at.localeCompare(a.created_at);
 }
 
+/** 完成 (Done) group: most recently updated first (2026-09-15 owner). The
+ *  open group keeps compareTasks — it is the manual drag-reorder range. */
+export function compareTasksByUpdatedDesc(a: Task, b: Task): number {
+  return b.updated_at.localeCompare(a.updated_at);
+}
+
+/** 未分配 (untasked) sessions: most recently updated first (2026-09-15 owner). */
+export function compareSessionsByUpdatedDesc(a: Session, b: Session): number {
+  return b.updated_at.localeCompare(a.updated_at);
+}
+
 
 export function TasksView({
   mode,
@@ -777,14 +788,14 @@ export function TasksSidebar({
     [visible],
   );
   const done = useMemo(
-    () => visible.filter(task => task.status === 'done').sort(compareTasks),
+    () => visible.filter(task => task.status === 'done').sort(compareTasksByUpdatedDesc),
     [visible],
   );
 
   // 未分配 (2026-09-06): untasked standalone Sessions — Tasks mode must reach
   // EVERY conversation, not just task-bound subtasks. Hidden-workspace
   // sessions stay reachable here exactly like the Project rail's 无归属.
-  // Creation order (oldest first) — the Tasks rail's global rule.
+  // Most recently updated first (2026-09-15 owner).
   const wsById = useMemo(() => new Map(workspaces.map(w => [w.id, w])), [workspaces]);
   const unassigned = useMemo(
     () => sessions
@@ -792,7 +803,7 @@ export function TasksSidebar({
         && s.archived === 0
         && s.type !== 'manager'
         && !(s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1))
-      .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+      .sort(compareSessionsByUpdatedDesc),
     [sessions, wsById],
   );
 

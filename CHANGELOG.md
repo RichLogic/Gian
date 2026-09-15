@@ -7,6 +7,138 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.0] - 2026-09-15
+
+### Added
+
+- Added the native Browser workspace with persistent tabs, constrained
+  authentication popups, origin-scoped permissions, downloads, page search,
+  detached DevTools, extension inspection, and session-scoped Browser use.
+- Added Remote Web pairing and control, including QR enrollment, encrypted
+  session state, attachments, task operations, model controls, reconnect
+  recovery, device revocation, and live Desktop connection settings.
+- Added conversation-bound scheduled automations with explicit confirmation,
+  Timer list/detail views, run history, retry-safe dispatch, and restart
+  recovery.
+- Added the read-only Custom inventory for Skills, MCP servers, Hooks, and
+  Rules across supported Agents and Workspace scopes.
+- Added the Proxy Catalog and globally managed Runtime generations, including
+  signed package verification, Runtime discovery/probing, Agent HOME
+  isolation, exact Session bindings, and install/update/rollback controls.
+- Added privacy-bounded macOS notifications for completed turns, approvals,
+  questions, and Agent errors, with per-category and sound preferences plus
+  direct navigation back to the affected Session.
+
+### Changed
+
+- Rebuilt Agents around saved Agent identities plus the signed Proxy Catalog;
+  Runtime paths are selected globally per certified Proxy generation instead
+  of being stored independently on each Agent.
+- Redesigned the primary sidebar and detail panes with persistent sections,
+  Project menus, task assignment, capped lists, improved History visuals, and
+  consistent narrow-window navigation.
+- Updated the target shipping set to Claude, Codex, Kimi, DeepSeek Harness,
+  and ZCode Proxy 0.3.0, with Proxy-owned Runtime installation recipes and
+  verified reuse of unchanged Runtime files.
+- Unified the Agents, Custom, and Timer panels, improved Timer frequency
+  editing and system-timezone display, and adapted the shared composer and
+  Remote Web audit mode to narrow windows.
+- Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
+  unavailable legacy 0.38.0 distribution.
+- Moved formal Proxy/Catalog artifact qualification to GitHub-hosted macOS
+  ARM64. Claude, Codex, and Kimi use pinned official assets, DSH is rebuilt
+  from an exact npm lock, and live Provider accounts remain optional canary
+  evidence instead of a Release dependency.
+- Established Developer ID signing, Apple notarization, Gatekeeper validation,
+  and latest-stable GitHub publication for official macOS releases.
+- Added automatic signed App updates that download in the background and
+  install only after the user confirms a restart; release metadata and every
+  uploaded update asset are verified before the draft becomes public.
+
+### Fixed
+
+- Remote Web now recovers stalled reads and sends, retains drafts until Host
+  receipt, restores remembered sessions, and keeps reconnecting through
+  transient failures without duplicating commands.
+- Improved Remote streaming, Host presence, and large-snapshot delivery
+  without reordering encrypted frames or losing unsent drafts.
+- Corrected packaged JavaScript Runtime probes and bounded installation
+  failure diagnostics.
+- Browser tabs remain closed after restart, popup and download boundaries stay
+  user-mediated, and packaged extension/runtime state is isolated from the
+  developer profile.
+- Runtime activation, Catalog validation, Proxy lifecycle, SQLite startup,
+  DSH continuation, Codex completion summaries, and packaged smoke now fail
+  closed at their actual ownership boundaries.
+- DSH Catalog startup now tolerates optional Cordis services that are not
+  injected, and managed Kimi Runtime qualification reuses the protected user
+  configuration without replacing the user's own Kimi binary.
+- Updated the managed Codex Runtime to 0.153.4 so Gian can expose GPT-6 Astra
+  when the signed-in Codex account advertises it.
+
+### Known limitations
+
+- The macOS build currently supports Apple Silicon only.
+- Existing unsigned builds require one manual installation of 0.6.0; later
+  signed stable releases can update automatically.
+- Fresh Agent onboarding requires the matching certified Proxy coordinates in
+  the signed stable Catalog; a missing Catalog entry blocks package acceptance.
+- Remote Web changes require a matching remote deployment to take effect.
+- Grok remains outside the shipping product surface.
+
+## [0.6.0-beta3] - 2026-09-15
+
+### Fixed
+
+- Fixed GianDev aborting before startup on another Mac because ad-hoc signed
+  Electron libraries were rejected by Hardened Runtime library validation.
+  Dev builds use a dedicated entitlement for the App and helper processes;
+  signed stable builds keep their existing stricter entitlements.
+- Fixed missing GitHub sign-in configuration in GianDev packages. Builds now
+  reject a missing OAuth Client ID and verify the embedded configuration.
+
+### Known limitations
+
+- This remains an ad-hoc signed Apple Silicon Dev build, not a notarized
+  stable release. Runtime installer v1 still requires the matching certified
+  Proxy releases and Catalog; their publication is separate from the App ZIP.
+
+## [0.6.0-beta2] - 2026-09-15
+
+### Changed
+
+- Unified the Agents, Custom, and Timer panels; improved Timer frequency
+  editing, system-timezone display, and schedule indicators on Sessions.
+- Made the composer adapt to narrow windows and brought its shared layout
+  and audit mode to Remote Web.
+- Moved Runtime installation recipes into their owning Proxies, added
+  verified reuse of unchanged Runtime files, and scoped Catalog discovery
+  to each Agent's HOME.
+
+### Fixed
+
+- Improved Remote reconnect recovery, streaming updates, Host presence,
+  and large-snapshot delivery without losing unsent drafts or reordering
+  encrypted frames.
+- Corrected packaged JavaScript Runtime probes and added bounded installation
+  failure diagnostics.
+
+### Known limitations
+
+- This GianDev Apple Silicon build uses ad-hoc signing, has no automatic
+  update feed, and is not a notarized stable release.
+- Fresh Runtime installation requires matching installer-capable Proxy
+  releases in the official Catalog; building this App does not publish them.
+- Remote Web changes require a matching remote deployment to take effect.
+
+## [0.6.0-beta1] - 2026-09-14
+
+First versioned GianDev dev-channel package, built by the hosted Dev Package
+pipeline. It is ad-hoc signed, has no auto-update feed, and is intended for
+development verification; see [0.6.0] for the cumulative user-facing changes
+it contains. Dev package file names and build receipts now carry the app
+version, and app versions may use prerelease suffixes such as `-beta1`.
+
 ## Proxy Installer Releases - 2026-09-15
 
 ### Added
@@ -35,68 +167,6 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
   Proxy 0.1.2 under new immutable versions so Integrations can upgrade from
   same-version development packages to certified official packages before
   installing their Runtimes. Provider Runtime versions are unchanged.
-
-## [0.6.0] - 2026-09-12
-
-### Added
-
-- Added the native Browser workspace with persistent tabs, constrained
-  authentication popups, origin-scoped permissions, downloads, page search,
-  detached DevTools, extension inspection, and session-scoped Browser use.
-- Added Remote Web pairing and control, including QR enrollment, encrypted
-  session state, attachments, task operations, model controls, reconnect
-  recovery, device revocation, and live Desktop connection settings.
-- Added conversation-bound scheduled automations with explicit confirmation,
-  Timer list/detail views, run history, retry-safe dispatch, and restart
-  recovery.
-- Added the read-only Custom inventory for Skills, MCP servers, Hooks, and
-  Rules across supported Agents and Workspace scopes.
-- Added the Proxy Catalog and globally managed Runtime generations, including
-  signed package verification, Runtime discovery/probing, Agent HOME
-  isolation, exact Session bindings, and install/update/rollback controls.
-
-### Changed
-
-- Rebuilt Agents around saved Agent identities plus the signed Proxy Catalog;
-  Runtime paths are selected globally per certified Proxy generation instead
-  of being stored independently on each Agent.
-- Redesigned the primary sidebar and detail panes with persistent sections,
-  Project menus, task assignment, capped lists, improved History visuals, and
-  consistent narrow-window navigation.
-- Updated the target shipping set to Claude Proxy 0.2.4, Codex Proxy 0.2.16,
-  Kimi Proxy 0.2.10, DeepSeek Harness Proxy 0.1.6, and ZCode Proxy 0.1.1.
-- Certified Kimi Code 0.41.0 as the managed Runtime candidate instead of the
-  unavailable legacy 0.38.0 distribution.
-- Moved formal Proxy/Catalog artifact qualification to GitHub-hosted macOS
-  ARM64. Claude, Codex, and Kimi use pinned official assets, DSH is rebuilt
-  from an exact npm lock, and live Provider accounts remain optional canary
-  evidence instead of a Release dependency.
-- Established Developer ID signing, Apple notarization, Gatekeeper validation,
-  and latest-stable GitHub publication for official macOS releases.
-
-### Fixed
-
-- Remote Web now recovers stalled reads and sends, retains drafts until Host
-  receipt, restores remembered sessions, and keeps reconnecting through
-  transient failures without duplicating commands.
-- Browser tabs remain closed after restart, popup and download boundaries stay
-  user-mediated, and packaged extension/runtime state is isolated from the
-  developer profile.
-- Runtime activation, Catalog validation, Proxy lifecycle, SQLite startup,
-  DSH continuation, Codex completion summaries, and packaged smoke now fail
-  closed at their actual ownership boundaries.
-- DSH Catalog startup now tolerates optional Cordis services that are not
-  injected, and managed Kimi Runtime qualification reuses the protected user
-  configuration without replacing the user's own Kimi binary.
-- Updated the managed Codex Runtime to 0.153.4 so Gian can expose GPT-6 Astra
-  when the signed-in Codex account advertises it.
-
-### Known limitations
-
-- The macOS build currently supports Apple Silicon only.
-- Fresh Agent onboarding requires the matching certified Proxy coordinates in
-  the signed stable Catalog; a missing Catalog entry blocks package acceptance.
-- Grok remains outside the shipping product surface.
 
 ## [0.5.5] - 2026-09-02
 

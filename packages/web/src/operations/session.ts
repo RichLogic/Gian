@@ -29,7 +29,7 @@ import type {
 } from '@gian/shared';
 import { usesNativeExecutorConfig } from '@gian/shared';
 
-import { dropSession, mergeSession, reorderSessions } from '../api.js';
+import { dropSession, mergeSession, rebindDeletedSessionAgent, reorderSessions } from '../api.js';
 import { toast } from '../feedback.js';
 import { registry } from './registry.js';
 import type { OperationDefinition, OptimisticOverlay } from './types.js';
@@ -168,6 +168,13 @@ const sessionAssignTask: OperationDefinition<SessionIdInput & { taskId: string |
     session_id: input.sessionId,
     task_id: input.taskId,
   }),
+  timeoutMs: WS_TIMEOUT_MS,
+};
+
+const sessionRebindAgent: OperationDefinition<SessionIdInput & { agentId: string }, Session> = {
+  policy: 'pending',
+  entityKey: input => sessionEntityKey(input.sessionId),
+  execute: input => rebindDeletedSessionAgent(input.sessionId, input.agentId),
   timeoutMs: WS_TIMEOUT_MS,
 };
 
@@ -364,6 +371,7 @@ registry.register('session.setModel', sessionSetModel);
 registry.register('session.setEffort', sessionSetEffort);
 registry.register('session.setServiceTier', sessionSetServiceTier);
 registry.register('session.assignTask', sessionAssignTask);
+registry.register('session.rebindAgent', sessionRebindAgent);
 registry.register('session.setNativeConfig', sessionSetNativeConfig);
 registry.register('session.setTurnConfig', sessionSetTurnConfig);
 registry.register('session.create', sessionCreate);

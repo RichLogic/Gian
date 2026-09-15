@@ -315,6 +315,7 @@ export interface RemoteUiActions {
     model?: string;
     thinking?: string;
     service_tier?: 'standard' | 'fast';
+    approval_mode?: string;
   }): void;
   retryTranscript(sessionId: string): void;
   loadOlderTranscript(sessionId: string): void;

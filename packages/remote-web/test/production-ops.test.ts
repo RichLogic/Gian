@@ -8,6 +8,7 @@ import {
   generateCanonicalId,
   generateP256KeyPair,
   sha256Hex,
+  splitSnapshotParts,
   type RemoteMethod,
   type RemoteStateSnapshot,
 } from '@gian/remote-protocol';
@@ -16,6 +17,7 @@ import { createProductionController } from '../src/controller/create.js';
 import {
   READ_COMMAND_TIMEOUT_MS,
   READ_STALL_RECONNECT_MS,
+  SNAPSHOT_ASSEMBLY_TIMEOUT_MS,
 } from '../src/controller/production.js';
 import { applyCanonicalEvent, applySnapshotToState, applyStatePatch } from '../src/controller/apply-control.js';
 import { advanceCanonicalSequence, occupiesCanonicalSequence } from '../src/controller/event-sequence.js';
@@ -195,6 +197,13 @@ describe('production controller operations', () => {
     });
     controller.actions.challengeLogin(hostId);
     await viWait(async () => controller.state.connection.kind === 'online');
+    const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+    await relays[0]!.emit({
+      type: 'command.result',
+      command_id: String(initialSync!.command_id),
+      ok: true,
+      data: { ...sampleSnapshot(hostId, 'Office Mac'), event_sequence: 5 },
+    });
 
     const sessionId = generateCanonicalId();
     controller.actions.retryTranscript(sessionId);
@@ -241,6 +250,13 @@ describe('production controller operations', () => {
     });
     controller.actions.challengeLogin(hostId);
     await viWait(async () => controller.state.connection.kind === 'online');
+    const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+    await relays[0]!.emit({
+      type: 'command.result',
+      command_id: String(initialSync!.command_id),
+      ok: true,
+      data: { ...sampleSnapshot(hostId, 'Office Mac'), event_sequence: 5 },
+    });
 
     controller.actions.retryTranscript(generateCanonicalId());
     await viWait(async () => relays.length >= 2 && relays[1]!.sent.some(message => (
@@ -338,6 +354,290 @@ describe('production controller operations', () => {
     });
     await viWait(async () => controller.state.connection.kind === 'online');
     controller.close();
+  });
+
+  it('fresh connect requests a full state refresh instead of waiting for a host push', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      await viWait(async () => relays[0]!.sent.some(message => (
+        message.type === 'command.request' && message.method === 'state.refresh'
+      )));
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('reconnect with prior state resumes without a full state refresh', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      await viWait(async () => relays[0]!.isOpen);
+      const refresh = relays[0]!.sent.find(message => message.method === 'state.refresh');
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(refresh!.command_id),
+        ok: true,
+        data: { ...sampleSnapshot(hostId, 'Office Mac'), event_sequence: 5 },
+      });
+      relays[0]!.close('socket_closed');
+      await viWait(async () => relays.length >= 2 && relays[1]!.isOpen, 2_000);
+      await viWait(async () => relays[1]!.sent.some(message => message.type === 'resume.request'));
+      expect(relays[1]!.sent.some(message => message.method === 'state.refresh')).toBe(false);
+      const resume = relays[1]!.sent.find(message => message.type === 'resume.request');
+      expect(resume).toMatchObject({ after_event_sequence: 4, current_revision: 'rev-1' });
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('resume with an included transcript page hydrates without a session.page round trip', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    const sessionId = generateCanonicalId();
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(initialSync!.command_id),
+        ok: true,
+        data: {
+          ...sampleSnapshot(hostId, 'Office Mac'),
+          event_sequence: 5,
+          sessions: [remoteSession(sessionId)],
+        },
+      });
+      controller.actions.selectSession(sessionId);
+      await viWait(async () => relays[0]!.sent.some(message => message.method === 'session.page'));
+      const pageCommand = relays[0]!.sent.find(message => message.method === 'session.page')!;
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(pageCommand.command_id),
+        ok: true,
+        data: { session_id: sessionId, has_more: false, items: [] },
+      });
+      await viWait(async () => controller.state.transcripts[sessionId]?.hydrated === true);
+
+      relays[0]!.close('socket_closed');
+      await viWait(async () => relays.length >= 2 && relays[1]!.isOpen, 2_000);
+      await viWait(async () => relays[1]!.sent.some(message => message.type === 'resume.request'));
+      await relays[1]!.emit({
+        type: 'resume.ok',
+        host_generation: generateCanonicalId(),
+        replay_from: 5,
+        replay_through: 5,
+        revision: 'rev-1',
+        transcript_included: true,
+      });
+      await relays[1]!.emit({
+        type: 'transcript.page',
+        session_id: sessionId,
+        has_more: false,
+        items: [{
+          id: generateCanonicalId(),
+          turn_id: generateCanonicalId(),
+          turn: 0,
+          ts: Date.now(),
+          kind: 'user',
+          text: 'pushed history',
+        }],
+      });
+      await viWait(async () => (controller.state.transcripts[sessionId]?.items.length ?? 0) === 1);
+      expect(controller.state.transcripts[sessionId]?.hydrated).toBe(true);
+      expect(relays[1]!.sent.some(message => message.method === 'session.page')).toBe(false);
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('a host.offline notice shows the host offline and retries with a short cap', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      reconnectBaseMs: 20,
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(initialSync!.command_id),
+        ok: true,
+        data: { ...sampleSnapshot(hostId, 'Office Mac'), event_sequence: 5 },
+      });
+      relays[0]!.emitNotice({ type: 'host.offline', host_id: hostId });
+      expect(controller.state.connection.kind).toBe('host_offline');
+      await viWait(async () => relays.length >= 2 && relays[1]!.isOpen, 1_000);
+      await viWait(async () => controller.state.connection.kind === 'online');
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('a host.online notice reconnects immediately without waiting out the backoff', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      reconnectBaseMs: 30_000,
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      relays[0]!.close('socket_closed');
+      expect(controller.state.connection.kind).toBe('relay_reconnecting');
+      relays[0]!.emitNotice({ type: 'host.online', host_id: hostId });
+      await viWait(async () => relays.length >= 2 && relays[1]!.isOpen, 1_000);
+      await viWait(async () => controller.state.connection.kind === 'online');
+    } finally {
+      controller.close();
+    }
+  });
+
+  it('keeps draft and selected session until a split snapshot is fully verified', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    const sessionId = generateCanonicalId();
+    const full = {
+      ...sampleSnapshot(hostId, 'Office Mac'),
+      event_sequence: 9,
+      catalog_revision: 'full-snapshot',
+      sessions: [remoteSession(sessionId)],
+    };
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(initialSync!.command_id),
+        ok: true,
+        data: { ...full, event_sequence: 5, catalog_revision: 'old-snapshot' },
+      });
+      controller.actions.setDraftText(sessionId, 'Unsent work');
+      controller.actions.refreshState();
+      await viWait(async () => relays[0]!.sent.filter(message => message.method === 'state.refresh').length === 2);
+      const refresh = relays[0]!.sent.filter(message => message.method === 'state.refresh').at(-1)!;
+      await relays[0]!.emit({
+        type: 'command.result', command_id: refresh.command_id, ok: true,
+        data: { type: 'state.snapshot.pending', snapshot_id: full.snapshot_id },
+      });
+      const parts = await splitSnapshotParts(full, 256);
+      await relays[0]!.emit(parts[0]!);
+      expect(controller.state.catalogRevision).toBe('old-snapshot');
+      expect(controller.state.view).toEqual({ kind: 'chat', sessionId });
+      expect(controller.state.drafts[sessionId]?.text).toBe('Unsent work');
+      expect(controller.state.mutations[String(refresh.command_id)]?.phase).toBe('pending');
+      expect(controller.state.connection.kind).toBe('resyncing');
+      for (const part of parts.slice(1)) await relays[0]!.emit(part);
+      expect(controller.state.catalogRevision).toBe('full-snapshot');
+      expect(controller.state.drafts[sessionId]?.text).toBe('Unsent work');
+      expect(controller.state.mutations[String(refresh.command_id)]?.phase).toBe('succeeded');
+      expect(controller.state.connection.kind).toBe('online');
+    } finally {
+      controller.close();
+    }
+  });
+
+  it.each(['missing', 'hash', 'stale'] as const)('retains old state and reconnects for a %s split snapshot', async (failure) => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) { const relay = new FakeRelay(input); relays.push(relay); return relay; },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => relays[0]?.sent.some(message => message.method === 'state.refresh') === true);
+      const first = relays[0]!.sent.find(message => message.method === 'state.refresh')!;
+      const sessionId = generateCanonicalId();
+      const previous = { ...sampleSnapshot(hostId, 'Office'), event_sequence: 5, sessions: [remoteSession(sessionId)] };
+      await relays[0]!.emit({ type: 'command.result', command_id: first.command_id, ok: true, data: previous });
+      controller.actions.setDraftText(sessionId, 'Keep this draft');
+      controller.actions.refreshState();
+      await viWait(async () => relays[0]!.sent.filter(message => message.method === 'state.refresh').length === 2);
+      const refresh = relays[0]!.sent.filter(message => message.method === 'state.refresh').at(-1)!;
+      const full = { ...previous, snapshot_id: generateCanonicalId(), catalog_revision: 'new-snapshot' };
+      const parts = await splitSnapshotParts(full, 256);
+      if (failure === 'missing') vi.useFakeTimers();
+      await relays[0]!.emit({ type: 'command.result', command_id: refresh.command_id, ok: true, data: { type: 'state.snapshot.pending', snapshot_id: full.snapshot_id } });
+      if (failure === 'missing') {
+        await relays[0]!.emit(parts[0]!);
+        await vi.advanceTimersByTimeAsync(SNAPSHOT_ASSEMBLY_TIMEOUT_MS);
+      } else {
+        if (failure === 'stale') {
+          await relays[0]!.emit({ type: 'state.patch', host_generation: full.host_generation, event_sequence: 5, base_revision: 'rev-1', revision: 'rev-2', patch: {} });
+        }
+        for (const part of parts) await relays[0]!.emit(failure === 'hash' ? { ...part, payload_sha256: '0'.repeat(64) } : part);
+      }
+      expect(relays[0]!.isOpen).toBe(false);
+      expect(controller.state.catalogRevision).toBe('cat-1');
+      expect(controller.state.drafts[sessionId]?.text).toBe('Keep this draft');
+      expect(controller.state.mutations[String(refresh.command_id)]?.phase).not.toBe('succeeded');
+      // A late part from the retired transport cannot apply the abandoned snapshot.
+      for (const part of parts) await relays[0]!.emit(part);
+      expect(controller.state.catalogRevision).toBe('cat-1');
+    } finally { controller.close(); vi.useRealTimers(); }
+  });
+
+  it('advances the local revision through replayed patches without requesting a full snapshot', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      reconnectBaseMs: 10,
+      createRelay(input) { const relay = new FakeRelay(input); relays.push(relay); return relay; },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => relays[0]?.sent.some(message => message.method === 'state.refresh') === true);
+      const first = relays[0]!.sent.find(message => message.method === 'state.refresh')!;
+      const full = { ...sampleSnapshot(hostId, 'Office'), event_sequence: 5 };
+      await relays[0]!.emit({ type: 'command.result', command_id: first.command_id, ok: true, data: full });
+      relays[0]!.close('socket_closed');
+      await viWait(async () => relays[1]?.sent.some(message => message.type === 'resume.request') === true);
+      await relays[1]!.emit({ type: 'resume.ok', host_generation: full.host_generation, replay_from: 5, replay_through: 7, revision: 'rev-3' });
+      await relays[1]!.emit({ type: 'state.patch', host_generation: full.host_generation, event_sequence: 5, base_revision: 'rev-1', revision: 'rev-2', patch: {} });
+      await relays[1]!.emit({ type: 'state.patch', host_generation: full.host_generation, event_sequence: 6, base_revision: 'rev-2', revision: 'rev-3', patch: {} });
+      expect(relays[1]!.sent.filter(message => message.method === 'state.refresh')).toHaveLength(0);
+      relays[1]!.close('socket_closed');
+      await viWait(async () => relays[2]?.sent.some(message => message.type === 'resume.request') === true);
+      expect(relays[2]!.sent.find(message => message.type === 'resume.request')).toMatchObject({ current_revision: 'rev-3', after_event_sequence: 6 });
+    } finally { controller.close(); }
   });
 
   it('Refresh state rechecks an accepted send without sending the message twice', async () => {
@@ -1433,6 +1733,13 @@ describe('production controller operations', () => {
     });
     controller.actions.challengeLogin(hostId);
     await viWait(async () => controller.state.connection.kind === 'online');
+    const initialSync = relays[0]!.sent.find(message => message.method === 'state.refresh');
+    await relays[0]!.emit({
+      type: 'command.result',
+      command_id: String(initialSync!.command_id),
+      ok: true,
+      data: { ...sampleSnapshot(hostId, 'Office Mac'), event_sequence: 5 },
+    });
 
     controller.actions.refreshCatalog();
     await viWait(async () => relays[0]!.sent.some(message => message.method === 'catalog.read'));
@@ -1785,6 +2092,10 @@ class FakeRelay implements DeviceRelayLike {
 
   async emit(message: { type?: string; [key: string]: unknown }): Promise<void> {
     await this.input.handlers.onControl(message);
+  }
+
+  emitNotice(notice: { type: 'host.offline' | 'host.online'; host_id: string }): void {
+    this.input.handlers.onNotice?.(notice as never);
   }
 }
 

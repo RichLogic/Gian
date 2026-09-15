@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import {
   RELAY_PROTOCOL,
-  createRelayFramePacer,
+  createRelayFrameTokenBucket,
   generateCanonicalId,
   parseRelayHandshake,
   type CryptoOffer,
@@ -10,7 +10,6 @@ import {
   type RelayNotice,
 } from '@gian/remote-protocol';
 import type { RemotePeerTransport } from './connector.js';
-import { createSerialQueue } from './serial-queue.js';
 
 export class DeviceRouteTransport implements RemotePeerTransport {
   readonly events = new EventEmitter();
@@ -52,12 +51,15 @@ export class HostRelaySocket {
   private readonly queuedNotices: RelayNotice[] = [];
   private readonly boundHandlers = new Set<() => void>();
   private readonly closeHandlers = new Set<(reason: string) => void>();
-  private readonly enqueueOutbound = createSerialQueue();
-  private readonly framePacer = createRelayFramePacer();
+  private readonly outboundQueue: Array<{ frame: unknown; stillCurrent: () => boolean }> = [];
+  private draining = false;
   private closed = false;
   bound = false;
 
-  private constructor(private readonly socket: WebSocket) {}
+  private constructor(
+    private readonly socket: WebSocket,
+    private readonly frameLimiter = createRelayFrameTokenBucket(),
+  ) {}
 
   static connect(input: { url: string; ticket: string }): Promise<HostRelaySocket> {
     return new Promise((resolve, reject) => {
@@ -105,6 +107,12 @@ export class HostRelaySocket {
     return transport;
   }
 
+  /** The relay reported this device route is no longer crypto-bound; drop it
+   *  so the next handshake attaches a fresh transport. */
+  dropRoute(deviceId: string): void {
+    this.routes.get(deviceId)?.close('route_not_bound');
+  }
+
   send(frame: unknown): void {
     this.sendWhen(frame, () => true);
   }
@@ -112,17 +120,38 @@ export class HostRelaySocket {
   private sendWhen(frame: unknown, stillCurrent: () => boolean): void {
     if (this.closed) return;
     if (frame && typeof frame === 'object' && 'ciphertext' in frame) {
-      void this.enqueueOutbound(async () => {
-        await this.framePacer.wait();
-        if (stillCurrent()) this.sendNow(frame);
-      }).catch(() => undefined);
+      this.outboundQueue.push({ frame, stillCurrent });
+      void this.drain();
       return;
     }
     if (stillCurrent()) this.sendNow(frame);
   }
 
+  // Frames are already sealed with contiguous transport sequences. Reordering
+  // them here breaks both Relay sequence guards and peer AEAD sessions.
+  private async drain(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      for (;;) {
+        const next = this.outboundQueue.shift();
+        if (!next) return;
+        await this.frameLimiter.wait();
+        if (this.closed) return;
+        if (next.stillCurrent()) this.sendNow(next.frame);
+      }
+    } finally {
+      this.draining = false;
+    }
+  }
+
   private sendNow(frame: unknown): void {
-    if (this.closed || this.socket.readyState !== WebSocket.OPEN) return;
+    if (this.closed || this.socket.readyState !== WebSocket.OPEN) {
+      // Dropping a frame silently here would strand the device waiting for
+      // it; surface the dead socket through the normal close/reconnect path.
+      if (!this.closed) this.close('socket_not_open');
+      return;
+    }
     if (frame && typeof frame === 'object' && 'connection_id' in frame) {
       this.socket.send(JSON.stringify({ ...frame, connection_id: this.connectionId }));
       return;
@@ -207,6 +236,7 @@ export class HostRelaySocket {
       || parsed.type === 'host.offline'
       || parsed.type === 'host.online'
       || parsed.type === 'pairing.claimed'
+      || parsed.type === 'route.not_bound'
     ) {
       const notice = parsed as RelayNotice;
       if (this.noticeHandlers.size === 0) {

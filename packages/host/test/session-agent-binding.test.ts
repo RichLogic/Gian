@@ -1,7 +1,7 @@
 // Session ↔ Agent binding (agents.json schema v2, migration 055):
 // session:create resolves kind/defaults/CLI path from the Agent and persists
 // agent_id + name/color snapshots; fork copies them; a deleted Agent leaves
-// the session readable but unable to run turns.
+// the session readable until the user selects a same-Proxy replacement.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
@@ -577,6 +577,84 @@ test('a deleted Agent leaves the session readable but blocks new turns', async (
       // Same dir as `first` — cleaned up by the outer finally.
     }
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a deleted Agent can be rebound to a same-Proxy Agent without moving Session history', async () => {
+  const deletedAgent = makeAgent({ id: 'agent-deleted', name: 'Old Codex', proxy: 'codex' });
+  const replacement = makeAgent({ id: 'agent-replacement', name: 'Current Codex', proxy: 'codex' });
+  const wrongProxy = makeAgent({ id: 'agent-claude', name: 'Claude', proxy: 'claude' });
+  const deleted = new Set<string>();
+  const profile = {
+    id: 'profile-old',
+    agentId: deletedAgent.id,
+    pluginId: 'codex',
+    runtimeId: 'codex',
+    path: '/runtime/codex',
+    version: '0.153.4',
+    configHome: '/Users/test/.codex-old',
+    contentFingerprint: 'fingerprint',
+    verifiedVersions: ['0.153.4'],
+    verification: 'verified',
+  } satisfies OpenRuntimeProfile;
+  const { dir, db, wsId, sessions, broadcaster } = setup({
+    agents: [deletedAgent, replacement, wrongProxy],
+    deletedAgentIds: deleted,
+    runtimeProfiles: { [deletedAgent.id]: profile },
+  });
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, agent_id: deletedAgent.id });
+    deleted.add(deletedAgent.id);
+
+    assert.throws(
+      () => sessions.rebindDeletedAgent(session.id, wrongProxy.id),
+      (error: unknown) => (error as { code?: unknown }).code === 'AGENT_PROXY_MISMATCH',
+    );
+
+    const rebound = sessions.rebindDeletedAgent(session.id, replacement.id);
+    assert.equal(rebound.agent_id, replacement.id);
+    assert.equal(rebound.agent_name, replacement.name);
+    assert.equal(rebound.native_session_id, session.native_session_id);
+    assert.equal(rebound.runtime_profile?.id, profile.id);
+    assert.equal(rebound.runtime_profile?.configHome, profile.configHome);
+    assert.ok(broadcaster.messages.some(message => (
+      message.type === 'session:updated'
+      && message.session.id === session.id
+      && message.session.agent_id === replacement.id
+    )));
+    assert.equal(sessions.rebindDeletedAgent(session.id, replacement.id).agent_id, replacement.id);
+
+    await sessions.sendMessage(session.id, 'continue with the replacement');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a deleted Agent cannot be rebound during an active Turn', async () => {
+  const deletedAgent = makeAgent({ id: 'agent-deleted-busy', proxy: 'codex' });
+  const replacement = makeAgent({ id: 'agent-replacement-busy', proxy: 'codex' });
+  const deleted = new Set<string>();
+  const { dir, db, wsId, sessions } = setup({
+    agents: [deletedAgent, replacement],
+    deletedAgentIds: deleted,
+  });
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, agent_id: deletedAgent.id });
+    deleted.add(deletedAgent.id);
+    db.prepare(
+      `INSERT INTO turns (id, session_id, turn_number, status, created_at)
+       VALUES ('turn-agent-rebind-busy', ?, 1, 'running', datetime('now'))`,
+    ).run(session.id);
+
+    assert.throws(
+      () => sessions.rebindDeletedAgent(session.id, replacement.id),
+      (error: unknown) => (error as { code?: unknown }).code === 'SESSION_AGENT_REBIND_BUSY',
+    );
+    assert.equal(sessions.getSession(session.id).agent_id, deletedAgent.id);
+  } finally {
+    db.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

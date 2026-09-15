@@ -40,6 +40,21 @@ function lifecycleErrorStatus(error: unknown): 400 | 409 {
   return error instanceof SessionLifecycleBusyError ? 409 : 400;
 }
 
+function agentRebindError(error: unknown): { status: 400 | 404 | 409; code?: string } {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+  if (code === 'AGENT_NOT_FOUND' || /session not found/i.test(errorMessage(error))) {
+    return { status: 404, ...(code ? { code } : {}) };
+  }
+  if (code === 'SESSION_AGENT_REBIND_BUSY'
+    || code === 'SESSION_AGENT_REBIND_CONFLICT'
+    || code === 'SESSION_AGENT_NOT_DELETED') {
+    return { status: 409, code };
+  }
+  return { status: 400, ...(code ? { code } : {}) };
+}
+
 export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManager): void {
   app.get('/api/sessions', c => {
     const archived = c.req.query('archived');
@@ -112,6 +127,21 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
       return c.json({ ok: true });
     } catch (error) {
       return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post('/api/sessions/:id/rebind-agent', async c => {
+    const body: { agent_id?: unknown } = await c.req
+      .json<{ agent_id?: unknown }>()
+      .catch(() => ({ agent_id: undefined }));
+    if (typeof body.agent_id !== 'string' || body.agent_id.length === 0 || body.agent_id.length > 128) {
+      return c.json({ error: 'agent_id required' }, 400);
+    }
+    try {
+      return c.json({ session: sessions.rebindDeletedAgent(c.req.param('id'), body.agent_id) });
+    } catch (error) {
+      const mapped = agentRebindError(error);
+      return c.json({ error: errorMessage(error), ...(mapped.code ? { code: mapped.code } : {}) }, mapped.status);
     }
   });
 

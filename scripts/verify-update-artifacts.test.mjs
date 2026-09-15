@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   parseLatestMacManifest,
+  verifyGithubReleaseAssets,
   verifyUpdateArtifacts,
 } from './verify-update-artifacts.mjs';
 
@@ -16,6 +17,10 @@ const dmgName = `Gian-${version}-arm64.dmg`;
 
 function digest(content) {
   return createHash('sha512').update(content).digest('base64');
+}
+
+function sha256(content) {
+  return createHash('sha256').update(content).digest('hex');
 }
 
 function manifestFor(zip, dmg, overrides = {}) {
@@ -140,8 +145,7 @@ test('desktop release build requires credentials and generates public latest met
   const command = desktopPackage.scripts['make:mac:release'];
 
   for (const name of [
-    'CSC_LINK',
-    'CSC_KEY_PASSWORD',
+    'CSC_KEYCHAIN',
     'APPLE_API_KEY',
     'APPLE_API_KEY_ID',
     'APPLE_API_ISSUER',
@@ -149,6 +153,7 @@ test('desktop release build requires credentials and generates public latest met
   ]) {
     assert.match(command, new RegExp(name));
   }
+  assert.doesNotMatch(command, /CSC_LINK|CSC_KEY_PASSWORD/);
   assert.match(command, /forceCodeSigning=true/);
   assert.match(command, /mac\.notarize=true/);
   assert.match(command, /--publish never/);
@@ -180,4 +185,99 @@ test('desktop release build requires credentials and generates public latest met
       publishAutoUpdate: true,
     },
   );
+});
+
+async function withDraftReleaseFixture(run) {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-update-release-'));
+  const files = new Map([
+    [zipName, Buffer.from('signed zip fixture')],
+    [`${zipName}.blockmap`, Buffer.from('zip blockmap fixture')],
+    [dmgName, Buffer.from('signed dmg fixture')],
+    [`${dmgName}.blockmap`, Buffer.from('dmg blockmap fixture')],
+  ]);
+  const zip = files.get(zipName);
+  const dmg = files.get(dmgName);
+  files.set('latest-mac.yml', Buffer.from(manifestFor(zip, dmg)));
+  const checksums = [...files]
+    .map(([name, content]) => `${sha256(content)}  ${name}`)
+    .join('\n');
+  files.set('SHA256SUMS', Buffer.from(`${checksums}\n`));
+  const release = {
+    tagName: `v${version}`,
+    isDraft: true,
+    isPrerelease: false,
+    assets: [...files].map(([name, content]) => ({
+      name,
+      size: content.length,
+      digest: `sha256:${sha256(content)}`,
+      state: 'uploaded',
+    })),
+  };
+  try {
+    await Promise.all([
+      ...[...files].map(([name, content]) => writeFile(join(directory, name), content)),
+      writeFile(join(directory, 'release.json'), JSON.stringify(release)),
+    ]);
+    await run({ directory, files, release });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test('verifies an exact draft release asset set before publication', async () => {
+  await withDraftReleaseFixture(async ({ directory }) => {
+    const result = await verifyGithubReleaseAssets({
+      releaseDir: directory,
+      releaseJsonPath: join(directory, 'release.json'),
+      version,
+    });
+    assert.equal(result.tag, `v${version}`);
+    assert.equal(result.artifacts.length, 6);
+  });
+});
+
+test('fails closed on public, missing, or changed draft release assets', async () => {
+  await withDraftReleaseFixture(async ({ directory, release }) => {
+    await writeFile(join(directory, 'release.json'), JSON.stringify({
+      ...release,
+      isDraft: false,
+    }));
+    await assert.rejects(
+      verifyGithubReleaseAssets({
+        releaseDir: directory,
+        releaseJsonPath: join(directory, 'release.json'),
+        version,
+      }),
+      /must remain draft/,
+    );
+
+    await writeFile(join(directory, 'release.json'), JSON.stringify({
+      ...release,
+      isDraft: true,
+      assets: release.assets.slice(1),
+    }));
+    await assert.rejects(
+      verifyGithubReleaseAssets({
+        releaseDir: directory,
+        releaseJsonPath: join(directory, 'release.json'),
+        version,
+      }),
+      /asset set mismatch/,
+    );
+
+    await writeFile(join(directory, 'release.json'), JSON.stringify({
+      ...release,
+      assets: release.assets.map(asset => asset.name === zipName
+        ? { ...asset, digest: `sha256:${'0'.repeat(64)}` }
+        : asset),
+    }));
+    await assert.rejects(
+      verifyGithubReleaseAssets({
+        releaseDir: directory,
+        releaseJsonPath: join(directory, 'release.json'),
+        version,
+      }),
+      new RegExp(`release digest mismatch for ${zipName.replaceAll('.', '\\.')}`),
+    );
+  });
 });

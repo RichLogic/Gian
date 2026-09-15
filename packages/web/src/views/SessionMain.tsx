@@ -16,6 +16,7 @@ import {
   discardComposerDraft,
 } from '../components/Composer.js';
 import { loadSessionTrace, loadAgents } from '../api.js';
+import { DeletedAgentDialog } from '../components/DeletedAgentDialog.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import type { ActionControlState } from '../components/action-gating.js';
@@ -104,6 +105,7 @@ export interface SessionMainProps {
   onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
   onDelete: () => void;
   onReopen?: () => void;
+  onOpenAgents?: () => void;
   /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
   onShowLastTurnChanges: (turn: number, path: string) => void;
   /** Session Fork standard controls (proposal §10.6): `forkAtTurnControl`
@@ -151,6 +153,7 @@ export function SessionMain({
   onSetTurnConfig,
   onDelete,
   onReopen,
+  onOpenAgents,
   onShowLastTurnChanges,
   forkAtTurnControl,
   sideChatControl,
@@ -172,6 +175,13 @@ export function SessionMain({
   // enforces the same rule in `sendMessage` and the queue drain.
   const sessionCompleted = session.completed_at != null;
   const [knownAgents, setKnownAgents] = useState<UserAgentStatus[] | null>(null);
+  const [agentRepairRunId, setAgentRepairRunId] = useState<string>();
+  const agentRepairRun = useOperationRun(agentRepairRunId);
+  const agentRepairPending = !!agentRepairRun
+    && agentRepairRun.phase !== 'failed'
+    && agentRepairRun.phase !== 'timed-out';
+  const [agentRepairError, setAgentRepairError] = useState('');
+  const [agentRepairDismissed, setAgentRepairDismissed] = useState(false);
   useEffect(() => {
     let alive = true;
     loadAgents()
@@ -179,11 +189,27 @@ export function SessionMain({
       .catch(() => { if (alive) setKnownAgents([]); });
     return () => { alive = false; };
   }, []);
-  // A deleted Agent's session stays readable from its snapshots but cannot
-  // run turns — the composer is disabled and the snapshot name is shown.
+  // A deleted Agent's session stays readable from its snapshots. New turns
+  // remain blocked until the user chooses a same-Proxy replacement.
   const agentDeleted = !!session.agent_id
     && knownAgents !== null
     && !knownAgents.some(agent => agent.id === session.agent_id);
+
+  useEffect(() => {
+    if (!agentDeleted) {
+      setAgentRepairRunId(undefined);
+      setAgentRepairError('');
+      setAgentRepairDismissed(false);
+    }
+  }, [agentDeleted]);
+
+  useEffect(() => {
+    if (!agentRepairRun) return;
+    if (agentRepairRun.phase === 'failed' || agentRepairRun.phase === 'timed-out') {
+      setAgentRepairError(agentRepairRun.error ?? t('session.agentDeleted.rebindFailed'));
+      setAgentRepairRunId(undefined);
+    }
+  }, [agentRepairRun, t]);
 
   useEffect(() => {
     if (!selectionCreate || !selectionCreateRun) return;
@@ -249,6 +275,20 @@ export function SessionMain({
   const [sessionView, setSessionView] = useState<'chat' | 'trace'>('chat');
   const [hostTraceSnapshot, setHostTraceSnapshot] = useState<TraceSnapshot | null>(null);
   const running = pending || session.status === 'running' || session.status === 'pending';
+  useEffect(() => {
+    if (agentDeleted && !running) setAgentRepairDismissed(false);
+  }, [agentDeleted, running]);
+
+  function repairDeletedAgent(agentId: string): void {
+    if (agentRepairPending || running) return;
+    setAgentRepairError('');
+    if (!dispatch) {
+      setAgentRepairError(t('session.agentDeleted.rebindFailed'));
+      return;
+    }
+    const run = dispatch('session.rebindAgent', { sessionId: session.id, agentId });
+    setAgentRepairRunId(run.id);
+  }
   const derivedTraceSnapshot = useMemo(
     () => deriveTraceSnapshot(items, session.id, {
       partial: running || hydrated === false,
@@ -401,11 +441,6 @@ export function SessionMain({
             />
             <TranscriptNavigation items={items} />
           </UnderbarPanelGroup>
-          {agentDeleted && (
-            <p className="s2-help" role="note" data-testid="agent-deleted-note">
-              {t('session.agentDeleted').replace('{name}', session.agent_name ?? '')}
-            </p>
-          )}
           <Composer
             session={session}
             onSend={onSend}
@@ -427,6 +462,18 @@ export function SessionMain({
             workspaceId={workspace?.id}
           />
         </>
+      )}
+      {agentDeleted && knownAgents !== null && !agentRepairDismissed && (
+        <DeletedAgentDialog
+          session={session}
+          agents={knownAgents}
+          busy={agentRepairPending}
+          sessionBusy={running}
+          error={agentRepairError}
+          onSelect={agentId => { void repairDeletedAgent(agentId); }}
+          onOpenAgents={onOpenAgents}
+          onLater={() => setAgentRepairDismissed(true)}
+        />
       )}
     </main>
   );

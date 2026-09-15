@@ -44,12 +44,14 @@ describe('chat + composer (B5)', () => {
     });
   });
 
-  it('shows the canonical Session model and opens its choices on narrow layouts', async () => {
+  it('narrow layouts collapse the config controls into the proxy icon (2026-09-15 framework sync)', async () => {
     const user = userEvent.setup();
     renderApp({ scenario: {}, viewport: 'narrow' });
-    const picker = screen.getByRole('button', { name: /gpt-5\.3-codex/ });
-    expect(picker).toHaveTextContent('gpt-5.3-codex · Medium');
-    expect(picker).not.toHaveTextContent(/^Codex/);
+    // Icon-only trigger: no model text, opens the combined sheet at its root.
+    const picker = screen.getByRole('button', { name: 'Model / Thinking / Fast' });
+    expect(picker).not.toHaveTextContent(/gpt-5\.3-codex/);
+    // The audit chip stays but drops its label.
+    expect(screen.getByTestId('rw-approval-chip')).not.toHaveTextContent(/Ask/);
 
     await user.click(picker);
     const menu = screen.getByRole('menu', { name: 'Model / Thinking / Fast' });
@@ -61,43 +63,58 @@ describe('chat + composer (B5)', () => {
     expect(within(menu).getByRole('switch', { name: 'Fast' })).toHaveAttribute('aria-checked', 'false');
   });
 
-  it('opens the model menu on wide layouts and dispatches the selected model', async () => {
+  it('opens the model list directly from the wide model chip and dispatches the selection', async () => {
     const user = userEvent.setup();
     const { controller } = renderApp({ scenario: {}, viewport: 'wide' });
 
     await user.click(screen.getByRole('button', { name: /gpt-5\.3-codex/ }));
-    const menu = screen.getByRole('menu', { name: 'Model / Thinking / Fast' });
-    expect(menu).toBeInTheDocument();
-    await user.click(within(menu).getByRole('menuitem', { name: /Model.*GPT-5\.3 Codex/ }));
+    // Deep-linked straight into the model page — no root-row hop.
     expect(screen.getByRole('menuitemradio', { name: /GPT-5\.3 Codex/ })).toHaveAttribute('aria-checked', 'true');
     await user.click(screen.getByRole('menuitemradio', { name: /GPT-5\.2 Codex/ }));
     expect(controller.test.pendingCommandIds()).toHaveLength(1);
   });
 
-  it('dispatches thinking and mode changes and waits for canonical settlement', async () => {
+  it('dispatches thinking and fast changes from their wide-bar chips and waits for canonical settlement', async () => {
     const user = userEvent.setup();
     const { controller } = renderApp({ scenario: {}, viewport: 'wide', locale: 'en' });
-    const picker = screen.getByRole('button', { name: /gpt-5\.3-codex/ });
 
-    await user.click(picker);
-    await user.click(screen.getByRole('menuitem', { name: /Thinking.*Medium/ }));
+    await user.click(screen.getByTestId('rw-thinking-chip'));
     await user.click(screen.getByRole('menuitemradio', { name: 'High' }));
     expect(controller.state.sessions.find((session) => session.id === 's-1')?.thinking).toBe('medium');
     controller.test.resolveAll();
     expect(controller.state.sessions.find((session) => session.id === 's-1')?.thinking).toBe('high');
 
-    await user.click(picker);
-    const fast = screen.getByRole('switch', { name: 'Fast' });
-    expect(fast).toHaveAttribute('aria-checked', 'false');
+    const fast = screen.getByTestId('rw-fast-chip');
+    expect(fast).toHaveAttribute('aria-pressed', 'false');
     await user.click(fast);
     expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBeNull();
     controller.test.resolveAll();
     expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBe('fast');
-    expect(screen.getByRole('switch', { name: 'Fast' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('rw-fast-chip')).toHaveAttribute('aria-pressed', 'true');
 
-    await user.click(screen.getByRole('switch', { name: 'Fast' }));
+    await user.click(screen.getByTestId('rw-fast-chip'));
     controller.test.resolveAll();
     expect(controller.state.sessions.find((session) => session.id === 's-1')?.service_tier).toBeNull();
+  });
+
+  it('audit chip lists the proxy modes and settles approval_mode (2026-09-15 audit-mode sync)', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: {}, viewport: 'wide', locale: 'en' });
+    const chip = screen.getByTestId('rw-approval-chip');
+    expect(chip).toHaveTextContent('Ask for approval');
+
+    await user.click(chip);
+    const menu = screen.getByRole('menu', { name: 'Approval mode' });
+    expect(within(menu).getByRole('menuitemradio', { name: 'Ask for approval' }))
+      .toHaveAttribute('aria-checked', 'true');
+    await user.click(within(menu).getByRole('menuitemradio', { name: 'Full access' }));
+    // The chip keeps the previous label until the canonical settle arrives.
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.approval_mode)
+      .not.toBe('full-access');
+    controller.test.resolveAll();
+    expect(controller.state.sessions.find((session) => session.id === 's-1')?.approval_mode)
+      .toBe('full-access');
+    expect(screen.getByTestId('rw-approval-chip')).toHaveTextContent('Full access');
   });
 
   it('shows an explicit loading state before a Session history page arrives', () => {
@@ -177,8 +194,10 @@ describe('chat + composer (B5)', () => {
     // mutation controls stay disabled.
     const picker = screen.getByRole('button', { name: /gpt-5\.3-codex/ });
     expect(picker).toBeEnabled();
+    expect(screen.getByTestId('rw-fast-chip')).toBeDisabled();
+    expect(screen.getByTestId('rw-approval-chip')).toBeDisabled();
     await user.click(picker);
-    expect(screen.getByRole('switch', { name: 'Fast' })).toBeDisabled();
+    expect(screen.getByRole('menu', { name: 'Model / Thinking / Fast' })).toBeInTheDocument();
     await user.click(picker);
     expect(screen.queryByRole('menu', { name: 'Model / Thinking / Fast' })).toBeNull();
     // a crafted direct action call is refused too

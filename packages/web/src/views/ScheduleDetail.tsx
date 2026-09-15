@@ -36,17 +36,21 @@ import {
   usePendingOperations,
 } from '../operations/use-operations.js';
 import {
+  buildCronFromSpec,
+  DEFAULT_CUSTOM_FREQUENCY,
   formatScheduleDateTime,
   instantToLocalInput,
   intervalPartsToMs,
   intervalToParts,
   localInputToInstant,
   misfirePolicyLabelKey,
+  parseCronToSpec,
   runDurationLabel,
   runErrorLabelKey,
   runStatusLabelKey,
   scheduleStatusLabelKey,
   validateScheduleDraft,
+  type CustomFrequencySpec,
   type IntervalUnit,
 } from '../presentation/schedule.js';
 import { ScheduleForkTranscript } from './ScheduleForkTranscript.js';
@@ -59,6 +63,7 @@ export function ScheduleDetail({
   showBack = false,
   onBack,
   onOpenScheduledTurn,
+  onOpenConversation,
 }: {
   scheduleId: string;
   sessions: Session[];
@@ -67,6 +72,9 @@ export function ScheduleDetail({
   showBack?: boolean;
   onBack: () => void;
   onOpenScheduledTurn: (sessionId: string, runId: string) => void;
+  /** Definition "Runs in" row: open the control conversation (no Turn
+   *  focus). The binding itself stays immutable (ADR-0053). */
+  onOpenConversation: (sessionId: string) => void;
 }) {
   const t = useT();
   const detail = useScheduleDetail(scheduleId);
@@ -182,7 +190,12 @@ export function ScheduleDetail({
         )}
         {schedule && (
           tab === 'definition' ? (
-            <DefinitionForm schedule={schedule} onSaved={() => void detail.refresh()} />
+            <DefinitionForm
+              schedule={schedule}
+              controlSession={controlSession}
+              onOpenConversation={onOpenConversation}
+              onSaved={() => void detail.refresh()}
+            />
           ) : (
             <RunsList
               runs={detail.runs}
@@ -300,39 +313,52 @@ function ScheduleDetailActions({
 interface Draft {
   name: string;
   prompt: string;
-  timezone: string;
   misfirePolicy: ScheduleMisfirePolicy;
-  triggerKind: ScheduleTrigger['kind'];
+  /** The Codex-style "Repeat" row (2026-09-15 owner): users never type a
+   *  cron expression — a Custom repeat edits structured rows that compile
+   *  to the stored 5-field cron. */
+  repeat: 'once' | 'interval' | 'custom';
   onceLocal: string;
   intervalValue: number;
   intervalUnit: IntervalUnit;
   intervalAnchorAt: string | null;
-  cronExpression: string;
+  custom: CustomFrequencySpec;
+  /** An existing cron the structured editor cannot express: shown read-only
+   *  until the user converts it (picks structured editing). */
+  rawCron: string | null;
 }
 
 function draftFromSchedule(schedule: Schedule): Draft {
+  const trigger = schedule.trigger;
+  let custom = DEFAULT_CUSTOM_FREQUENCY;
+  let rawCron: string | null = null;
+  if (trigger.kind === 'cron') {
+    const spec = parseCronToSpec(trigger.expression);
+    if (spec) custom = spec;
+    else rawCron = trigger.expression;
+  }
   return {
     name: schedule.name,
     prompt: schedule.prompt,
-    timezone: schedule.timezone,
     misfirePolicy: schedule.misfire_policy,
-    triggerKind: schedule.trigger.kind,
-    onceLocal: schedule.trigger.kind === 'once' ? instantToLocalInput(schedule.trigger.at) : '',
-    intervalValue: schedule.trigger.kind === 'interval'
-      ? intervalToParts(schedule.trigger.every_ms).value
+    repeat: trigger.kind === 'once' ? 'once' : trigger.kind === 'interval' ? 'interval' : 'custom',
+    onceLocal: trigger.kind === 'once' ? instantToLocalInput(trigger.at) : '',
+    intervalValue: trigger.kind === 'interval'
+      ? intervalToParts(trigger.every_ms).value
       : 30,
-    intervalUnit: schedule.trigger.kind === 'interval'
-      ? intervalToParts(schedule.trigger.every_ms).unit
+    intervalUnit: trigger.kind === 'interval'
+      ? intervalToParts(trigger.every_ms).unit
       : 'minutes',
-    intervalAnchorAt: schedule.trigger.kind === 'interval'
-      ? schedule.trigger.anchor_at
+    intervalAnchorAt: trigger.kind === 'interval'
+      ? trigger.anchor_at
       : null,
-    cronExpression: schedule.trigger.kind === 'cron' ? schedule.trigger.expression : '0 9 * * *',
+    custom,
+    rawCron,
   };
 }
 
 function draftTrigger(draft: Draft): ScheduleTrigger | null {
-  switch (draft.triggerKind) {
+  switch (draft.repeat) {
     case 'once': {
       const at = localInputToInstant(draft.onceLocal);
       return at ? { kind: 'once', at } : null;
@@ -343,12 +369,30 @@ function draftTrigger(draft: Draft): ScheduleTrigger | null {
         every_ms: intervalPartsToMs(draft.intervalValue, draft.intervalUnit),
         anchor_at: draft.intervalAnchorAt ?? new Date().toISOString(),
       };
-    case 'cron':
-      return { kind: 'cron', expression: draft.cronExpression.trim() };
+    case 'custom':
+      return draft.rawCron !== null
+        ? { kind: 'cron', expression: draft.rawCron }
+        : { kind: 'cron', expression: buildCronFromSpec(draft.custom) };
   }
 }
 
-function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: () => void }) {
+/** Timezone is not a draft field (2026-09-15 owner): saves always pin the
+ *  viewer's system timezone. */
+function systemTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
+function DefinitionForm({
+  schedule,
+  controlSession,
+  onOpenConversation,
+  onSaved,
+}: {
+  schedule: Schedule;
+  controlSession: Session | null;
+  onOpenConversation: (sessionId: string) => void;
+  onSaved: () => void;
+}) {
   const t = useT();
   const dispatch = useOperationDispatch();
   const readOnly = schedule.status === 'archived' || schedule.status === 'completed';
@@ -408,7 +452,6 @@ function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: ()
       name: draft.name,
       prompt: draft.prompt,
       trigger,
-      timezone: draft.timezone,
     });
     if (invalidKey) {
       setFormError(t(invalidKey));
@@ -421,7 +464,7 @@ function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: ()
       name: draft.name.trim(),
       prompt: draft.prompt,
       trigger,
-      timezone: draft.timezone.trim(),
+      timezone: systemTimezone(),
       misfirePolicy: draft.misfirePolicy,
     });
     setSaveRunId(run.id);
@@ -440,10 +483,24 @@ function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: ()
         </div>
       )}
       <div className="schedule-field">
-        <span className="schedule-label">{t('schedule.form.conversation')}</span>
-        <span className="schedule-static" data-testid="schedule-conversation">
-          {ownerLine.join(' — ')}
-        </span>
+        <span className="schedule-label">{t('schedule.form.runsIn')}</span>
+        <div className="schedule-runsin">
+          <span className="schedule-static ellip" data-testid="schedule-conversation">
+            {ownerLine.join(' — ')}
+          </span>
+          <button
+            type="button"
+            className="btn sm ghost schedule-openchat"
+            data-testid="schedule-open-chat"
+            disabled={!controlSession}
+            title={t('schedule.form.openChat')}
+            onClick={() => {
+              if (controlSession) onOpenConversation(controlSession.id);
+            }}
+          >
+            {t('schedule.form.openChat')}
+          </button>
+        </div>
       </div>
       <label className="schedule-field">
         <span className="schedule-label">{t('schedule.form.name')}</span>
@@ -467,19 +524,7 @@ function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: ()
           onChange={event => patch({ prompt: event.target.value })}
         />
       </label>
-      <TriggerEditor draft={draft} readOnly={readOnly} onChange={patch} />
-      <label className="schedule-field">
-        <span className="schedule-label">{t('schedule.form.timezone')}</span>
-        <input
-          type="text"
-          className="schedule-input"
-          data-testid="schedule-field-timezone"
-          value={draft.timezone}
-          disabled={readOnly}
-          placeholder="Asia/Shanghai"
-          onChange={event => patch({ timezone: event.target.value })}
-        />
-      </label>
+      <FrequencyEditor draft={draft} readOnly={readOnly} onChange={patch} />
       <label className="schedule-field">
         <span className="schedule-label">{t('schedule.form.misfire')}</span>
         <select
@@ -515,7 +560,10 @@ function DefinitionForm({ schedule, onSaved }: { schedule: Schedule; onSaved: ()
   );
 }
 
-function TriggerEditor({
+/** Codex-style frequency card (2026-09-15 owner): label left, control
+ *  right, hairline between rows. Compiles to the stored trigger model —
+ *  users never type a cron expression. */
+function FrequencyEditor({
   draft,
   readOnly,
   onChange,
@@ -525,74 +573,244 @@ function TriggerEditor({
   onChange: (partial: Partial<Draft>) => void;
 }) {
   const t = useT();
+  const custom = draft.custom;
+  const patchCustom = (partial: Partial<CustomFrequencySpec>) => {
+    onChange({ custom: { ...custom, ...partial }, ...(draft.rawCron !== null ? { rawCron: null } : {}) });
+  };
+  const unitKey = custom.repeats === 'hourly'
+    ? 'schedule.interval.hours'
+    : custom.repeats === 'monthly'
+      ? 'schedule.freq.unit.months'
+      : 'schedule.interval.days';
+  const showEvery = custom.repeats === 'hourly' || custom.repeats === 'daily' || custom.repeats === 'monthly';
+
   return (
     <div className="schedule-field">
       <span className="schedule-label">{t('schedule.form.trigger')}</span>
-      <div className="schedule-trigger-kinds" role="radiogroup" aria-label={t('schedule.form.trigger')}>
-        {(['once', 'interval', 'cron'] as const).map(kind => (
-          <button
-            key={kind}
-            type="button"
-            role="radio"
-            aria-checked={draft.triggerKind === kind}
-            className={`schedule-trigger-kind${draft.triggerKind === kind ? ' active' : ''}`}
-            data-testid={`schedule-trigger-${kind}`}
-            disabled={readOnly}
-            onClick={() => onChange({ triggerKind: kind })}
-          >
-            {t(`schedule.trigger.${kind}`)}
-          </button>
-        ))}
-      </div>
-      {draft.triggerKind === 'once' && (
-        <input
-          type="datetime-local"
-          className="schedule-input"
-          data-testid="schedule-trigger-once-at"
-          value={draft.onceLocal}
-          disabled={readOnly}
-          onChange={event => onChange({ onceLocal: event.target.value })}
-        />
-      )}
-      {draft.triggerKind === 'interval' && (
-        <span className="schedule-interval">
-          <input
-            type="number"
-            min={1}
-            className="schedule-input schedule-interval-value"
-            data-testid="schedule-trigger-interval-value"
-            value={draft.intervalValue}
-            disabled={readOnly}
-            onChange={event => onChange({ intervalValue: Number(event.target.value) })}
-          />
+      <div className="schedule-freq" data-testid="schedule-frequency">
+        <div className="schedule-freq-row">
+          <span className="schedule-freq-label">{t('schedule.freq.repeat')}</span>
           <select
-            className="schedule-input"
-            data-testid="schedule-trigger-interval-unit"
-            value={draft.intervalUnit}
+            className="schedule-input schedule-freq-select"
+            data-testid="schedule-repeat"
+            value={draft.repeat}
             disabled={readOnly}
-            onChange={event => onChange({ intervalUnit: event.target.value as IntervalUnit })}
+            onChange={event => onChange({ repeat: event.target.value as Draft['repeat'] })}
           >
-            <option value="minutes">{t('schedule.interval.minutes')}</option>
-            <option value="hours">{t('schedule.interval.hours')}</option>
-            <option value="days">{t('schedule.interval.days')}</option>
+            <option value="once">{t('schedule.repeat.once')}</option>
+            <option value="interval">{t('schedule.repeat.interval')}</option>
+            <option value="custom">{t('schedule.repeat.custom')}</option>
           </select>
-          {intervalPartsToMs(draft.intervalValue, draft.intervalUnit) < MIN_INTERVAL_MS && (
-            <span className="schedule-hint" data-testid="schedule-interval-hint">
-              {t('schedule.form.error.intervalTooShort')}
+        </div>
+
+        {draft.repeat === 'once' && (
+          <div className="schedule-freq-row">
+            <span className="schedule-freq-label">{t('schedule.freq.at')}</span>
+            <input
+              type="datetime-local"
+              className="schedule-input"
+              data-testid="schedule-trigger-once-at"
+              value={draft.onceLocal}
+              disabled={readOnly}
+              onChange={event => onChange({ onceLocal: event.target.value })}
+            />
+          </div>
+        )}
+
+        {draft.repeat === 'interval' && (
+          <div className="schedule-freq-row">
+            <span className="schedule-freq-label">{t('schedule.freq.every')}</span>
+            <span className="schedule-freq-controls">
+              <input
+                type="number"
+                min={1}
+                className="schedule-input schedule-freq-number"
+                data-testid="schedule-trigger-interval-value"
+                value={draft.intervalValue}
+                disabled={readOnly}
+                onChange={event => onChange({ intervalValue: Number(event.target.value) })}
+              />
+              <select
+                className="schedule-input schedule-freq-select"
+                data-testid="schedule-trigger-interval-unit"
+                value={draft.intervalUnit}
+                disabled={readOnly}
+                onChange={event => onChange({ intervalUnit: event.target.value as IntervalUnit })}
+              >
+                <option value="minutes">{t('schedule.interval.minutes')}</option>
+                <option value="hours">{t('schedule.interval.hours')}</option>
+                <option value="days">{t('schedule.interval.days')}</option>
+              </select>
             </span>
-          )}
+          </div>
+        )}
+
+        {draft.repeat === 'custom' && draft.rawCron !== null && (
+          <div className="schedule-freq-row">
+            <span className="schedule-freq-label">{t('schedule.form.cronRaw')}</span>
+            <span className="schedule-freq-controls">
+              <code className="schedule-freq-raw" data-testid="schedule-cron-raw">{draft.rawCron}</code>
+              {!readOnly && (
+                <button
+                  type="button"
+                  className="btn xs ghost"
+                  data-testid="schedule-cron-convert"
+                  onClick={() => onChange({ rawCron: null })}
+                >
+                  {t('schedule.form.cronConvert')}
+                </button>
+              )}
+            </span>
+          </div>
+        )}
+
+        {draft.repeat === 'custom' && draft.rawCron === null && (
+          <>
+            <div className="schedule-freq-row">
+              <span className="schedule-freq-label">{t('schedule.freq.repeats')}</span>
+              <select
+                className="schedule-input schedule-freq-select"
+                data-testid="schedule-repeats"
+                value={custom.repeats}
+                disabled={readOnly}
+                onChange={event => patchCustom({ repeats: event.target.value as CustomFrequencySpec['repeats'] })}
+              >
+                <option value="hourly">{t('schedule.repeats.hourly')}</option>
+                <option value="daily">{t('schedule.repeats.daily')}</option>
+                <option value="weekly">{t('schedule.repeats.weekly')}</option>
+                <option value="monthly">{t('schedule.repeats.monthly')}</option>
+                <option value="yearly">{t('schedule.repeats.yearly')}</option>
+              </select>
+            </div>
+            {showEvery && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.every')}</span>
+                <span className="schedule-freq-controls">
+                  <input
+                    type="number"
+                    min={1}
+                    className="schedule-input schedule-freq-number"
+                    data-testid="schedule-custom-every"
+                    value={custom.every}
+                    disabled={readOnly}
+                    onChange={event => patchCustom({ every: Math.max(1, Number(event.target.value)) })}
+                  />
+                  <span className="schedule-freq-unit">{t(unitKey)}</span>
+                </span>
+              </div>
+            )}
+            {custom.repeats === 'hourly' && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.atMinute')}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={59}
+                  className="schedule-input schedule-freq-number"
+                  data-testid="schedule-custom-minute"
+                  value={custom.minute}
+                  disabled={readOnly}
+                  onChange={event => patchCustom({
+                    minute: Math.min(59, Math.max(0, Number(event.target.value))),
+                  })}
+                />
+              </div>
+            )}
+            {custom.repeats === 'weekly' && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.on')}</span>
+                <span className="schedule-freq-weekdays" role="group" aria-label={t('schedule.freq.on')}>
+                  {[0, 1, 2, 3, 4, 5, 6].map(day => {
+                    const on = custom.weekdays.includes(day);
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        className={`timer-filter${on ? ' on' : ''}`}
+                        data-testid={`schedule-weekday-${day}`}
+                        aria-pressed={on}
+                        disabled={readOnly}
+                        onClick={() => {
+                          const next = on
+                            ? custom.weekdays.filter(entry => entry !== day)
+                            : [...custom.weekdays, day];
+                          // Keep at least one weekday — an empty set is not a
+                          // valid weekly schedule.
+                          if (next.length > 0) patchCustom({ weekdays: next });
+                        }}
+                      >
+                        {t(`schedule.weekday.short.${day}`)}
+                      </button>
+                    );
+                  })}
+                </span>
+              </div>
+            )}
+            {(custom.repeats === 'monthly' || custom.repeats === 'yearly') && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.onDays')}</span>
+                <span className="schedule-freq-controls">
+                  <input
+                    type="number"
+                    min={1}
+                    max={31}
+                    className="schedule-input schedule-freq-number"
+                    data-testid="schedule-custom-monthday"
+                    value={custom.monthDay}
+                    disabled={readOnly}
+                    onChange={event => patchCustom({
+                      monthDay: Math.min(31, Math.max(1, Number(event.target.value))),
+                    })}
+                  />
+                  {custom.monthDay > 28 && (
+                    <span className="schedule-hint" data-testid="schedule-monthday-hint">
+                      {t('schedule.freq.monthDayHint')}
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
+            {custom.repeats === 'yearly' && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.in')}</span>
+                <select
+                  className="schedule-input schedule-freq-select"
+                  data-testid="schedule-custom-month"
+                  value={custom.month}
+                  disabled={readOnly}
+                  onChange={event => patchCustom({ month: Number(event.target.value) })}
+                >
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(month => (
+                    <option key={month} value={month}>{t(`schedule.month.short.${month}`)}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {custom.repeats !== 'hourly' && (
+              <div className="schedule-freq-row">
+                <span className="schedule-freq-label">{t('schedule.freq.at')}</span>
+                <input
+                  type="time"
+                  className="schedule-input"
+                  data-testid="schedule-custom-time"
+                  value={custom.time}
+                  disabled={readOnly}
+                  onChange={event => {
+                    if (/^\d{2}:\d{2}$/.test(event.target.value)) {
+                      patchCustom({ time: event.target.value });
+                    }
+                  }}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {draft.repeat === 'interval'
+        && intervalPartsToMs(draft.intervalValue, draft.intervalUnit) < MIN_INTERVAL_MS && (
+        <span className="schedule-hint" data-testid="schedule-interval-hint">
+          {t('schedule.form.error.intervalTooShort')}
         </span>
-      )}
-      {draft.triggerKind === 'cron' && (
-        <input
-          type="text"
-          className="schedule-input"
-          data-testid="schedule-trigger-cron-expression"
-          value={draft.cronExpression}
-          disabled={readOnly}
-          placeholder="0 9 * * *"
-          onChange={event => onChange({ cronExpression: event.target.value })}
-        />
       )}
     </div>
   );

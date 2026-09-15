@@ -137,17 +137,27 @@ function ExtIco({ kind }: { kind: SheetTab['icoKind'] }) {
 }
 
 /** Tab label with MIDDLE truncation: the head shrinks with an ellipsis while a
- *  fixed tail (last few chars, usually the extension) stays visible — so a long
+ *  fixed tail (the file extension) stays visible — so a long
  *  `apr-001-approval-card.test.tsx` reads as `apr-001-app…test.tsx` instead of
- *  pushing the tab wide. CSS (`.sheet-tab .name`) caps the width. */
+ *  pushing the tab wide. CSS (`.sheet-tab .name`) caps the width.
+ *  Free-form labels (browser page titles, terminal sessions) are NOT file
+ *  names: pinning their last 8 chars chopped them mid-word
+ *  ("Invocation · 业务 Design" → "Invocation … 务 Design", 2026-09-15 owner
+ *  report), so they get a plain end-ellipsis instead. */
 function TabName({ name }: { name: string }) {
-  const tailLen = Math.min(8, name.length);
-  const head = name.slice(0, name.length - tailLen);
-  const tail = name.slice(name.length - tailLen);
+  const extension = /\.[A-Za-z0-9]{1,8}$/.exec(name)?.[0] ?? null;
+  if (!extension || name.length <= extension.length) {
+    return (
+      <span className="name">
+        <span className="name-head">{name}</span>
+      </span>
+    );
+  }
+  const head = name.slice(0, name.length - extension.length);
   return (
     <span className="name">
-      {head && <span className="name-head">{head}</span>}
-      <span className="name-tail">{tail}</span>
+      <span className="name-head">{head}</span>
+      <span className="name-tail">{extension}</span>
     </span>
   );
 }

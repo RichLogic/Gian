@@ -44,6 +44,10 @@
   /* Unified panel header height (main head / sheet tab strip / inspector
    * head / sidebar top row) — density variants below. */
   --panel-header-h: 36px;
+  /* Management pages (Agents / Custom / Timer): the panel-1 page head and
+   * the panel-2 detail head share this taller row so both columns' bodies
+   * start at the same height. */
+  --mgmt-header-h: calc(var(--panel-header-h) + 8px);
 
   /* Motion */
   --ease: cubic-bezier(.2,.7,.2,1);

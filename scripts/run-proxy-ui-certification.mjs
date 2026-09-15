@@ -73,6 +73,8 @@ function runStep(step, outputDir) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  const { assertExecutionAllowed } = await import('./execution-policy.mjs');
+  assertExecutionAllowed('desktop');
   const options = parseProxyUiOptions(argv);
   const outputDir = resolve(rootDir, options.output);
   await mkdir(outputDir, { recursive: true });

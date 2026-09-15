@@ -428,6 +428,24 @@
   pointer-events: none;
 }
 .ri-hidden-badge svg { width: 11px; height: 11px; }
+/* Row-start timer glyph (2026-09-15 owner): hangs in the row's icon gutter —
+   the empty column left of the shared 43px title column, aligned with the
+   group-header icons (~18px). The −25px/1em/5px triple (plus the row's 6px
+   flex gap) keeps the title exactly on the 43px column; the glyph tracks
+   the row's font (1em). */
+.ri-schedule-badge {
+  flex: none;
+  width: 1em;
+  margin-left: -25px;
+  margin-right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  opacity: 0.8;
+  pointer-events: none;
+}
+.ri-schedule-badge svg { width: 1em; height: 1em; }
 .ri-dot-sep { color: var(--text-3); opacity: 0.5; }
 .ri-age {
   position: absolute;

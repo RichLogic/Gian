@@ -5,6 +5,7 @@ import { formatResourceMetrics } from './process-resource-monitor.mjs';
 import { acquireQualityLock, QUALITY_LOCK_ENV } from './quality-lock.mjs';
 import { runLoggedCommand } from './run-logged-command.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
+import { assertExecutionAllowed } from './execution-policy.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -65,10 +66,12 @@ export function formatPreviewSummary(results, logPath) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  assertExecutionAllowed('desktop');
   const { base } = parsePreviewOptions(argv);
   const lock = acquireQualityLock({ command: 'verify:preview', rootDir });
   try {
     const env = sanitizedTestEnv();
+    if (process.env.GIAN_ALLOW_DESKTOP_E2E === '1') env.GIAN_ALLOW_DESKTOP_E2E = '1';
     env[QUALITY_LOCK_ENV] = lock.token;
     delete env.FORCE_COLOR;
     env.NO_COLOR = '1';

@@ -72,7 +72,7 @@ describe('ScheduleConfirmationHost', () => {
     // The FULL prompt is visible before approval (expanded by default).
     expect(screen.getByTestId('schedule-confirmation-prompt'))
       .toHaveTextContent('Summarize the overnight CI results and post the digest.');
-    expect(screen.getByTestId('schedule-confirmation-trigger')).toHaveTextContent('Cron · 0 9 * * *');
+    expect(screen.getByTestId('schedule-confirmation-trigger')).toHaveTextContent('Daily at 09:00');
     expect(card).toHaveTextContent('Asia/Shanghai');
     expect(screen.getByTestId('schedule-confirmation-occurrences').children).toHaveLength(3);
     expect(screen.getByTestId('schedule-confirmation-conversation'))

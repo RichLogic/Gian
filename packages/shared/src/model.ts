@@ -228,7 +228,7 @@ export interface Session {
   executor: Executor;
   /** Owning user Agent (agents.json schema v4). No SQL FK — Agents live
    *  outside SQLite and can be deleted; a deleted Agent's sessions stay
-   *  read-only (no new turns) and render from the snapshots below. NULL for
+   *  readable and must be rebound to a same-Proxy Agent before new turns. NULL for
    *  sessions created before migration 055, which resolve through the
    *  kind's default Agent. Optional for compatibility with older hosts. */
   agent_id?: string | null;

@@ -8,7 +8,7 @@
  * older generation is dropped so a slow earlier request can never overwrite
  * a newer result (contract N invalidation can arrive mid-flight).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { Schedule, ScheduleRun, ScheduleStatus } from '@gian/shared';
 import { loadSchedule, loadScheduleRuns, loadSchedules } from '../api.js';
 import { onScheduleChanged, onScheduleResync } from '../presentation/schedule-sync.js';
@@ -237,4 +237,78 @@ export function useScheduleDetail(scheduleId: string | null) {
     refresh,
     runs: { ...runs, refresh: refreshRuns, loadMore: loadMoreRuns },
   };
+}
+
+// ── Sidebar schedule badge store (2026-09-15 owner) ────────────────────────
+// Which sessions own at least one live (active/paused) Schedule — the rail's
+// session rows render a small timer glyph for them. A module-level store
+// (same shape as schedule-confirmations.ts) so one fetch serves every row;
+// freshness rides the same coarse `schedule:changed` / resync signals the
+// Timer lanes use. Completed once-Schedules and archived ones do not count.
+
+const badgeListeners = new Set<() => void>();
+let badgeSessionIds: ReadonlySet<string> = new Set();
+let badgeHydrated = false;
+let badgeFlight: Promise<void> | null = null;
+let badgeInvalidationArmed = false;
+
+function emitBadge(): void {
+  for (const listener of badgeListeners) listener();
+}
+
+async function refreshBadgeSessionIds(): Promise<void> {
+  badgeFlight ??= (async () => {
+    try {
+      const ids = new Set<string>();
+      let cursor: string | null = null;
+      do {
+        const page = await loadSchedules({
+          statuses: ['active', 'paused'],
+          limit: 100,
+          ...(cursor ? { cursor } : {}),
+        });
+        for (const schedule of page.schedules) ids.add(schedule.control_session_id);
+        cursor = page.next_cursor;
+      } while (cursor);
+      badgeSessionIds = ids;
+      badgeHydrated = true;
+      emitBadge();
+    } catch {
+      // Keep the last known set — the badge is a hint, never a gate.
+    } finally {
+      badgeFlight = null;
+    }
+  })();
+  return badgeFlight;
+}
+
+function armBadgeInvalidation(): void {
+  if (badgeInvalidationArmed) return;
+  badgeInvalidationArmed = true;
+  onScheduleChanged(() => { void refreshBadgeSessionIds(); });
+  onScheduleResync(() => { void refreshBadgeSessionIds(); });
+}
+
+function subscribeBadge(listener: () => void): () => void {
+  badgeListeners.add(listener);
+  armBadgeInvalidation();
+  if (!badgeHydrated) void refreshBadgeSessionIds();
+  return () => { badgeListeners.delete(listener); };
+}
+
+function getBadgeSnapshot(): ReadonlySet<string> {
+  return badgeSessionIds;
+}
+
+/** Control-Session ids of every live Schedule — `.has(session.id)` per row. */
+export function useScheduledSessionIds(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribeBadge, getBadgeSnapshot, getBadgeSnapshot);
+}
+
+/** Test-only: drop hydrated state so each test re-fetches through its own
+ *  mocked fetch router. */
+export function __resetScheduleBadgeForTest(): void {
+  badgeSessionIds = new Set();
+  badgeHydrated = false;
+  badgeFlight = null;
 }

@@ -111,6 +111,12 @@ async function sha512Base64(path) {
   return hash.digest('base64');
 }
 
+async function sha256Hex(path) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 export async function verifyUpdateArtifacts({
   releaseDir,
   version,
@@ -181,11 +187,100 @@ export async function verifyUpdateArtifacts({
   return { version, manifest: manifestName, artifacts: verified };
 }
 
+export async function verifyGithubReleaseAssets({
+  releaseDir,
+  version,
+  releaseJsonPath,
+  productName = 'Gian',
+  arch = 'arm64',
+}) {
+  if (!releaseJsonPath) throw new Error('releaseJsonPath is required');
+  const directory = resolve(releaseDir);
+  const expectedArtifactNames = [
+    `${productName}-${version}-${arch}.dmg`,
+    `${productName}-${version}-${arch}.dmg.blockmap`,
+    `${productName}-${version}-${arch}.zip`,
+    `${productName}-${version}-${arch}.zip.blockmap`,
+    'latest-mac.yml',
+  ];
+  const expectedReleaseNames = [...expectedArtifactNames, 'SHA256SUMS'];
+
+  const release = JSON.parse(await readFile(resolve(releaseJsonPath), 'utf8'));
+  if (release.tagName !== `v${version}`) {
+    throw new Error(`release tag ${release.tagName ?? '<missing>'} does not match v${version}`);
+  }
+  if (release.isDraft !== true) throw new Error('release must remain draft during verification');
+  if (release.isPrerelease !== false) throw new Error('stable release draft must not be a prerelease');
+  if (!Array.isArray(release.assets)) throw new Error('release assets must be an array');
+
+  const assets = new Map();
+  for (const asset of release.assets) {
+    if (!asset || typeof asset !== 'object' || typeof asset.name !== 'string') {
+      throw new Error('release contains a malformed asset');
+    }
+    if (assets.has(asset.name)) throw new Error(`release contains duplicate asset ${asset.name}`);
+    assets.set(asset.name, asset);
+  }
+  const actualNames = [...assets.keys()].sort();
+  const expectedNames = [...expectedReleaseNames].sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new Error(
+      `release asset set mismatch: expected ${expectedNames.join(', ')}; got ${actualNames.join(', ')}`,
+    );
+  }
+
+  const checksumLines = (await readFile(resolve(directory, 'SHA256SUMS'), 'utf8'))
+    .split(/\r?\n/u)
+    .filter(Boolean);
+  const checksums = new Map();
+  for (const line of checksumLines) {
+    const match = /^([a-f0-9]{64})\s{2}([^/\\]+)$/u.exec(line);
+    if (!match) throw new Error(`SHA256SUMS contains a malformed line: ${line}`);
+    const [, digest, name] = match;
+    if (checksums.has(name)) throw new Error(`SHA256SUMS contains duplicate ${name}`);
+    checksums.set(name, digest);
+  }
+  const checksumNames = [...checksums.keys()].sort();
+  const expectedChecksumNames = [...expectedArtifactNames].sort();
+  if (JSON.stringify(checksumNames) !== JSON.stringify(expectedChecksumNames)) {
+    throw new Error('SHA256SUMS must contain exactly the update artifacts and metadata');
+  }
+
+  const verified = [];
+  for (const name of expectedReleaseNames) {
+    const path = resolve(directory, name);
+    const metadata = await stat(path);
+    if (!metadata.isFile()) throw new Error(`release artifact is not a file: ${name}`);
+    const digest = await sha256Hex(path);
+    const asset = assets.get(name);
+    if (asset.state !== 'uploaded') throw new Error(`release asset is not uploaded: ${name}`);
+    if (asset.size !== metadata.size) {
+      throw new Error(`release size mismatch for ${name}: remote=${asset.size} local=${metadata.size}`);
+    }
+    if (asset.digest !== `sha256:${digest}`) {
+      throw new Error(`release digest mismatch for ${name}`);
+    }
+    if (name !== 'SHA256SUMS' && checksums.get(name) !== digest) {
+      throw new Error(`SHA256SUMS digest mismatch for ${name}`);
+    }
+    verified.push({ name, size: metadata.size, sha256: digest });
+  }
+
+  return { tag: release.tagName, artifacts: verified };
+}
+
 function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (!['--release-dir', '--version', '--product-name', '--arch', '--manifest'].includes(flag)) {
+    if (![
+      '--release-dir',
+      '--version',
+      '--product-name',
+      '--arch',
+      '--manifest',
+      '--github-release-json',
+    ].includes(flag)) {
       throw new Error(`unknown argument: ${flag}`);
     }
     const value = argv[index + 1];
@@ -196,17 +291,23 @@ function parseArgs(argv) {
     if (flag === '--product-name') options.productName = value;
     if (flag === '--arch') options.arch = value;
     if (flag === '--manifest') options.manifestName = value;
+    if (flag === '--github-release-json') options.releaseJsonPath = value;
   }
   return options;
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const result = await verifyUpdateArtifacts(parseArgs(argv));
+  const options = parseArgs(argv);
+  const result = await verifyUpdateArtifacts(options);
   console.log(
     `verified ${result.manifest} for ${result.version}: ${result.artifacts
       .map(artifact => `${artifact.name} (${artifact.size} bytes)`)
       .join(', ')}`,
   );
+  if (options.releaseJsonPath) {
+    const release = await verifyGithubReleaseAssets(options);
+    console.log(`verified draft ${release.tag}: ${release.artifacts.length} exact release assets`);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

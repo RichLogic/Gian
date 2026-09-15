@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { environmentSettings, productionHostIsOccupied } from '../src/dev-environment.js';
 import {
   desktopRequestBoundaryUrls,
   DEV_HOST_URL,
@@ -35,6 +36,38 @@ test('development shell uses a distinct application identity and profile', () =>
     userDataPath: null,
     variant: 'production',
   });
+});
+
+test('packaged GianDev owns 8991 and never uses production identity', () => {
+  const targets = resolveDesktopTargets({ isPackaged: true, channel: 'dev', platform: 'darwin', env: {} });
+  assert.equal(targets.hostUrl, 'http://127.0.0.1:8991');
+  assert.equal(targets.webUrl, targets.hostUrl);
+  assert.equal(targets.manageHost, true);
+  assert.deepEqual(resolveDesktopApplicationIdentity(true, '/tmp/app-data', {}, 'dev'), {
+    name: 'GianDev', userDataPath: '/tmp/app-data/GianDev', variant: 'development',
+  });
+  assert.deepEqual(environmentSettings('dev', '/tmp/home'), { dataDir: '/tmp/home/.gian-dev', title: 'GianDev · Dev' });
+  assert.deepEqual(environmentSettings('prod', '/tmp/home'), { dataDir: '/tmp/home/.gian', title: 'GianDev · Prod' });
+});
+
+test('Prod selection checks both loopback families and does not stop the owner', async () => {
+  const probes: Array<[number, string | undefined]> = [];
+  assert.equal(await productionHostIsOccupied(async (port, host) => {
+    probes.push([port, host]);
+    return host === '::1';
+  }), true);
+  assert.deepEqual(probes, [[8990, undefined], [8990, '::1']]);
+  assert.equal(await productionHostIsOccupied(async () => false), false);
+  assert.equal(await productionHostIsOccupied(async () => true), true);
+});
+
+test('GianDev ignores inherited production targets outside isolated smoke', () => {
+  const targets = resolveDesktopTargets({ isPackaged: true, channel: 'dev', platform: 'darwin', env: {
+    GIAN_DESKTOP_HOST_URL: PROD_HOST_URL, GIAN_DESKTOP_WEB_URL: PROD_HOST_URL,
+    GIAN_DESKTOP_DISABLE_HOST_MANAGEMENT: '1',
+  } });
+  assert.equal(targets.hostUrl, 'http://127.0.0.1:8991');
+  assert.equal(targets.manageHost, true);
 });
 
 test('desktop smoke can override the profile for either application variant', () => {

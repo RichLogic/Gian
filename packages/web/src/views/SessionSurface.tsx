@@ -46,6 +46,7 @@ interface SessionSurfaceProps {
   /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
   onShowLastTurnChanges: (turn: number, path: string) => void;
   onReopen?: () => void;
+  onOpenAgents?: () => void;
   containerClassName?: string;
   /** Session Fork standard controls (proposal §10.6) — same contract as
    *  SessionMain (head fork lives in the session dropdown menu; Side Chat
@@ -77,6 +78,7 @@ export function SessionSurface({
   fileRehype,
   onShowLastTurnChanges,
   onReopen,
+  onOpenAgents,
   containerClassName,
   forkAtTurnControl,
   sideChatControl,
@@ -135,6 +137,7 @@ export function SessionSurface({
                   })}
                 onDelete={() => commands.onDelete(session.id)}
                 onReopen={onReopen}
+                onOpenAgents={onOpenAgents}
                 onShowLastTurnChanges={onShowLastTurnChanges}
                 forkAtTurnControl={forkAtTurnControl}
                 sideChatControl={sideChatControl}

@@ -77,7 +77,7 @@ describe('Sheet file actions', () => {
     expect(actions.closeTab).toHaveBeenCalledWith('t1');
   });
 
-  it('middle-truncates a long tab name (tail kept, head ellipsizes)', () => {
+  it('middle-truncates a long tab name (extension kept, head ellipsizes)', () => {
     const longTab: SheetTab = { ...fileTab, id: 't2', name: 'apr-001-approval-card.test.tsx' };
     const { container } = render(
       <Sheet tabs={[longTab]} activeByGroup={{ files: 't2' }} activeGroup="files" actions={actions} />,
@@ -85,7 +85,25 @@ describe('Sheet file actions', () => {
     const head = container.querySelector('.sheet-tab .name-head')?.textContent ?? '';
     const tail = container.querySelector('.sheet-tab .name-tail')?.textContent ?? '';
     expect(head + tail).toBe('apr-001-approval-card.test.tsx');
-    expect(tail).toBe('test.tsx');
+    expect(tail).toBe('.tsx');
+  });
+
+  it('does not split a browser page title into head + fake extension tail', () => {
+    // 2026-09-15 owner report: free-form titles were middle-chopped
+    // ("Invocation · 业务 Design" → "Invocation … 务 Design") because the
+    // last 8 chars were always pinned as an "extension".
+    const browserTab: SheetTab = {
+      ...fileTab,
+      id: 't3',
+      kind: 'browser',
+      name: 'Invocation · 业务 Design',
+    };
+    const { container } = render(
+      <Sheet tabs={[browserTab]} activeByGroup={{ browser: 't3' }} activeGroup="browser" actions={actions} />,
+    );
+    expect(container.querySelector('.sheet-tab .name-tail')).toBeNull();
+    expect(container.querySelector('.sheet-tab .name-head')?.textContent)
+      .toBe('Invocation · 业务 Design');
   });
 
   it('preview tab has no pin element — italic name is the only indicator', () => {

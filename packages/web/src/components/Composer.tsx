@@ -616,6 +616,24 @@ export function Composer({
   const approvalDrop = useUpDrop(340, { align: 'right' });
   const modelDrop = useUpDrop(320);
   const thinkDrop = useUpDrop(210);
+  // Narrow bar (2026-09-15 owner): below the threshold the model/thinking/
+  // fast text chips collapse — the Proxy icon opens one combined up-drop
+  // (Model row, Thinking row, Fast toggle) and approval goes icon-only.
+  const NARROW_BAR_PX = 620;
+  const barRef = useRef<HTMLDivElement>(null);
+  const [narrowBar, setNarrowBar] = useState(false);
+  const proxyDrop = useUpDrop(300);
+  const [proxySection, setProxySection] = useState<'model' | 'effort' | null>(null);
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar || typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      setNarrowBar(width > 0 && width < NARROW_BAR_PX);
+    });
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, []);
   const [models, setModels] = useState<ProxyModel[]>(
     cliExecutor ? (getModelsCached(cliExecutor, agentId) ?? []) : [],
   );
@@ -1764,15 +1782,17 @@ export function Composer({
           document.body,
         )}
 
-          <div className="composer-bar">
+          <div className={`composer-bar${narrowBar ? ' narrow' : ''}`} ref={barRef}>
             {!fixed && resolvedOverlay?.error && (
             <span className="composer-resolve-error" data-testid="composer-resolve-error">
               {resolvedOverlay.error}
             </span>
           )}
             {/* Agent identity leads the bar; the context-usage ring moved
-                after the model/thinking/fast chips (2026-09-10 owner call). */}
-            {!fixed && (
+                after the model/thinking/fast chips (2026-09-10 owner call).
+                Hidden in the narrow bar, where the same logo is the Proxy
+                drop's button. */}
+            {!fixed && !narrowBar && (
               <span
                 className="composer-agent"
                 data-testid="composer-agent-icon"
@@ -1786,7 +1806,140 @@ export function Composer({
               </span>
             )}
 
-          {!fixed && extraTurnOptions.length > 0 && (
+            {/* Narrow bar: the Proxy icon opens the combined
+                Model/Thinking/Fast up-drop (2026-09-15 owner). */}
+            {!fixed && narrowBar && (
+              <>
+                <button
+                  ref={proxyDrop.btnRef}
+                  type="button"
+                  className={`composer-opt cmp-proxy-btn${proxyDrop.open ? ' open' : ''}`}
+                  data-testid="composer-proxy-btn"
+                  title={t('composer.model.section')}
+                  disabled={disabled}
+                  onClick={() => {
+                    setProxySection(null);
+                    proxyDrop.setOpen(open => !open);
+                  }}
+                >
+                  <AgentLogo
+                    proxy={session.executor as ProductExecutor | null}
+                    fallback={session.agent_name || session.executor}
+                    size={17}
+                  />
+                </button>
+                {proxyDrop.open && proxyDrop.pos && createPortal(
+                  <div
+                    ref={proxyDrop.popRef}
+                    className="popover proxy-pop"
+                    role="dialog"
+                    style={{ left: proxyDrop.pos.left, bottom: proxyDrop.pos.bottom }}
+                  >
+                    {modelControlInteractive && showModelChip && (
+                      <div className="proxy-pop-section">
+                        <button
+                          type="button"
+                          className="proxy-pop-row"
+                          data-testid="proxy-pop-model"
+                          aria-expanded={proxySection === 'model'}
+                          onClick={() => setProxySection(s => (s === 'model' ? null : 'model'))}
+                        >
+                          <span className="proxy-pop-label">{t('composer.model.section')}</span>
+                          <span className="proxy-pop-value">
+                            {modelLabel(displayModels, activeModel) || activeModel}
+                          </span>
+                          <span className={`proxy-pop-caret${proxySection === 'model' ? ' open' : ''}`}>›</span>
+                        </button>
+                        {proxySection === 'model' && (
+                          <div className="mp-list">
+                            {displayModels.filter(model => !model.hidden).map(model => {
+                              const active = model.model === activeModel
+                                || claudeModelFamily(activeModel) === model.model;
+                              return (
+                                <button
+                                  key={model.model}
+                                  type="button"
+                                  className={`mp-row${active ? ' active' : ''}`}
+                                  onClick={() => {
+                                    if (catalogModelOption) setCatalogOption(catalogModelOption, model.model);
+                                    else onSetModel(model.model);
+                                    proxyDrop.setOpen(false);
+                                  }}
+                                >
+                                  <span className="mp-check">{active ? '✓' : ''}</span>
+                                  <span className="mp-row-body">
+                                    <span className="mp-row-title">{model.displayName}</span>
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {effortControlInteractive && showEffortChip && (
+                      <div className="proxy-pop-section">
+                        <button
+                          type="button"
+                          className="proxy-pop-row"
+                          data-testid="proxy-pop-effort"
+                          aria-expanded={proxySection === 'effort'}
+                          onClick={() => setProxySection(s => (s === 'effort' ? null : 'effort'))}
+                        >
+                          <span className="proxy-pop-label">{t('composer.reasoning.effort')}</span>
+                          <span className="proxy-pop-value">{effortLabel(executor, thinkLevel)}</span>
+                          <span className={`proxy-pop-caret${proxySection === 'effort' ? ' open' : ''}`}>›</span>
+                        </button>
+                        {proxySection === 'effort' && (
+                          <div className="mp-list">
+                            {effortChoices.map(level => (
+                              <button
+                                key={level}
+                                type="button"
+                                className={`mp-row${thinkLevel === level ? ' active' : ''}`}
+                                onClick={() => {
+                                  if (catalogEffortOption) setCatalogOption(catalogEffortOption, level);
+                                  else onSetEffort(level);
+                                  proxyDrop.setOpen(false);
+                                }}
+                              >
+                                <span className="mp-check">{thinkLevel === level ? '✓' : ''}</span>
+                                <span className="mp-row-body">
+                                  <span className="mp-row-title">{effortLabel(executor, level)}</span>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {showFast && (
+                      <div className="proxy-pop-row proxy-pop-fast">
+                        <span className="proxy-pop-label">
+                          {fastOption?.displayName ?? t('composer.fast.button')}
+                        </span>
+                        <label className="cmp-switch" data-testid="proxy-pop-fast">
+                          <input
+                            type="checkbox"
+                            checked={session.service_tier === 'fast'}
+                            disabled={disabled || !fastEnabled}
+                            onChange={event => {
+                              const checked = event.target.checked;
+                              if (fastOption) setCatalogOption(fastOption, checked);
+                              else onSetServiceTier?.(checked ? 'fast' : null);
+                            }}
+                          />
+                          <span />
+                        </label>
+                      </div>
+                    )}
+                  </div>,
+                  document.body,
+                )}
+              </>
+            )}
+
+          {!fixed && !narrowBar && extraTurnOptions.length > 0 && (
             <CatalogOptionsMenu
               summary={extraTurnSummary}
               options={extraTurnOptions}
@@ -1797,7 +1950,7 @@ export function Composer({
             />
           )}
 
-          {!fixed && extraTurnOptions.length > 0 && modelControlVisible && <ControlSeparator />}
+          {!fixed && !narrowBar && extraTurnOptions.length > 0 && modelControlVisible && <ControlSeparator />}
 
           {fixed && modelControlVisible && !modelControlInteractive && (
             <span
@@ -1811,7 +1964,7 @@ export function Composer({
             </span>
           )}
 
-          {!fixed && showNativeFallback && nativeModelOption && (
+          {!fixed && !narrowBar && showNativeFallback && nativeModelOption && (
             <NativeOptionDrop
               option={nativeModelOption}
               role="model"
@@ -1820,7 +1973,7 @@ export function Composer({
             />
           )}
 
-          {modelControlInteractive && showModelChip && (
+          {!narrowBar && modelControlInteractive && showModelChip && (
             <>
               <button
                 ref={modelDrop.btnRef}
@@ -1875,7 +2028,7 @@ export function Composer({
             </>
           )}
 
-          {modelControlVisible && effortControlVisible && <ControlSeparator />}
+          {!narrowBar && modelControlVisible && effortControlVisible && <ControlSeparator />}
 
           {fixed && effortControlVisible && !effortControlInteractive && (
             <span
@@ -1887,7 +2040,7 @@ export function Composer({
             </span>
           )}
 
-          {!fixed && showNativeFallback && nativeEffortOption && (
+          {!fixed && !narrowBar && showNativeFallback && nativeEffortOption && (
             <NativeOptionDrop
               option={nativeEffortOption}
               role="effort"
@@ -1896,7 +2049,7 @@ export function Composer({
             />
           )}
 
-          {effortControlInteractive && showEffortChip && (
+          {!narrowBar && effortControlInteractive && showEffortChip && (
             <>
               <button
                 ref={thinkDrop.btnRef}
@@ -1944,7 +2097,7 @@ export function Composer({
             </>
           )}
 
-          {fastControlVisible && (modelControlVisible || effortControlVisible) && <ControlSeparator />}
+          {!narrowBar && fastControlVisible && (modelControlVisible || effortControlVisible) && <ControlSeparator />}
 
           {fixed && fastControlVisible && !fastControlInteractive && (
             <span
@@ -1956,7 +2109,7 @@ export function Composer({
             </span>
           )}
 
-          {fastControlInteractive && showFast && onSetServiceTier && (
+          {!narrowBar && fastControlInteractive && showFast && onSetServiceTier && (
             <button
               type="button"
               className={`composer-opt cmp-fast${session.service_tier === 'fast' ? ' on' : ''}`}
@@ -1973,6 +2126,11 @@ export function Composer({
               {fastOption?.displayName ?? t('composer.fast.button')}
             </button>
           )}
+
+          {/* The context-usage ring trails the LAST left-cluster control —
+              after fast, or after thinking when no fast chip is shown — with
+              no separator (2026-09-15 owner call). */}
+          {!fixed && <ContextUsageIndicator session={session} />}
 
           <span className="spacer" />
 
@@ -1996,6 +2154,8 @@ export function Composer({
                     <path d="M12 9v6" />
                   </svg>
                 </span>
+                {/* Icon-only in the narrow bar (2026-09-15 owner). */}
+                {!narrowBar && (
                 <span className="name">
                   {executor === 'claude' && oneShotBypass
                     ? t('composer.bypass.button')
@@ -2006,6 +2166,7 @@ export function Composer({
                       t,
                     )}
                 </span>
+                )}
               </button>
               {approvalDrop.open && approvalDrop.pos && createPortal(
                 <div
@@ -2161,10 +2322,6 @@ export function Composer({
               )}
             </>
           )}
-
-          {/* The context-usage ring trails the right cluster (after the
-              mode chip and the attach "+", 2026-09-10 owner call). */}
-          {!fixed && <ContextUsageIndicator session={session} />}
 
           {/* Send / Stop */}
           {running ? (

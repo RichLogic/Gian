@@ -17,6 +17,7 @@ import {
   utf8ByteLength,
   verifyBytes,
   type CryptoAccept,
+  type RelayFrame,
   type RelayNotice,
 } from '@gian/remote-protocol';
 import { createCiphertextPacer } from './ciphertext-pacer.js';
@@ -24,6 +25,71 @@ import { DeviceCryptoSession } from './crypto-session.js';
 import { acceptMatchesOffer, type FrozenCryptoOffer } from './handshake.js';
 import type { HostScopedIdentity } from './identity.js';
 import { createSerialQueue } from './serial-queue.js';
+
+export interface HostFrameIo {
+  crypto: {
+    connectionId: string;
+    open(input: {
+      ciphertext: string;
+      sequence: number;
+      direction: 'host_to_device';
+      routeId: string;
+      connectionId: string;
+    }): Promise<Uint8Array>;
+  };
+  noteAck: (transportAck: number) => void;
+  onControl: (message: { type?: string }) => Promise<void> | void;
+  sendError: (message: { type: 'error'; code: string; message: string }) => Promise<void> | void;
+  close: (reason: string) => void;
+  log?: (error: unknown) => void;
+}
+
+export type FrameOutcome = 'handled' | 'dropped' | 'closed';
+
+/** Classify a failure on one inbound host frame. Only an AEAD open failure is
+ *  an integrity boundary that justifies killing the connection; a malformed
+ *  inner message is answered with an error frame and dropped so one bad
+ *  frame cannot cascade into disconnect, backoff, and a full resync. */
+export async function openHostFrame(raw: unknown, io: HostFrameIo): Promise<FrameOutcome> {
+  let frame: RelayFrame;
+  try {
+    frame = parseRelayFrame(raw);
+  } catch {
+    return 'dropped';
+  }
+  io.noteAck(frame.transport_ack);
+  let plaintext: Uint8Array;
+  try {
+    plaintext = await io.crypto.open({
+      ciphertext: frame.ciphertext,
+      sequence: frame.transport_sequence,
+      direction: 'host_to_device',
+      routeId: frame.route_id,
+      connectionId: io.crypto.connectionId,
+    });
+  } catch (error) {
+    io.close(error instanceof RemoteProtocolError ? error.code : 'INVALID_FRAME');
+    return 'closed';
+  }
+  let message: { type?: string };
+  try {
+    message = JSON.parse(new TextDecoder().decode(plaintext)) as { type?: string };
+    assertFrameClassMatchesInner(frame.frame_class, message.type);
+  } catch (error) {
+    await io.sendError({
+      type: 'error',
+      code: 'INVALID_FRAME',
+      message: `bad inner message: ${error instanceof Error ? error.message.slice(0, 120) : 'unknown'}`,
+    });
+    return 'dropped';
+  }
+  try {
+    await io.onControl(message);
+  } catch (error) {
+    io.log?.(error);
+  }
+  return 'handled';
+}
 
 export interface DeviceRelayHandlers {
   onControl(message: { type?: string; [key: string]: unknown }): void | Promise<void>;
@@ -310,23 +376,22 @@ export class DeviceRelayClient implements DeviceRelayLike {
 
   private async openFrame(raw: unknown): Promise<void> {
     if (!this.crypto) return;
-    try {
-      const frame = parseRelayFrame(raw);
-      this.peerTransportAck = Math.max(this.peerTransportAck, frame.transport_ack);
-      const plaintext = await this.crypto.open({
-        ciphertext: frame.ciphertext,
-        sequence: frame.transport_sequence,
-        direction: 'host_to_device',
-        routeId: frame.route_id,
-        connectionId: this.crypto.connectionId,
-      });
-      const message = JSON.parse(new TextDecoder().decode(plaintext)) as { type?: string };
-      assertFrameClassMatchesInner(frame.frame_class, message.type);
-      await this.input.handlers.onControl(message);
-    } catch (error) {
-      const code = error instanceof RemoteProtocolError ? error.code : 'INVALID_FRAME';
-      this.close(code);
-    }
+    await openHostFrame(raw, {
+      crypto: this.crypto,
+      noteAck: (ack) => {
+        this.peerTransportAck = Math.max(this.peerTransportAck, ack);
+      },
+      onControl: message => this.input.handlers.onControl(message),
+      sendError: async message => {
+        try {
+          await this.sendControl(message);
+        } catch {
+          // The socket is gone; close handling owns recovery.
+        }
+      },
+      close: reason => this.close(reason),
+      log: error => console.error('[remote] control handler failed; frame dropped', error),
+    });
   }
 
   private sendRaw(value: object): void {

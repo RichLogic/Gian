@@ -6,6 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { _electron as electron } from 'playwright';
+import { assertExecutionAllowed } from '../../../scripts/execution-policy.mjs';
+
+assertExecutionAllowed('desktop');
 
 const require = createRequire(import.meta.url);
 const electronPath = process.env.GIAN_DESKTOP_SMOKE_EXECUTABLE || require('electron');

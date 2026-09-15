@@ -34,34 +34,43 @@
 .notice b { color: var(--text); }
 .notice .grow { flex: 1; min-width: 0; }
 
-.agents-view { --agents-header-h: calc(var(--panel-header-h) + 8px); }
 .agents-view > .main-pane {
   flex: 1 1 50%;
   min-width: 360px;
   margin: var(--sp-2) 0;
 }
 .agents-view:has(> .p2) > .main-pane { max-width: 50%; }
+/* Once the user drags the seam (`p2-sized`), panel 2 carries an explicit
+   inline width — lift the 50% cap so the main pane takes the remaining
+   space instead of pinning the pair to halves. */
+.agents-view.p2-sized > .main-pane { max-width: none; }
 
 .page { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .page-head {
   flex: none;
-  height: var(--agents-header-h);
-  padding: 0 20px;
+  height: var(--mgmt-header-h);
+  padding: 0 16px;
   display: flex;
   align-items: center;
 }
+/* Chat-style fixed content column: the head row and the body content share
+   one centered 820px track instead of stretching across the main island. */
 .page-head .ph-row {
   flex: 1;
   min-width: 0;
   height: 100%;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
   display: flex;
   align-items: center;
   gap: 10px;
 }
-.page-head h1 { margin: 0; font: 600 16px var(--font-sans); }
+.page-head h1 { margin: 0; flex: none; font: 600 var(--fz-15) var(--font-sans); }
 .page-head .sub { color: var(--text-3); font-size: var(--fz-12); white-space: nowrap; }
 .page-head .spacer { flex: 1; }
-.page-body { flex: 1; min-height: 0; overflow: hidden auto; padding: 12px 20px 16px; }
+.page-body { flex: 1; min-height: 0; overflow: hidden auto; padding: 16px 16px 12px; }
+.agents-view .page-body > * { width: 100%; max-width: 820px; margin-inline: auto; }
 
 .p2 {
   flex: 1 1 50%;
@@ -78,20 +87,24 @@
 }
 .p2-head {
   flex: none;
-  height: var(--agents-header-h);
-  padding: 0 14px;
+  height: var(--mgmt-header-h);
+  padding: 0 16px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .p2-head h2,
-.p2-head .p2-title { margin: 0; font: 600 13.5px var(--font-sans); }
+.p2-head .p2-title { margin: 0; font: 600 var(--fz-13)/1.2 var(--font-sans); }
 .p2-head .spacer { flex: 1; }
-.p2-head .exec-name-input { flex: 1; min-width: 0; }
+.p2-head .exec-name-input {
+  flex: 1;
+  min-width: 0;
+  font: 600 var(--fz-13)/1.2 var(--font-sans);
+}
 .p2-body {
   flex: 1;
   min-height: 0;
-  padding: 12px 14px;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -99,7 +112,7 @@
 }
 .p2-foot {
   flex: none;
-  padding: 10px 14px;
+  padding: 10px 16px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -112,7 +125,17 @@
 .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .catalog-item .grow { flex: 1; min-width: 0; }
 .agents-view .page-body .s2-subhead { padding: 10px 4px 4px; }
-.agents-view .page-body .catalog { margin: 2px 0 0; }
+.agents-view .page-body .agents-integrations-head {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  gap: 8px;
+}
+.agents-integrations-refresh { margin-left: auto; }
+/* Block-axis margins only — the inline centering comes from the shared
+   `.agents-view .page-body > *` column rule (a margin shorthand here used to
+   silently win over it and pin the lists to the left edge). */
+.agents-view .page-body .catalog { margin-block: 2px 0; }
 .agents-view .page-body .catalog-item { cursor: pointer; }
 .agents-view .page-body .catalog-item .pill,
 .agents-view .page-body .catalog-item .btn { flex: none; }
@@ -296,16 +319,15 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
 .p2 .ag-runtime-candidate .grow { flex: 1; min-width: 0; }
 
 @media (max-width: 1100px) {
-  .agents-view .page-head { padding: 0 14px; }
-  .agents-view .page-body { padding: 12px 14px; }
+  .agents-view .page-head { padding: 0 12px; }
+  .agents-view .page-body { padding: 12px 12px; }
   .agents-view > .main-pane { min-width: 0; max-width: none; }
   .agents-view .p2 { min-width: 0; }
-  .p2.replacing .p2-head { min-height: var(--agents-header-h); height: var(--agents-header-h); }
+  .p2.replacing .p2-head { min-height: var(--mgmt-header-h); height: var(--mgmt-header-h); }
   .agents-view .btn.icon:not(.compact) { min-width: 44px; min-height: 44px; }
 }
 
 @media (max-width: 700px) {
-  .agents-view .page-head h1 { font-size: 15px; }
   .p2 .kv-grid { grid-template-columns: 78px minmax(0, 1fr); column-gap: 8px; }
   .p2-body { padding-inline: 12px; }
 }

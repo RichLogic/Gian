@@ -1041,6 +1041,15 @@ export function App() {
     setFocusScheduleRun({ sessionId, runId });
   }, [selectSession, setActiveRail, setViewState]);
 
+  // Timer detail "Open chat": jump to the Schedule's control conversation
+  // without focusing a specific Run.
+  const openTimerConversation = useCallback((sessionId: string) => {
+    selectSession(sessionId);
+    setActiveRail(null);
+    setViewState('main');
+    startTransition(() => setMode('sessions'));
+  }, [selectSession, setActiveRail, setViewState]);
+
   // 未分配 (untasked) sessions open inside the Tasks view, not in Project
   // mode (2026-09-06 owner call): clear any task/subtask selection, point
   // the active session at the row, stay in Tasks.
@@ -1506,6 +1515,7 @@ export function App() {
       onOpenChat={request => openChatPanel(surfaceSession.id, request)}
       fileRehype={fileRehype}
       onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: surfaceSession.id }); }}
+      onOpenAgents={() => { startTransition(() => setMode('agents')); }}
       onShowLastTurnChanges={(turn, path) => showLastTurnChanges(surfaceSession, turn, path)}
       forkAtTurnControl={forkAtTurnControl}
       sideChatControl={sideChatControl}
@@ -1843,6 +1853,7 @@ export function App() {
                     selectedScheduleId={timerScheduleId}
                     onSelectSchedule={setTimerScheduleId}
                     onOpenScheduledTurn={openScheduledTurn}
+                    onOpenConversation={openTimerConversation}
                     onCreateSchedule={(prompt) => {
                       // Design 05: creation is prompt-driven — jump to the
                       // standard new-session page with the guidance prompt

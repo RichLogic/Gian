@@ -192,6 +192,9 @@ export interface GianBrowserApi {
   recover(tabId: string): Promise<GianBrowserState>;
   stop(tabId: string): Promise<GianBrowserState>;
   setLayout(tabId: string, bounds: GianBrowserBounds, visible: boolean): Promise<boolean>;
+  /** Freeze-frame of the live page (PNG data URL) so an HTML overlay can sit
+   *  where the native view was — null when the tab has no paintable view. */
+  captureFrame(tabId: string): Promise<string | null>;
   setBackground(tabId: string, cssColor: string): Promise<boolean>;
   setZoom(tabId: string, factor: number): Promise<GianBrowserState>;
   openExternal(tabId: string): Promise<boolean>;

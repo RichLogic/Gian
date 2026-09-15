@@ -78,6 +78,7 @@ export const REST_MUTATION_TO_OPERATION = {
   reorderWorkspaces: ['workspace.reorder'],
   reorderTasks: ['task.reorder'],
   reorderSessions: ['session.reorder'],
+  rebindDeletedSessionAgent: ['session.rebindAgent'],
   deleteWorkspace: ['workspace.delete'],
   saveClaudeMd: ['workspace.saveClaudeMd'],
   pickWorkspaceFolder: ['workspace.pickFolder'],

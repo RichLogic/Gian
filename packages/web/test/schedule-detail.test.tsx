@@ -1,11 +1,14 @@
 /**
- * Schedule detail (Issue #51): Definition editing with all three trigger
- * kinds, expected_revision + Idempotency-Key on save, the 409 conflict
- * notice + canonical reload, the paginated run log covering every status,
- * bound-run Turn navigation, and the hidden Fork transcript opening inline
- * without touching the session list.
+ * Schedule detail (Issue #51): Definition editing through the Codex-style
+ * structured frequency card (2026-09-15 owner: Repeat = once/interval/custom,
+ * custom compiles to cron — no raw cron input, no timezone field, system
+ * timezone on save), the read-only "Runs in" row with the Open chat jump,
+ * expected_revision + Idempotency-Key on save, the 409 conflict notice +
+ * canonical reload, the paginated run log covering every status, bound-run
+ * Turn navigation, and the hidden Fork transcript opening inline without
+ * touching the session list.
  */
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
@@ -40,6 +43,7 @@ function renderDetail(
         sessions={[CONTROL_SESSION]}
         onBack={() => undefined}
         onOpenScheduledTurn={() => undefined}
+        onOpenConversation={() => undefined}
         {...props}
       />
     </LocaleProvider>
@@ -108,8 +112,12 @@ describe('ScheduleDetail Definition tab', () => {
 
     const nameInput = await screen.findByTestId('schedule-field-name');
     expect(nameInput).toHaveValue('Nightly digest');
-    // Immutable binding is rendered read-only, not as an input.
+    // Immutable binding is rendered read-only in the "Runs in" row, next to
+    // the Open chat jump — never as an input.
     expect(screen.getByTestId('schedule-conversation')).toHaveTextContent('Release watch — Claude · Gian');
+    expect(screen.getByTestId('schedule-open-chat')).toBeEnabled();
+    // No timezone field (2026-09-15 owner): saves pin the system timezone.
+    expect(screen.queryByTestId('schedule-field-timezone')).toBeNull();
 
     const save = screen.getByTestId('schedule-save');
     expect(save).toBeDisabled();
@@ -127,7 +135,7 @@ describe('ScheduleDetail Definition tab', () => {
       expected_revision: 3,
       name: 'Morning digest',
       trigger: { kind: 'cron', expression: '0 9 * * *' },
-      timezone: 'Asia/Shanghai',
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       misfire_policy: 'skip',
     });
     // Canonical reload follows the confirmed save.
@@ -137,14 +145,34 @@ describe('ScheduleDetail Definition tab', () => {
     });
   });
 
-  it('edits all three trigger kinds', async () => {
+  it('opens the control conversation from the Runs in row', async () => {
+    const router = detailRouter();
+    mockFetch(router.handler);
+    const onOpenConversation = vi.fn();
+    renderDetail(createOperationHarness(), { onOpenConversation });
+    await screen.findByTestId('schedule-field-name');
+
+    await userEvent.click(screen.getByTestId('schedule-open-chat'));
+    expect(onOpenConversation).toHaveBeenCalledWith('session-1');
+  });
+
+  it('disables Open chat when the control conversation is gone', async () => {
+    const router = detailRouter();
+    mockFetch(router.handler);
+    renderDetail(createOperationHarness(), { sessions: [] });
+    await screen.findByTestId('schedule-field-name');
+
+    expect(screen.getByTestId('schedule-open-chat')).toBeDisabled();
+  });
+
+  it('edits all three repeat modes (custom compiles to cron)', async () => {
     const router = detailRouter();
     mockFetch(router.handler);
     renderDetail(createOperationHarness());
     await screen.findByTestId('schedule-field-name');
 
     // interval: value + unit → every_ms (2 hours).
-    await userEvent.click(screen.getByTestId('schedule-trigger-interval'));
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeat'), 'interval');
     const value = screen.getByTestId('schedule-trigger-interval-value');
     await userEvent.clear(value);
     await userEvent.type(value, '2');
@@ -158,7 +186,7 @@ describe('ScheduleDetail Definition tab', () => {
     });
 
     // once: datetime-local → RFC3339 instant.
-    await userEvent.click(screen.getByTestId('schedule-trigger-once'));
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeat'), 'once');
     const at = screen.getByTestId('schedule-trigger-once-at');
     await userEvent.clear(at);
     await userEvent.type(at, '2026-10-01T08:30');
@@ -170,16 +198,56 @@ describe('ScheduleDetail Definition tab', () => {
       expect((last.body as { trigger: { at: string } }).trigger.at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
 
-    // cron: raw expression.
-    await userEvent.click(screen.getByTestId('schedule-trigger-cron'));
-    const cron = screen.getByTestId('schedule-trigger-cron-expression');
-    await userEvent.clear(cron);
-    await userEvent.type(cron, '*/15 * * * *');
+    // custom daily: structured time row → compiled cron expression.
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeat'), 'custom');
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeats'), 'daily');
+    // jsdom sanitizes <input type="time"> per keystroke, so set the final
+    // valid value in one change event instead of typing.
+    fireEvent.change(screen.getByTestId('schedule-custom-time'), { target: { value: '09:30' } });
     await userEvent.click(screen.getByTestId('schedule-save'));
     await waitFor(() => {
       const patches = router.calls.filter(call => call.method === 'PATCH');
       expect(patches[patches.length - 1]!.body).toMatchObject({
-        trigger: { kind: 'cron', expression: '*/15 * * * *' },
+        trigger: { kind: 'cron', expression: '30 9 * * *' },
+      });
+    });
+
+    // custom hourly: every 2 hours at minute 5.
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeats'), 'hourly');
+    // The onChange clamps empty strings back to the minimum while typing, so
+    // set the final values with single change events.
+    fireEvent.change(screen.getByTestId('schedule-custom-every'), { target: { value: '2' } });
+    fireEvent.change(screen.getByTestId('schedule-custom-minute'), { target: { value: '5' } });
+    await userEvent.click(screen.getByTestId('schedule-save'));
+    await waitFor(() => {
+      const patches = router.calls.filter(call => call.method === 'PATCH');
+      expect(patches[patches.length - 1]!.body).toMatchObject({
+        trigger: { kind: 'cron', expression: '5 */2 * * *' },
+      });
+    });
+  });
+
+  it('shows an unparseable cron read-only until converted to structured editing', async () => {
+    const router = detailRouter({
+      schedule: makeSchedule({ trigger: { kind: 'cron', expression: '0 9 * * 1-5' } }),
+    });
+    mockFetch(router.handler);
+    renderDetail(createOperationHarness());
+    await screen.findByTestId('schedule-field-name');
+
+    // The raw expression renders read-only; the structured rows stay hidden.
+    expect(screen.getByTestId('schedule-cron-raw')).toHaveTextContent('0 9 * * 1-5');
+    expect(screen.queryByTestId('schedule-repeats')).toBeNull();
+
+    await userEvent.click(screen.getByTestId('schedule-cron-convert'));
+    expect(screen.getByTestId('schedule-repeats')).toBeInTheDocument();
+
+    // Saving after the conversion compiles the default structured spec.
+    await userEvent.click(screen.getByTestId('schedule-save'));
+    await waitFor(() => {
+      const patch = router.calls.find(call => call.method === 'PATCH');
+      expect(patch?.body).toMatchObject({
+        trigger: { kind: 'cron', expression: '0 9 * * *' },
       });
     });
   });
@@ -212,7 +280,7 @@ describe('ScheduleDetail Definition tab', () => {
     renderDetail(createOperationHarness());
     await screen.findByTestId('schedule-field-name');
 
-    await userEvent.click(screen.getByTestId('schedule-trigger-interval'));
+    await userEvent.selectOptions(screen.getByTestId('schedule-repeat'), 'interval');
     const value = screen.getByTestId('schedule-trigger-interval-value');
     await userEvent.clear(value);
     await userEvent.type(value, '1');

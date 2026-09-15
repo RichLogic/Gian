@@ -736,11 +736,52 @@ input, select, textarea {
 }
 .composer-model:hover { color: var(--text); }
 .composer-model .name {
-  white-space: nowrap;
-  overflow: hidden;
+  white-space: nowrap;  overflow: hidden;
   text-overflow: ellipsis;
 }
 .composer-model .caret { color: var(--text-3); font-size: 9px; }
+/* Gian-composer framework on remote-web (2026-09-15 owner sync): separate
+   model / thinking / fast chips + the audit shield chip; narrow collapses
+   to icon-only triggers. */
+.composer-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  font: 500 11.5px/1 var(--font-sans);
+  color: var(--text-2);
+  cursor: pointer;
+  flex: none;
+  min-width: 0;
+}
+.composer-opt:hover { color: var(--text); }
+.composer-opt:disabled { opacity: 0.5; cursor: default; }
+.composer-opt .caret { color: var(--text-3); font-size: 9px; }
+.composer-opt .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.composer-sep {
+  width: 1px;
+  height: 14px;
+  flex: none;
+  background: var(--hairline-2);
+}
+.composer-opt.rw-fast.on { color: var(--accent); }
+.composer-model.icon-only { padding: 0 7px; }
+.composer-model.icon-only .rw-agent-dot { width: 9px; height: 9px; }
+.rw-approval svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text-3);
+}
+.rw-approval-menu {
+  left: auto;
+  right: 0;
+  width: min(240px, calc(100vw - 48px));
+}
 .rw-agent-dot {
   width: 7px;
   height: 7px;

@@ -33,7 +33,8 @@ test('RemoteMethod registry is closed and exhaustive', () => {
   ]);
   assert.throws(() => parseRemoteMethodParams('session.send', { session_id: generateCanonicalId() }));
   assert.doesNotThrow(() => parseRemoteMethodParams('catalog.read', {}));
-  assert.throws(() => parseRemoteMethodParams('session.update', {
+  // approval_mode joined the session config set (2026-09-15 audit-mode sync).
+  assert.doesNotThrow(() => parseRemoteMethodParams('session.update', {
     session_id: generateCanonicalId(),
     session_revision: 'rev-1',
     approval_mode: 'full-access',

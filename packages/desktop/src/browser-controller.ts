@@ -718,6 +718,23 @@ export class BrowserController {
     return true;
   }
 
+  /** Freeze-frame for HTML overlays that must float above the page (the ⋯
+   *  menu): the renderer hides the native view and shows this image in its
+   *  place, so the page never reflows. Resized to layout DIPs — the frame is
+   *  transient, Retina pixels would only inflate the IPC payload. */
+  async captureFrame(tabId: string): Promise<string | null> {
+    const tab = this.tabs.get(tabId);
+    const contents = tab?.view?.webContents;
+    if (!tab?.view || !contents || contents.isDestroyed()) return null;
+    let image = await contents.capturePage();
+    if (image.isEmpty()) return null;
+    const dipWidth = Math.max(1, Math.round(tab.bounds.width));
+    if (image.getSize().width > dipWidth) {
+      image = image.resize({ width: dipWidth, quality: 'good' });
+    }
+    return `data:image/png;base64,${image.toPNG().toString('base64')}`;
+  }
+
   async openExternal(tabId: string): Promise<boolean> {
     const tab = this.tabs.get(tabId);
     const url = tab?.view?.webContents.getURL() ?? '';

@@ -280,6 +280,15 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
 
+  it('keeps an explicit Agent Integrations refresh action available for a healthy Catalog', async () => {
+    mockApi([]);
+    renderAgents();
+
+    const refresh = await screen.findByRole('button', { name: 'Refresh Agent Integrations' });
+    fireEvent.click(refresh);
+    await waitFor(() => expect(api.syncProxyCatalog).toHaveBeenCalledTimes(1));
+  });
+
   it('opens a Workspace-style Add Agent dialog without replacing the Agents page', async () => {
     mockApi([agent({ name: 'Writer' })]);
     renderAgents();
@@ -684,7 +693,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.getByText(/last synced Catalog/)).toBeTruthy();
     // Stale items stay usable (last-known-good).
     expect(screen.getByTestId('catalog-item-io.acme.ready')).toBeTruthy();
-    fireEvent.click(screen.getByTestId('catalog-sync'));
+    fireEvent.click(screen.getByTestId('agent-integrations-refresh'));
     await waitFor(() => expect(api.syncProxyCatalog).toHaveBeenCalled());
   });
 
@@ -861,7 +870,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
 
     // Sync advances the Catalog generation: same doc URL, new content —
     // the cache key includes the generation, so this refetches.
-    fireEvent.click(screen.getByTestId('catalog-sync'));
+    fireEvent.click(screen.getByTestId('agent-integrations-refresh'));
     expect(await within(panel).findByRole('heading', { level: 2, name: 'Setup v2' })).toBeTruthy();
     expect(setupCalls).toBe(2);
   });
@@ -898,7 +907,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.queryByTestId('agents-detail-panel')).toBeNull();
     expect(container.querySelector('main.main')).not.toBeNull();
     expect(screen.getByTestId('agents-add')).toBeTruthy();
-    expect(screen.queryByTestId('catalog-sync')).toBeNull();
+    expect(screen.getByTestId('agent-integrations-refresh')).toBeTruthy();
     expect(screen.queryByRole('searchbox')).toBeNull();
   });
 

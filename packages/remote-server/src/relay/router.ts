@@ -1,10 +1,13 @@
 import {
   CONTENT_WINDOW_CHUNKS,
+  RELAY_PROTOCOL,
   RemoteProtocolError,
   TransportSequenceGuard,
   isContentFrame,
   isControlFrame,
+  parseClosed,
   parseRelayFrame,
+  relayNoticeSchema,
   utf8ByteLength,
   type RelayFrame,
   type RelayHandshake,
@@ -109,6 +112,17 @@ export class RelayRouter {
     }
   }
 
+  /** Presence notices go to every authenticated device connection of the
+   *  host, not only crypto-bound ones: a device waiting inside its handshake
+   *  is exactly the peer that must learn host-offline immediately. */
+  notifyDevices(hostId: string, notice: RelayNotice): void {
+    for (const entry of this.#connections.values()) {
+      if (entry.peer.role === 'device' && entry.peer.hostId === hostId) {
+        entry.peer.send(notice);
+      }
+    }
+  }
+
   handleHandshake(connectionId: string, message: RelayHandshake): void {
     const state = this.#connections.get(connectionId);
     // Replacement closes the old WebSocket asynchronously. Ignore any final
@@ -148,6 +162,16 @@ export class RelayRouter {
     const direction: TransportDirection = state.peer.role === 'host' ? 'host_to_device' : 'device_to_host';
     this.#assertInboundRoute(state.peer, frame);
     if (state.peer.role === 'host' && !this.#deviceCryptoBound(frame.host_id, frame.device_id)) {
+      // Tell the Host its route is gone instead of dropping the frame
+      // silently, so it can drop the stale route and recover.
+      this.notifyHost(frame.host_id, parseClosed(relayNoticeSchema, {
+        protocol: RELAY_PROTOCOL,
+        type: 'route.not_bound',
+        host_id: frame.host_id,
+        device_id: frame.device_id,
+        route_id: frame.route_id,
+        sent_at: this.config.now(),
+      }));
       return;
     }
     this.#enforceRate(state, frame);

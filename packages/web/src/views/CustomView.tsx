@@ -445,10 +445,11 @@ export function CustomView({
     <div className="custom-page-head">
       <div>
         <h1>{t('custom.title')}</h1>
-        <div className="sub">
-          {t('custom.sub.readonly')}
-          {inventory ? ` · ${t('custom.sub.refreshed').replace('{time}', relTime(inventory.fetchedAt))}` : ''}
-        </div>
+        {inventory && (
+          <div className="sub">
+            {t('custom.sub.refreshed').replace('{time}', relTime(inventory.fetchedAt))}
+          </div>
+        )}
       </div>
       <span className="custom-spacer" />
       {agent?.ready && (
@@ -1236,7 +1237,11 @@ function CustomDetail({
   return (
     <aside
       className={`p2 custom-detail${swap ? ' replacing' : ''}`}
-      style={width !== undefined ? { width } : undefined}
+      style={width !== undefined
+        // The inline geometry must win over the `.p2` 50/50 flex + min-width
+        // clamp or dragging the seam does nothing.
+        ? { width, minWidth: 340, flex: '0 0 auto' }
+        : undefined}
       data-testid="custom-detail"
     >
       <div className="p2-head custom-detail-head">

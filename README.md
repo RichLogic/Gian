@@ -128,7 +128,9 @@ The Electron app starts and supervises its bundled Host. The Host binds to loopb
 
 ## Project status
 
-Gian is in active beta development. The current public build is macOS Apple Silicon only, is unsigned, and may change its public APIs or integration contracts before a stable release.
+Gian is in active development. The current official build supports macOS Apple
+Silicon, is Developer ID signed and Apple notarized, and may continue to evolve
+its public APIs and integration contracts.
 
 For bugs and feature requests, use [GitHub Issues](https://github.com/RichLogic/Gian/issues). For all public builds, see [Releases](https://github.com/RichLogic/Gian/releases).
 

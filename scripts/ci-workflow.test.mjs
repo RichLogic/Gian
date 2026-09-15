@@ -22,7 +22,7 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
   ]);
 
   assert.match(workflow, /\n  pull_request:\n/);
-  assert.match(workflow, /\n  push:\n[\s\S]*?      - main\n/);
+  assert.match(workflow, /branches: \[main,/);
   assert.match(workflow, /fetch-depth: 0/);
   for (const configuredWorkflow of [
     workflow,
@@ -35,29 +35,21 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
     assert.doesNotMatch(configuredWorkflow, /node-version: 22/);
   }
 
-  for (const command of [
-    'pnpm quality:traceability',
-    'pnpm typecheck',
-    'pnpm test:all',
-    'pnpm build',
-  ]) {
-    assert.match(workflow, new RegExp(command.replaceAll(':', '\\:')));
-  }
+  assert.match(workflow, /lane: \[policy, typecheck, build, unit, integration, system\]/);
+  assert.match(workflow, /node scripts\/source-gate.mjs/);
+  assert.match(workflow, /fail-fast: false/);
+  assert.doesNotMatch(workflow, /test:e2e|quality:package|test:smoke/);
 });
 
 test('nightly and manual CI run isolated E2E and retain failure artifacts', async () => {
-  const workflow = await readFile(workflowUrl, 'utf8');
+  const workflow = await readFile(new URL('../.github/workflows/nightly-e2e.yml', import.meta.url), 'utf8');
 
   assert.match(workflow, /\n  schedule:\n/);
   assert.match(workflow, /\n  workflow_dispatch:\n/);
-  assert.match(
-    workflow,
-    /if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
-  );
-  assert.match(workflow, /run: pnpm test:e2e/);
-  assert.match(workflow, /run: pnpm test:e2e:proxy-mock/);
+  assert.match(workflow, /command: \['test:e2e', 'test:e2e:proxy-mock'\]/);
+  assert.match(workflow, /fail-fast: false/);
   assert.match(workflow, /PLAYWRIGHT_CHANNEL: chromium/);
-  assert.match(workflow, /if: failure\(\)[\s\S]*?uses: actions\/upload-artifact@v4/);
+  assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*?if: always\(\)/);
   assert.match(workflow, /playwright-report\//);
   assert.match(workflow, /test-results\//);
 });
@@ -103,6 +95,18 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
 });
 
+test('release installs dependencies after certification and before the version gate', async () => {
+  const workflow = await readFile(releaseWorkflowUrl, 'utf8');
+  const source = workflow.indexOf('node scripts/delivery-certificate.mjs verify-source');
+  const install = workflow.indexOf('pnpm install --frozen-lockfile');
+  const version = workflow.indexOf('node scripts/check-version-consistency.mjs --release-ref');
+  const signing = workflow.indexOf('security import');
+  const build = workflow.indexOf('run: pnpm --filter @gian/desktop make:mac:release');
+  assert.ok(source >= 0 && source < install, 'certify source before installing dependencies');
+  assert.ok(install < version, 'version validation imports esbuild through Proxy metadata');
+  assert.ok(version < signing && signing < build, 'reject version drift before signing and building');
+});
+
 test('release and desktop packaging fail closed before expensive builds', async () => {
   const [releaseWorkflow, desktopPackageText] = await Promise.all([
     readFile(releaseWorkflowUrl, 'utf8'),
@@ -110,10 +114,10 @@ test('release and desktop packaging fail closed before expensive builds', async 
   ]);
   const desktopPackage = JSON.parse(desktopPackageText);
 
-  assert.match(
-    releaseWorkflow,
-    /- name: Verify source[\s\S]*?pnpm quality:traceability[\s\S]*?pnpm typecheck[\s\S]*?pnpm test:all/,
-  );
+  assert.match(releaseWorkflow, /delivery-certificate.mjs verify-source/);
+  assert.match(releaseWorkflow, /workflow_dispatch:/);
+  assert.match(releaseWorkflow, /environment: production/);
+  assert.doesNotMatch(releaseWorkflow, /push:\s*tags:|pnpm test:all|pnpm quality:package/);
   for (const secret of [
     'CSC_LINK',
     'CSC_KEY_PASSWORD',
@@ -121,12 +125,34 @@ test('release and desktop packaging fail closed before expensive builds', async 
     'APPLE_API_KEY_ID',
     'APPLE_API_ISSUER',
   ]) assert.match(releaseWorkflow, new RegExp(`secrets\\.${secret}`));
-  assert.match(releaseWorkflow, /pnpm quality:package/);
+  assert.match(releaseWorkflow, /timeout-minutes: 120/);
+  assert.match(releaseWorkflow, /security create-keychain/);
+  assert.match(releaseWorkflow, /security import/);
+  assert.match(releaseWorkflow, /security set-key-partition-list/);
+  assert.match(
+    releaseWorkflow,
+    /security set-key-partition-list[\s\S]*?-k "\$\{KEYCHAIN_PASSWORD\}"/,
+  );
+  assert.doesNotMatch(
+    releaseWorkflow,
+    /security set-key-partition-list[\s\S]{0,240}?CSC_KEY_PASSWORD/,
+  );
+  assert.match(releaseWorkflow, /CSC_KEYCHAIN=\$\{KEYCHAIN_PATH\}/);
+  assert.match(releaseWorkflow, /security delete-keychain/);
   assert.match(releaseWorkflow, /make:mac:release/);
   assert.match(releaseWorkflow, /codesign --verify --deep --strict/);
   assert.match(releaseWorkflow, /xcrun stapler validate/);
   assert.match(releaseWorkflow, /spctl --assess --type execute/);
-  assert.match(releaseWorkflow, /--latest/);
+  assert.match(releaseWorkflow, /Gian-\$\{VERSION\}-arm64\.dmg\.blockmap/);
+  assert.match(releaseWorkflow, /Gian-\$\{VERSION\}-arm64\.zip\.blockmap/);
+  assert.match(releaseWorkflow, /latest-mac\.yml/);
+  assert.match(releaseWorkflow, /--draft/);
+  assert.match(releaseWorkflow, /--github-release-json/);
+  assert.doesNotMatch(releaseWorkflow, /--draft=false|--clobber/);
+  const promotion = await readFile(new URL('../.github/workflows/release-promote.yml', import.meta.url), 'utf8');
+  assert.match(promotion, /verify-acceptance/);
+  assert.match(promotion, /--draft=false --latest/);
+  assert.doesNotMatch(promotion, /make:mac|electron-builder/);
   assert.doesNotMatch(releaseWorkflow, /--prerelease/);
   assert.equal(
     desktopPackage.scripts['bundle:build'].split(' && ')[0],

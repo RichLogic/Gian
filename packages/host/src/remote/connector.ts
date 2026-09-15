@@ -4,6 +4,7 @@ import {
   CONTENT_WINDOW_CHUNKS,
   MAX_ATTACHMENT_BYTES,
   MAX_CONCURRENT_TRANSFERS_PER_DEVICE,
+  MAX_STRING_CHARS,
   RemoteProtocolError,
   assertInnerContentPlaintext,
   base64UrlToBytes,
@@ -17,10 +18,12 @@ import {
   parseRelayFrame,
   assertFrameClassMatchesInner,
   utf8ByteLength,
+  SNAPSHOT_PUSH_GRACE_MS,
   attachmentBeginSchema,
   attachmentCompleteSchema,
   downloadRequestSchema,
   transferAckSchema,
+  TRANSCRIPT_COALESCE_MS,
   type CommandRequest,
   type RelayFrame,
 } from '@gian/remote-protocol';
@@ -32,11 +35,18 @@ import type { RemoteFileRefService } from './file-ref.js';
 import { RemoteReplayBuffer } from './replay-buffer.js';
 import { createSerialQueue } from './serial-queue.js';
 
+interface TranscriptItemShape {
+  id?: string;
+  kind?: string;
+  delta?: boolean;
+  text?: unknown;
+}
+
 export interface RemotePeerTransport {
   send(frame: unknown): void;
   close(reason?: string): void;
   onMessage(handler: (frame: unknown) => void): () => void;
-  onClose(handler: () => void): () => void;
+  onClose(handler: (reason?: string) => void): () => void;
 }
 
 export interface RemoteServerAuthClient {
@@ -118,8 +128,12 @@ export class RemoteConnector {
   private readonly transferAckOffset = new Map<string, number>();
   private readonly activeDownloadTransfers = new Set<string>();
   private readonly enqueueInbound = createSerialQueue();
+  private readonly enqueueCommands = createSerialQueue();
   private readonly enqueueOutbound = createSerialQueue();
   private readonly ciphertextPacer = createCiphertextPacer();
+  private initialSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingDelta: { item: TranscriptItemShape & { text: string }; envelope: object } | null = null;
+  private pendingDeltaTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly transport: RemotePeerTransport,
@@ -128,7 +142,10 @@ export class RemoteConnector {
     private readonly onCommand: (
       device: RemoteDeviceRecord,
       command: CommandRequest,
-      hooks?: { onAccepted?: () => Promise<void> },
+      hooks?: {
+        onAccepted?: () => Promise<void>;
+        onResultSent?: () => Promise<void>;
+      },
     ) => Promise<unknown>,
     private readonly device: RemoteDeviceRecord,
     _auth?: RemoteServerAuthClient,
@@ -136,7 +153,14 @@ export class RemoteConnector {
     private readonly services?: {
       attachments?: RemoteAttachmentService;
       fileRefs?: RemoteFileRefService;
+      transcriptPage?: (sessionId: string, deviceId: string) => {
+        items: unknown[];
+        has_more: boolean;
+        cursor?: string;
+      } | null;
     },
+    private readonly initialSnapshotGraceMs: number = SNAPSHOT_PUSH_GRACE_MS,
+    private readonly transcriptCoalesceMs: number = TRANSCRIPT_COALESCE_MS,
   ) {
     this.transport.onMessage(frame => {
       void this.enqueueInbound(() => this.receive(frame));
@@ -190,10 +214,67 @@ export class RemoteConnector {
     });
   }
 
+  /** Live transcript fanout. Consecutive assistant deltas for one item merge
+   *  inside a short window so streaming does not occupy a relay frame per
+   *  token; any other transcript item flushes the pending delta first so
+   *  append order on the device is preserved. */
+  sendTranscript(envelope: object): void {
+    const item = (envelope as { event?: { item?: TranscriptItemShape } }).event?.item;
+    if (!item || item.kind !== 'assistant' || item.delta !== true || typeof item.text !== 'string') {
+      this.flushTranscriptDelta();
+      void this.sendControl(envelope).catch(() => undefined);
+      return;
+    }
+    if (this.pendingDelta && (
+      this.pendingDelta.item.id !== item.id
+      || this.pendingDelta.item.text.length + item.text.length > MAX_STRING_CHARS
+    )) this.flushTranscriptDelta();
+    if (this.pendingDelta) {
+      this.pendingDelta.item.text += item.text;
+      return;
+    }
+    const mergedItem = { ...item, text: item.text };
+    const event = (envelope as { event: object }).event;
+    this.pendingDelta = { item: mergedItem, envelope: { ...envelope, event: { ...event, item: mergedItem } } };
+    this.pendingDeltaTimer = setTimeout(() => this.flushTranscriptDelta(), this.transcriptCoalesceMs);
+    this.pendingDeltaTimer.unref?.();
+  }
+
+  private flushTranscriptDelta(): void {
+    if (this.pendingDeltaTimer) clearTimeout(this.pendingDeltaTimer);
+    this.pendingDeltaTimer = null;
+    const pending = this.pendingDelta;
+    if (!pending) return;
+    this.pendingDelta = null;
+    void this.sendControl(pending.envelope).catch(() => undefined);
+  }
+
   close(): void {
     this.closed = true;
+    this.cancelInitialSnapshot();
+    if (this.pendingDeltaTimer) clearTimeout(this.pendingDeltaTimer);
+    this.pendingDeltaTimer = null;
+    this.pendingDelta = null;
     this.crypto.close();
     this.transport.close('host_closed');
+  }
+
+  /** A fresh crypto handshake says nothing about the client's local state.
+   *  Clients that can resume announce themselves within the grace window;
+   *  only a silent client falls back to a pushed full resync. */
+  scheduleInitialSnapshot(): void {
+    this.cancelInitialSnapshot();
+    if (this.closed) return;
+    this.initialSnapshotTimer = setTimeout(() => {
+      this.initialSnapshotTimer = null;
+      void this.sendControl({ type: 'snapshot.required', reason: 'crypto_resumed' }).catch(() => undefined);
+    }, this.initialSnapshotGraceMs);
+    this.initialSnapshotTimer.unref?.();
+  }
+
+  private cancelInitialSnapshot(): void {
+    if (this.initialSnapshotTimer) clearTimeout(this.initialSnapshotTimer);
+    this.initialSnapshotTimer = null;
   }
 
   private async receive(raw: unknown): Promise<void> {
@@ -216,10 +297,22 @@ export class RemoteConnector {
       };
       messageType = message.type;
       transferId = typeof message.transfer_id === 'string' ? message.transfer_id : undefined;
+      if (message.type === 'resume.request'
+        || (message.type === 'command.request'
+          && (message as { method?: string }).method === 'state.refresh')) {
+        this.cancelInitialSnapshot();
+      }
       assertFrameClassMatchesInner(frame.frame_class, message.type);
       if (message.type === 'command.request') {
         const command = parseCommandRequest(message, Date.now());
-        const result = await this.onCommand(this.device, command, {
+        // Commands leave the frame queue so one slow execution cannot stall
+        // later frames — transfer.ack traffic in particular feeds the
+        // content sliding window and must keep flowing. Per-device command
+        // order stays FIFO through this dedicated chain.
+        const hooks: {
+          onAccepted?: () => Promise<void>;
+          onResultSent?: () => Promise<void>;
+        } = {
           onAccepted: async () => {
             await this.sendControl({
               type: 'command.accepted',
@@ -227,12 +320,21 @@ export class RemoteConnector {
               attempt_id: command.attempt_id,
             });
           },
-        });
-        await this.sendControl({
-          type: 'command.result',
-          command_id: command.command_id,
-          attempt_id: command.attempt_id,
-          ...(result as object),
+        };
+        void this.enqueueCommands(async () => {
+          try {
+            if (this.closed) return;
+            const result = await this.onCommand(this.device, command, hooks);
+            await this.sendControl({
+              type: 'command.result',
+              command_id: command.command_id,
+              attempt_id: command.attempt_id,
+              ...(result as object),
+            });
+            await hooks.onResultSent?.();
+          } catch (error) {
+            await this.sendTransferFailure(transferId, error);
+          }
         });
         return;
       }
@@ -265,18 +367,31 @@ export class RemoteConnector {
           await this.sendControl({ type: 'snapshot.required', reason: 'gap_evicted' });
           return;
         }
+        const transcriptPage = subscribedSessionId
+          ? this.services?.transcriptPage?.(subscribedSessionId, this.device.id) ?? null
+          : null;
         await this.sendControl({
           type: 'resume.ok',
           host_generation: this.generation,
           replay_from: replayed[0]?.eventSequence ?? this.replay.eventSequence,
           replay_through: this.replay.eventSequence,
           revision: this.replay.currentRevision,
+          ...(transcriptPage ? { transcript_included: true } : {}),
         });
         for (const envelope of replayed) {
           if (subscribedSessionId && isOtherSessionTranscript(envelope.message, subscribedSessionId)) {
             continue;
           }
           await this.sendControl(envelope.message);
+        }
+        if (transcriptPage) {
+          await this.sendControl({
+            type: 'transcript.page',
+            session_id: subscribedSessionId,
+            has_more: transcriptPage.has_more,
+            ...(transcriptPage.cursor ? { cursor: transcriptPage.cursor } : {}),
+            items: transcriptPage.items,
+          });
         }
       }
     } catch (error) {

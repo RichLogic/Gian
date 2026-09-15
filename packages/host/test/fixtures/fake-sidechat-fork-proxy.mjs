@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFixtureJson } from './atomic-json.mjs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -27,7 +28,7 @@ function readJson(path, fallback) {
 }
 
 function writeJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  writeFixtureJson(path, value);
 }
 
 function control() {
@@ -35,12 +36,13 @@ function control() {
 }
 
 function loadState() {
-  return readJson(statePath, {
+  if (existsSync(statePath)) return JSON.parse(readFileSync(statePath, 'utf8'));
+  return {
     sessions: {},
     sidechats: {},
     resumeOwners: {},
     sequences: {},
-  });
+  };
 }
 
 function saveState(state) {

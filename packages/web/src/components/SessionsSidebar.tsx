@@ -22,6 +22,7 @@ import { sessionNeedsAttention, buildRailSections, orderByIds } from '../session
 import { moveById, useDragReorder } from '../dnd-reorder.js';
 import type { DropPlace, RowDragProps } from '../dnd-reorder.js';
 import { relTime, statusGlyphShown, StatusIcon } from '../views/session-list-status.js';
+import { useScheduledSessionIds } from '../controllers/use-schedules.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
 function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
@@ -37,6 +38,8 @@ function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; si
 
 const ICON = {
   plus:   'M12 5v14 M5 12h14',
+  // lucide "timer" — session owns at least one live Schedule (row-end badge)
+  timer:  'M10 2h4 M12 14l3-3 M20 14a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
   eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
@@ -533,6 +536,9 @@ export function SessionRow({
   const t = useT();
   const pinned = session.pinned_at != null;
   const hover = useSessionHoverCard();
+  // Row-end timer glyph (2026-09-15 owner): the session owns at least one
+  // live (active/paused) Schedule.
+  const hasSchedule = useScheduledSessionIds().has(session.id);
   // Destructive-delete rule (proposal §5): the row stays visible with a
   // pending affordance until the canonical session:deleted removes it.
   const deleting = useSessionOperationPending(session.id, 'session.delete');
@@ -552,6 +558,19 @@ export function SessionRow({
     >
       <div className="ri-body">
         <div className="ri-row1">
+          {/* Timer glyph hangs in the row's icon gutter (2026-09-15 owner):
+              the empty column left of the shared 43px title column, aligned
+              with the group-header icons — the title never moves. */}
+          {hasSchedule && (
+            <span
+              className="ri-schedule-badge"
+              title={t('coding.session.scheduledTasks')}
+              aria-label={t('coding.session.scheduledTasks')}
+              data-testid={`session-schedule-${session.id}`}
+            >
+              <SvgIcon d={ICON.timer} size={13} />
+            </span>
+          )}
           {/* Single-line (Codex-style) row: title only; executor/branch dropped. */}
           <span className="ri-title">{session.name || `session ${session.id.slice(0, 6)}`}</span>
         </div>

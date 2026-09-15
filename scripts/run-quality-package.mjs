@@ -5,6 +5,7 @@ import { acquireQualityLock, QUALITY_LOCK_ENV } from './quality-lock.mjs';
 import { formatResourceMetrics } from './process-resource-monitor.mjs';
 import { runLoggedCommand } from './run-logged-command.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
+import { assertExecutionAllowed } from './execution-policy.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const steps = [
@@ -41,6 +42,7 @@ export function packageQualityEnvironment(source = process.env) {
 }
 
 export async function main() {
+  assertExecutionAllowed('package');
   const lock = acquireQualityLock({ command: 'quality:package', rootDir });
   try {
     const env = packageQualityEnvironment();

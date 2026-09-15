@@ -29,9 +29,9 @@ import {
 } from '../operations/use-operations.js';
 import {
   formatNextRun,
+  frequencySummary,
   scheduleStatusLabelKey,
   scheduleStatusReasonLabelKey,
-  triggerSummary,
 } from '../presentation/schedule.js';
 import { ScheduleDetail } from '../views/ScheduleDetail.js';
 import { Splitter } from '../components/Splitter.js';
@@ -81,6 +81,7 @@ export function TimerView({
   selectedScheduleId,
   onSelectSchedule,
   onOpenScheduledTurn,
+  onOpenConversation,
   onCreateSchedule,
   offline = false,
 }: {
@@ -92,6 +93,8 @@ export function TimerView({
   onSelectSchedule: (scheduleId: string | null) => void;
   /** Open a bound-session Run's control conversation, focused on its Turn. */
   onOpenScheduledTurn: (sessionId: string, runId: string) => void;
+  /** Open the Schedule's control conversation (no Turn focus). */
+  onOpenConversation: (sessionId: string) => void;
   /** 新建定时任务 CTA: App opens the standard new-session page with the
    *  passed guidance prompt prefilled in the composer (design 05). */
   onCreateSchedule: (prompt: string) => void;
@@ -228,7 +231,11 @@ export function TimerView({
       {detail && (
         <aside
           className={`p2 schedule-detail-panel${narrow ? ' replacing' : ''}`}
-          style={!narrow && p2Width.customized ? { width: p2Width.width } : undefined}
+          style={!narrow && p2Width.customized
+            // Once the user drags the seam, the inline geometry must win over
+            // the `.p2` 50/50 flex + min-width clamp or the drag does nothing.
+            ? { width: p2Width.width, minWidth: 340, flex: '0 0 auto' }
+            : undefined}
           data-testid="schedule-detail-panel"
         >
           <ScheduleDetail
@@ -237,6 +244,7 @@ export function TimerView({
             showBack={narrow}
             onBack={() => onSelectSchedule(null)}
             onOpenScheduledTurn={onOpenScheduledTurn}
+            onOpenConversation={onOpenConversation}
           />
         </aside>
       )}
@@ -244,9 +252,10 @@ export function TimerView({
   );
 }
 
-/** The fixed five semantic columns (contract: name/trigger · status · owning
- *  conversation · next run · actions). Stable widths; narrow windows scroll
- *  horizontally instead of overlapping text. */
+/** Four quiet columns (2026-09-15 owner): name + a humanized frequency line,
+ *  status, next run, actions. The raw cron expression and the owning
+ *  conversation live in the detail, not the list. Stable widths; narrow
+ *  windows scroll horizontally instead of overlapping text. */
 function ScheduleTable({
   schedules,
   onOpen,
@@ -263,7 +272,6 @@ function ScheduleTable({
         <colgroup>
           <col className="timer-col-name" />
           <col className="timer-col-status" />
-          <col className="timer-col-conversation" />
           <col className="timer-col-next" />
           <col className="timer-col-actions" />
         </colgroup>
@@ -271,7 +279,6 @@ function ScheduleTable({
           <tr>
             <th scope="col">{t('timer.col.name')}</th>
             <th scope="col">{t('timer.col.status')}</th>
-            <th scope="col">{t('timer.col.conversation')}</th>
             <th scope="col">{t('timer.col.nextRun')}</th>
             <th scope="col" aria-label={t('timer.col.actions')} />
           </tr>
@@ -301,8 +308,6 @@ function ScheduleRow({
   onChanged: () => void;
 }) {
   const t = useT();
-  const conversation = schedule.control_session_title ?? t('timer.conversation.unknown');
-  const owner = [schedule.agent_name, schedule.workspace_name].filter(Boolean).join(' · ');
   const reasonKey = scheduleStatusReasonLabelKey(schedule.status_reason);
   return (
     <tr
@@ -320,7 +325,7 @@ function ScheduleRow({
     >
       <td className="timer-cell-name">
         <span className="timer-name">{schedule.name}</span>
-        <span className="timer-trigger">{triggerSummary(schedule.trigger, t)}</span>
+        <span className="timer-trigger">{frequencySummary(schedule.trigger, t)}</span>
       </td>
       <td className="timer-cell-status">
         <span className={`timer-status is-${schedule.status}`}>
@@ -329,10 +334,6 @@ function ScheduleRow({
         {reasonKey && (
           <span className="timer-status-reason" title={t(reasonKey)}>{t(reasonKey)}</span>
         )}
-      </td>
-      <td className="timer-cell-conversation">
-        <span className="timer-conversation">{conversation}</span>
-        {owner && <span className="timer-owner">{owner}</span>}
       </td>
       <td className="timer-cell-next" title={schedule.next_run_at ?? undefined}>
         {formatNextRun(schedule.next_run_at, t)}

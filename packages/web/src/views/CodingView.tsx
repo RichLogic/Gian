@@ -356,6 +356,7 @@ export function CodingView(p: CodingViewProps) {
             : undefined}
           onDelete={() => p.onDelete(p.activeSession!.id)}
           onReopen={() => p.onReopenSession(p.activeSession!.id)}
+          onOpenAgents={() => p.onSetAppMode('agents')}
           onShowLastTurnChanges={(turn, path) =>
             p.onShowLastTurnChanges(p.activeSession!, turn, path)}
           forkAtTurnControl={p.forkAtTurnControl}

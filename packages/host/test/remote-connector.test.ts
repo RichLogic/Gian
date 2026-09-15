@@ -7,8 +7,11 @@ import { join } from 'node:path';
 import {
   AUTH_PROTOCOL,
   AUTH_SIGNED_AT_SKEW_MS,
+  RELAY_PROTOCOL,
   CONTENT_WINDOW_CHUNKS,
   MAX_CONTENT_CHUNK_PLAINTEXT_BYTES,
+  MAX_STRING_CHARS,
+  canonicalEventSchema,
   PRESENCE_LEASE_MS,
   selfRevokePayload,
   bytesToBase64Url,
@@ -139,7 +142,7 @@ async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 3_000): Promis
   throw new Error(`timed out waiting for condition: ${String(last)}`);
 }
 
-test('Host relay paces a shared encrypted-frame burst and drops a closed route queue', async () => {
+test('Host relay sends a small burst without artificial spacing', async () => {
   const sentAt: number[] = [];
   const socket = {
     readyState: WebSocket.OPEN,
@@ -154,15 +157,66 @@ test('Host relay paces a shared encrypted-frame burst and drops a closed route q
     route.send({ ciphertext: 'sealed', connection_id: generateCanonicalId(), index });
   }
   await waitUntil(() => sentAt.length === 4);
-  assert.ok(sentAt[3]! - started >= 35);
+  assert.ok(sentAt[3]! - started < 30);
+  relay.close();
+});
 
-  const beforeClose = sentAt.length;
+test('Host relay preserves sealed transcript and control sequence under backpressure', async () => {
+  const crypto = await pairCrypto();
+  const sent: RelayFrame[] = [];
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send(data: string) { sent.push(JSON.parse(data)); },
+    close() {},
+  } as unknown as WebSocket;
+  const waits: Array<() => void> = [];
+  const limiter = { wait: () => new Promise<void>(resolve => { waits.push(resolve); }) };
+  const RelayConstructor = HostRelaySocket as unknown as new (socket: WebSocket, limiter: typeof limiter) => HostRelaySocket;
+  const relay = new RelayConstructor(socket, limiter);
+  const route = relay.attachDevice(crypto.host.deviceId);
+  const connector = new RemoteConnector(route, crypto.host, new RemoteReplayBuffer(), async () => ({}), { id: crypto.host.deviceId } as never);
+  for (let index = 0; index < 3; index += 1) {
+    await connector.sendControl({ type: 'event', index });
+  }
+  await connector.sendControl({ type: 'command.accepted' });
+  assert.deepEqual(sent, []);
+  const release = async (index: number) => {
+    waits[index]!();
+    await new Promise(resolve => setTimeout(resolve, 5));
+  };
+  await release(0);
+  assert.deepEqual(sent.map(frame => frame.transport_sequence), [0]);
+  await release(1);
+  assert.deepEqual(sent.map(frame => frame.transport_sequence), [0, 1]);
+  await release(2);
+  assert.deepEqual(sent.map(frame => frame.transport_sequence), [0, 1, 2]);
+  await release(3);
+  assert.deepEqual(sent.map(frame => frame.transport_sequence), [0, 1, 2, 3]);
+  const opened = await openHostFrames(crypto.device, sent);
+  assert.deepEqual(opened.map(entry => entry.message.type), ['event', 'event', 'event', 'command.accepted']);
+  connector.close();
+  relay.close();
+});
+
+test('Host relay drops frames of a closed route instead of sending them later', async () => {
+  const sentAt: number[] = [];
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send() { sentAt.push(Date.now()); },
+    close() {},
+  } as unknown as WebSocket;
+  const waits: Array<() => void> = [];
+  const limiter = { wait: () => new Promise<void>(resolve => { waits.push(resolve); }) };
+  const RelayConstructor = HostRelaySocket as unknown as new (socket: WebSocket, limiter: typeof limiter) => HostRelaySocket;
+  const relay = new RelayConstructor(socket, limiter);
+  const route = relay.attachDevice(generateCanonicalId());
   for (let index = 0; index < 4; index += 1) {
     route.send({ ciphertext: 'stale', connection_id: generateCanonicalId(), index });
   }
   route.close('replaced');
-  await new Promise(resolve => setTimeout(resolve, 80));
-  assert.equal(sentAt.length, beforeClose);
+  for (const release of waits) release();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(sentAt.length, 0);
   relay.close();
 });
 
@@ -657,6 +711,397 @@ test('connector resume falls back to snapshot when the control replay gap was ev
   } finally {
     teardownRemoteHarness(context);
   }
+});
+
+test('silent fresh connector falls back to a pushed snapshot after the sync grace', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      new RemoteReplayBuffer(),
+      async (_record, command: CommandRequest) => command,
+      device,
+      undefined,
+      undefined,
+      undefined,
+      10,
+    );
+    connector.scheduleInitialSnapshot();
+    await new Promise(resolve => setTimeout(resolve, 60));
+    connector.close();
+    const opened = await openHostFrames(crypto.device, seen);
+    const pushed = opened.map(entry => entry.message).find(message => message.type === 'snapshot.required');
+    assert.equal((pushed as { reason?: string } | undefined)?.reason, 'crypto_resumed');
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('client resume.request during the sync grace cancels the pushed snapshot', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const replay = new RemoteReplayBuffer();
+    replay.push({ type: 'host.online', host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } as never, 'rev-1');
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      replay,
+      async (_record, command: CommandRequest) => command,
+      device,
+      undefined,
+      undefined,
+      undefined,
+      30,
+    );
+    connector.scheduleInitialSnapshot();
+    const sealed = await crypto.device.seal(new TextEncoder().encode(JSON.stringify({
+      type: 'resume.request',
+      host_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      after_event_sequence: 0,
+      current_revision: 'rev-1',
+    })));
+    transports.device.send({
+      protocol: 'gian.relay/1',
+      frame_id: generateCanonicalId(),
+      frame_class: 'control',
+      route_id: crypto.host.routeId,
+      host_id: crypto.host.hostId,
+      device_id: crypto.host.deviceId,
+      connection_id: crypto.host.connectionId,
+      transport_sequence: sealed.sequence,
+      transport_ack: 0,
+      sent_at: Date.now(),
+      ciphertext: sealed.ciphertext,
+    });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    connector.close();
+    const opened = await openHostFrames(crypto.device, seen);
+    const messages = opened.map(entry => entry.message);
+    assert.ok(messages.some(message => message.type === 'resume.ok'));
+    assert.equal(messages.some(message => message.type === 'snapshot.required'), false);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('client state.refresh command during the sync grace cancels the pushed snapshot', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      new RemoteReplayBuffer(),
+      async (_record, command: CommandRequest) => command,
+      device,
+      undefined,
+      undefined,
+      undefined,
+      30,
+    );
+    connector.scheduleInitialSnapshot();
+    const refresh = command('state.refresh', {});
+    const sealed = await crypto.device.seal(new TextEncoder().encode(JSON.stringify(refresh)));
+    transports.device.send({
+      protocol: 'gian.relay/1',
+      frame_id: generateCanonicalId(),
+      frame_class: 'control',
+      route_id: crypto.host.routeId,
+      host_id: crypto.host.hostId,
+      device_id: crypto.host.deviceId,
+      connection_id: crypto.host.connectionId,
+      transport_sequence: sealed.sequence,
+      transport_ack: 0,
+      sent_at: Date.now(),
+      ciphertext: sealed.ciphertext,
+    });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    connector.close();
+    const opened = await openHostFrames(crypto.device, seen);
+    const messages = opened.map(entry => entry.message as { type?: string; method?: string });
+    assert.ok(messages.some(message => message.method === 'state.refresh'));
+    assert.equal(messages.some(message => message.type === 'snapshot.required'), false);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('connector merges consecutive assistant deltas and preserves transcript order', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      new RemoteReplayBuffer(),
+      async (_record, command: CommandRequest) => command,
+      device,
+      undefined,
+      undefined,
+      undefined,
+      1_000,
+      10,
+    );
+    const delta = (id: string, text: string) => ({
+      type: 'event',
+      host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      event_sequence: 0,
+      event: { kind: 'transcript.item', session_id: 's', item: { id, kind: 'assistant', delta: true, text } },
+    });
+    connector.sendTranscript(delta('a', 'Hel'));
+    connector.sendTranscript(delta('a', 'lo'));
+    connector.sendTranscript(delta('b', ' the'));
+    connector.sendTranscript({
+      type: 'event',
+      host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      event_sequence: 0,
+      event: { kind: 'transcript.item', session_id: 's', item: { id: 'a', kind: 'assistant', delta: false, text: 'Hello!' } },
+    });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    connector.close();
+    const opened = await openHostFrames(crypto.device, seen);
+    const items = opened
+      .map(entry => entry.message as { event?: { item?: { id?: string; text?: string; delta?: boolean } } })
+      .filter(message => (message as { event?: { kind?: string } }).event?.kind === 'transcript.item')
+      .map(message => message.event!.item!);
+    assert.deepEqual(
+      items.map(item => `${item.id}:${item.text}:${String(item.delta)}`),
+      ['a:Hello:true', 'b: the:true', 'a:Hello!:false'],
+    );
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('coalesced assistant deltas remain schema-valid without truncation or input mutation', async () => {
+  const crypto = await pairCrypto();
+  const transports = MemoryDuplexTransport.pair();
+  const seen: unknown[] = [];
+  transports.device.onMessage(frame => seen.push(frame));
+  const connector = new RemoteConnector(transports.host, crypto.host, new RemoteReplayBuffer(), async () => ({}), { id: crypto.host.deviceId } as never);
+  const id = generateCanonicalId();
+  const delta = (text: string) => ({
+    type: 'event' as const,
+    host_generation: crypto.binding.hostGeneration,
+    event_sequence: 0,
+    event: {
+      kind: 'transcript.item' as const,
+      session_id: id,
+      item: { id, turn_id: id, turn: 0, ts: Date.now(), kind: 'assistant' as const, delta: true, text },
+    },
+  });
+  const first = delta('a'.repeat(MAX_STRING_CHARS - 10));
+  connector.sendTranscript(first);
+  connector.sendTranscript(delta('b'.repeat(10)));
+  connector.sendTranscript(delta('c'.repeat(9000)));
+  connector.sendTranscript(delta('d'.repeat(9000)));
+  await waitUntil(() => seen.length === 3);
+  connector.close();
+  assert.equal(first.event.item.text, 'a'.repeat(MAX_STRING_CHARS - 10));
+  const messages = (await openHostFrames(crypto.device, seen)).map(entry => canonicalEventSchema.parse(entry.message));
+  const text = messages.map(message => message.event.kind === 'transcript.item' && message.event.item.kind === 'assistant' ? message.event.item.text : '').join('');
+  assert.equal(text, 'a'.repeat(MAX_STRING_CHARS - 10) + 'b'.repeat(10) + 'c'.repeat(9000) + 'd'.repeat(9000));
+});
+
+test('resume carries the subscribed transcript page instead of a client refetch', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const replay = new RemoteReplayBuffer();
+    replay.push({ type: 'host.online', host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } as never, 'rev-1');
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      replay,
+      async (_record, command: CommandRequest) => command,
+      device,
+      undefined,
+      undefined,
+      {
+        transcriptPage: () => ({ items: [{ id: 'x', kind: 'assistant', delta: false, text: 'hi' }], has_more: false }),
+      },
+      1_000,
+    );
+    const sealed = await crypto.device.seal(new TextEncoder().encode(JSON.stringify({
+      type: 'resume.request',
+      host_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      after_event_sequence: 0,
+      current_revision: 'rev-1',
+      subscribed_session_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    })));
+    transports.device.send({
+      protocol: 'gian.relay/1',
+      frame_id: generateCanonicalId(),
+      frame_class: 'control',
+      route_id: crypto.host.routeId,
+      host_id: crypto.host.hostId,
+      device_id: crypto.host.deviceId,
+      connection_id: crypto.host.connectionId,
+      transport_sequence: sealed.sequence,
+      transport_ack: 0,
+      sent_at: Date.now(),
+      ciphertext: sealed.ciphertext,
+    });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    connector.close();
+    const messages = (await openHostFrames(crypto.device, seen)).map(entry => entry.message);
+    const resume = messages.find(message => message.type === 'resume.ok') as { transcript_included?: boolean } | undefined;
+    assert.equal(resume?.transcript_included, true);
+    const page = messages.find(message => message.type === 'transcript.page') as {
+      session_id?: string;
+      items?: unknown[];
+      has_more?: boolean;
+    } | undefined;
+    assert.equal(page?.session_id, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+    assert.equal(page?.has_more, false);
+    assert.equal(Array.isArray(page?.items), true);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('resume without a visible subscribed session omits the pushed transcript page', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const replay = new RemoteReplayBuffer();
+    replay.push({ type: 'host.online', host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } as never, 'rev-1');
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      replay,
+      async (_record, command: CommandRequest) => command,
+      device,
+    );
+    const sealed = await crypto.device.seal(new TextEncoder().encode(JSON.stringify({
+      type: 'resume.request',
+      host_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      after_event_sequence: 0,
+      current_revision: 'rev-1',
+      subscribed_session_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    })));
+    transports.device.send({
+      protocol: 'gian.relay/1',
+      frame_id: generateCanonicalId(),
+      frame_class: 'control',
+      route_id: crypto.host.routeId,
+      host_id: crypto.host.hostId,
+      device_id: crypto.host.deviceId,
+      connection_id: crypto.host.connectionId,
+      transport_sequence: sealed.sequence,
+      transport_ack: 0,
+      sent_at: Date.now(),
+      ciphertext: sealed.ciphertext,
+    });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    connector.close();
+    const messages = (await openHostFrames(crypto.device, seen)).map(entry => entry.message);
+    const resume = messages.find(message => message.type === 'resume.ok') as { transcript_included?: boolean } | undefined;
+    assert.equal(resume?.transcript_included, undefined);
+    assert.equal(messages.some(message => message.type === 'transcript.page'), false);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('a slow command leaves the inbound frame queue free for later frames', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const replay = new RemoteReplayBuffer();
+    replay.push({ type: 'host.online', host_generation: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' } as never, 'rev-1');
+    const seen: unknown[] = [];
+    transports.device.onMessage(frame => seen.push(frame));
+    let releaseCommand: (() => void) | null = null;
+    let commandStarted: (() => void) | null = null;
+    const started = new Promise<void>(resolve => { commandStarted = resolve; });
+    const connector = new RemoteConnector(
+      transports.host,
+      crypto.host,
+      replay,
+      async (_record, command: CommandRequest) => {
+        commandStarted?.();
+        commandStarted = null;
+        await new Promise<void>(resolve => { releaseCommand = resolve; });
+        return { ok: true };
+      },
+      device,
+    );
+    await sendDeviceFrame(transports.device, crypto.device, command('catalog.read', {}));
+    await started;
+    await sendDeviceFrame(transports.device, crypto.device, {
+      type: 'resume.request',
+      host_generation: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      after_event_sequence: 0,
+      current_revision: 'rev-1',
+    });
+    // AEAD replay protection forbids re-opening the same frame, so decrypt
+    // only frames that arrived since the previous pass.
+    let openedCount = 0;
+    const messages: Array<{ message: { type?: string } }> = [];
+    await waitUntil(async () => {
+      const fresh = seen.slice(openedCount);
+      openedCount += fresh.length;
+      messages.push(...await openHostFrames(crypto.device, fresh));
+      return messages.some(entry => entry.message.type === 'resume.ok');
+    });
+    assert.ok(messages.some(entry => entry.message.type === 'resume.ok'));
+    assert.equal(messages.some(entry => entry.message.type === 'command.result'), false);
+    releaseCommand?.();
+    await waitUntil(async () => {
+      const fresh = seen.slice(openedCount);
+      openedCount += fresh.length;
+      messages.push(...await openHostFrames(crypto.device, fresh));
+      return messages.some(entry => entry.message.type === 'command.result');
+    });
+    connector.close();
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('Host relay surfaces a dead socket through close instead of silent frame drops', () => {
+  const closeReasons: string[] = [];
+  const socket = {
+    readyState: WebSocket.CONNECTING,
+    send() { throw new Error('send must not be attempted while not open'); },
+    close() {},
+  } as unknown as WebSocket;
+  const RelayConstructor = HostRelaySocket as unknown as new (socket: WebSocket) => HostRelaySocket;
+  const relay = new RelayConstructor(socket);
+  relay.onClose(reason => closeReasons.push(reason));
+  relay.send({ protocol: RELAY_PROTOCOL, type: 'device.revoked.ack', sent_at: 1 });
+  assert.deepEqual(closeReasons, ['socket_not_open']);
+  assert.equal(relay.closed, true);
 });
 
 test('production runtime start performs signed login and binds outbound WSS', async () => {

@@ -802,6 +802,8 @@
       "patterns": [
         "scripts/ci-workflow.test.mjs",
         "scripts/dev.test.mjs",
+        "scripts/delivery-policy.test.mjs",
+        "scripts/fixture-atomic-json.test.mjs",
         "scripts/quality-lock.test.mjs"
       ],
       "module": "scripts",

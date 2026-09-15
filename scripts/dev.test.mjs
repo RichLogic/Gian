@@ -42,8 +42,8 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   }, identity);
 
   assert.equal(env.GIAN_HOST, '127.0.0.1');
-  assert.equal(env.GIAN_PORT, '8991');
-  assert.equal(env.GIAN_WEB_PORT, '5191');
+  assert.equal(env.GIAN_PORT, '8992');
+  assert.equal(env.GIAN_WEB_PORT, '5192');
   assert.equal(env.GIAN_DATA_DIR, '/tmp/gian-dev-test');
   assert.equal(env.GIAN_DESKTOP_HOST_URL, DEV_HOST_URL);
   assert.equal(env.GIAN_DESKTOP_WEB_URL, DEV_WEB_URL);
