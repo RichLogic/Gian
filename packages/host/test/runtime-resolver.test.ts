@@ -671,7 +671,7 @@ test('official Proxies project discover/probe facts through the same Host finger
     await writeExecutable(join(bins, name), `#!/bin/sh\necho ${name} ${version}\n`);
   }
   const zcode = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  await writeExecutable(zcode, '#!/bin/sh\necho zcode 0.16.5\n');
+  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
   await mkdir(join(root, '.zcode', 'cli'), { recursive: true });
   await writeFile(join(root, '.zcode', 'cli', 'config.json'), '{"ok":true}\n');
 

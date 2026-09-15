@@ -34,6 +34,8 @@ const HOST_CLIENT = resolve('src/proxy/protocol-v2-client.ts');
 const HOST_SESSION = resolve('src/proxy/protocol-v2-session-client.ts');
 const CUSTOMIZATION_SERVICE = resolve('src/proxy/customization-inventory.ts');
 const RUNTIME_RESOLVER = resolve('src/runtime/resolver.ts');
+const RUNTIME_INSTALLER = resolve('src/runtime/installer.ts');
+const RUNTIME_BOOTSTRAP = resolve('../proxy-protocol/src/runtime-bootstrap-server.ts');
 
 const CANONICAL = new Set<string>([
   ...CORE_METHODS,
@@ -75,7 +77,7 @@ function methodsFromAdapter(adapter: typeof V2_ADAPTERS[number]): Set<string> {
 }
 
 function methodsCalledByHost(): Set<string> {
-  const text = [HOST_CLIENT, HOST_SESSION, CUSTOMIZATION_SERVICE, RUNTIME_RESOLVER]
+  const text = [HOST_CLIENT, HOST_SESSION, CUSTOMIZATION_SERVICE, RUNTIME_RESOLVER, RUNTIME_INSTALLER]
     .map(path => readFileSync(path, 'utf8'))
     .join('\n');
   const out = new Set<string>();
@@ -86,6 +88,18 @@ function methodsCalledByHost(): Set<string> {
 }
 
 const sharedRegistry = new Set<string>(PROXY_METHODS);
+
+function methodsHandledByBootstrap(): Set<string> {
+  return new Set([...readFileSync(RUNTIME_BOOTSTRAP, 'utf8').matchAll(/\bif\s*\(\s*method\s*===\s*'([^']+)'/g)]
+    .map(match => match[1]!));
+}
+
+test('CONTRACT-003: Runtime-free bootstrap handles declared installer methods', () => {
+  const methods = methodsHandledByBootstrap();
+  assert.ok(methods.has('runtime.install.plan'));
+  assert.ok(methodsCalledByHost().has('runtime.install.plan'));
+  assert.deepEqual([...methods].filter(method => !sharedRegistry.has(method)), []);
+});
 
 test('CONTRACT-003: shared PROXY_METHODS matches the gian.proxy/2 method set', () => {
   for (const method of CANONICAL) {
@@ -117,7 +131,7 @@ test('CONTRACT-003: every adapter-handled method is in shared PROXY_METHODS', ()
 
 test('CONTRACT-003: every shared method is handled by at least one adapter', () => {
   const union = new Set<string>(
-    V2_ADAPTERS.flatMap(adapter => [...methodsFromAdapter(adapter)]),
+    [...V2_ADAPTERS.flatMap(adapter => [...methodsFromAdapter(adapter)]), ...methodsHandledByBootstrap()],
   );
   const orphans = [...sharedRegistry].filter((method) => (
     !union.has(method) && !PROVIDER_DEFERRED_METHODS.has(method)
