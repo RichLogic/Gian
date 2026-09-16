@@ -2,7 +2,7 @@
  *  the initialize handshake; Host validates both against the registry). */
 export const PLUGIN_ID = 'com.zhipu.zcode';
 export const PLUGIN_NAME = 'ZCode';
-export const PLUGIN_VERSION = '0.3.0';
+export const PLUGIN_VERSION = '0.3.1';
 
 /** Inner wire facts frozen by WP0 (evidence/wp0/gate-summary.json). */
 export const INNER_PROTOCOL_NAME = 'ZCode Protocol';

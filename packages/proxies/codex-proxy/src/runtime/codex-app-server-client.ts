@@ -286,7 +286,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.3.0' },
+    clientInfo: { name: 'codex-proxy', version: '0.3.1' },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,
