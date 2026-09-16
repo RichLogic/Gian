@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 
@@ -50,11 +51,23 @@ function startProxy(script = 'success'): ChildProcessWithoutNullStreams {
   );
 }
 
+const PLUGIN_VERSION = (() => {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (typeof pkg.version === 'string' && pkg.name?.startsWith('@gian/')) return pkg.version;
+    } catch { /* keep walking */ }
+    dir = resolve(dir, '..');
+  }
+  throw new Error('Proxy package.json not found for the version assertion');
+})();
+
 class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;
   readonly validator = new HostProtocolValidator({
     pluginId: 'ai.deepseek.harness',
-    pluginVersion: '0.3.0',
+    pluginVersion: PLUGIN_VERSION,
     processScope: 'shared',
   });
   readonly notifications: ProxyNotification[] = [];

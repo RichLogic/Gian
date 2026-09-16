@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { chmodSync } from 'node:fs';
+import {chmodSync, readFileSync} from 'node:fs';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -68,6 +68,18 @@ async function responseFor(
   }
 }
 
+const PLUGIN_VERSION = (() => {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (typeof pkg.version === 'string' && pkg.name?.startsWith('@gian/')) return pkg.version;
+    } catch { /* keep walking */ }
+    dir = resolve(dir, '..');
+  }
+  throw new Error('Proxy package.json not found for the version assertion');
+})();
+
 test('Codex CLI negotiates gian.proxy/2.1 independently from its app-server version', async () => {
   const proxy = startV2Proxy();
   try {
@@ -85,7 +97,7 @@ test('Codex CLI negotiates gian.proxy/2.1 independently from its app-server vers
     const result = initializeResultSchema.parse(initialized.result);
     assert.equal(result.protocol.version, '2.1');
     assert.equal(result.plugin.id, 'codex');
-    assert.equal(result.plugin.version, '0.3.0');
+    assert.equal(result.plugin.version, PLUGIN_VERSION);
     assert.equal(result.process.scope, 'shared');
     assert.equal(result.capabilities.interaction, 1);
     assert.equal(result.capabilities['session.replay'], 1);

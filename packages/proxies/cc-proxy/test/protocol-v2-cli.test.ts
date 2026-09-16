@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -45,8 +45,21 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
   };
 }
 
-test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime version', async () => {
+const PLUGIN_VERSION = (() => {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (typeof pkg.version === 'string' && pkg.name?.startsWith('@gian/')) return pkg.version;
+    } catch { /* keep walking */ }
+    dir = resolve(dir, '..');
+  }
+  throw new Error('Proxy package.json not found for the version assertion');
+})();
+
+test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime version', async (t) => {
   const proxy = startV2Proxy();
+  t.after(() => { proxy.child.kill('SIGKILL'); });
   proxy.send({
     jsonrpc: '2.0',
     id: 'req-1',
@@ -61,7 +74,7 @@ test('Claude CLI negotiates gian.proxy/2.1 independently from its runtime versio
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'claude');
-  assert.equal(result.plugin.version, '0.3.0');
+  assert.equal(result.plugin.version, PLUGIN_VERSION);
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);

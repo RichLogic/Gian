@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync} from 'node:fs';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -54,6 +54,18 @@ function startV2Proxy(extraEnv: Record<string, string> = {}) {
   };
 }
 
+const PLUGIN_VERSION = (() => {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (typeof pkg.version === 'string' && pkg.name?.startsWith('@gian/')) return pkg.version;
+    } catch { /* keep walking */ }
+    dir = resolve(dir, '..');
+  }
+  throw new Error('Proxy package.json not found for the version assertion');
+})();
+
 test('Kimi CLI negotiates gian.proxy/2.1 independently from its ACP runtime version', async (t) => {
   const proxy = startV2Proxy();
   t.after(() => { proxy.child.kill('SIGKILL'); });
@@ -70,7 +82,7 @@ test('Kimi CLI negotiates gian.proxy/2.1 independently from its ACP runtime vers
   assert.equal(initialized.id, 'req-1');
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
-  assert.equal(result.plugin.version, '0.3.0');
+  assert.equal(result.plugin.version, PLUGIN_VERSION);
   assert.equal(result.process.scope, 'shared');
   assert.equal(result.capabilities.interaction, 1);
   assert.equal(result.capabilities['session.replay'], 1);

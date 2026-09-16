@@ -7,6 +7,7 @@ import test from 'node:test';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { initializeResultSchema, proxyErrorResponseSchema } from '@gian/proxy-protocol';
 import {
   CodexJsonRpcError,
@@ -124,6 +125,18 @@ function startProxy() {
   };
 }
 
+const PLUGIN_VERSION = (() => {
+  let dir = import.meta.dirname;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (typeof pkg.version === 'string' && pkg.name?.startsWith('@gian/')) return pkg.version;
+    } catch { /* keep walking */ }
+    dir = resolve(dir, '..');
+  }
+  throw new Error('Proxy package.json not found for the version assertion');
+})();
+
 test('ERR-004: Codex CLI reports a JSON-RPC error for malformed JSON', async () => {
   const proxy = startProxy();
   try {
@@ -164,7 +177,7 @@ test('ERR-004: Codex CLI stays responsive after malformed JSON', async () => {
     });
     const result = initializeResultSchema.parse(response.result);
     assert.equal(result.protocol.version, '2.1');
-    assert.equal(result.plugin.version, '0.3.0');
+    assert.equal(result.plugin.version, PLUGIN_VERSION);
   } finally {
     await proxy.close();
   }
