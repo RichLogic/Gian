@@ -669,7 +669,6 @@ describe('fork origin display', () => {
           onSetEffort={() => {}}
           onSetServiceTier={() => {}}
           onSetNativeConfig={() => {}}
-          onDelete={() => {}}
           onShowChanges={() => {}}
           onShowLastTurnChanges={() => {}}
           forkAtTurnControl={atTurnState(FORK_SUPPORTED, FORK_ENABLED)}
@@ -730,7 +729,6 @@ describe('fork origin display', () => {
           onSetEffort={() => {}}
           onSetServiceTier={() => {}}
           onSetNativeConfig={() => {}}
-          onDelete={() => {}}
           onShowChanges={() => {}}
           onShowLastTurnChanges={() => {}}
         />

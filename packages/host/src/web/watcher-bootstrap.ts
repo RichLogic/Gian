@@ -36,8 +36,7 @@ export function selectBootWatcherRows(db: Db): Array<{
        JOIN workspaces w ON w.id = s.workspace_id
       WHERE s.archived = 0
         AND s.executor IN ('claude', 'codex')
-        AND s.native_session_id IS NOT NULL
-        AND s.worktree_outcome IS NULL`,
+        AND s.native_session_id IS NOT NULL`,
   ).all() as Array<{
     id: string;
     executor: 'claude' | 'codex';

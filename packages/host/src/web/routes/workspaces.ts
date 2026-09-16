@@ -283,21 +283,18 @@ export function registerWorkspaceRoutes(app: Hono, db: Db): void {
       return c.json({ error: 'workspace not found' }, 404);
     }
     const body = await c.req.json<Record<string, unknown>>();
-    if ('hidden' in body && typeof body.hidden !== 'boolean') {
-      return c.json({ error: 'hidden must be boolean' }, 400);
-    }
     if ('pinned' in body && typeof body.pinned !== 'boolean') {
       return c.json({ error: 'pinned must be boolean' }, 400);
     }
 
     const sets: string[] = [];
     const values: unknown[] = [];
-    for (const key of ['name', 'hidden', 'pinned'] as const) {
+    // `hidden` is intentionally not updatable: the Workspace hidden feature
+    // was retired and the column only remains for schema compatibility.
+    for (const key of ['name', 'pinned'] as const) {
       if (!(key in body)) continue;
       sets.push(`${key} = ?`);
-      values.push(
-        key === 'hidden' || key === 'pinned' ? (body[key] ? 1 : 0) : body[key],
-      );
+      values.push(key === 'pinned' ? (body[key] ? 1 : 0) : body[key]);
     }
     if (sets.length === 0) return c.json({ error: 'no updatable fields' }, 400);
     sets.push("updated_at = datetime('now')");

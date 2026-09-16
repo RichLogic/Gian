@@ -388,6 +388,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
     sessions: initial.sessions ?? [],
     interactions: initial.interactions ?? [],
     interactionPhases: initial.interactionPhases ?? {},
+    interactionErrors: {},
     capabilities: initial.capabilities ?? {},
     catalogRevision: initial.catalogRevision ?? '',
     catalog: initial.catalog ?? null,

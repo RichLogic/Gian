@@ -239,6 +239,8 @@ export interface RemoteUiState {
   interactions: RemoteInteraction[];
   /** Per-interaction UI phase, keyed by interaction id. */
   interactionPhases: Record<string, InteractionPhase>;
+  /** Last `interaction.respond` failure per interaction id; cleared on retry. */
+  interactionErrors: Record<string, string>;
   capabilities: EffectiveCapabilities;
   catalogRevision: string;
   catalog: RemoteCatalog | null;

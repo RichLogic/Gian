@@ -224,6 +224,41 @@ test('SEC-016 · retired appearance preferences normalize while current settings
   }
 });
 
+test('SEC-016 · the notifications section validates strictly and round-trips', async () => {
+  const ctx = await makeTestApp();
+  try {
+    const before = storedConfig(ctx);
+    const invalidPayloads: unknown[] = [
+      { notifications: null },
+      { notifications: [] },
+      { notifications: { enabled: true, session_done: true, approval_needed: true } },
+      { notifications: { enabled: true, session_done: true, approval_needed: true, errors: 'yes' } },
+      { notifications: { enabled: true, session_done: true, approval_needed: true, errors: true, sound: true } },
+    ];
+    for (const payload of invalidPayloads) {
+      const response = await patchSettings(ctx, payload);
+      assert.equal(response.status, 400, `expected 400 for ${JSON.stringify(payload)}`);
+    }
+    assert.deepEqual(storedConfig(ctx), before, 'invalid payloads mutate nothing');
+
+    const patch = {
+      notifications: {
+        enabled: true,
+        session_done: false,
+        approval_needed: true,
+        errors: false,
+      },
+    };
+    const response = await patchSettings(ctx, patch);
+    assert.equal(response.status, 200);
+    const returned = await response.json() as Record<string, unknown>;
+    assert.deepEqual(returned.notifications, patch.notifications);
+    assert.deepEqual(loadConfig(ctx.db).notifications, patch.notifications);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('TERM-001 · terminal options route returns only discovered executable shells', async () => {
   const ctx = await makeTestApp();
   try {

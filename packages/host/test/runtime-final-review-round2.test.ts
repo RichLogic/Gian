@@ -590,7 +590,7 @@ test('Guardian invalidates cached observations before close and maps DSH/ZCode o
     processScope: 'shared',
     runtime: {
       kind: 'external',
-      id: 'dsh',
+      id: 'deepseek-harness',
       displayName: 'DeepSeek Harness',
       verifiedVersions: ['0.1.1-rc.2'],
     },

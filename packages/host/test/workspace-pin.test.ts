@@ -1,6 +1,6 @@
 // Coverage for UI-WS-PIN-001 — migration 044 adds Workspace.pinned
 // column (0|1, default 0); PATCH /api/workspaces/:id accepts a boolean
-// `pinned` patch alongside `hidden`.
+// `pinned` patch.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';

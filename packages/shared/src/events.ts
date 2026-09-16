@@ -262,6 +262,15 @@ export interface ApprovalRequestedData {
    *   'keep_planning'     → reject; agent stays in plan mode for more input
    */
   planActions?: ('accept_with_auto' | 'accept_with_ask' | 'keep_planning')[];
+  /**
+   * Proxy-advertised wire actionIds backing an `exit_plan_mode` card that
+   * renders `planActions` instead of native options. The proxy's own action
+   * set (e.g. cc-proxy's `allow_once`/`reject_once`, or kimi's ACP optionIds)
+   * stays authoritative on the wire; the Host maps the three-way plan
+   * decision back to these ids when responding. `allow` backs
+   * accept_with_auto/accept_with_ask, `deny` backs keep_planning.
+   */
+  wireActions?: { allow: string; deny: string };
   /** Exact choices supplied by the executor. When present the UI must return
    *  one `optionId` rather than translating through Gian ApprovalDecision. */
   nativeOptions?: import('./model.js').NativeApprovalOption[];

@@ -193,6 +193,8 @@ export interface Workspace {
   name: string;
   path: string;
   sort_order: number;
+  /** Retired: the Workspace hidden feature no longer exists. The column stays
+   *  for schema/API compatibility and migration 078 resets every row to 0. */
   hidden: 0 | 1;
   /** Pinned workspaces sort above the rest in the sidebar; `sort_order`
    *  still applies within each pinned/unpinned group. */
@@ -789,6 +791,28 @@ export const THEME_DEFAULT_ACCENT: Record<'light' | 'warm' | 'dark', Accent> = {
   dark: 'plum',
 };
 
+/** User-level system-notification preferences, stored in the Host config and
+ *  enforced by the Host BEFORE broadcasting `attention` — every delivery end
+ *  (native, renderer fallback) sees the same gated signal. Device-level
+ *  consent (OS permission) and sound stay on the device, not here. */
+export interface NotificationPreferences {
+  /** Master switch: when false the Host broadcasts no attention at all. */
+  enabled: boolean;
+  /** kind `turn-completed`. */
+  session_done: boolean;
+  /** kinds `approval` and `question`. */
+  approval_needed: boolean;
+  /** kind `error` (including scheduled-run failure/unknown). */
+  errors: boolean;
+}
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: Readonly<NotificationPreferences> = {
+  enabled: true,
+  session_done: true,
+  approval_needed: true,
+  errors: true,
+};
+
 export interface SystemConfig {
   host: string;
   port: number;
@@ -831,4 +855,8 @@ export interface SystemConfig {
    *  Optional so older configs / test fixtures stay valid; loadConfig always
    *  returns at least `{}`. */
   open_apps?: OpenAppPrefs;
+  /** User-level notification gating (Host-enforced). Optional so older
+   *  configs / test fixtures stay valid; loadConfig always returns the full
+   *  section with DEFAULT_NOTIFICATION_PREFERENCES for missing keys. */
+  notifications?: NotificationPreferences;
 }

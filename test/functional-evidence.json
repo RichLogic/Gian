@@ -75,7 +75,7 @@
     {
       "id": "settings-navigation-experience",
       "prefixes": ["FT-SET", "FT-NAV", "FT-NOTIFY", "FT-UX"],
-      "evidence": ["packages/web/test/*settings*.test.ts*", "packages/web/test/*navigation*.test.ts*", "packages/web/test/*notification*.test.ts*", "packages/web/test/clamp-panel.test.ts", "packages/web/test/zoom-normalize.test.ts", "packages/web/test/shortcut-helpers.test.ts", "packages/desktop/test/attention-client.test.ts", "packages/desktop/test/native-notifications.test.ts", "packages/host/test/attention-broadcast.test.ts", "packages/host/test/ws-broadcast.test.ts", "e2e/specs/10-ui-regression.spec.ts"]
+      "evidence": ["packages/web/test/*settings*.test.ts*", "packages/web/test/*navigation*.test.ts*", "packages/web/test/*notification*.test.ts*", "packages/web/test/app-socket-attention.test.tsx", "packages/web/test/clamp-panel.test.ts", "packages/web/test/zoom-normalize.test.ts", "packages/web/test/shortcut-helpers.test.ts", "packages/desktop/test/attention-client.test.ts", "packages/desktop/test/native-notifications.test.ts", "packages/host/test/attention-broadcast.test.ts", "packages/host/test/ws-broadcast.test.ts", "e2e/specs/10-ui-regression.spec.ts"]
     },
     {
       "id": "storage-migration-performance",

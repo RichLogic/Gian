@@ -83,24 +83,39 @@ describe('global queue.sendNow shortcut terminal guard', () => {
     });
   }
 
-  for (const state of [
-    { label: 'completed', completed_at: '2026-08-08T01:00:00.000Z', worktree_outcome: null },
-    { label: 'merged', completed_at: null, worktree_outcome: 'merged' },
-    { label: 'discarded', completed_at: null, worktree_outcome: 'discarded' },
-  ] as const) {
+  for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+    it(`ignores ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter when the session is completed`, () => {
+      const session = sessionContractFixture({
+        id: `completed-${modifier}`,
+        completed_at: '2026-08-08T01:00:00.000Z',
+        worktree_outcome: null,
+      });
+      const dispatch = renderShortcuts(session);
+
+      const event = pressQueueShortcut(modifier);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+  }
+
+  // ADR-0080: a finalized worktree outcome is legacy metadata — the session
+  // behaves like any other open session, including the queue.sendNow shortcut.
+  for (const outcome of ['merged', 'discarded'] as const) {
     for (const modifier of ['metaKey', 'ctrlKey'] as const) {
-      it(`ignores ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter when the session is ${state.label}`, () => {
+      it(`dispatches ${modifier === 'metaKey' ? 'Cmd' : 'Ctrl'}+Enter when the session is ${outcome}`, () => {
         const session = sessionContractFixture({
-          id: `${state.label}-${modifier}`,
-          completed_at: state.completed_at,
-          worktree_outcome: state.worktree_outcome,
+          id: `${outcome}-${modifier}`,
+          completed_at: null,
+          worktree_outcome: outcome,
         });
         const dispatch = renderShortcuts(session);
 
         const event = pressQueueShortcut(modifier);
 
-        expect(event.defaultPrevented).toBe(false);
-        expect(dispatch).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(true);
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(dispatch).toHaveBeenCalledWith('queue.sendNow', { sessionId: session.id });
       });
     }
   }

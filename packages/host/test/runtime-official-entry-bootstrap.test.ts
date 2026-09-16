@@ -63,7 +63,7 @@ const OFFICIAL = [
     processScope: 'shared' as const,
     command: 'dsh',
     version: '0.1.1-rc.2',
-    runtimeId: 'dsh',
+    runtimeId: 'deepseek-harness',
     displayName: 'DeepSeek Harness',
   },
   {

@@ -41,6 +41,7 @@ import {
 } from '../src/runtime/kimi-acp-client.js';
 import {
   ACP_MALFORMED_V0_23_PROMPT_USAGE,
+  ACP_PRE_041_STATUS_CONTEXT_CHUNKS,
   ACP_UNKNOWN_PROMPT_USAGE,
   ACP_V0_23_COMPACTION,
   ACP_V0_23_PROMPT_USAGE,
@@ -359,7 +360,7 @@ test('allows concurrent prompts across sessions but rejects a second prompt in o
   await service.close();
 });
 
-test('suppresses hidden /status output and refreshes context after compact', async () => {
+test('suppresses hidden /usage output and refreshes context after compact', async () => {
   let remote!: AgentSideConnection;
   const events: Array<{ method: string; params: Record<string, unknown> }> = [];
   const runtime = new KimiAcpClient({
@@ -375,6 +376,7 @@ test('suppresses hidden /status output and refreshes context after compact', asy
               sessionUpdate: 'available_commands_update',
               availableCommands: [
                 { name: 'status', description: 'Show status' },
+                { name: 'usage', description: 'Show usage' },
                 { name: 'compact', description: 'Compact context' },
               ],
             },
@@ -386,8 +388,15 @@ test('suppresses hidden /status output and refreshes context after compact', asy
           prompt: Array<{ type: string; text?: string }>;
         }) => {
           const text = params.prompt.find(block => block.type === 'text')?.text ?? '';
-          if (text === '/status') {
-            for (const update of ACP_V0_23_COMPACTION.postBoundaryStatusChunks) {
+          if (text === ACP_V0_23_COMPACTION.statusCommand) {
+            // Kimi CLI 0.41 /status has no Context line.
+            for (const update of ACP_V0_23_COMPACTION.statusChunks) {
+              await remote.sessionUpdate({ sessionId: params.sessionId, update });
+            }
+            return { stopReason: 'end_turn' };
+          }
+          if (text === ACP_V0_23_COMPACTION.usageCommand) {
+            for (const update of ACP_V0_23_COMPACTION.usageChunks) {
               await remote.sessionUpdate({ sessionId: params.sessionId, update });
             }
             return { stopReason: 'end_turn' };
@@ -507,6 +516,238 @@ test('suppresses hidden /status output and refreshes context after compact', asy
     )),
     'the compact request usage sample leaked through as post-compact context',
   );
+
+  await service.close();
+});
+
+test('recovers a structured usage_update that lands inside the hidden /usage capture window', async () => {
+  let remote!: AgentSideConnection;
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => {
+          await remote.sessionUpdate({
+            sessionId: 'native-usage-race',
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'usage', description: 'Show usage' }],
+            },
+          });
+          return { sessionId: 'native-usage-race' };
+        },
+        prompt: async (params: {
+          sessionId: string;
+          prompt: Array<{ type: string; text?: string }>;
+        }) => {
+          const text = params.prompt.find(block => block.type === 'text')?.text ?? '';
+          if (text === ACP_V0_23_COMPACTION.usageCommand) {
+            // Kimi CLI 0.41's fire-and-forget post-turn usage_update races
+            // with the hidden /usage prompt and lands inside its capture
+            // window; the stale rendered line must not win over it.
+            await remote.sessionUpdate({
+              sessionId: params.sessionId,
+              update: ACP_V0_23_COMPACTION.postTurnUsageUpdate,
+            });
+            await remote.sessionUpdate({
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'Context: 90,000 / 1,048,576 tokens (9%)' },
+              },
+            });
+            return { stopReason: 'end_turn' };
+          }
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Normal answer.' },
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({
+    runtime,
+    emitEvent(method, params) {
+      events.push({ method, params });
+    },
+  });
+  const created = await service.createSession({ cwd: '/workspace/usage-race' });
+
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'hello' }],
+  });
+  await waitFor(
+    () => events.some(event => event.method === 'turn.completed'),
+    'usage race turn did not complete',
+  );
+
+  const contextEvents = events
+    .filter(event => event.method === 'token_usage.updated')
+    .map(event => (event.params.data as { context?: unknown }).context)
+    .filter(context => context != null);
+  assert.deepEqual(
+    contextEvents,
+    [{ used: 86_397, window: 1_048_576 }],
+    'the captured structured usage_update must surface exactly once as context',
+  );
+  assert.ok(
+    !events.some(event => (
+      event.method === 'acp.sessionUpdate'
+      && (event.params.data as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === 'usage_update'
+    )),
+    'the captured usage_update must not leak into the transcript stream',
+  );
+
+  await service.close();
+});
+
+test('emits a turn-less post-turn usage_update as a session-scoped usage.updated', async () => {
+  let remote!: AgentSideConnection;
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => ({ sessionId: 'native-turnless-usage' }),
+        prompt: async (params: { sessionId: string }) => {
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'answer' },
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({ runtime });
+  await service.initialize();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new KimiProtocolV2Adapter(service, '0.2.0', (method, params) => {
+    notifications.push({ method, params });
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '9.9.9' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-turnless-usage',
+    workspace: { cwd: '/tmp', roots: ['/tmp'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-turnless-usage',
+    streamId: created.session.streamId,
+    turnId: 'host-turnless-turn',
+    input: [{ type: 'text', text: 'go' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notifications.some(item => item.method === 'turn.completed'),
+    'turn-less usage turn did not complete',
+  );
+
+  // Kimi CLI 0.41 samples usage fire-and-forget after the turn; by then the
+  // adapter has cleared the turn, so the update arrives turn-less.
+  await remote.sessionUpdate({
+    sessionId: 'native-turnless-usage',
+    update: ACP_V0_23_COMPACTION.postTurnUsageUpdate,
+  });
+  await waitFor(
+    () => notifications.some(item => item.method === 'usage.updated'),
+    'turn-less usage_update was dropped instead of emitted session-scoped',
+  );
+
+  const usageNotifications = notifications.filter(item => item.method === 'usage.updated');
+  assert.equal(usageNotifications.length, 1);
+  const usageParams = usageNotifications[0]!.params;
+  assert.equal(usageParams.sessionId, 'host-turnless-usage');
+  assert.equal(usageParams.turnId, undefined);
+  assert.deepEqual(
+    (usageParams.data as { context?: unknown }).context,
+    { used: 86_397, window: 1_048_576 },
+  );
+
+  await service.close();
+});
+
+test('falls back to /status context on Kimi CLIs older than 0.41', async () => {
+  let remote!: AgentSideConnection;
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory((client) => {
+      remote = client;
+      return {
+        initialize: async () => initializeResponse(),
+        newSession: async () => {
+          await remote.sessionUpdate({
+            sessionId: 'native-legacy-status',
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'status', description: 'Show status' }],
+            },
+          });
+          return { sessionId: 'native-legacy-status' };
+        },
+        prompt: async (params: {
+          sessionId: string;
+          prompt: Array<{ type: string; text?: string }>;
+        }) => {
+          const text = params.prompt.find(block => block.type === 'text')?.text ?? '';
+          if (text === ACP_V0_23_COMPACTION.statusCommand) {
+            for (const update of ACP_PRE_041_STATUS_CONTEXT_CHUNKS) {
+              await remote.sessionUpdate({ sessionId: params.sessionId, update });
+            }
+            return { stopReason: 'end_turn' };
+          }
+          await remote.sessionUpdate({
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Normal answer.' },
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+      } as unknown as Agent;
+    }),
+  });
+  const service = new KimiProxyService({
+    runtime,
+    emitEvent(method, params) {
+      events.push({ method, params });
+    },
+  });
+  const created = await service.createSession({ cwd: '/workspace/legacy-status' });
+
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'hello' }],
+  });
+  await waitFor(
+    () => events.some(event => event.method === 'turn.completed'),
+    'legacy status turn did not complete',
+  );
+
+  const context = events
+    .filter(event => event.method === 'token_usage.updated')
+    .map(event => (event.params.data as { context?: unknown }).context)
+    .find(value => value != null);
+  assert.deepEqual(context, { used: 86_397, window: 1_048_576 });
 
   await service.close();
 });

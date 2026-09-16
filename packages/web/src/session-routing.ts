@@ -119,18 +119,20 @@ export function sortWorkspacesForRail<T extends { pinned: 0 | 1 }>(workspaces: T
  *  dedicated "Pinned" section above "Projects". A pinned SESSION becomes a
  *  standalone row in Pinned (it leaves its workspace group); a pinned
  *  WORKSPACE moves its whole group (header + its unpinned sessions) into
- *  Pinned. Everything else stays grouped by workspace under Projects.
- *  Hidden workspaces and every session they own are absent from the active
- *  rail; Settings > Workspaces > Show restores the group without mutating the
- *  Session rows. Only genuinely missing workspace ids collect in Unfiled. */
+ *  Pinned. Everything else stays grouped by workspace under Projects. Every
+ *  workspace gets a group — including ones with zero sessions, so the rail
+ *  lists the same repos as the create-conversation picker — except the
+ *  internal `__gian_root__` workspace. Only genuinely missing workspace ids
+ *  collect in Unfiled. */
 export interface RailSections<T> {
   /** Standalone pinned session rows, most-recently-pinned first. */
   pinnedSessions: T[];
-  /** Unpinned sessions grouped by workspace_id (each list rail-sorted). */
+  /** Unpinned sessions grouped by workspace_id (each list rail-sorted).
+   *  Workspaces with zero sessions have no entry — readers use `?? []`. */
   byWs: Map<string, T[]>;
-  /** Pinned workspace ids that have visible sessions, in host order. */
+  /** Pinned workspace ids (including empty ones), in host order. */
   pinnedWsIds: string[];
-  /** Unpinned workspace ids that have visible sessions, in host order
+  /** Unpinned workspace ids (including empty ones), in host order
    *  (orphan ids — sessions whose workspace isn't in the list — appended). */
   projectWsIds: string[];
   /** Unpinned sessions whose workspace is gone (NULL after workspace delete,
@@ -143,17 +145,15 @@ export interface RailSections<T> {
 
 export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinned_at' | 'updated_at'>>(
   sessions: T[],
-  workspaces: Array<{ id: string; pinned: 0 | 1; hidden?: 0 | 1 }>,
+  workspaces: Array<{ id: string; name?: string; pinned: 0 | 1 }>,
 ): RailSections<T> {
-  const hiddenWsIds = new Set(workspaces.filter(w => w.hidden === 1).map(w => w.id));
-  const visibleSessions = sessions.filter(s => s.workspace_id == null || !hiddenWsIds.has(s.workspace_id));
-  const pinnedSessions = sortSessionsForRail(visibleSessions.filter(s => s.pinned_at != null));
+  const pinnedSessions = sortSessionsForRail(sessions.filter(s => s.pinned_at != null));
   const byWs = new Map<string, T[]>();
   const unfiled: T[] = [];
-  for (const s of visibleSessions) {
+  for (const s of sessions) {
     if (s.pinned_at != null) continue;
     // NULL workspace_id (workspace deleted → ON DELETE SET NULL) lands in
-    // 无归属 (Unfiled). Hidden workspace sessions were filtered above.
+    // 无归属 (Unfiled).
     if (s.workspace_id == null) {
       unfiled.push(s);
       continue;
@@ -168,7 +168,9 @@ export function buildRailSections<T extends Pick<Session, 'workspace_id' | 'pinn
   const projectWsIds: string[] = [];
   const seen = new Set<string>();
   for (const w of workspaces) {
-    if (!byWs.has(w.id)) continue;
+    // The internal root workspace never gets a rail group (seen-marked so a
+    // stray session there never falls back to an orphan group either).
+    if (w.name === '__gian_root__') { seen.add(w.id); continue; }
     seen.add(w.id);
     (w.pinned === 1 ? pinnedWsIds : projectWsIds).push(w.id);
   }

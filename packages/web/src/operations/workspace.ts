@@ -134,16 +134,6 @@ const workspaceRename: OperationDefinition<WorkspaceIdInput & { name: string }, 
   timeoutMs: REST_TIMEOUT_MS,
 };
 
-const workspaceSetHidden: OperationDefinition<WorkspaceIdInput & { hidden: boolean }, Workspace> = {
-  policy: 'optimistic',
-  entityKey: input => workspaceEntityKey(input.workspaceId),
-  optimisticWrites: input => [{ field: 'hidden', value: input.hidden ? 1 : 0 }],
-  execute: input => patchWorkspace(input.workspaceId, { hidden: input.hidden }),
-  reconcile: reconcileUpdatedWorkspace,
-  rollback: rollbackToast,
-  timeoutMs: REST_TIMEOUT_MS,
-};
-
 const workspacePin: OperationDefinition<WorkspaceIdInput & { pinned: boolean }, Workspace> = {
   policy: 'optimistic',
   entityKey: input => workspaceEntityKey(input.workspaceId),
@@ -267,7 +257,6 @@ const workspaceCloneRepo: OperationDefinition<WorkspaceCloneRepoInput, CloneWork
 };
 
 registry.register('workspace.rename', workspaceRename);
-registry.register('workspace.setHidden', workspaceSetHidden);
 registry.register('workspace.pin', workspacePin);
 registry.register('workspace.reorder', workspaceReorder);
 registry.register('workspace.create', workspaceCreate);
@@ -277,7 +266,7 @@ registry.register('workspace.saveClaudeMd', workspaceSaveClaudeMd);
 registry.register('workspace.pickFolder', workspacePickFolder);
 
 /** Workspace fields an overlay may write (Phase 3a set). */
-const WORKSPACE_OVERLAY_FIELDS = new Set(['name', 'hidden', 'pinned']);
+const WORKSPACE_OVERLAY_FIELDS = new Set(['name', 'pinned']);
 
 /**
  * Render merge (proposal §4.3): `canonical + overlays`, the overlay always

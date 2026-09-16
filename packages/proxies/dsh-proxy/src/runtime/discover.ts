@@ -85,7 +85,7 @@ export async function probeDshRuntime(path: string): Promise<{
   await access(path, constants.X_OK);
   const version = await runVersion(path);
   return {
-    runtimeId: 'dsh',
+    runtimeId: 'deepseek-harness',
     displayName: 'DeepSeek Harness',
     path,
     version,

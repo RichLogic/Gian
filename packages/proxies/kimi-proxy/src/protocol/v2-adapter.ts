@@ -1971,6 +1971,25 @@ export class KimiProtocolV2Adapter {
       // provider-native user input via input.recorded. Never re-emit live.
       return;
     }
+    if (kind === 'usage_update') {
+      const used = typeof update.used === 'number' ? update.used : null;
+      const window = typeof update.size === 'number' ? update.size : null;
+      if (used !== null && window !== null && used >= 0 && window > 0) {
+        // The CLI's post-turn usage sample is fire-and-forget and can arrive
+        // after the turn was cleared; keep it session-scoped instead of
+        // dropping it.
+        if (turnId) {
+          this.emitTurnEvent('usage.updated', session, turnId, {
+            context: { used, window },
+          });
+        } else {
+          this.emitSessionEvent('usage.updated', session, {
+            context: { used, window },
+          });
+        }
+      }
+      return;
+    }
     if (!turnId) return;
     if (kind === 'agent_message_chunk' || kind === 'agent_thought_chunk') {
       const text = contentText(update);
@@ -1987,16 +2006,6 @@ export class KimiProtocolV2Adapter {
         ...(contentKind === 'text' ? { format: 'plain' } : {}),
         delta: text,
       }, this.nextContentDeltaIdentity(session, turnId, contentId));
-      return;
-    }
-    if (kind === 'usage_update') {
-      const used = typeof update.used === 'number' ? update.used : null;
-      const window = typeof update.size === 'number' ? update.size : null;
-      if (used !== null && window !== null && used >= 0 && window > 0) {
-        this.emitTurnEvent('usage.updated', session, turnId, {
-          context: { used, window },
-        });
-      }
       return;
     }
     if (kind === 'plan' || kind === 'plan_update') {

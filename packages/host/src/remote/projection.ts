@@ -83,6 +83,32 @@ export function remoteActionId(interactionId: string, key: string): string {
   return remoteStableUuid('action', `${interactionId}:${key}`);
 }
 
+/**
+ * Translate `interaction.respond` answer keys back to the Host question/input
+ * ids. The projection hashes non-UUID question ids (AskUserQuestion rides the
+ * full question text as its id) into wire UUIDs, so answers arrive keyed by
+ * wire id while the Tool layer validates against the original ids. Keys that
+ * match neither the wire nor the original id pass through untouched: dropping
+ * them could silently lose an answer, and the Tool validator ignores unknown
+ * keys anyway.
+ */
+export function resolveRemoteAnswerValues(
+  record: ApprovalRecord,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const questions = projectInteraction(record).questions ?? [];
+  if (questions.length === 0) return values;
+  const originalByWireId = new Map(questions.map((question) => [
+    UUID_RE.test(question.id) ? question.id : remoteStableUuid('input', `${record.id}:${question.id}`),
+    question.id,
+  ]));
+  const resolved: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    resolved[originalByWireId.get(key) ?? key] = value;
+  }
+  return resolved;
+}
+
 export function resolveRemoteAction(
   record: ApprovalRecord,
   actionId: string,
@@ -98,6 +124,12 @@ export function resolveRemoteAction(
   return decision ? { decision } : null;
 }
 
+const PLAN_ACTION_LABELS: Record<string, string> = {
+  accept_with_auto: 'Accept, auto-approve edits',
+  accept_with_ask: 'Accept, ask before edits',
+  keep_planning: 'Keep planning',
+};
+
 export function projectRemoteInteraction(record: ApprovalRecord, revision: string): RemoteInteraction {
   const tool = projectInteraction(record);
   const actions = tool.native_options?.length
@@ -108,8 +140,8 @@ export function projectRemoteInteraction(record: ApprovalRecord, revision: strin
     }))
     : tool.allowed_decisions.map((decision) => ({
       id: remoteActionId(record.id, decision),
-      label: decision,
-      tone: decision === 'decline' ? 'danger' as const : 'default' as const,
+      label: PLAN_ACTION_LABELS[decision] ?? decision,
+      tone: decision === 'decline' || decision === 'keep_planning' ? 'danger' as const : 'default' as const,
     }));
   return {
     id: record.id,
@@ -159,7 +191,7 @@ export class RemoteProjector {
 
   catalogRevision(): string {
     const workspaces = this.deps.db.prepare(
-      'SELECT id, name FROM workspaces WHERE hidden = 0 ORDER BY id',
+      'SELECT id, name FROM workspaces ORDER BY id',
     ).all() as Array<{ id: string; name: string }>;
     const agents = (this.deps.listAgents?.() ?? []).map((agent) => ({
       id: agent.id,
@@ -550,7 +582,7 @@ export class RemoteProjector {
 
   private workspaces(sessions: RemoteSession[]): Array<{ id: string; name: string }> {
     const rows = (this.deps.db.prepare(
-      'SELECT id, name FROM workspaces WHERE hidden = 0 ORDER BY sort_order, created_at',
+      'SELECT id, name FROM workspaces ORDER BY sort_order, created_at',
     ).all() as Array<{ id: string; name: string }>).map(row => ({ id: row.id, name: row.name }));
     if (sessions.some(session => session.workspace_id === UNFILED_WORKSPACE_ID)) {
       rows.push({ id: UNFILED_WORKSPACE_ID, name: 'Unfiled' });

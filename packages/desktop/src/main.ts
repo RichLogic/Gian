@@ -220,9 +220,6 @@ const DISABLED_NOTIFICATION_STATE: DesktopNotificationState = {
   supported: false,
   preferences: {
     desktop: false,
-    sessionDone: true,
-    approvalNeeded: true,
-    errors: true,
     sound: false,
   },
   lastError: null,
@@ -475,6 +472,10 @@ function createNativeNotificationDelivery() {
 
 function showUpdateReadyNotification(state: AppUpdateState): void {
   const version = state.update?.version;
+  // Update-ready alerts are independent of the session-notification consent
+  // (preferences.desktop): turning off background Session alerts must not
+  // silence an already-downloaded update. Sound still follows the device
+  // preference.
   if (
     state.status !== 'downloaded'
     || !version
@@ -482,7 +483,6 @@ function showUpdateReadyNotification(state: AppUpdateState): void {
     || !app.isPackaged
     || process.platform !== 'darwin'
     || !Notification.isSupported()
-    || notificationService?.getState().preferences.desktop !== true
   ) {
     return;
   }
@@ -836,10 +836,7 @@ async function showUnavailable(
   // error page. Treat every Session as background so attention is not queued
   // indefinitely while the Host/Web surface is unavailable.
   if (mainWindow === window) {
-    notificationService?.setContext({
-      windowFocused: false,
-      visibleSessionId: null,
-    });
+    notificationService?.setContext({ visibleSessionId: null });
   }
 }
 
@@ -1145,11 +1142,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
     if (mainWindow !== window) return;
     rendererReady = false;
     rendererDocumentReady = false;
-    notificationService?.setContext({ windowFocused: false, visibleSessionId: null });
+    notificationService?.setContext({ visibleSessionId: null });
   });
   window.on('unresponsive', () => {
     if (mainWindow !== window) return;
-    notificationService?.setContext({ windowFocused: false, visibleSessionId: null });
+    notificationService?.setContext({ visibleSessionId: null });
   });
   window.webContents.on('did-create-window', child => {
     hardenWebContents(child.webContents);
@@ -1165,7 +1162,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
       rendererReady = false;
       rendererDocumentReady = false;
     }
-    notificationService?.setContext({ windowFocused: false, visibleSessionId: null });
+    notificationService?.setContext({ visibleSessionId: null });
   });
 
   await loadGianSurface(window);
@@ -1345,9 +1342,12 @@ ipcMain.handle('desktop:notifications:set-context', (event, value: unknown) => {
     || !value
     || typeof value !== 'object'
   ) return false;
+  // Focus is computed here in the main process; the renderer only reports
+  // which Session is visible (a renderer-supplied focus flag would be dead
+  // state overwritten at this boundary).
+  notificationService?.setWindowFocused(mainWindow?.isFocused() ?? false);
   notificationService?.setContext({
-    ...(value as Record<string, unknown>),
-    windowFocused: mainWindow?.isFocused() ?? false,
+    visibleSessionId: (value as Record<string, unknown>).visibleSessionId,
   });
   return true;
 });
@@ -1737,6 +1737,10 @@ function navigationTargetsEqual(
   const candidate = actual as Record<string, unknown>;
   if (expected.type !== candidate.type) return false;
   if (expected.type === 'settings') return candidate.section === expected.section;
+  if (expected.type === 'schedule') {
+    return candidate.scheduleId === expected.scheduleId
+      && candidate.runId === expected.runId;
+  }
   return candidate.type === 'session'
     && candidate.sessionId === expected.sessionId
     && candidate.turn === expected.turn

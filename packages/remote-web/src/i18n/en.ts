@@ -207,4 +207,5 @@ export const EN: Messages = {
   'interaction.resolvedHere': 'Resolved on this device',
   'interaction.resolvedElsewhere': 'Resolved on another device',
   'interaction.expired': 'Expired',
+  'interaction.respondFailed': 'Response failed',
 };

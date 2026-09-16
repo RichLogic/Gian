@@ -3,7 +3,7 @@ import type {
   GianDesktopNavigationApi,
   GianDesktopNavigationTarget,
 } from '../src/desktop-bridge.js';
-import { subscribeDesktopNavigation } from '../src/desktop-navigation.js';
+import { resolveSessionNavigation, subscribeDesktopNavigation } from '../src/desktop-navigation.js';
 
 const targetA: GianDesktopNavigationTarget = {
   type: 'session',
@@ -74,5 +74,42 @@ describe('desktop navigation handshake', () => {
     await lateReady.promise;
     await Promise.resolve();
     expect(handled).toEqual([targetA]);
+  });
+});
+
+describe('resolveSessionNavigation (in-place jump)', () => {
+  it('selects in place inside the Repos (sessions) view', () => {
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'sessions', session: { task_id: 'task-9' } },
+    )).toEqual({ kind: 'select-in-sessions', sessionId: 's1' });
+  });
+
+  it('opens a task-bound session as the active Subtask inside the Tasks view', () => {
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'tasks', session: { task_id: 'task-9' } },
+    )).toEqual({ kind: 'select-subtask-in-tasks', taskId: 'task-9', sessionId: 's1' });
+  });
+
+  it('opens a standalone session in the Tasks view without clearing the view', () => {
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'tasks', session: { task_id: null } },
+    )).toEqual({ kind: 'select-standalone-in-tasks', sessionId: 's1' });
+    // An unknown session (not yet in the read model) is treated as standalone.
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'tasks', session: null },
+    )).toEqual({ kind: 'select-standalone-in-tasks', sessionId: 's1' });
+  });
+
+  it('falls back to Repos from views without a conversation surface', () => {
+    for (const mode of ['spaces', 'agents', 'timer', 'custom'] as const) {
+      expect(resolveSessionNavigation(
+        { sessionId: 's1' },
+        { mode, session: { task_id: 'task-9' } },
+      )).toEqual({ kind: 'fallback-sessions', sessionId: 's1' });
+    }
   });
 });

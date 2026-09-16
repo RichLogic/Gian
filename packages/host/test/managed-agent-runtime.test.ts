@@ -51,7 +51,7 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-agent-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const proxyEntry = join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs');
-  const cliEntry = join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude');
+  const cliEntry = join(dataDir, 'runtimes', 'claude', '2.1.159', 'c'.repeat(64), 'bin', 'claude');
   await executable(proxyEntry);
   await executable(cliEntry);
   const generations = new ManagedRuntimeGenerationStore(dataDir);
@@ -358,7 +358,7 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
         return generation(
           dataDir,
           join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs'),
-          join(dataDir, 'runtimes', 'claude', '2.1.159', 'bin', 'claude'),
+          join(dataDir, 'runtimes', 'claude', '2.1.159', 'c'.repeat(64), 'bin', 'claude'),
         );
       },
     } as never,

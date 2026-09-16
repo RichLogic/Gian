@@ -129,7 +129,6 @@ function props(overrides: Partial<CodingViewProps> = {}): CodingViewProps {
     onSetEffort: vi.fn(),
     onSetServiceTier: vi.fn(),
     onSetNativeConfig: vi.fn(),
-    onDelete: vi.fn(),
     onReopenSession: vi.fn(),
     onPinSession: vi.fn(),
     onArchiveSession: vi.fn(),

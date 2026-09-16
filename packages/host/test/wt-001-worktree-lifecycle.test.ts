@@ -1,7 +1,8 @@
 // Coverage for traceability rows:
-//   WT-003 — Worktree merge/drop must record outcome and block subsequent
-//            sendMessage. Gian no longer creates worktrees on behalf of the
-//            user (agents create their own via `git worktree add`), so
+//   WT-003 — Worktree merge/drop must record the outcome. Per ADR-0080 the
+//            finalized session stays resumable: outcome is legacy metadata,
+//            never an input gate. Gian no longer creates worktrees on behalf
+//            of the user (agents create their own via `git worktree add`), so
 //            merge/drop operate on legacy worktree-session rows and
 //            deliberately do NOT remove the worktree directory or branch.
 //   INV-013 — After finalize, worktree_outcome / branch / base_branch
@@ -236,7 +237,7 @@ test('WT-003: mergeWorktree records `merged` outcome and merges the branch, but 
   }
 });
 
-test('WT-003: dropWorktree records `discarded` outcome, leaves worktree + branch untouched, blocks sendMessage', async () => {
+test('WT-003: dropWorktree records `discarded` outcome, leaves worktree + branch untouched, keeps the session resumable (ADR-0080)', async () => {
   const ctx = setup();
   try {
     const { session, branch, worktreePath } = await setupWorktreeSession(ctx);
@@ -262,12 +263,10 @@ test('WT-003: dropWorktree records `discarded` outcome, leaves worktree + branch
     assert.equal(branchList.includes(branch), true,
       'worktree branch must NOT be deleted by drop');
 
-    // sendMessage must refuse to start a turn on a finalized session.
-    await assert.rejects(
-      ctx.sessions.sendMessage(session.id, 'hello'),
-      /discarded|create a new session/i,
-      'finalized session must block sendMessage so the user can\'t keep typing into a dead worktree',
-    );
+    // ADR-0080: a finalized outcome is legacy metadata — the CLI can resume,
+    // so sendMessage starts a new turn on the finalized session too.
+    const sent = await ctx.sessions.sendMessage(session.id, 'hello');
+    assert.ok(sent, 'finalized session must accept sendMessage again');
   } finally {
     teardown(ctx);
   }

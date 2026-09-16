@@ -9,10 +9,10 @@ import {
 import { dirname } from 'node:path';
 
 export interface DesktopNotificationPreferences {
+  /** Device-level OS consent. User-level master/kind switches live in the
+   *  Host config and gate the attention signal before it ever reaches this
+   *  process — they are deliberately NOT duplicated here. */
   desktop: boolean;
-  sessionDone: boolean;
-  approvalNeeded: boolean;
-  errors: boolean;
   sound: boolean;
 }
 
@@ -21,12 +21,18 @@ export interface DesktopNotificationContext {
   visibleSessionId: string | null;
 }
 
-export interface DesktopNotificationTarget {
-  type: 'session';
-  sessionId: string;
-  turn: number;
-  kind: AttentionKind;
-}
+export type DesktopNotificationTarget =
+  | {
+      type: 'session';
+      sessionId: string;
+      turn: number;
+      kind: AttentionKind;
+    }
+  | {
+      type: 'schedule';
+      scheduleId: string;
+      runId: string;
+    };
 
 export interface DesktopNotificationState {
   supported: boolean;
@@ -39,9 +45,6 @@ export const DEFAULT_DESKTOP_NOTIFICATION_PREFERENCES: DesktopNotificationPrefer
   // gesture. Existing Browser Notification users are migrated only when that
   // permission is already granted.
   desktop: false,
-  sessionDone: true,
-  approvalNeeded: true,
-  errors: true,
   sound: false,
 };
 
@@ -125,16 +128,23 @@ export class NativeNotificationService {
   }
 
   setContext(value: unknown): void {
+    // The renderer reports only which Session is visible. Window focus is
+    // owned by the main process (setWindowFocused) — a renderer-reported
+    // focus flag would be dead state overwritten at the IPC boundary.
     if (!value || typeof value !== 'object') return;
-    const candidate = value as Partial<DesktopNotificationContext>;
-    if (typeof candidate.windowFocused !== 'boolean') return;
+    const candidate = value as { visibleSessionId?: unknown };
     if (candidate.visibleSessionId !== null && typeof candidate.visibleSessionId !== 'string') return;
     this.context = {
-      windowFocused: candidate.windowFocused,
+      windowFocused: this.context.windowFocused,
       visibleSessionId: candidate.visibleSessionId?.slice(0, 512) ?? null,
     };
     this.hasRendererContext = true;
     this.flushPendingAttention();
+  }
+
+  setWindowFocused(focused: boolean): void {
+    if (this.context.windowFocused === focused) return;
+    this.context = { ...this.context, windowFocused: focused };
   }
 
   subscribe(listener: (state: DesktopNotificationState) => void): () => void {
@@ -146,7 +156,6 @@ export class NativeNotificationService {
   handleAttention(message: AttentionMessage): boolean {
     if (this.rememberedIds.has(message.id)) return false;
     if (!this.options.supported || !this.preferences.desktop) return false;
-    if (!this.kindEnabled(message.kind)) return false;
     // A newly created renderer has not supplied visibility context yet. Keep
     // the low-frequency signal bounded until it does, so an active Session is
     // never notified merely because IPC initialization lost a race.
@@ -172,12 +181,18 @@ export class NativeNotificationService {
       return false;
     }
 
-    const target: DesktopNotificationTarget = {
-      type: 'session',
-      sessionId: message.session_id,
-      turn: message.turn,
-      kind: message.kind,
-    };
+    const target: DesktopNotificationTarget = message.schedule
+      ? {
+          type: 'schedule',
+          scheduleId: message.schedule.schedule_id,
+          runId: message.schedule.run_id,
+        }
+      : {
+          type: 'session',
+          sessionId: message.session_id,
+          turn: message.turn,
+          kind: message.kind,
+        };
     try {
       const handle = this.options.delivery.show({
         title: message.title,
@@ -234,12 +249,6 @@ export class NativeNotificationService {
     this.listeners.clear();
   }
 
-  private kindEnabled(kind: AttentionKind): boolean {
-    if (kind === 'turn-completed') return this.preferences.sessionDone;
-    if (kind === 'approval' || kind === 'question') return this.preferences.approvalNeeded;
-    return this.preferences.errors;
-  }
-
   private remember(id: string): void {
     this.rememberedIds.add(id);
     while (this.rememberedIds.size > this.maxRememberedIds) {
@@ -291,11 +300,11 @@ export function sanitizeDesktopNotificationPreferences(
   const candidate = value && typeof value === 'object'
     ? value as Partial<DesktopNotificationPreferences>
     : {};
+  // Legacy 0.6.x files carry the retired user-level kind switches
+  // (sessionDone/approvalNeeded/errors). They now live in the Host config;
+  // only the device-level fields migrate forward.
   return {
     desktop: typeof candidate.desktop === 'boolean' ? candidate.desktop : fallback.desktop,
-    sessionDone: typeof candidate.sessionDone === 'boolean' ? candidate.sessionDone : fallback.sessionDone,
-    approvalNeeded: typeof candidate.approvalNeeded === 'boolean' ? candidate.approvalNeeded : fallback.approvalNeeded,
-    errors: typeof candidate.errors === 'boolean' ? candidate.errors : fallback.errors,
     sound: typeof candidate.sound === 'boolean' ? candidate.sound : fallback.sound,
   };
 }

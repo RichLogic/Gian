@@ -140,7 +140,7 @@ export function CustomView({
 }) {
   const t = useT();
 
-  const visibleWorkspaces = useMemo(() => workspaces.filter(w => w.hidden !== 1), [workspaces]);
+  const visibleWorkspaces = useMemo(() => workspaces, [workspaces]);
 
   // --- Agents + scope context -------------------------------------------
   const [agents, setAgents] = useState<UserAgentStatus[] | null>(null);

@@ -80,13 +80,12 @@ export function createRuntimeInstallPlanner(recipe: {
       ...identity,
       operation: {
         ...params.distribution,
-        // Content-addressed directories never overwrite an old executable or
-        // collide with legacy launcher files such as runtimes/dsh.
-        directory: `managed/${params.runtimeId}/${params.version}/${params.artifactSha256}`,
-        candidates: [
-          `${params.runtimeId}/${params.version}`,
-          ...(recipe.legacyDirectories?.(params.version) ?? []),
-        ],
+        // Content-addressed directories never overwrite an old executable.
+        // The flat legacy layout runtimes/{runtimeId}/{version} is the parent
+        // of this directory, so it must never be an automatic reuse
+        // candidate: inventorying it would recurse into the new tree.
+        directory: `${params.runtimeId}/${params.version}/${params.artifactSha256}`,
+        candidates: [...(recipe.legacyDirectories?.(params.version) ?? [])],
       },
     });
   };

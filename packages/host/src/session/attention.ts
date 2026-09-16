@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { stripGianActionBlocks } from '@gian/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES, stripGianActionBlocks } from '@gian/shared';
 import type {
   ApprovalRequestedData,
   AttentionKind,
   AttentionMessage,
   ChatEvent,
+  NotificationPreferences,
   SessionErrorData,
 } from '@gian/shared';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
@@ -123,6 +124,32 @@ export function attentionMessageForEvent(event: ChatEvent): AttentionMessage | n
 }
 
 /**
+ * User-level notification gating (ADR-0078). The Host applies this BEFORE
+ * any `attention` broadcast so every delivery end — native (Electron main)
+ * and the renderer fallback — sees the exact same gated signal and no
+ * per-device preference drift is possible.
+ */
+export function attentionKindEnabled(
+  prefs: NotificationPreferences,
+  kind: AttentionKind,
+): boolean {
+  if (!prefs.enabled) return false;
+  if (kind === 'turn-completed') return prefs.session_done;
+  if (kind === 'approval' || kind === 'question') return prefs.approval_needed;
+  return prefs.errors;
+}
+
+export type AttentionGate = (kind: AttentionKind) => boolean;
+
+/** Gate reading fresh preferences on every call (settings can change at
+ *  runtime via PATCH /api/settings). Missing config means defaults-on. */
+export function attentionGateForPreferences(
+  read: () => NotificationPreferences | undefined,
+): AttentionGate {
+  return kind => attentionKindEnabled(read() ?? DEFAULT_NOTIFICATION_PREFERENCES, kind);
+}
+
+/**
  * Process-wide attention projection and bounded de-duplication. The Host
  * shares one instance across proxy events, protocol replay and JSONL Live
  * Sync so one persisted event cannot produce multiple native notifications.
@@ -130,7 +157,10 @@ export function attentionMessageForEvent(event: ChatEvent): AttentionMessage | n
 export class AttentionDispatcher {
   private recentIds = new Set<string>();
 
-  constructor(private broadcaster: WsBroadcaster) {}
+  constructor(
+    private broadcaster: WsBroadcaster,
+    private gate?: AttentionGate,
+  ) {}
 
   claim(event: ChatEvent): AttentionMessage | null {
     const message = attentionMessageForEvent(event);
@@ -140,6 +170,9 @@ export class AttentionDispatcher {
       const oldest = this.recentIds.values().next().value as string | undefined;
       if (oldest !== undefined) this.recentIds.delete(oldest);
     }
+    // Gated-off kinds are still claimed (one persisted event → one claim) so
+    // re-enabling a preference never replays a suppressed signal.
+    if (this.gate && !this.gate(message.kind)) return null;
     return message;
   }
 

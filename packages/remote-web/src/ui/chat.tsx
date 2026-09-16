@@ -58,6 +58,12 @@ export function ChatPage({ session }: { session: RemoteSession }) {
       .filter(([, phase]) => phase === 'responding')
       .map(([interactionId]) => interactionId),
   );
+  // Failed `interaction.respond` results surface inline under the transcript
+  // so the card never looks like the click did nothing.
+  const sessionInteractionErrors = Object.entries(state.interactionErrors)
+    .filter(([interactionId]) => state.interactions.some(
+      interaction => interaction.id === interactionId && interaction.session_id === session.id,
+    ));
 
   return (
     <div className={`rw-chat-root${stale ? ' rw-stale' : ''}`}>
@@ -111,6 +117,11 @@ export function ChatPage({ session }: { session: RemoteSession }) {
               </MessageAttachmentOpenContext.Provider>
             </FileLinkHrefContext.Provider>
           </FileLinkOpenContext.Provider>
+          {sessionInteractionErrors.map(([interactionId, message]) => (
+            <div key={interactionId} className="session-banner rw-danger" role="alert">
+              {t('interaction.respondFailed')}: {message}
+            </div>
+          ))}
         </div>
       </div>
       <div className={mode === 'narrow' ? 'rw-m-bottom' : 'rw-bottom'}>

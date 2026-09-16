@@ -200,6 +200,49 @@ test('migration 057 repairs provisional live-turn Fork boundaries', () => {
   }
 });
 
+test('migration 078 resets the retired workspace hidden flags', () => {
+  const dir = makeTempDir();
+  try {
+    const raw = new Database(join(dir, 'gian.db'));
+    raw.exec(`
+      CREATE TABLE migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        hidden INTEGER NOT NULL DEFAULT 0,
+        pinned INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO workspaces (id, name, path, hidden) VALUES
+        ('ws-visible', 'visible', '/tmp/visible', 0),
+        ('ws-hidden', 'hidden', '/tmp/hidden', 1);
+    `);
+    const migrationDir = new URL('../migrations/', import.meta.url);
+    const insert = raw.prepare('INSERT INTO migrations (filename) VALUES (?)');
+    for (const filename of readdirSync(migrationDir).filter(name => name.endsWith('.sql'))) {
+      if (filename !== '078_workspace_hidden_removed.sql') insert.run(filename);
+    }
+    raw.close();
+
+    const upgraded = openDatabase(dir);
+    assert.equal(
+      upgraded.prepare('SELECT COUNT(*) AS n FROM workspaces WHERE hidden <> 0').pluck().get(),
+      0,
+      'every workspace is visible after 078',
+    );
+    assert.ok(upgraded.prepare(
+      "SELECT 1 FROM migrations WHERE filename = '078_workspace_hidden_removed.sql'",
+    ).get());
+    upgraded.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('migration 059 backfills stable Side Chat ordinals and nullable names', () => {
   const dir = makeTempDir();
   try {

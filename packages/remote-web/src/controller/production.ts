@@ -1672,12 +1672,29 @@ export function createProductionController(options: ProductionControllerOptions)
     respondToInteraction(interactionId, actionId, values) {
       const interaction = state.interactions.find((item) => item.id === interactionId);
       if (!interaction) return;
-      dispatchCommand('interaction.respond', {
+      // A card already being responded to never fires a second mutation.
+      if ((state.interactionPhases[interactionId] ?? 'pending') !== 'pending') return;
+      update({
+        interactionPhases: { ...state.interactionPhases, [interactionId]: 'responding' },
+        interactionErrors: omitKey(state.interactionErrors, interactionId),
+      });
+      // Unlike fire-and-forget mutations, a failed respond must surface on
+      // the card: swallowing it left the UI looking like the click did
+      // nothing (dispatchCommand catches into the void).
+      void sendCommand('interaction.respond', {
         interaction_id: interactionId,
         interaction_revision: interaction.revision,
         action_id: actionId,
         values,
-      }, 'interaction.respond');
+      }, 'interaction.respond').catch((error: unknown) => {
+        update({
+          interactionPhases: { ...state.interactionPhases, [interactionId]: 'pending' },
+          interactionErrors: {
+            ...state.interactionErrors,
+            [interactionId]: error instanceof Error ? error.message : 'interaction.respond failed',
+          },
+        });
+      });
     },
     openFile(handle) {
       update({ fileViewer: { status: 'loading', handle } });
@@ -1854,6 +1871,7 @@ function emptyUiState(): RemoteUiState {
     sessions: [],
     interactions: [],
     interactionPhases: {},
+    interactionErrors: {},
     capabilities: {},
     catalogRevision: '',
     catalog: null,
@@ -1901,6 +1919,13 @@ function errorCode(error: unknown): string {
 function devicePairingWasLost(error: unknown): boolean {
   const code = errorCode(error);
   return code === 'DEVICE_NOT_PAIRED' || code === 'DEVICE_REVOKED';
+}
+
+function omitKey(record: Record<string, string>, key: string): Record<string, string> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function isReplaySafeRead(

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { makeTestApp } from './fixtures/test-app.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
-import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES, DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
 test('UI-ACCENT-001 · invalid accent falls back to theme default', async () => {
   const ctx = await makeTestApp();
@@ -142,6 +142,44 @@ test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   assert.equal(cfg.font_scale_chat, 'md');
   assert.equal(cfg.font_scale_code, 'md');
   assert.deepEqual(cfg.terminal, DEFAULT_TERMINAL_PREFERENCES);
+  assert.deepEqual(cfg.notifications, DEFAULT_NOTIFICATION_PREFERENCES);
+  await ctx.cleanup?.();
+});
+
+test('notifications · saveConfig→loadConfig round-trips the section as JSON', async () => {
+  const ctx = await makeTestApp();
+  const notifications = {
+    enabled: true,
+    session_done: false,
+    approval_needed: true,
+    errors: false,
+  };
+  saveConfig(ctx.db, { notifications });
+  assert.deepEqual(loadConfig(ctx.db).notifications, notifications);
+  const row = ctx.db.prepare(`SELECT value FROM config WHERE key = 'notifications'`).get() as {
+    value: string;
+  };
+  assert.deepEqual(JSON.parse(row.value), notifications);
+  await ctx.cleanup?.();
+});
+
+test('notifications · malformed stored values fall back field by field to all-on', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('notifications', ?)`)
+    .run(JSON.stringify({
+      enabled: 'yes',
+      session_done: false,
+      approval_needed: 1,
+      errors: false,
+      extra: true,
+    }));
+  assert.deepEqual(loadConfig(ctx.db).notifications, {
+    ...DEFAULT_NOTIFICATION_PREFERENCES,
+    session_done: false,
+    errors: false,
+  });
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('notifications', '[object Object]')`).run();
+  assert.deepEqual(loadConfig(ctx.db).notifications, DEFAULT_NOTIFICATION_PREFERENCES);
   await ctx.cleanup?.();
 });
 

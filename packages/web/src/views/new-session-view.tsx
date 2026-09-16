@@ -380,7 +380,7 @@ export function NewSessionView({
   const [last] = useState(() => readJson<StoredNewSession>(LAST_KEY));
   const [initial] = useState(() => {
     const usable = (id: string | undefined) =>
-      id !== undefined && workspaces.some(w => w.id === id && w.hidden !== 1);
+      id !== undefined && workspaces.some(w => w.id === id);
     let activeDraftWorkspaceId: string | undefined;
     if (draftScope?.kind !== 'task') {
       try { activeDraftWorkspaceId = localStorage.getItem(ACTIVE_WORKSPACE_DRAFT_KEY) ?? undefined; }
@@ -390,7 +390,7 @@ export function NewSessionView({
     if (usable(initialWorkspaceId)) workspaceId = initialWorkspaceId!;
     else if (usable(activeDraftWorkspaceId)) workspaceId = activeDraftWorkspaceId!;
     else if (usable(last?.workspaceId)) workspaceId = last!.workspaceId!;
-    else workspaceId = workspaces.find(w => w.hidden !== 1 && w.name !== '__gian_root__')?.id ?? '';
+    else workspaceId = workspaces.find(w => w.name !== '__gian_root__')?.id ?? '';
     const owner = draftScope?.kind === 'task'
       ? draftScope
       : workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null;
@@ -973,7 +973,6 @@ export function NewSessionView({
   }
 
   const canSend = !!selectedWorkspace
-    && selectedWorkspace.hidden !== 1
     && selectedAgent?.ready === true
     && (composerDocument.segments.length > 0)
     && !creating
@@ -1429,7 +1428,6 @@ export function NewSessionView({
                   type="button"
                   className={`mp-row${selectedWs === workspace.id ? ' active' : ''}`}
                   data-testid={`ns-workspace-option-${workspace.id}`}
-                  disabled={workspace.hidden === 1}
                   onClick={() => pickWorkspace(workspace.id)}
                 >
                   <span className="mp-check">{selectedWs === workspace.id ? '✓' : ''}</span>

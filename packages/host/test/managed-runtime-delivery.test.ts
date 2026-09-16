@@ -129,7 +129,7 @@ test('fresh delivery installs certified bytes before Agent HOME setup and owns t
           agentId: 'agent-1',
           pluginId: parseProxyPluginId('claude'),
           runtimeId: 'claude',
-          path: join(dataDir, 'runtimes', 'managed', 'claude', '2.1.159', runtimeSha, 'bin', 'claude'),
+          path: join(dataDir, 'runtimes', 'claude', '2.1.159', runtimeSha, 'bin', 'claude'),
           version: '2.1.159',
           configHome: null,
           contentFingerprint: runtimeSha,
@@ -144,7 +144,7 @@ test('fresh delivery installs certified bytes before Agent HOME setup and owns t
 
   const progress: ManagedRuntimeInstallProgress[] = [];
   const active = await service.install('claude', 'agent-1', event => progress.push(event));
-  const runtimePath = join(dataDir, 'runtimes', 'managed', 'claude', '2.1.159', runtimeSha, 'bin', 'claude');
+  const runtimePath = join(dataDir, 'runtimes', 'claude', '2.1.159', runtimeSha, 'bin', 'claude');
   assert.equal(active.state, 'active');
   assert.equal(active.runtime?.entryPath, runtimePath);
   assert.deepEqual(await readFile(runtimePath), runtimeBytes);

@@ -12,6 +12,7 @@ import type {
   Workspace,
 } from '@gian/shared';
 import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_TERMINAL_PREFERENCES,
   KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
@@ -39,11 +40,11 @@ import {
 import { desktopBridge } from '../desktop-bridge.js';
 import {
   browserNotificationPermission,
-  loadNotificationPrefs,
+  loadDeviceNotificationPrefs,
   requestDesktopNotificationPermission,
-  saveNotificationPrefs,
+  saveDeviceNotificationPrefs,
   type BrowserNotificationPermission,
-  type NotificationPrefs,
+  type DeviceNotificationPrefs,
 } from '../notifications.js';
 import { confirm, toast } from '../feedback.js';
 import { AUTH_ENTITY_KEY } from '../operations/auth.js';
@@ -558,7 +559,7 @@ function SettingsBodyInner({
                  className="s2-section" style={{ order: 16 }}>
           <h3 className="s2-sectiontitle">{t('settings.section.notifications')}</h3>
           <div className="s2-card">
-            <NotificationsBlock />
+            <NotificationsBlock config={config} onPatch={patch} />
           </div>
         </section>
 
@@ -1027,15 +1028,24 @@ function AccountBlock({
   );
 }
 
-function NotificationsBlock() {
+function NotificationsBlock({
+  config,
+  onPatch,
+}: {
+  config: SystemConfig;
+  onPatch: (partial: Partial<SystemConfig>) => void;
+}) {
   const t = useT();
   const notifications = desktopBridge()?.notifications;
   const native = notifications?.native === true;
+  const preferences = config.notifications ?? DEFAULT_NOTIFICATION_PREFERENCES;
   const [permission, setPermission] = useState<BrowserNotificationPermission>(
     browserNotificationPermission(),
   );
-  const [preferences, setPreferences] = useState<NotificationPrefs>(
-    loadNotificationPrefs(),
+  // Device-level consent/sound: from the native service on signed Desktop,
+  // from localStorage (v2) in a plain browser.
+  const [device, setDevice] = useState<DeviceNotificationPrefs>(
+    loadDeviceNotificationPrefs(),
   );
   const [supported, setSupported] = useState(
     browserNotificationPermission() !== 'unsupported',
@@ -1047,13 +1057,13 @@ function NotificationsBlock() {
     const syncPermission = () => setPermission(browserNotificationPermission());
     window.addEventListener('focus', syncPermission);
     if (!native || !notifications) {
-      setPreferences(loadNotificationPrefs());
+      setDevice(loadDeviceNotificationPrefs());
       setSupported(browserNotificationPermission() !== 'unsupported');
       return () => window.removeEventListener('focus', syncPermission);
     }
 
     const applyState = (state: import('../desktop-bridge.js').GianDesktopNotificationState) => {
-      setPreferences(state.preferences);
+      setDevice(state.preferences);
       setSupported(state.supported);
       setLastError(state.lastError);
     };
@@ -1065,48 +1075,48 @@ function NotificationsBlock() {
     };
   }, [native, notifications]);
 
-  async function applyPreferences(next: NotificationPrefs) {
-    saveNotificationPrefs(next);
-    setPreferences(next);
+  async function applyDevice(next: DeviceNotificationPrefs) {
+    saveDeviceNotificationPrefs(next);
+    setDevice(next);
     if (!native || !notifications) return;
     const state = await notifications.updatePreferences(next);
-    setPreferences(state.preferences);
+    setDevice(state.preferences);
     setSupported(state.supported);
     setLastError(state.lastError);
   }
 
-  async function setDesktopEnabled(enabled: boolean) {
+  async function setMasterEnabled(enabled: boolean) {
     setSaving(true);
     try {
-      if (enabled) {
-        const nextPermission = await requestDesktopNotificationPermission();
-        setPermission(nextPermission);
-        if (nextPermission !== 'granted') {
-          await applyPreferences({ ...preferences, desktop: false });
-          return;
-        }
+      onPatch({ notifications: { ...preferences, enabled } });
+      if (!enabled) return;
+      // Enabling the user-level switch performs this device's consent flow:
+      // the OS permission gesture first, then the device-level consent flag.
+      const nextPermission = await requestDesktopNotificationPermission();
+      setPermission(nextPermission);
+      if (nextPermission === 'granted' && !device.desktop) {
+        await applyDevice({ ...device, desktop: true });
       }
-      await applyPreferences({ ...preferences, desktop: enabled });
     } finally {
       setSaving(false);
     }
   }
 
-  async function setPreference<Key extends keyof NotificationPrefs>(
-    key: Key,
-    value: NotificationPrefs[Key],
-  ) {
+  function setKind(key: 'session_done' | 'approval_needed' | 'errors', value: boolean) {
+    onPatch({ notifications: { ...preferences, [key]: value } });
+  }
+
+  async function setSound(value: boolean) {
     setSaving(true);
     try {
-      await applyPreferences({ ...preferences, [key]: value });
+      await applyDevice({ ...device, sound: value });
     } finally {
       setSaving(false);
     }
   }
 
-  const enabled = preferences.desktop && permission === 'granted';
-  const detailControlsDisabled = saving || !supported || !enabled;
   const permissionDenied = permission === 'denied';
+  const kindControlsDisabled = saving || !preferences.enabled;
 
   return (
     <dl className="kv-grid">
@@ -1116,16 +1126,16 @@ function NotificationsBlock() {
           <input
             type="checkbox"
             aria-label={t('settings.notifications.desktop')}
-            checked={enabled}
-            disabled={saving || !supported}
-            onChange={event => { void setDesktopEnabled(event.target.checked); }}
+            checked={preferences.enabled}
+            disabled={saving}
+            onChange={event => { void setMasterEnabled(event.target.checked); }}
           />
           <span>{
             !supported
               ? t('settings.notifications.status.unsupported')
               : permissionDenied
                 ? t('settings.notifications.status.denied')
-                : enabled
+                : preferences.enabled
                   ? t('settings.notifications.status.enabled')
                   : t('settings.notifications.status.disabled')
           }</span>
@@ -1140,11 +1150,11 @@ function NotificationsBlock() {
           </button>
         )}
       </dd>
+      <dd className="shortcut-hint">{t('settings.notifications.scopeHint')}</dd>
       {([
-        ['sessionDone', 'settings.notifications.sessionDone'],
-        ['approvalNeeded', 'settings.notifications.approvalNeeded'],
+        ['session_done', 'settings.notifications.sessionDone'],
+        ['approval_needed', 'settings.notifications.approvalNeeded'],
         ['errors', 'settings.notifications.errors'],
-        ['sound', 'settings.notifications.sound'],
       ] as const).map(([key, labelKey]) => (
         <Fragment key={key}>
           <dt>{t(labelKey)}</dt>
@@ -1154,8 +1164,8 @@ function NotificationsBlock() {
                 type="checkbox"
                 aria-label={t(labelKey)}
                 checked={preferences[key]}
-                disabled={detailControlsDisabled}
-                onChange={event => { void setPreference(key, event.target.checked); }}
+                disabled={kindControlsDisabled}
+                onChange={event => setKind(key, event.target.checked)}
               />
               <span>{
                 preferences[key]
@@ -1166,6 +1176,23 @@ function NotificationsBlock() {
           </dd>
         </Fragment>
       ))}
+      <dt>{t('settings.notifications.sound')}</dt>
+      <dd className="settings-toggle-row">
+        <label className="switch">
+          <input
+            type="checkbox"
+            aria-label={t('settings.notifications.sound')}
+            checked={device.sound}
+            disabled={saving || !supported}
+            onChange={event => { void setSound(event.target.checked); }}
+          />
+          <span>{
+            device.sound
+              ? t('settings.notifications.on')
+              : t('settings.notifications.off')
+          }</span>
+        </label>
+      </dd>
       {lastError === 'delivery_failed' && (
         <>
           <dt>{t('settings.notifications.delivery')}</dt>

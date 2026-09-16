@@ -7,20 +7,22 @@ import {
 } from '../src/runtime-install.js';
 
 const request = {
-  installerVersion: 1 as const, runtimeId: 'dsh', version: '0.1.1-rc.2',
+  installerVersion: 1 as const, runtimeId: 'deepseek-harness', version: '0.1.1-rc.2',
   artifactSha256: 'a'.repeat(64), platform: 'darwin-arm64' as const,
   distribution: { kind: 'managed' as const, format: 'tar.gz' as const, entryRelativePath: 'node_modules/dsh/bin.js' },
 };
 
 test('Proxy recipe owns layout and legacy candidates without executable commands', () => {
   const plan = createRuntimeInstallPlanner({
-    runtimeId: 'dsh', kind: 'managed', format: 'tar.gz', entryRelativePath: 'node_modules/dsh/bin.js',
+    runtimeId: 'deepseek-harness', kind: 'managed', format: 'tar.gz', entryRelativePath: 'node_modules/dsh/bin.js',
     legacyDirectories: version => [`deepseek-harness/runtimes/deepseek-harness/${version}`],
   })(request);
   assert.equal(plan.operation.kind, 'managed');
   if (plan.operation.kind !== 'managed') return;
-  assert.equal(plan.operation.directory, `managed/dsh/0.1.1-rc.2/${'a'.repeat(64)}`);
-  assert.deepEqual(plan.operation.candidates, ['dsh/0.1.1-rc.2', 'deepseek-harness/runtimes/deepseek-harness/0.1.1-rc.2']);
+  assert.equal(plan.operation.directory, `deepseek-harness/0.1.1-rc.2/${'a'.repeat(64)}`);
+  // The flat runtimes/{runtimeId}/{version} layout is the parent of the new
+  // content-addressed directory and must not be an automatic reuse candidate.
+  assert.deepEqual(plan.operation.candidates, ['deepseek-harness/runtimes/deepseek-harness/0.1.1-rc.2']);
   for (const directory of ['../escape', '/outside', 'a/../b', 'a\\b', 'a//b', 'a:stream']) {
     assert.equal(runtimeInstallPlanResultSchema.safeParse({
       ...plan, operation: { ...plan.operation, directory },

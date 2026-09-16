@@ -36,6 +36,10 @@ export class SessionBindingError extends Error {
 export interface PreparedSessionLaunch {
   sessionBinding: SessionProxyBinding;
   launchBinding: ProxyLaunchBinding;
+  /** Set only when the stored Runtime profile drifted in launchable facts
+   *  (version/fingerprint/verification metadata) while identity held; the
+   *  caller must persist this re-minted binding after a successful bring-up. */
+  remintedBinding?: SessionProxyBinding;
   acquireLease: () => Promise<RuntimeLease | null>;
   /** Releases the initially resolved lease when ProxyManager reused an
    * existing process and therefore never consumed it. Idempotent on success. */
@@ -262,8 +266,9 @@ export class SessionBindingPlanner {
       binding.protocolVersion,
       binding.runtimeProfile?.configHome ?? null,
     );
+    let runtimeDrifted = false;
     try {
-      this.assertExactRuntime(binding, prepared.sessionBinding);
+      runtimeDrifted = this.assertExactRuntime(binding, prepared.sessionBinding);
     } catch (error) {
       try {
         await prepared.releaseUnusedLease();
@@ -274,6 +279,19 @@ export class SessionBindingPlanner {
         );
       }
       throw error;
+    }
+    if (runtimeDrifted) {
+      const remintedBinding: SessionProxyBinding = {
+        ...binding,
+        runtimeProfile: prepared.sessionBinding.runtimeProfile,
+      };
+      return {
+        sessionBinding: remintedBinding,
+        launchBinding: prepared.launchBinding,
+        remintedBinding,
+        acquireLease: prepared.acquireLease,
+        releaseUnusedLease: prepared.releaseUnusedLease,
+      };
     }
     return {
       sessionBinding: binding,
@@ -458,20 +476,38 @@ export class SessionBindingPlanner {
     };
   }
 
+  /** Validates the stored Runtime profile against the freshly probed one.
+   *  Open Runtime profiles are compared on identity fields only: launchable
+   *  drift in version, content fingerprint, or verification metadata (for
+   *  example an in-place CLI self-update) is accepted and re-minted rather
+   *  than rejected. Returns true when the resolved profile drifted and the
+   *  stored binding must be re-minted. */
   private assertExactRuntime(
     stored: SessionProxyBinding,
     resolved: SessionProxyBinding,
-  ): void {
+  ): boolean {
     const storedProfile = stored.runtimeProfile;
     const resolvedProfile = resolved.runtimeProfile;
-    if (!storedProfile && !resolvedProfile) return;
+    if (!storedProfile && !resolvedProfile) return false;
     if (!storedProfile || !resolvedProfile) {
       throw new SessionBindingError(
         'BINDING_RUNTIME_MISMATCH',
         'Stored Runtime profile does not match the reacquired generation.',
       );
     }
+    if (isOpenRuntimeProfile(storedProfile) && isOpenRuntimeProfile(resolvedProfile)) {
+      for (const field of ['pluginId', 'agentId', 'runtimeId', 'path', 'configHome'] as const) {
+        if (storedProfile[field] !== resolvedProfile[field]) {
+          throw new SessionBindingError(
+            'BINDING_RUNTIME_MISMATCH',
+            `Stored Runtime profile identity (${field}) does not match the reacquired generation.`,
+          );
+        }
+      }
+      return !isDeepStrictEqual(storedProfile, resolvedProfile);
+    }
     this.assertRuntimeProfilesEqual(storedProfile, resolvedProfile);
+    return false;
   }
 
   private assertRuntimeProfilesEqual(

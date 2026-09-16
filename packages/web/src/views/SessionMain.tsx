@@ -103,7 +103,6 @@ export interface SessionMainProps {
   onSetServiceTier: (tier: 'fast' | null) => void;
   onSetNativeConfig: (configId: string, value: NativeConfigValue) => void;
   onSetTurnConfig?: (optionId: string, value: ConfigValue) => void;
-  onDelete: () => void;
   onReopen?: () => void;
   onOpenAgents?: () => void;
   /** Opens a selected file in Diffs pinned to the card's Last-turn scope. */
@@ -151,7 +150,6 @@ export function SessionMain({
   onSetServiceTier,
   onSetNativeConfig,
   onSetTurnConfig,
-  onDelete,
   onReopen,
   onOpenAgents,
   onShowLastTurnChanges,
@@ -169,7 +167,6 @@ export function SessionMain({
   }>();
   const selectionCreateRun = useOperationRun(selectionCreate?.runId);
   const signaledSelectionCreateRef = useRef<string | null>(null);
-  const terminal = session.worktree_outcome !== null;
   // User-set completion flag (spec §B): a completed session is closed for
   // input — the composer blocks and a banner explains how to reopen. The host
   // enforces the same rule in `sendMessage` and the queue drain.
@@ -227,7 +224,7 @@ export function SessionMain({
     }
   }, [selectionCreate, selectionCreateRun, t]);
 
-  const transcriptReadOnly = terminal || sessionCompleted || agentDeleted;
+  const transcriptReadOnly = sessionCompleted || agentDeleted;
   const selectionCreatePending = selectionCreateRun?.phase === 'pending'
     || selectionCreateRun?.phase === 'optimistic';
   const askSelectionEnabled = !transcriptReadOnly
@@ -352,19 +349,6 @@ export function SessionMain({
           </button>
         </div>
       </div>
-      {terminal && (
-        <div className={`session-banner ${session.worktree_outcome}`}>
-          <span>
-            {session.worktree_outcome === 'merged'
-              ? `${t('coding.banner.merged')} ${session.base_branch}. ${t('coding.banner.readonly')}`
-              : t('coding.banner.discarded')}
-          </span>
-          <span className="session-banner-spacer" />
-          <button className="btn xs danger-ghost" onClick={onDelete}>
-            {t('common.delete')}
-          </button>
-        </div>
-      )}
       {sessionCompleted && (
         <div className="session-banner">
           <span>{t('coding.banner.completed')}</span>
@@ -417,13 +401,13 @@ export function SessionMain({
           <QueueList
             sessionId={session.id}
             queue={queue}
-            onRemove={terminal || sessionCompleted ? undefined : onQueueRemove}
-            onUpdate={terminal || sessionCompleted ? undefined : onQueueUpdate}
-            onClear={terminal || sessionCompleted ? undefined : onQueueClear}
-            onSendNow={session.executor === 'codex' && !terminal && !sessionCompleted
+            onRemove={sessionCompleted ? undefined : onQueueRemove}
+            onUpdate={sessionCompleted ? undefined : onQueueUpdate}
+            onClear={sessionCompleted ? undefined : onQueueClear}
+            onSendNow={session.executor === 'codex' && !sessionCompleted
               ? onQueueSendNow
               : undefined}
-            readOnly={terminal || sessionCompleted}
+            readOnly={sessionCompleted}
           />
           <UnderbarPanelGroup sessionId={session.id}>
             <PlanChip
@@ -454,9 +438,9 @@ export function SessionMain({
             onSetServiceTier={onSetServiceTier}
             onSetNativeConfig={onSetNativeConfig}
             onSetTurnConfig={onSetTurnConfig}
-            disabled={pending || terminal || sessionCompleted || agentDeleted}
+            disabled={pending || sessionCompleted || agentDeleted}
             running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={terminal || sessionCompleted ? 'block' : 'queue'}
+            disabledSubmitBehavior={sessionCompleted ? 'block' : 'queue'}
             executor={session.executor}
             agentId={session.agent_id ?? null}
             workspaceId={workspace?.id}

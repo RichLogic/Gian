@@ -19,7 +19,7 @@ export async function fakeOfficialProxy(
     dsh: 'DeepSeek Harness',
     zcode: 'ZCode',
   }[id];
-  const runtimeId = id;
+  const runtimeId = id === 'dsh' ? 'deepseek-harness' : id;
   const verifiedVersions = {
     claude: ['2.1.159'],
     codex: ['0.146.0'],

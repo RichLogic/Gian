@@ -454,6 +454,12 @@ export class SidechatCoordinator {
   }
 
   handleNotification(sidechatId: string, notification: unknown): void {
+    // Intentional product decision (owner-confirmed 2026-09): Side Chat turns
+    // NEVER raise system notifications (`attention`). A Side Chat is a
+    // foreground auxiliary panel of its parent Session; its completion state
+    // is presented inside the UI, and the global attention signal stays
+    // reserved for background Sessions and scheduled runs. Do not route
+    // Side Chat events through the AttentionDispatcher.
     this.store.appendEvent(sidechatId, notification);
     let record = this.store.get(sidechatId);
     if (!record) return;

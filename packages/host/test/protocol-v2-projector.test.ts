@@ -478,3 +478,79 @@ test('cancelled resolutions decline regardless of kind knowledge', () => {
   assert.equal(data.decision, 'decline');
   assert.equal(data.auto, true);
 });
+
+test('cc ExitPlanMode permission restores the three-way exit_plan_mode card', () => {
+  const [event] = projectNotification('claude', v2Notification('interaction.requested', {
+    interactionId: 'ix-plan',
+    title: 'ExitPlanMode requires approval',
+    description: 'Tool ExitPlanMode requires permission.',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [
+      { id: 'allow_once', label: 'Allow once', style: 'primary' },
+      { id: 'reject_once', label: 'Reject', style: 'danger' },
+    ],
+    context: {
+      subject: {
+        toolName: 'ExitPlanMode',
+        inputPreview: JSON.stringify({ plan: '## Ship it\n- step one' }),
+      },
+    },
+  }), 'session-1', 1);
+  assert.equal(event?.display?.type, 'interaction.approval');
+  const data = event?.display?.data as Record<string, unknown>;
+  assert.equal(data.category, 'exit_plan_mode');
+  assert.equal(data.title, 'Plan ready for review');
+  assert.equal(data.subject, '## Ship it\n- step one');
+  assert.deepEqual(data.planActions, ['accept_with_auto', 'accept_with_ask', 'keep_planning']);
+  assert.deepEqual(data.wireActions, { allow: 'allow_once', deny: 'reject_once' });
+  // The legacy plan card branch only renders when the v2 protocol signals
+  // (actions / nativeOptions / interactionKind) stay off the event.
+  assert.equal('actions' in data, false);
+  assert.equal('nativeOptions' in data, false);
+  assert.equal('interactionKind' in data, false);
+});
+
+test('kimi ExitPlanMode confirmation keeps ACP optionIds as wire actions', () => {
+  const [event] = projectNotification('kimi', v2Notification('interaction.requested', {
+    interactionId: 'ix-plan-kimi',
+    title: 'ExitPlanMode',
+    description: 'Plan ready',
+    presentation: { kind: 'confirmation', tone: 'neutral' },
+    inputs: [],
+    actions: [
+      { id: 'perm-allow-1', label: 'Yes, auto-accept', style: 'primary' },
+      { id: 'perm-reject-1', label: 'No, keep planning', style: 'danger' },
+    ],
+    context: {
+      subject: { toolCallId: 'tc-1', title: 'ExitPlanMode', status: 'pending' },
+      permissionOptionKinds: { 'perm-allow-1': 'allow_once', 'perm-reject-1': 'reject_once' },
+    },
+  }), 'session-1', 1);
+  const data = event?.display?.data as Record<string, unknown>;
+  assert.equal(data.category, 'exit_plan_mode');
+  assert.deepEqual(data.planActions, ['accept_with_auto', 'accept_with_ask', 'keep_planning']);
+  assert.deepEqual(data.wireActions, { allow: 'perm-allow-1', deny: 'perm-reject-1' });
+  assert.equal('actions' in data, false);
+  assert.equal('nativeOptions' in data, false);
+});
+
+test('resolved decisions fall back to ACP-kind actionIds when the registry missed the request', () => {
+  // The registry is empty (e.g. the requested event predates process start):
+  // cc-proxy uses the ACP kinds themselves as actionIds, so a bare
+  // 'reject_once' still declines instead of masquerading as an approval.
+  const registry = new InteractionKindRegistry();
+  const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-plan',
+    outcome: 'submitted',
+    actionId: 'reject_once',
+  }), registry);
+  assert.equal((resolved?.display?.data as Record<string, unknown>).decision, 'decline');
+
+  const [allowed] = projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-plan-2',
+    outcome: 'submitted',
+    actionId: 'allow_once',
+  }), registry);
+  assert.equal((allowed?.display?.data as Record<string, unknown>).decision, 'allow_once');
+});

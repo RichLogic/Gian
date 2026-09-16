@@ -1,5 +1,6 @@
 import type { DisplayEvent, FileChangeSummary } from '@gian/shared';
 import { INTERACTION_KINDS, PRESENTATION_TONES, type ProxyNotification } from '@gian/proxy-protocol';
+import { ccApprovalSubject, parseCcApprovalInput } from './normalize-cc.js';
 import { parseUnifiedDiffSummary } from './unified-diff.js';
 
 /** ACP PermissionOption.kind closed set carried by the proxy inside
@@ -278,13 +279,33 @@ function projectInteractionRequested(
   const rawSubject = asRecord(data.context).subject;
   let subject: string | undefined;
   let externalUrl: string | undefined;
+  // cc-proxy rides the tool identity as subject.toolName (inputPreview holds
+  // the SDK's JSON dump); kimi-proxy relays the ACP ToolCall whose title is
+  // the bare tool name. Either shape marks an ExitPlanMode permission, which
+  // must render as Gian's three-way plan-review card, not a generic
+  // permission/confirmation.
+  const subjectToolName = typeof rawSubject === 'object' && rawSubject !== null && !Array.isArray(rawSubject)
+    ? (() => {
+      const record = rawSubject as Record<string, unknown>;
+      return typeof record.toolName === 'string'
+        ? record.toolName
+        : typeof record.title === 'string' ? record.title : '';
+    })()
+    : '';
+  const exitPlanMode = subjectToolName === 'ExitPlanMode';
   if (typeof rawSubject === 'string') {
     subject = rawSubject;
   } else if (rawSubject && typeof rawSubject === 'object' && !Array.isArray(rawSubject)) {
     const subjectRecord = rawSubject as Record<string, unknown>;
     const toolName = typeof subjectRecord.toolName === 'string' ? subjectRecord.toolName : '';
     const inputPreview = typeof subjectRecord.inputPreview === 'string' ? subjectRecord.inputPreview : '';
-    if (toolName) subject = inputPreview ? `${toolName}\n${inputPreview}` : toolName;
+    if (exitPlanMode && toolName) {
+      // Same plan-body extraction as the legacy cc path: the card renders the
+      // plan markdown, not the `{"plan": ...}` JSON dump.
+      subject = ccApprovalSubject(toolName, parseCcApprovalInput(inputPreview));
+    } else if (toolName) {
+      subject = inputPreview ? `${toolName}\n${inputPreview}` : toolName;
+    }
     if (subjectRecord.mode === 'url' && typeof subjectRecord.url === 'string') {
       try {
         const parsed = new URL(subjectRecord.url);
@@ -295,6 +316,42 @@ function projectInteractionRequested(
         // Only credential-free absolute HTTPS URLs become clickable.
       }
     }
+  }
+  if (exitPlanMode) {
+    // Restore the legacy exit_plan_mode shape: the three-way plan actions
+    // render instead of the proxy's two raw permission options, and the
+    // respond path maps the plan decision back to the proxy-advertised wire
+    // actionIds (allow backs accept_with_*, deny backs keep_planning).
+    const kindOf = (id: string) => permissionKindById.get(id) ?? id;
+    const allowAction = protocolActions.find(action => {
+      const actionKind = kindOf(action.id);
+      return actionKind === 'allow_once' || actionKind === 'allow_always';
+    });
+    const denyAction = protocolActions.find(action => {
+      const actionKind = kindOf(action.id);
+      return actionKind === 'reject_once' || actionKind === 'reject_always';
+    });
+    return [{
+      session_id: sessionId,
+      turn,
+      call_id: String(data.interactionId ?? ''),
+      ts,
+      type: 'interaction.approval',
+      data: {
+        approvalId: String(data.interactionId ?? ''),
+        category: 'exit_plan_mode',
+        risk: presentation.tone === 'danger' ? 'high' : presentation.tone === 'warning' ? 'medium' : 'low',
+        title: 'Plan ready for review',
+        description: String(data.description ?? ''),
+        scopeOptions: ['once'] as Array<'once' | 'session'>,
+        planActions: ['accept_with_auto', 'accept_with_ask', 'keep_planning'] as const,
+        wireActions: {
+          allow: allowAction?.id ?? 'allow_once',
+          deny: denyAction?.id ?? 'decline',
+        },
+        ...(subject ? { subject } : {}),
+      },
+    }];
   }
   return [{
     session_id: sessionId,
@@ -386,7 +443,12 @@ export function projectProtocolV2Notification(
       const kind = actionId && interactionKinds
         ? interactionKinds(sessionId, String(data.interactionId ?? ''))?.get(actionId)
         : undefined;
-      const mappedDecision = decisionForKind(kind ?? undefined);
+      // Registry miss (e.g. the requested event carried no native options):
+      // proxies like cc-proxy use the ACP permission kinds themselves as
+      // actionIds, so a bare actionId in the closed kind set still maps.
+      const mappedDecision = decisionForKind(
+        kind ?? (actionId && ACP_PERMISSION_KINDS.has(actionId) ? actionId : undefined),
+      );
       return [{
         session_id: sessionId,
         turn,

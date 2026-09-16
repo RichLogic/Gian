@@ -128,7 +128,7 @@ test('native binary install verifies bytes and stages an immutable generation', 
   const installed = await installer.install(input);
   assert.equal(installed.state, 'staged');
   assert.equal(installed.runtime?.ownership, 'managed');
-  assert.equal(installed.runtime?.entryPath, join(root, 'runtimes', 'managed', 'claude', '2.1.159', createHash('sha256').update(bytes).digest('hex'), 'bin', 'claude'));
+  assert.equal(installed.runtime?.entryPath, join(root, 'runtimes', 'claude', '2.1.159', createHash('sha256').update(bytes).digest('hex'), 'bin', 'claude'));
   assert.deepEqual(await readFile(installed.runtime!.entryPath), bytes);
   assert.equal((await store.list('claude'))[0]?.generationId, input.generationId);
 
@@ -164,7 +164,7 @@ test('managed Runtime tar.gz installs the complete tree and probes its declared 
   });
 
   const installed = await installer.install(input);
-  const versionRoot = join(root, 'runtimes', 'managed', 'claude', '2.1.159', createHash('sha256').update(archive).digest('hex'));
+  const versionRoot = join(root, 'runtimes', 'claude', '2.1.159', createHash('sha256').update(archive).digest('hex'));
   assert.equal(installed.runtime?.entryPath, join(versionRoot, 'bin', 'claude'));
   assert.equal(probed, join(root, 'runtimes', expectStagingSegment(probed), 'bin', 'claude'));
   assert.deepEqual(await readFile(join(versionRoot, 'bin', 'claude')), entry);
@@ -284,17 +284,19 @@ test('DSH legacy launcher is preserved and certified legacy dependency tree is r
   const input = plan(root, archive);
   input.pluginId = 'ai.deepseek.harness';
   if (input.runtime?.kind !== 'native-binary') throw new Error('fixture');
-  Object.assign(input.runtime, { runtimeId: 'dsh', version: '0.1.1-rc.2', format: 'tar.gz', entryRelativePath: entry });
+  Object.assign(input.runtime, { runtimeId: 'deepseek-harness', version: '0.1.1-rc.2', format: 'tar.gz', entryRelativePath: entry });
   await executable(input.proxy.entryPath);
   const store = new ManagedRuntimeGenerationStore(root);
   await store.initialize();
+  // The startup migration already ran above; legacy trees created afterwards
+  // are installer reuse candidates, not migration input.
   const legacy = join(root, 'runtimes/deepseek-harness/runtimes/deepseek-harness/0.1.1-rc.2');
   await mkdir(legacy, { recursive: true });
   await extractManagedRuntimeArchive(archive, legacy);
   const wrapper = '#!/bin/sh\nexec old-managed-dsh "$@"\n';
   await writeFile(join(root, 'runtimes/dsh'), wrapper);
   const planner = createRuntimeInstallPlanner({
-    runtimeId: 'dsh', kind: 'managed', format: 'tar.gz', entryRelativePath: entry,
+    runtimeId: 'deepseek-harness', kind: 'managed', format: 'tar.gz', entryRelativePath: entry,
     legacyDirectories: version => [`deepseek-harness/runtimes/deepseek-harness/${version}`],
   });
   let downloads = 0;
@@ -327,7 +329,7 @@ test('recipe traversal, identity drift and directory symlinks are rejected befor
   await assert.rejects(make(value => ({ ...value, operation: { ...value.operation, directory: '../escape' } })).install(input));
   const outside = await mkdtemp(join(tmpdir(), 'gian-runtime-outside-'));
   t.after(() => rm(outside, { recursive: true, force: true }));
-  await symlink(outside, join(root, 'runtimes', 'managed'));
+  await symlink(outside, join(root, 'runtimes', 'claude'));
   await assert.rejects(make(value => value).install(input), /symlink/);
 });
 

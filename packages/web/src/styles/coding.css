@@ -1290,20 +1290,6 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   color: var(--text-2);
 }
 
-/* Active / Archived list tabs (segmented control, full width of the rail). */
-.spaces-list-tabs { width: 100%; }
-.spaces-list-tabs .segm-item {
-  flex: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-.spaces-list-tabs .count {
-  font: 500 10.5px/1 var(--font-mono);
-  color: var(--text-3);
-}
-
 .spaces-list-body {
   flex: 1;
   overflow-y: auto;
@@ -1699,7 +1685,7 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
 }
 
 /* ============================================================
-   Worktree session bits — branch badge, terminal banner, sidebar menu
+   Session banner (completed) + sidebar session row
    ============================================================ */
 
 .session-banner {
@@ -1708,8 +1694,6 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   font-size: var(--fz-12);
   background: var(--surface-2);
 }
-.session-banner.merged { color: var(--text-2); }
-.session-banner.discarded { color: var(--text-3); }
 .session-banner-spacer { flex: 1; }
 
 /* Sidebar session row + context menu */

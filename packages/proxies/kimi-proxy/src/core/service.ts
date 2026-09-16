@@ -320,6 +320,22 @@ export function parseKimiStatusContext(
   return { used: Math.floor(used), window: Math.floor(window) };
 }
 
+export function parseKimiUsageUpdate(
+  notifications: SessionNotification[],
+): { used: number; window: number } | null {
+  let latest: { used: number; window: number } | null = null;
+  for (const notification of notifications) {
+    const update = notification.update as unknown as Record<string, unknown>;
+    if (update.sessionUpdate !== 'usage_update') continue;
+    const used = update.used;
+    const size = update.size;
+    if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) continue;
+    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) continue;
+    latest = { used: Math.floor(used), window: Math.floor(size) };
+  }
+  return latest;
+}
+
 export class KimiProxyService {
   private readonly runtime: KimiAcpClient;
   private readonly customization: KimiCustomizationScanner;
@@ -892,22 +908,35 @@ export class KimiProxyService {
           conversation: cumulative,
         }, turnId));
       }
-      if (response.stopReason !== 'cancelled' && advertisedCommand(current, 'status')) {
-        try {
-          const status = await this.runtime.promptCaptured({
-            sessionId: current.nativeSessionId,
-            prompt: [{ type: 'text', text: '/status' }],
-          });
-          const context = parseKimiStatusContext(status.updates);
-          if (context && current.activeTurnId === turnId) {
-            this.emitEvent('token_usage.updated', this.eventEnvelope(current, {
-              context,
-            }, turnId));
+      if (response.stopReason !== 'cancelled') {
+        // Kimi CLI 0.41 moved the Context line from /status to /usage; older
+        // CLIs still print it in /status.
+        const contextCommand = advertisedCommand(current, 'usage')
+          ? '/usage'
+          : advertisedCommand(current, 'status')
+            ? '/status'
+            : null;
+        if (contextCommand) {
+          try {
+            const status = await this.runtime.promptCaptured({
+              sessionId: current.nativeSessionId,
+              prompt: [{ type: 'text', text: contextCommand }],
+            });
+            // The fire-and-forget post-turn usage_update can race into this
+            // capture window; the structured sample is exact, so it wins over
+            // the rendered text line.
+            const context = parseKimiUsageUpdate(status.updates)
+              ?? parseKimiStatusContext(status.updates);
+            if (context && current.activeTurnId === turnId) {
+              this.emitEvent('token_usage.updated', this.eventEnvelope(current, {
+                context,
+              }, turnId));
+            }
+          } catch (error) {
+            this.emitEvent('debug', {
+              message: `[kimi] Could not refresh context usage: ${error instanceof Error ? error.message : String(error)}`,
+            });
           }
-        } catch (error) {
-          this.emitEvent('debug', {
-            message: `[kimi] Could not refresh context usage: ${error instanceof Error ? error.message : String(error)}`,
-          });
         }
       }
 
@@ -1010,8 +1039,8 @@ export class KimiProxyService {
     }
 
     // A compact request may emit a usage sample for the summarization input.
-    // Keep the numerator invalid until the captured post-compact /status
-    // response emits the authoritative replacement.
+    // Keep the numerator invalid until the captured post-compact /usage (or
+    // legacy /status) response emits the authoritative replacement.
     const activeTurn = this.activeTurns.get(proxySessionId);
     if (activeTurn?.isCompact && updateKind(completeNotification) === 'usage_update') {
       return;

@@ -50,7 +50,6 @@ function sessionCallbacks() {
     onSetEffort: vi.fn(),
     onSetServiceTier: vi.fn(),
     onSetNativeConfig: vi.fn(),
-    onDelete: vi.fn(),
     onReopen: vi.fn(),
     onShowChanges: vi.fn(),
     onShowLastTurnChanges: vi.fn(),
@@ -154,8 +153,8 @@ describe('WT-003: finalized worktree Session composer', () => {
   beforeEach(() => localStorage.clear());
 
   for (const outcome of ['merged', 'discarded'] as const) {
-    it(`hard-disables input after the worktree is ${outcome}`, () => {
-      const callbacks = renderSession(sessionContractFixture({
+    it(`stays fully interactive after the worktree is ${outcome} (ADR-0080)`, () => {
+      renderSession(sessionContractFixture({
         status: 'done',
         branch: 'worktree/finalized',
         base_branch: 'main',
@@ -163,13 +162,17 @@ describe('WT-003: finalized worktree Session composer', () => {
         worktree_outcome: outcome,
       }), queuedFollowUp);
 
-      expect(document.querySelector(`.session-banner.${outcome}`)).toBeVisible();
-      expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'false');
-      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-      expect(screen.getByRole('button', { name: 'Add context' })).toBeDisabled();
-      expectReadOnlyQueue();
-      expect(callbacks.onSend).not.toHaveBeenCalled();
-      expect(callbacks.onQueueAdd).not.toHaveBeenCalled();
+      // A finalized worktree outcome is legacy metadata: no banner, and the
+      // session resumes exactly like an ordinary open session.
+      expect(document.querySelector('.session-banner')).not.toBeInTheDocument();
+      expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'true');
+      const drawer = screen.getByText('queued follow-up').closest('.queue-drawer');
+      expect(drawer).not.toBeNull();
+      const queueUi = within(drawer as HTMLElement);
+      expect(queueUi.getByRole('button', { name: 'Send now' })).toBeInTheDocument();
+      expect(queueUi.getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+      expect(queueUi.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+      expect(queueUi.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
     });
   }
 });

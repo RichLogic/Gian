@@ -309,7 +309,7 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
     expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s2']);
     expect(sections.byWs.get('ws-a')!.map(s => s.id)).toEqual(['s1']);
     expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
-    expect(sections.pinnedWsIds).toEqual([]);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
     expect(sections.hasPinned).toBe(true);
   });
 
@@ -326,58 +326,63 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
   });
 
   it('nothing pinned → no sections (labels stay hidden)', () => {
-    const sections = buildRailSections([session('s1', 'ws-a')], workspaces);
+    const unpinned = [
+      { id: 'ws-a', pinned: 0 as const },
+      { id: 'ws-c', pinned: 0 as const },
+    ];
+    const sections = buildRailSections([session('s1', 'ws-a')], unpinned);
     expect(sections.hasPinned).toBe(false);
     expect(sections.pinnedWsIds).toEqual([]);
     expect(sections.pinnedSessions).toEqual([]);
   });
 
-  it('a pinned workspace with all sessions pinned leaves no empty group', () => {
+  it('every workspace gets a group, even with zero sessions (Repos rail lists every repo)', () => {
+    const sections = buildRailSections([session('s1', 'ws-a')], workspaces);
+    // ws-c has no sessions: it still lists under Projects, with no byWs entry
+    // (the sidebar renders the group header with `?? []`).
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.byWs.has('ws-c')).toBe(false);
+  });
+
+  it('an empty pinned workspace appears in Pinned and flips hasPinned', () => {
+    const unpinned = [
+      { id: 'ws-a', pinned: 0 as const },
+      { id: 'ws-c', pinned: 0 as const },
+    ];
+    const sections = buildRailSections([session('s1', 'ws-a')], [
+      ...unpinned,
+      { id: 'ws-empty-pinned', pinned: 1 as const },
+    ]);
+    expect(sections.pinnedWsIds).toEqual(['ws-empty-pinned']);
+    expect(sections.byWs.has('ws-empty-pinned')).toBe(false);
+    expect(sections.hasPinned).toBe(true);
+  });
+
+  it('a pinned workspace with all sessions pinned still lists as an empty group', () => {
     const sections = buildRailSections([
       session('s1', 'ws-b', '2026-08-01T10:00:00Z'),
       session('s2', 'ws-a'),
     ], workspaces);
-    expect(sections.pinnedWsIds).toEqual([]);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
+    expect(sections.byWs.has('ws-b')).toBe(false);
     expect(sections.pinnedSessions.map(s => s.id)).toEqual(['s1']);
-    expect(sections.projectWsIds).toEqual(['ws-a']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
   });
 
   it('orphan workspace ids append to Projects so their sessions stay visible', () => {
     const sections = buildRailSections([session('s1', 'ws-zzz')], workspaces);
-    expect(sections.projectWsIds).toEqual(['ws-zzz']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c', 'ws-zzz']);
   });
 
-  it('hidden-workspace sessions leave the active rail without becoming unfiled', () => {
-    const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
+  it('the internal __gian_root__ workspace never gets a group', () => {
+    const withRoot = [...workspaces, { id: 'ws-root', name: '__gian_root__', pinned: 0 as const }];
     const sections = buildRailSections([
       session('s1', 'ws-a'),
-      session('s2', 'ws-h'),
-      session('s3', 'ws-h'),
-    ], withHidden);
+      session('s2', 'ws-root'),
+    ], withRoot);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
+    expect(sections.pinnedWsIds).toEqual(['ws-b']);
     expect(sections.unfiled).toEqual([]);
-    expect(sections.byWs.has('ws-h')).toBe(false);
-    expect(sections.projectWsIds).toEqual(['ws-a']);
-    expect(sections.pinnedWsIds).toEqual([]);
-    expect(sections.hasPinned).toBe(false);
-  });
-
-  it('a pinned session of a hidden workspace is hidden with its workspace', () => {
-    const withHidden = [...workspaces, { id: 'ws-h', pinned: 0 as const, hidden: 1 as const }];
-    const sections = buildRailSections([
-      session('s1', 'ws-h', '2026-08-01T10:00:00Z'),
-      session('s2', 'ws-h'),
-    ], withHidden);
-    expect(sections.pinnedSessions).toEqual([]);
-    expect(sections.unfiled).toEqual([]);
-    expect(sections.hasPinned).toBe(false);
-  });
-
-  it('a hidden workspace never enters pinnedWsIds even when pinned', () => {
-    const withHiddenPinned = [...workspaces, { id: 'ws-h', pinned: 1 as const, hidden: 1 as const }];
-    const sections = buildRailSections([session('s1', 'ws-h')], withHiddenPinned);
-    expect(sections.unfiled).toEqual([]);
-    expect(sections.pinnedWsIds).toEqual([]);
-    expect(sections.hasPinned).toBe(false);
   });
 
   it('sessions without a workspace (deleted → NULL workspace_id) collect in unfiled', () => {
@@ -385,7 +390,7 @@ describe('buildRailSections: Pinned section above Projects (2026-08-03)', () => 
     const sections = buildRailSections([orphan, session('s2', 'ws-a')], workspaces);
     expect(sections.unfiled.map(s => s.id)).toEqual(['s1']);
     expect(sections.byWs.has(null as unknown as string)).toBe(false);
-    expect(sections.projectWsIds).toEqual(['ws-a']);
+    expect(sections.projectWsIds).toEqual(['ws-a', 'ws-c']);
   });
 });
 

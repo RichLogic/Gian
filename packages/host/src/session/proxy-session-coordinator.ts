@@ -293,6 +293,7 @@ export class ProxySessionCoordinator {
         ? [JSON.stringify(remapped), JSON.stringify(result.availableActions), now, session.id]
         : [JSON.stringify(remapped), now, session.id]),
     );
+    const remintedBinding = preparedLaunch?.remintedBinding;
     if (capturedLegacyLaunch) {
       this.db.prepare(
         'UPDATE sessions SET proxy_binding_json = ?, runtime_profile_json = ?, updated_at = ? WHERE id = ? AND proxy_binding_json IS NULL',
@@ -304,6 +305,18 @@ export class ProxySessionCoordinator {
         now,
         session.id,
       );
+    } else if (remintedBinding) {
+      this.db.prepare(
+        'UPDATE sessions SET proxy_binding_json = ?, runtime_profile_json = ?, updated_at = ? WHERE id = ? AND proxy_binding_json = ?',
+      ).run(
+        JSON.stringify(remintedBinding),
+        remintedBinding.runtimeProfile
+          ? JSON.stringify(remintedBinding.runtimeProfile)
+          : null,
+        now,
+        session.id,
+        JSON.stringify(session.proxy_binding),
+      );
     }
     this.callbacks.onSessionUpdated(session.id, {
       executor_config: remapped,
@@ -314,7 +327,12 @@ export class ProxySessionCoordinator {
           proxy_binding: capturedLegacyLaunch.sessionBinding,
           runtime_profile: capturedLegacyLaunch.sessionBinding.runtimeProfile,
         }
-        : {}),
+        : remintedBinding
+          ? {
+            proxy_binding: remintedBinding,
+            runtime_profile: remintedBinding.runtimeProfile,
+          }
+          : {}),
       updated_at: now,
     });
     return result.proxySessionId;

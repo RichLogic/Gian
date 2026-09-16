@@ -6,10 +6,10 @@ import type {
 } from '@gian/shared';
 
 export interface GianDesktopNotificationPreferences {
+  /** Device-level only: OS consent and sound. User-level master/kind
+   *  switches live in the Host config (`notifications` settings section)
+   *  and gate the attention signal before it reaches any device. */
   desktop: boolean;
-  sessionDone: boolean;
-  approvalNeeded: boolean;
-  errors: boolean;
   sound: boolean;
 }
 
@@ -25,6 +25,11 @@ export type GianDesktopNavigationTarget =
       sessionId: string;
       turn: number;
       kind: 'turn-completed' | 'approval' | 'question' | 'error';
+    }
+  | {
+      type: 'schedule';
+      scheduleId: string;
+      runId: string;
     }
   | { type: 'settings'; section: 'updates' };
 
@@ -55,7 +60,7 @@ export interface GianDesktopNotificationsApi {
   native: boolean;
   getState: () => Promise<GianDesktopNotificationState>;
   updatePreferences: (preferences: GianDesktopNotificationPreferences) => Promise<GianDesktopNotificationState>;
-  setContext: (context: { windowFocused: boolean; visibleSessionId: string | null }) => Promise<boolean>;
+  setContext: (context: { visibleSessionId: string | null }) => Promise<boolean>;
   openSystemSettings: () => Promise<boolean>;
   onStateChanged: (listener: (state: GianDesktopNotificationState) => void) => () => void;
 }

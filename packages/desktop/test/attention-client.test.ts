@@ -116,3 +116,26 @@ test('parser rejects oversized or non-attention messages', () => {
   assert.equal(parseAttentionMessage(JSON.stringify({ type: 'event' })), null);
   assert.equal(parseAttentionMessage(Buffer.from(JSON.stringify(attention))), null);
 });
+
+test('parser accepts a well-formed schedule target and rejects malformed ones', () => {
+  const scheduled: AttentionMessage = {
+    ...attention,
+    id: 'gian:attention:schedule-run-run-1',
+    kind: 'error',
+    title: 'Scheduled run failed',
+    body: 'A scheduled run failed (SCHEDULE_FORK_FAILED). Open the schedule run log for details.',
+    schedule: { schedule_id: 'sched-1', run_id: 'run-1' },
+  };
+  assert.deepEqual(parseAttentionMessage(JSON.stringify(scheduled)), scheduled);
+
+  const malformed: unknown[] = [
+    { ...scheduled, schedule: null },
+    { ...scheduled, schedule: 'sched-1' },
+    { ...scheduled, schedule: { schedule_id: 'sched-1' } },
+    { ...scheduled, schedule: { schedule_id: 'sched-1', run_id: 42 } },
+    { ...scheduled, schedule: { schedule_id: '', run_id: 'run-1' } },
+  ];
+  for (const candidate of malformed) {
+    assert.equal(parseAttentionMessage(JSON.stringify(candidate)), null, JSON.stringify(candidate));
+  }
+});

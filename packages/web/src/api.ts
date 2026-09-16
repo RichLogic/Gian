@@ -1007,7 +1007,6 @@ export async function loadDiff(
 
 export interface WorkspacePatch {
   name?: string;
-  hidden?: boolean;
   pinned?: boolean;
 }
 

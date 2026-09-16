@@ -115,7 +115,6 @@ export interface CodingViewProps {
     optionId: string,
     value: ConfigValue,
   ) => void;
-  onDelete: (sessionId: string) => void;
   onReopenSession: (sessionId: string) => void;
   /** Toggle a session's pinned marker (sidebar ordering). */
   onPinSession: (sessionId: string, pinned: boolean) => void;
@@ -354,7 +353,6 @@ export function CodingView(p: CodingViewProps) {
           onSetTurnConfig={p.onSetTurnConfig
             ? (optionId, value) => p.onSetTurnConfig!(p.activeSession!.id, optionId, value)
             : undefined}
-          onDelete={() => p.onDelete(p.activeSession!.id)}
           onReopen={() => p.onReopenSession(p.activeSession!.id)}
           onOpenAgents={() => p.onSetAppMode('agents')}
           onShowLastTurnChanges={(turn, path) =>

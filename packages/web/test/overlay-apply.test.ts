@@ -58,10 +58,10 @@ describe('applyWorkspaceOverlays / applyWorkspaceOrderOverlay', () => {
   it('overlays workspace fields', () => {
     const canonical = workspace();
     const merged = applyWorkspaceOverlays(canonical, [
-      overlay('workspace:ws-1:hidden', 1),
+      overlay('workspace:ws-1:pinned', 1),
     ]);
-    expect(merged.hidden).toBe(1);
-    expect(canonical.hidden).toBe(0);
+    expect(merged.pinned).toBe(1);
+    expect(canonical.pinned).toBe(0);
   });
 
   it('reorders by overlay ids and keeps leftovers at the end', () => {

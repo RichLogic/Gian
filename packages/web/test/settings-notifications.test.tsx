@@ -1,15 +1,27 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SystemConfig } from '@gian/shared';
-import { DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
+import {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  DEFAULT_TERMINAL_PREFERENCES,
+} from '@gian/shared';
 import { SettingsBody } from '../src/components/SettingsBody.js';
 import type {
   GianDesktopNotificationPreferences,
   GianDesktopNotificationsApi,
   GianDesktopNotificationState,
 } from '../src/desktop-bridge.js';
-import { loadNotificationPrefs } from '../src/notifications.js';
+import { loadDeviceNotificationPrefs } from '../src/notifications.js';
 import { renderWithOperations } from './operation-test-utils.js';
+import * as api from '../src/api.js';
+
+vi.mock('../src/api.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/api.js')>('../src/api.js');
+  return {
+    ...actual,
+    saveSettings: vi.fn().mockImplementation(async partial => ({ ...config(), ...partial })),
+  };
+});
 
 class FakeNotification {
   static permission: NotificationPermission = 'default';
@@ -18,7 +30,7 @@ class FakeNotification {
 
 const originalNotification = globalThis.Notification;
 
-function config(): SystemConfig {
+function config(overrides: Partial<SystemConfig> = {}): SystemConfig {
   return {
     host: '127.0.0.1', port: 8991, workspace_root: '~/Coding',
     theme: 'warm', accent: 'ember', density: 'cozy', locale: 'en',
@@ -28,6 +40,8 @@ function config(): SystemConfig {
     default_claude_model: '', default_claude_effort: '',
     default_codex_model: '', default_codex_effort: '',
     auth_username: '', external_editors: [],
+    notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES },
+    ...overrides,
   };
 }
 
@@ -69,16 +83,9 @@ function installNativeNotifications(
   return notifications;
 }
 
-const disabledPreferences: GianDesktopNotificationPreferences = {
-  desktop: false,
-  sessionDone: true,
-  approvalNeeded: true,
-  errors: true,
-  sound: false,
-};
-
 describe('SettingsBody Notifications', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     localStorage.clear();
     delete window.gianDesktop;
     installNotification('default');
@@ -95,64 +102,102 @@ describe('SettingsBody Notifications', () => {
     });
   });
 
-  it('requests permission from the notification toggle and persists granted consent', async () => {
-    const notifications = installNativeNotifications(disabledPreferences);
+  it('patches the user-level master switch and performs the device consent flow', async () => {
+    const notifications = installNativeNotifications({ desktop: false, sound: false });
     FakeNotification.requestPermission = vi.fn(async () => 'granted');
-    renderWithOperations(<SettingsBody config={config()} activeSection="notifications" />);
+    renderWithOperations(<SettingsBody
+      config={config({ notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: false } })}
+      activeSection="notifications"
+    />);
 
     fireEvent.click(await screen.findByRole('checkbox', { name: 'System notifications' }));
 
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({
+      notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: true },
+    }));
     await waitFor(() => expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(notifications.updatePreferences).toHaveBeenCalledWith({
-      ...disabledPreferences,
       desktop: true,
+      sound: false,
     }));
-    expect(loadNotificationPrefs().desktop).toBe(true);
-    expect(screen.getByText('Enabled')).toBeInTheDocument();
+    expect(loadDeviceNotificationPrefs().desktop).toBe(true);
   });
 
-  it('keeps denied consent off and opens macOS notification settings', async () => {
-    const notifications = installNativeNotifications(disabledPreferences);
+  it('keeps the master switch on when the OS permission is denied and offers macOS Settings', async () => {
+    const notifications = installNativeNotifications({ desktop: false, sound: false });
     installNotification('denied');
-    renderWithOperations(<SettingsBody config={config()} activeSection="notifications" />);
+    renderWithOperations(<SettingsBody
+      config={config({ notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: false } })}
+      activeSection="notifications"
+    />);
 
     fireEvent.click(await screen.findByRole('checkbox', { name: 'System notifications' }));
 
-    await waitFor(() => expect(notifications.updatePreferences).toHaveBeenCalledWith({
-      ...disabledPreferences,
-      desktop: false,
+    // Denied consent must not silently revert the user-level switch…
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({
+      notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: true },
     }));
+    // …and must not grant device-level consent.
+    expect(notifications.updatePreferences).not.toHaveBeenCalledWith({
+      desktop: true,
+      sound: false,
+    });
+    expect(await screen.findByText('Blocked by macOS')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Open macOS Settings' }));
     expect(notifications.openSystemSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('persists event and sound preferences through the native service', async () => {
+  it('patches a kind switch through the Host settings section', async () => {
     installNotification('granted');
-    const enabled = { ...disabledPreferences, desktop: true };
-    const notifications = installNativeNotifications(enabled);
+    installNativeNotifications({ desktop: true, sound: false });
     renderWithOperations(<SettingsBody config={config()} activeSection="notifications" />);
 
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Completed turns' }));
 
-    await waitFor(() => expect(notifications.updatePreferences).toHaveBeenCalledWith({
-      ...enabled,
-      sessionDone: false,
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({
+      notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, session_done: false },
     }));
-    expect(loadNotificationPrefs().sessionDone).toBe(false);
   });
 
-  it('persists an explicit disable so startup migration cannot re-enable it', async () => {
+  it('disables the kind switches while the master switch is off', async () => {
     installNotification('granted');
-    const enabled = { ...disabledPreferences, desktop: true };
-    const notifications = installNativeNotifications(enabled);
+    installNativeNotifications({ desktop: true, sound: false });
+    renderWithOperations(<SettingsBody
+      config={config({ notifications: { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: false } })}
+      activeSection="notifications"
+    />);
+
+    expect(await screen.findByRole('checkbox', { name: 'Completed turns' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Approvals and questions' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Agent errors' })).toBeDisabled();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('keeps sound device-level through the native service', async () => {
+    installNotification('granted');
+    const notifications = installNativeNotifications({ desktop: true, sound: false });
     renderWithOperations(<SettingsBody config={config()} activeSection="notifications" />);
 
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'System notifications' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Sound' }));
 
     await waitFor(() => expect(notifications.updatePreferences).toHaveBeenCalledWith({
-      ...enabled,
-      desktop: false,
+      desktop: true,
+      sound: true,
     }));
-    expect(loadNotificationPrefs().desktop).toBe(false);
+    // Sound never enters the user-level Host settings patch.
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('stores sound in v2 localStorage on the browser fallback', async () => {
+    installNotification('granted');
+    renderWithOperations(<SettingsBody config={config()} activeSection="notifications" />);
+
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Sound' }));
+
+    await waitFor(() => expect(loadDeviceNotificationPrefs().sound).toBe(true));
+    expect(JSON.parse(localStorage.getItem('gian.notificationPrefs.v2')!)).toEqual({
+      desktop: true,
+      sound: true,
+    });
   });
 });

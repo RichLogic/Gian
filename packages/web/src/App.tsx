@@ -1,5 +1,5 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { RunnerInfo, Session, SideChatInfo, Task, TerminalOptions, Workspace } from '@gian/shared';
+import type { AttentionMessage, RunnerInfo, Session, SideChatInfo, Task, TerminalOptions, Workspace } from '@gian/shared';
 import { CHAT_FONT_FAMILY_STACKS, DEFAULT_CHAT_FONT_SIZE, DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 import { LocaleProvider } from './i18n/index.js';
 import { EN } from './i18n/en.js';
@@ -94,8 +94,9 @@ import {
   desktopBridge,
   type GianDesktopNavigationTarget,
 } from './desktop-bridge.js';
-import { subscribeDesktopNavigation } from './desktop-navigation.js';
+import { resolveSessionNavigation, subscribeDesktopNavigation } from './desktop-navigation.js';
 import {
+  maybeNotifyForAttention,
   nativeNotificationPreferencesForMigration,
   visibleSessionForNativeNotification,
 } from './notifications.js';
@@ -587,7 +588,7 @@ export function App() {
   // `sessions` stays untouched for refs, effects, and the reload paths.
   const displaySessions = useStoreSessionsWithOverlays(operationStore, sessions);
   // Same merge for tasks (rename/done/pin overlays) and workspaces
-  // (rename/hidden/pin overlays + the whole-list reorder overlay).
+  // (rename/pin overlays + the whole-list reorder overlay).
   const displayTasks = useStoreTasksWithOverlays(operationStore, tasks);
   const displayWorkspaces = useStoreWorkspacesWithOverlays(operationStore, workspaces);
   // Rendered settings = canonical + settings.save overlays (Phase 3b):
@@ -930,6 +931,41 @@ export function App() {
     t: appT,
   });
 
+  // ─── System notifications (renderer fallback) ────────────────────────────
+  // The Host's `attention` message is the single signal source; this client
+  // is only a delivery end. Desktop-navigation handling is defined further
+  // down (it needs selectSession); the socket layer reaches the latest
+  // handler through this ref, and suppression reads the latest view context
+  // through the other — both assigned during render like the sibling refs.
+  const desktopNavigationRef = useRef<(target: GianDesktopNavigationTarget) => void>(() => {});
+  const notificationContextRef = useRef({ mode, viewState, activeSessionId, activeSubtaskId });
+  notificationContextRef.current = { mode, viewState, activeSessionId, activeSubtaskId };
+  const handleAttentionMessage = useCallback((message: AttentionMessage) => {
+    const context = notificationContextRef.current;
+    maybeNotifyForAttention(message, {
+      visibleSessionId: visibleSessionForNativeNotification({
+        mode: context.mode,
+        viewState: context.viewState,
+        activeSessionId: context.activeSessionId,
+        activeSubtaskId: context.activeSubtaskId,
+      }),
+      onClick: () => desktopNavigationRef.current(
+        message.schedule
+          ? {
+              type: 'schedule',
+              scheduleId: message.schedule.schedule_id,
+              runId: message.schedule.run_id,
+            }
+          : {
+              type: 'session',
+              sessionId: message.session_id,
+              turn: message.turn,
+              kind: message.kind,
+            },
+      ),
+    });
+  }, []);
+
   // A file selected from the transcript underbar's Diff panel opens the
   // Diffs rail on that exact turn's scope and jumps panel 2's multi-diff
   // view to the file's block. It intentionally steals the view.
@@ -1014,6 +1050,7 @@ export function App() {
     operationStore,
     ops,
     translate: appT,
+    onAttention: handleAttentionMessage,
   });
 
   const selectSession = useSessionSelection({
@@ -1111,13 +1148,46 @@ export function App() {
       activateRail('settings');
       return;
     }
-    selectSession(target.sessionId);
-    setActiveTaskId(null);
-    setActiveSubtaskId(null);
-    setActiveRail(null);
-    setViewState('main');
-    startTransition(() => setMode('sessions'));
-  }, [activateRail, selectSession, setActiveRail, setViewState]);
+    if (target.type === 'schedule') {
+      // Scheduled-run attention: open the Timer detail — its run log is what
+      // the notification body points at.
+      openSchedule(target.scheduleId);
+      return;
+    }
+    // In-place jump: Repos and Tasks both present every unarchived Session,
+    // so select inside the current view instead of forcing Repos.
+    const session = sessionsRef.current.find(entry => entry.id === target.sessionId) ?? null;
+    const action = resolveSessionNavigation(target, { mode, session });
+    switch (action.kind) {
+      case 'select-in-sessions':
+        selectSession(action.sessionId);
+        setActiveRail(null);
+        setViewState('main');
+        startTransition(() => setMode('sessions'));
+        break;
+      case 'select-subtask-in-tasks':
+        setActiveTaskId(action.taskId);
+        setActiveSubtaskId(action.sessionId);
+        selectSession(action.sessionId);
+        setActiveRail(null);
+        setViewState('main');
+        break;
+      case 'select-standalone-in-tasks':
+        selectStandaloneInTasks(action.sessionId);
+        setActiveRail(null);
+        setViewState('main');
+        break;
+      case 'fallback-sessions':
+        selectSession(action.sessionId);
+        setActiveTaskId(null);
+        setActiveSubtaskId(null);
+        setActiveRail(null);
+        setViewState('main');
+        startTransition(() => setMode('sessions'));
+        break;
+    }
+  }, [activateRail, mode, openSchedule, selectSession, selectStandaloneInTasks, setActiveRail, setViewState]);
+  desktopNavigationRef.current = handleDesktopNavigation;
 
   useEffect(() => {
     const navigation = desktopBridge()?.navigation;
@@ -1314,21 +1384,9 @@ export function App() {
       activeSessionId,
       activeSubtaskId,
     });
-    const syncContext = () => {
-      void notifications.setContext({
-        windowFocused: document.hasFocus() && document.visibilityState === 'visible',
-        visibleSessionId,
-      });
-    };
-    syncContext();
-    window.addEventListener('focus', syncContext);
-    window.addEventListener('blur', syncContext);
-    document.addEventListener('visibilitychange', syncContext);
-    return () => {
-      window.removeEventListener('focus', syncContext);
-      window.removeEventListener('blur', syncContext);
-      document.removeEventListener('visibilitychange', syncContext);
-    };
+    // Focus is owned by the main process (mainWindow.isFocused()); the
+    // renderer reports only which Session is visible.
+    void notifications.setContext({ visibleSessionId });
   }, [activeSessionId, activeSubtaskId, mode, viewState]);
 
   const panelLayout = usePanelLayout({
@@ -1718,7 +1776,6 @@ export function App() {
                 setSessions(fresh);
                 setSessionCreateRunId(undefined);
               }}
-              onDelete={sessionMainHandlers.onDelete}
               onReopenSession={sessionId => {
                 ops.dispatch('task.reopenSubtask', { sessionId });
               }}

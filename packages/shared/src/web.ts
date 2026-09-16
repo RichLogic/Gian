@@ -94,6 +94,10 @@ export interface AttentionMessage {
   /** Notification-safe summary, capped by the Host to a small UTF-8 budget. */
   body: string;
   provider: Executor;
+  /** Present on scheduled-run failure/unknown attention: the Run whose log
+   *  the notification click must open (Timer detail), instead of the control
+   *  Session's latest Turn. */
+  schedule?: { schedule_id: string; run_id: string };
 }
 
 export interface SessionUpdatedMessage {

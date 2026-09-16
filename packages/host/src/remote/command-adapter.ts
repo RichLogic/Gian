@@ -38,7 +38,7 @@ import type { RemoteAuditCategory, RemoteMutationAudit } from './audit.js';
 import type { RemoteAttachmentService } from './attachment-stream.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import type { RemoteFileRefService } from './file-ref.js';
-import { RemoteProjector, assertNoLeak, remoteStableUuid, resolveRemoteAction } from './projection.js';
+import { RemoteProjector, assertNoLeak, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues } from './projection.js';
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -410,7 +410,9 @@ export class RemoteCommandAdapter {
       expected_interaction_revision: params['interaction_revision'],
       ...(mapped.decision && mapped.decision !== 'submit_answers' ? { decision: mapped.decision } : {}),
       ...(mapped.native_option_id ? { native_option_id: mapped.native_option_id } : {}),
-      ...(params['values'] ? { answers: params['values'] } : {}),
+      ...(params['values'] && typeof params['values'] === 'object' && !Array.isArray(params['values'])
+        ? { answers: resolveRemoteAnswerValues(pending, params['values'] as Record<string, unknown>) }
+        : {}),
     });
     return {
       interaction_id: params['interaction_id'],

@@ -159,10 +159,22 @@ export function parseAttentionMessage(data: unknown): AttentionMessage | null {
     || !isBoundedString(candidate.body, 1, 512)
     || !['turn-completed', 'approval', 'question', 'error'].includes(String(candidate.kind))
     || !isProxyPluginId(candidate.provider)
+    || !isValidScheduleTarget(candidate.schedule)
   ) {
     return null;
   }
   return candidate as AttentionMessage;
+}
+
+/** Optional scheduled-run navigation target: present and well-formed, or
+ *  absent entirely. Anything in between is a malformed message. */
+function isValidScheduleTarget(
+  value: AttentionMessage['schedule'] | undefined,
+): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object') return false;
+  return isBoundedString(value.schedule_id, 1, 512)
+    && isBoundedString(value.run_id, 1, 512);
 }
 
 function isBoundedString(value: unknown, min: number, max: number): value is string {

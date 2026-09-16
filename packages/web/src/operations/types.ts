@@ -73,7 +73,6 @@ export type OperationName =
   // Workspace
   | 'workspace.create'
   | 'workspace.rename'
-  | 'workspace.setHidden'
   | 'workspace.pin'
   | 'workspace.reorder'
   | 'workspace.delete'
@@ -191,7 +190,6 @@ export const OPERATION_POLICIES = {
   'task.reorder': 'optimistic',
   'workspace.create': 'pending',
   'workspace.rename': 'optimistic',
-  'workspace.setHidden': 'optimistic',
   'workspace.pin': 'optimistic',
   'workspace.reorder': 'optimistic',
   'workspace.delete': 'pending',

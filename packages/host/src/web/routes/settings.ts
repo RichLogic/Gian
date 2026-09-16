@@ -3,6 +3,7 @@ import type {
   ExternalEditor,
   KeymapPreferences,
   LayoutPreferences,
+  NotificationPreferences,
   OpenAppPrefs,
   ShortcutMap,
   SystemConfig,
@@ -35,6 +36,7 @@ type EditableSettingsKey =
   | 'keymap'
   | 'layout'
   | 'tools'
+  | 'notifications'
   | 'terminal'
   | 'locale'
   | 'external_editors'
@@ -268,6 +270,24 @@ function parseTools(value: unknown): ToolPreferences {
   };
 }
 
+function parseNotificationPreferences(value: unknown): NotificationPreferences {
+  const record = strictRecord(value, 'notifications', [
+    'enabled', 'session_done', 'approval_needed', 'errors',
+  ]);
+  const boolean = (key: keyof NotificationPreferences) => {
+    if (typeof record[key] !== 'boolean') {
+      throw new Error(`notifications.${key} must be a boolean`);
+    }
+    return record[key] as boolean;
+  };
+  return {
+    enabled: boolean('enabled'),
+    session_done: boolean('session_done'),
+    approval_needed: boolean('approval_needed'),
+    errors: boolean('errors'),
+  };
+}
+
 function parseOpenApps(value: unknown): OpenAppPrefs {  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('open_apps must be an object');
   }
@@ -385,6 +405,7 @@ const SETTINGS_PATCH_SCHEMA = {
   keymap: parseKeymap,
   layout: parseLayout,
   tools: parseTools,
+  notifications: parseNotificationPreferences,
   font_scale_code: (value: unknown, field: string) => parseEnum(
     value,
     field,

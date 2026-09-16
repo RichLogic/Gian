@@ -265,16 +265,15 @@ function runtimeProfileMatchesBinding(
  * pluginId backfill only). Present but malformed JSON fails closed and stays
  * diagnosable — callers must not invent version, digest, scope, or protocol.
  */
-/** A stored binding that can still launch later: valid exact facts and not a
- *  finished worktree outcome. Archived and completed Sessions remain resumable. */
+/** A stored binding that can still launch later: valid exact facts and no
+ *  binding error. Archived, completed, and finalized-worktree Sessions all
+ *  remain resumable (ADR-0080). */
 export function isResumableSessionBinding(session: {
   proxy_binding?: SessionProxyBinding | null;
   proxy_binding_error?: string | null;
-  worktree_outcome?: string | null;
 } | null | undefined): boolean {
   return isSessionProxyBinding(session?.proxy_binding)
-    && !session?.proxy_binding_error
-    && session?.worktree_outcome == null;
+    && !session?.proxy_binding_error;
 }
 
 export function parseSessionProxyBinding(value: unknown): SessionProxyBindingParseResult {

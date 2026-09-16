@@ -7,6 +7,48 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.1] - 2026-09-16
+
+### Changed
+
+- Moved notification preferences into Gian's settings: the master switch and
+  the per-category switches (completed turns, approvals and questions, errors)
+  are enforced by the Host before any system notification is delivered, while
+  each device keeps only its own consent and sound choice. Background sessions
+  now notify as well; the session you are watching stays silent.
+- Reworked notification navigation to jump in place: clicking a notification
+  selects the session when browsing sessions, opens it as the active Subtask
+  inside Tasks, and opens the Timer run log for a failed schedule run.
+  Update-available alerts no longer depend on the session-notification master
+  switch.
+- Removed the retired hidden-repo feature completely: the Repos rail now lists
+  every repo, including zero-session ones, matching the new-conversation
+  picker, and the Hide/Show controls are gone.
+- Flattened the managed Runtime directory layout: certified Runtimes now
+  install content-addressed under `runtimes/<id>/<version>/<sha>/` instead of
+  `runtimes/managed/...`, and the DeepSeek Harness Runtime id is renamed from
+  `dsh` to `deepseek-harness`. Existing installs migrate automatically on the
+  first start: managed trees are moved and re-verified, unreferenced legacy
+  trees are cleaned up, and broken generation pointers are repaired.
+
+### Fixed
+
+- Fixed Remote Web interactions: questions and input requests can now actually
+  be answered from Remote instead of always failing with a missing-answer
+  error, ExitPlanMode renders as the three-way plan review card over
+  gian.proxy/2.0 so accepting a plan really leaves plan mode, and a failed
+  approval now shows an inline error on the card instead of a dead click.
+- Sessions whose workspace worktree was merged or discarded can be opened and
+  resumed again: input is accepted, queued turns drain, boot watchers attach,
+  and the pinned Proxy package stays retained.
+- In-place Agent CLI self-updates no longer orphan existing sessions with
+  BINDING_RUNTIME_MISMATCH: launchable drift in version, content fingerprint,
+  or verification metadata re-mints the stored Runtime binding, while
+  identity drift still fails closed.
+- Kimi sessions keep their context-window meter accurate on Kimi Code 0.41,
+  which moved the post-turn context line from /status to /usage; late
+  post-turn usage samples now refresh the session instead of being dropped.
+
 ## [0.6.0] - 2026-09-15
 
 ### Added

@@ -915,3 +915,139 @@ test('session mutations push control events into the Host replay buffer', async 
     teardownRemoteHarness(context);
   }
 });
+
+test('interaction.respond translates wire answer keys back to original question ids', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const created = await context.runtime.commands.execute(device, command('session.create', {
+      catalog_revision: context.runtime.projector.catalogRevision(),
+      workspace_id: context.workspaceId,
+      task_id: context.taskId,
+      agent_id: remoteStableUuid('agent', 'agent-claude-review'),
+    }));
+    const sessionId = (created.data as { id: string }).id;
+    // AskUserQuestion rides the full question text as the input id; the remote
+    // projection hashes it into a wire UUID, so answers arrive keyed by the
+    // hash while the Tool layer validates against the original text.
+    const questionText = 'Which rollout strategy should the agent use for the database migration that touches 42 tables across two clusters?';
+    void context.approvals.request({
+      sessionId,
+      turnId: randomUUID(),
+      category: 'question',
+      risk: 'low',
+      description: 'Claude is asking you a question',
+      payload: {
+        questions: [{
+          question: questionText,
+          multiSelect: false,
+          options: [{ label: 'Blue-green' }, { label: 'In-place' }],
+        }],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const pending = context.approvals.listPending();
+    assert.equal(pending.length, 1);
+    const snapshot = await context.runtime.commands.execute(device, command('state.refresh', {}));
+    const interactions = (snapshot.data as {
+      interactions: Array<{ id: string; presentation: { inputs?: Array<{ id: string }> } }>;
+    }).interactions;
+    assert.equal(interactions.length, 1);
+    const wireInputId = interactions[0]!.presentation.inputs?.[0]?.id;
+    assert.ok(wireInputId);
+    assert.notEqual(wireInputId, questionText);
+
+    const responses: Array<{ actionId: string; values: unknown }> = [];
+    const client = context.proxy.client;
+    const originalRespond = client.respondInteraction.bind(client);
+    client.respondInteraction = async (params: { actionId: string; values: unknown }) => {
+      responses.push({ actionId: params.actionId, values: params.values });
+      return originalRespond(params as never);
+    };
+    const respond = await context.runtime.commands.execute(device, command('interaction.respond', {
+      interaction_id: pending[0]!.id,
+      interaction_revision: '0',
+      action_id: remoteActionId(pending[0]!.id, 'submit_answers'),
+      values: { [wireInputId]: 'Blue-green' },
+    }));
+    assert.equal(respond.ok, true, respond.error?.message);
+    assert.equal(responses.length, 1);
+    assert.deepEqual(responses[0]!.values, { [questionText]: 'Blue-green' });
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('exit_plan_mode respond maps plan decisions to wire action ids and runs the mode ceremony', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const created = await context.runtime.commands.execute(device, command('session.create', {
+      catalog_revision: context.runtime.projector.catalogRevision(),
+      workspace_id: context.workspaceId,
+      task_id: context.taskId,
+      agent_id: remoteStableUuid('agent', 'agent-claude-review'),
+    }));
+    const sessionId = (created.data as { id: string }).id;
+    context.db.prepare(`UPDATE sessions SET approval_mode = 'plan' WHERE id = ?`).run(sessionId);
+    const responses: Array<{ actionId: string; values: unknown }> = [];
+    const client = context.proxy.client;
+    client.respondInteraction = async (params: { actionId: string; values: unknown }) => {
+      responses.push({ actionId: params.actionId, values: params.values });
+    };
+    const requestPlanExit = () => context.approvals.request({
+      sessionId,
+      turnId: randomUUID(),
+      category: 'exit_plan_mode',
+      risk: 'low',
+      description: 'Plan ready for review',
+      payload: {
+        planActions: ['accept_with_auto', 'accept_with_ask', 'keep_planning'],
+        // cc-proxy's gian.proxy/2.0 adapter whitelists exactly these ids; a
+        // hardcoded 'decline' for keep_planning is rejected on the wire.
+        wireActions: { allow: 'allow_once', deny: 'reject_once' },
+      },
+    });
+    void requestPlanExit();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const keepPlanning = context.approvals.listPending()[0]!;
+    const snapshot = await context.runtime.commands.execute(device, command('state.refresh', {}));
+    const interactions = (snapshot.data as {
+      interactions: Array<{ id: string; kind: string; presentation: { actions: Array<{ id: string; label: string; tone: string }> } }>;
+    }).interactions;
+    assert.equal(interactions.length, 1);
+    assert.equal(interactions[0]!.kind, 'exit_plan_mode');
+    assert.deepEqual(
+      interactions[0]!.presentation.actions.map((action) => action.label),
+      ['Accept, auto-approve edits', 'Accept, ask before edits', 'Keep planning'],
+    );
+    assert.equal(interactions[0]!.presentation.actions[2]!.tone, 'danger');
+
+    const declined = await context.runtime.commands.execute(device, command('interaction.respond', {
+      interaction_id: keepPlanning.id,
+      interaction_revision: '0',
+      action_id: remoteActionId(keepPlanning.id, 'keep_planning'),
+    }));
+    assert.equal(declined.ok, true, declined.error?.message);
+    assert.equal(responses.at(-1)?.actionId, 'reject_once');
+    const modeAfterDecline = context.db.prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+      .get(sessionId) as { approval_mode: string };
+    assert.equal(modeAfterDecline.approval_mode, 'plan');
+
+    void requestPlanExit();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const acceptAuto = context.approvals.listPending().find((record) => record.id !== keepPlanning.id)!;
+    const accepted = await context.runtime.commands.execute(device, command('interaction.respond', {
+      interaction_id: acceptAuto.id,
+      interaction_revision: '0',
+      action_id: remoteActionId(acceptAuto.id, 'accept_with_auto'),
+    }));
+    assert.equal(accepted.ok, true, accepted.error?.message);
+    assert.equal(responses.at(-1)?.actionId, 'allow_once');
+    const modeAfterAccept = context.db.prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+      .get(sessionId) as { approval_mode: string };
+    assert.equal(modeAfterAccept.approval_mode, 'auto');
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});

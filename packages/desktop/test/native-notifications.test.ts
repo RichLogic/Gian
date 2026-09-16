@@ -4,6 +4,7 @@ import type { AttentionMessage } from '@gian/shared';
 import {
   DEFAULT_DESKTOP_NOTIFICATION_PREFERENCES,
   NativeNotificationService,
+  sanitizeDesktopNotificationPreferences,
   type DesktopNotificationPreferences,
   type NativeNotificationDelivery,
   type NativeNotificationPayload,
@@ -50,7 +51,8 @@ function fixture(
     onActivate: target => activated.push(target),
   });
   if (initializeContext) {
-    service.setContext({ windowFocused: false, visibleSessionId: null });
+    service.setWindowFocused(false);
+    service.setContext({ visibleSessionId: null });
   }
   return { service, shown, activated, saved: () => saved, closed: () => closed };
 }
@@ -75,9 +77,30 @@ test('notifies in the background, dedupes, and preserves a safe click target', (
   assert.equal(closed(), 0, 'clicked notifications do not retain active handles');
 });
 
+test('a scheduled-run attention activates the Timer run-log target, not a session turn', () => {
+  const { service, shown, activated } = fixture();
+  const scheduledAttention: AttentionMessage = {
+    ...attention,
+    id: 'gian:attention:schedule-run-run-1',
+    session_id: 'control-session',
+    kind: 'error',
+    title: 'Scheduled run failed',
+    body: 'A scheduled run failed (SCHEDULE_FORK_FAILED). Open the schedule run log for details.',
+    schedule: { schedule_id: 'sched-1', run_id: 'run-1' },
+  };
+  assert.equal(service.handleAttention(scheduledAttention), true);
+  shown[0]!.callbacks.onClick();
+  assert.deepEqual(activated, [{
+    type: 'schedule',
+    scheduleId: 'sched-1',
+    runId: 'run-1',
+  }]);
+});
+
 test('suppresses only the session currently visible in a focused window', () => {
   const { service, shown } = fixture();
-  service.setContext({ windowFocused: true, visibleSessionId: 's1' });
+  service.setWindowFocused(true);
+  service.setContext({ visibleSessionId: 's1' });
   assert.equal(service.handleAttention(attention), false);
   assert.equal(service.handleAttention({ ...attention, id: 'other', session_id: 's2' }), true);
   assert.equal(shown.length, 1);
@@ -87,13 +110,15 @@ test('waits for first renderer visibility context before deciding foreground del
   const { service, shown } = fixture(undefined, false);
   assert.equal(service.handleAttention(attention), false);
   assert.equal(shown.length, 0);
-  service.setContext({ windowFocused: true, visibleSessionId: 's1' });
+  service.setWindowFocused(true);
+  service.setContext({ visibleSessionId: 's1' });
   assert.equal(shown.length, 0);
 
   const background = { ...attention, id: 'background', session_id: 's2' };
   const next = fixture(undefined, false);
   assert.equal(next.service.handleAttention(background), false);
-  next.service.setContext({ windowFocused: true, visibleSessionId: 's1' });
+  next.service.setWindowFocused(true);
+  next.service.setContext({ visibleSessionId: 's1' });
   assert.equal(next.shown.length, 1);
 });
 
@@ -101,41 +126,50 @@ test('rechecks consent before flushing attention queued during renderer startup'
   const master = fixture(undefined, false);
   assert.equal(master.service.handleAttention(attention), false);
   master.service.updatePreferences({ desktop: false });
-  master.service.setContext({ windowFocused: false, visibleSessionId: null });
+  master.service.setWindowFocused(false);
+  master.service.setContext({ visibleSessionId: null });
   assert.equal(master.shown.length, 0);
-
-  const category = fixture(undefined, false);
-  assert.equal(category.service.handleAttention(attention), false);
-  category.service.updatePreferences({ sessionDone: false });
-  category.service.setContext({ windowFocused: false, visibleSessionId: null });
-  assert.equal(category.shown.length, 0);
 });
 
 test('reset context defers suppression decisions across a renderer reload', () => {
   const { service, shown } = fixture();
-  service.setContext({ windowFocused: true, visibleSessionId: 's1' });
+  service.setWindowFocused(true);
+  service.setContext({ visibleSessionId: 's1' });
   service.resetContext();
   assert.equal(service.handleAttention(attention), false);
   assert.equal(shown.length, 0);
-  service.setContext({ windowFocused: false, visibleSessionId: null });
+  service.setWindowFocused(false);
+  service.setContext({ visibleSessionId: null });
   assert.equal(shown.length, 1);
 });
 
-test('event preferences and master switch are enforced and persisted', () => {
+test('device-level preferences hold only consent and sound; sound drives silent delivery', () => {
   const { service, shown, saved } = fixture();
-  const state = service.updatePreferences({
-    desktop: true,
-    sessionDone: false,
-    approvalNeeded: true,
-    errors: false,
-    sound: true,
-  });
-  assert.deepEqual(saved(), state.preferences);
-  assert.equal(service.handleAttention(attention), false);
-  assert.equal(service.handleAttention({ ...attention, id: 'approval', kind: 'approval' }), true);
+  const state = service.updatePreferences({ desktop: true, sound: true });
+  assert.deepEqual(state.preferences, { desktop: true, sound: true });
+  assert.deepEqual(saved(), { desktop: true, sound: true });
+  // Kind gating is Host-side now: every kind the Host broadcasts is delivered.
+  assert.equal(service.handleAttention(attention), true);
   assert.equal(shown[0]!.payload.silent, false);
   service.updatePreferences({ desktop: false });
   assert.equal(service.handleAttention({ ...attention, id: 'question', kind: 'question' }), false);
+});
+
+test('legacy preference files migrate to the device-level shape', () => {
+  const legacy = {
+    desktop: true,
+    sessionDone: false,
+    approvalNeeded: false,
+    errors: true,
+    sound: true,
+  };
+  assert.deepEqual(sanitizeDesktopNotificationPreferences(legacy), {
+    desktop: true,
+    sound: true,
+  });
+  assert.deepEqual(sanitizeDesktopNotificationPreferences({}), {
+    ...DEFAULT_DESKTOP_NOTIFICATION_PREFERENCES,
+  });
 });
 
 test('native delivery failure is surfaced without leaking platform details', () => {
@@ -171,7 +205,8 @@ test('caps retained native handles when the platform never emits close', () => {
     },
     onActivate: () => undefined,
   });
-  service.setContext({ windowFocused: false, visibleSessionId: null });
+  service.setWindowFocused(false);
+  service.setContext({ visibleSessionId: null });
 
   for (let index = 0; index < 3; index += 1) {
     assert.equal(service.handleAttention({

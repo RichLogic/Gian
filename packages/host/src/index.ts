@@ -171,18 +171,12 @@ async function main(): Promise<void> {
     network: pluginArtifactNetwork,
     listBindingReferences: () => {
       const rows = db.prepare(
-        'SELECT proxy_binding_json, worktree_outcome FROM sessions WHERE proxy_binding_json IS NOT NULL',
-      ).all() as Array<{ proxy_binding_json: string | null; worktree_outcome: string | null }>;
+        'SELECT proxy_binding_json FROM sessions WHERE proxy_binding_json IS NOT NULL',
+      ).all() as Array<{ proxy_binding_json: string | null }>;
       const refs = [];
       for (const row of rows) {
         const parsed = parseSessionProxyBinding(row.proxy_binding_json);
-        if (
-          parsed.ok
-          && isResumableSessionBinding({
-            proxy_binding: parsed.binding,
-            worktree_outcome: row.worktree_outcome,
-          })
-        ) {
+        if (parsed.ok && isResumableSessionBinding({ proxy_binding: parsed.binding })) {
           refs.push({
             pluginId: parsed.binding.pluginId,
             pluginVersion: parsed.binding.pluginVersion,

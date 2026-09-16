@@ -65,10 +65,9 @@ function setup(): Fixture {
     broadcaster: broadcaster as unknown as WsBroadcaster,
     assertControlSessionReady: () => {
       fixture.lifecycleChecks += 1;
-      const row = db.prepare('SELECT archived, completed_at, worktree_outcome FROM sessions WHERE id = ?')
-        .get(sessionId) as { archived: number; completed_at: string | null; worktree_outcome: string | null };
+      const row = db.prepare('SELECT archived, completed_at FROM sessions WHERE id = ?')
+        .get(sessionId) as { archived: number; completed_at: string | null };
       if (row.archived === 1) throw new Error('session is archived');
-      if (row.worktree_outcome) throw new Error(`session is ${row.worktree_outcome}`);
       if (row.completed_at) throw new Error('session is completed; reopen it before sending more messages');
     },
     wake: () => { fixture.wakeCount += 1; },

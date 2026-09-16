@@ -49,6 +49,7 @@ function emptyState(): RemoteUiState {
     sessions: [],
     interactions: [],
     interactionPhases: {},
+    interactionErrors: {},
     capabilities: {},
     catalogRevision: 'rev-0',
     catalog: null,
@@ -2092,6 +2093,73 @@ describe('production controller operations', () => {
 
     await viWait(async () => controller.state.connection.kind === 'online');
     expect(relays).toHaveLength(1);
+    controller.close();
+  });
+
+  it('surfaces a failed interaction.respond on the card instead of swallowing it', async () => {
+    let relay: FakeRelay | undefined;
+    const { controller } = await pairedController({
+      createRelay(input) {
+        relay = new FakeRelay(input);
+        return relay;
+      },
+    });
+    controller.actions.challengeLogin(hostId);
+    await viWait(async () => controller.state.connection.kind === 'online');
+
+    const sessionId = generateCanonicalId();
+    const allowActionId = generateCanonicalId();
+    const declineActionId = generateCanonicalId();
+    const interaction = sampleInteraction({
+      id: generateCanonicalId(),
+      session_id: sessionId,
+      turn_id: generateCanonicalId(),
+      presentation: {
+        title: 'Run command',
+        description: 'needs approval',
+        risk: 'medium',
+        actions: [
+          { id: allowActionId, label: 'Allow once', tone: 'default' },
+          { id: declineActionId, label: 'Decline', tone: 'danger' },
+        ],
+      },
+    });
+    const refresh = relay!.sent.find(message => message.method === 'state.refresh')!;
+    await relay!.emit({
+      type: 'command.result',
+      command_id: String(refresh.command_id),
+      ok: true,
+      data: {
+        ...sampleSnapshot(hostId, 'Office Mac'),
+        sessions: [remoteSession(sessionId)],
+        interactions: [interaction],
+      },
+    });
+    await viWait(async () => controller.state.interactions.some(item => item.id === interaction.id));
+
+    controller.actions.respondToInteraction(interaction.id, allowActionId);
+    expect(controller.state.interactionPhases[interaction.id]).toBe('responding');
+    // A card already responding never fires a second mutation.
+    controller.actions.respondToInteraction(interaction.id, allowActionId);
+    await viWait(async () => relay!.sent.some(message => message.method === 'interaction.respond'));
+    const respondRequests = relay!.sent.filter(message => message.method === 'interaction.respond');
+    expect(respondRequests).toHaveLength(1);
+
+    await relay!.emit({
+      type: 'command.result',
+      command_id: String(respondRequests[0]!.command_id),
+      ok: false,
+      error: { code: 'INTERACTION_ACTION_NOT_FOUND', message: 'Interaction action is not available.' },
+    });
+    await viWait(async () => controller.state.interactionPhases[interaction.id] === 'pending');
+    expect(controller.state.interactionErrors[interaction.id])
+      .toBe('Interaction action is not available.');
+    expect(controller.state.mutations[String(respondRequests[0]!.command_id)]?.phase).toBe('failed');
+
+    // Retrying clears the recorded error and re-enters the responding phase.
+    controller.actions.respondToInteraction(interaction.id, declineActionId);
+    expect(controller.state.interactionErrors[interaction.id]).toBeUndefined();
+    expect(controller.state.interactionPhases[interaction.id]).toBe('responding');
     controller.close();
   });
 });

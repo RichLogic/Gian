@@ -67,7 +67,9 @@ export async function runtimeFileInventory(root: string): Promise<FileIdentity[]
   return files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
 
-function receiptPath(root: string, directory: string): string {
+/** Receipts are keyed by the absolute Runtime tree directory, so a tree move
+ * must re-key (not rewrite) its receipt. */
+export function runtimeReceiptPath(root: string, directory: string): string {
   const key = createHash('sha256').update(directory).digest('hex');
   return join(root, 'receipts', `${key}.json`);
 }
@@ -76,7 +78,7 @@ export async function verifiedRuntimeReuse(
   root: string, directory: string, artifactSha256: string, entryRelativePath: string,
 ): Promise<boolean> {
   if (!await ownedRuntimeDirectory(root, directory)) return false;
-  const path = receiptPath(root, directory);
+  const path = runtimeReceiptPath(root, directory);
   try {
     if (!await ownedRuntimeDirectory(root, join(root, 'receipts'))) return false;
     const info = await lstat(path);
@@ -100,7 +102,7 @@ export async function recordRuntimeArtifact(
   await mkdir(receipts, { recursive: true, mode: 0o700 });
   if (!await ownedRuntimeDirectory(root, receipts)) throw new Error('Runtime receipt root is not owned.');
   const receipt: ArtifactReceipt = { schemaVersion: 1, artifactSha256, entryRelativePath, files };
-  await writeFileAtomic(receiptPath(root, directory), Buffer.from(JSON.stringify(receipt)));
+  await writeFileAtomic(runtimeReceiptPath(root, directory), Buffer.from(JSON.stringify(receipt)));
 }
 
 export async function sameRuntimeTree(directory: string, expected: FileIdentity[]): Promise<boolean> {

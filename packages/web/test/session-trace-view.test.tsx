@@ -58,7 +58,6 @@ function callbacks() {
     onSetEffort: vi.fn(),
     onSetServiceTier: vi.fn(),
     onSetNativeConfig: vi.fn(),
-    onDelete: vi.fn(),
     onReopen: vi.fn(),
     onShowChanges: vi.fn(),
     onShowLastTurnChanges: vi.fn(),

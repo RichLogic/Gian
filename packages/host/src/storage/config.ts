@@ -3,6 +3,7 @@ import type {
   ExternalEditor,
   KeymapPreferences,
   LayoutPreferences,
+  NotificationPreferences,
   ShortcutMap,
   SystemConfig,
   TerminalPreferences,
@@ -14,6 +15,7 @@ import { join } from 'node:path';
 import {
   DEFAULT_CHAT_FONT_SIZE,
   DEFAULT_LAYOUT_PREFERENCES,
+  DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_TERMINAL_PREFERENCES,
   DEFAULT_TOOL_PREFERENCES,
   KEYMAP_COMMANDS,
@@ -33,6 +35,7 @@ const SHORTCUTS_KEY = 'shortcuts';
 const KEYMAP_KEY = 'keymap';
 const LAYOUT_KEY = 'layout';
 const TOOLS_KEY = 'tools';
+const NOTIFICATIONS_KEY = 'notifications';
 const OPEN_APP_CATEGORIES = ['code', 'web', 'images', 'pdf', 'other'] as const;
 
 const SETTINGS_FILE_SCHEMA_VERSION = 1;
@@ -155,6 +158,17 @@ function oneOf<T extends string>(raw: unknown, values: readonly T[], fallback: T
   return typeof raw === 'string' && values.includes(raw as T) ? raw as T : fallback;
 }
 
+export function sanitizeNotificationPreferences(raw: unknown): NotificationPreferences {
+  const record = objectRecord(raw);
+  const defaults = DEFAULT_NOTIFICATION_PREFERENCES;
+  return {
+    enabled: bool(record.enabled, defaults.enabled),
+    session_done: bool(record.session_done, defaults.session_done),
+    approval_needed: bool(record.approval_needed, defaults.approval_needed),
+    errors: bool(record.errors, defaults.errors),
+  };
+}
+
 export function sanitizeToolPreferences(raw: unknown): ToolPreferences {
   const record = objectRecord(raw);
   const files = objectRecord(record.files);
@@ -231,6 +245,9 @@ function parseUserSettingsFile(): Partial<SystemConfig> {
     if (raw.keymap !== undefined) parsed.keymap = sanitizeKeymap(raw.keymap);
     if (raw.layout !== undefined) parsed.layout = sanitizeLayoutPreferences(raw.layout);
     if (raw.tools !== undefined) parsed.tools = sanitizeToolPreferences(raw.tools);
+    if (raw.notifications !== undefined) {
+      parsed.notifications = sanitizeNotificationPreferences(raw.notifications);
+    }
     if (raw.terminal !== undefined) parsed.terminal = sanitizeTerminalPreferences(raw.terminal);
     if (raw.external_editors !== undefined) parsed.external_editors = sanitizeEditors(raw.external_editors);
     if (raw.open_apps !== undefined) parsed.open_apps = sanitizeOpenApps(raw.open_apps);
@@ -255,6 +272,7 @@ function userSettingsDocument(config: SystemConfig): Record<string, unknown> {
     keymap: config.keymap ?? sanitizeKeymap(undefined),
     layout: config.layout ?? { ...DEFAULT_LAYOUT_PREFERENCES },
     tools: config.tools ?? structuredClone(DEFAULT_TOOL_PREFERENCES),
+    notifications: config.notifications ?? { ...DEFAULT_NOTIFICATION_PREFERENCES },
     terminal: config.terminal,
     external_editors: config.external_editors,
     open_apps: config.open_apps ?? {},
@@ -273,6 +291,7 @@ function writeUserSettingsFile(config: SystemConfig): void {
     keymap: config.keymap,
     layout: config.layout,
     tools: config.tools,
+    notifications: config.notifications,
     terminal: config.terminal,
   };
 }
@@ -425,6 +444,10 @@ export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
       stmt.run(key, JSON.stringify(sanitizeToolPreferences(value)));
       continue;
     }
+    if (key === NOTIFICATIONS_KEY) {
+      stmt.run(key, JSON.stringify(sanitizeNotificationPreferences(value)));
+      continue;
+    }
     stmt.run(key, String(value));
   }
   if (userSettingsPath) writeUserSettingsFile({ ...loadConfig(db), ...partial });
@@ -509,6 +532,14 @@ export function loadConfig(db: Db): SystemConfig {
     try { tools = sanitizeToolPreferences(JSON.parse(rawTools)); } catch { /* defaults */ }
   }
 
+  let notifications: NotificationPreferences = { ...DEFAULT_NOTIFICATION_PREFERENCES };
+  const rawNotifications = map.get(NOTIFICATIONS_KEY);
+  if (rawNotifications) {
+    try {
+      notifications = sanitizeNotificationPreferences(JSON.parse(rawNotifications));
+    } catch { /* defaults */ }
+  }
+
   const rawTheme = map.get('theme') ?? '';
   const theme: SystemConfig['theme'] = VALID_THEMES.has(rawTheme as SystemConfig['theme'])
     ? (rawTheme as SystemConfig['theme'])
@@ -534,6 +565,7 @@ export function loadConfig(db: Db): SystemConfig {
     keymap,
     layout,
     tools,
+    notifications,
     terminal,
     locale: (map.get('locale') ?? 'zh-CN') as SystemConfig['locale'],
     default_claude_model: map.get('default_claude_model') ?? '',

@@ -382,7 +382,7 @@ export class GianToolService {
     params: GianToolMethodParams['catalog.get_create_options'],
   ): Promise<GianToolMethodData['catalog.get_create_options']> {
     const workspaces = this.deps.db.prepare(
-      'SELECT id, name, path FROM workspaces WHERE hidden = 0 ORDER BY sort_order, created_at',
+      'SELECT id, name, path FROM workspaces ORDER BY sort_order, created_at',
     ).all() as Array<Pick<Workspace, 'id' | 'name' | 'path'>>;
     if (!this.deps.agents) return { workspaces, agents: [] };
     const agents: GianToolCatalogAgent[] = [];

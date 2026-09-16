@@ -10,8 +10,6 @@ import { SpaceDetail, ClaudeMdInspector } from '../views/SpacesView.js';
 // the Inspector list matches the prototype's WorkspacesInspector exactly.
 const I = {
   plus: 'M12 5v14 M5 12h14',
-  eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
-  eyeOff: 'M2 12s4-7 10-7a9 9 0 0 1 4 1 M22 12s-4 7-10 7a9 9 0 0 1-4-1 M3 3l18 18 M9.9 9.9a3 3 0 0 0 4.2 4.2',
   arrowUp: 'M12 19V5 M5 12l7-7 7 7',
   arrowDown: 'M12 5v14 M19 12l-7 7-7-7',
 };
@@ -27,19 +25,17 @@ function Icon({ d, size = 14, stroke = 1.6 }: { d: string; size?: number; stroke
 
 // ─── Workspaces Inspector (right rail, zone 4) ───────────────────────────────
 // Mirrors design/gian-design-v2/js/views.jsx → WorkspacesInspector: a flat list
-// of workspaces with per-row eye(hide)/up/down buttons. NO leading icon, NO
-// open-dot, NO session count. Clicking a row opens that workspace's detail as a
-// Workbench tab (zone 3) via onOpenWorkspace.
+// of workspaces with per-row up/down buttons. NO leading icon, NO open-dot, NO
+// session count. Clicking a row opens that workspace's detail as a Workbench
+// tab (zone 3) via onOpenWorkspace.
 //
-// Unlike the prototype (where order + hidden are local-only and reset on
-// reload), this is wired to the real persistence layer THROUGH THE OPERATION
-// LAYER (Phase 3a): reordering dispatches `workspace.reorder` (whole-list
-// order overlay → POST /api/workspaces/reorder) and hide toggles dispatch
-// `workspace.setHidden` (optimistic `hidden` overlay → PATCH
-// /api/workspaces/:id). The host does not broadcast these; the definitions'
-// reconcile patches + refetches canonical state on success. The list itself
-// reflects `workspace.sort_order` (already sorted by the host) and
-// `workspace.hidden`.
+// Unlike the prototype (where order is local-only and resets on reload), this
+// is wired to the real persistence layer THROUGH THE OPERATION LAYER
+// (Phase 3a): reordering dispatches `workspace.reorder` (whole-list order
+// overlay → POST /api/workspaces/reorder). The host does not broadcast
+// reorders; the definition's reconcile patches + refetches canonical state on
+// success. The list itself reflects `workspace.sort_order` (already sorted by
+// the host).
 export function WorkspacesInspector({
   workspaces,
   selectedWsId,
@@ -75,10 +71,6 @@ export function WorkspacesInspector({
     dispatch('workspace.reorder', { ids });
   }
 
-  function toggleHidden(ws: Workspace) {
-    dispatch('workspace.setHidden', { workspaceId: ws.id, hidden: ws.hidden !== 1 });
-  }
-
   return (
     <aside className="inspector" data-testid="workspaces-inspector">
       <div className="insp-head">
@@ -97,12 +89,11 @@ export function WorkspacesInspector({
         <div className="ws-list">
           {rows.map((w, idx) => {
             const open = openWsIds.has(w.id);
-            const isHidden = w.hidden === 1;
             const active = w.id === selectedWsId && open;
             return (
               <div
                 key={w.id}
-                className={`ws-item ${active ? 'active' : ''} ${isHidden ? 'hidden' : ''}`}
+                className={`ws-item ${active ? 'active' : ''}`}
                 data-testid={`ws-item-${w.id}`}
               >
                 <button className="ws-item-main" onClick={() => onOpenWorkspace(w.id)}>
@@ -112,14 +103,6 @@ export function WorkspacesInspector({
                   </span>
                 </button>
                 <span className="ws-item-actions">
-                  <button
-                    className="ws-act"
-                    title={isHidden ? t('spaces.kebab.show') : t('spaces.kebab.hide')}
-                    aria-label={isHidden ? t('spaces.kebab.show') : t('spaces.kebab.hide')}
-                    onClick={() => void toggleHidden(w)}
-                  >
-                    <Icon d={isHidden ? I.eyeOff : I.eye} size={14} />
-                  </button>
                   <button
                     className="ws-act"
                     title={t('spaces.moveup.title')}

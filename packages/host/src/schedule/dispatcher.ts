@@ -60,6 +60,10 @@ export interface DispatcherOptions {
    *  unknown). Making it non-optional keeps production assembly honest — the
    *  compiler rejects a dispatcher constructed without it. */
   broadcaster: WsBroadcaster;
+  /** Same user-level gate the session AttentionDispatcher applies: failure
+   *  attention (kind `error`) must not broadcast when the master switch or
+   *  the errors category is off. */
+  attentionGate?: import('../session/attention.js').AttentionGate;
 }
 
 export class ScheduleRunDispatcher {
@@ -372,12 +376,15 @@ export class ScheduleRunDispatcher {
    *  notification carries only a generic bounded title and the stable error
    *  CODE — never the raw error, paths, commands, secrets, or the Schedule
    *  name. The full message stays in the durable run log. The id derives
-   *  from the run id so the message de-duplicates across restarts. */
+   *  from the run id so the message de-duplicates across restarts.
+   *  Navigation target: the `schedule` field points at this Run — clicking
+   *  the notification opens the Timer detail whose run log matches the body. */
   private broadcastFailureAttention(
     run: ScheduleRunRow,
     errorCode: string,
     _errorMessage: string | undefined,
   ): void {
+    if (this.options.attentionGate && !this.options.attentionGate('error')) return;
     const schedule = this.service.repository.scheduleRow(run.schedule_id);
     const session = schedule
       ? this.db.prepare(
@@ -385,20 +392,26 @@ export class ScheduleRunDispatcher {
         ).get(schedule.control_session_id) as { executor: Executor } | undefined
       : undefined;
     if (!schedule || !session) return;
-    // Navigation target: the control conversation's latest Turn.
+    // AttentionMessage.turn is required by the wire contract; schedule
+    // navigation uses the `schedule` field instead, so a control conversation
+    // without any Turn yet still produces a deliverable message.
     const turnRow = this.db.prepare(
       'SELECT COALESCE(MAX(turn_number), 0) AS n FROM turns WHERE session_id = ?',
     ).get(schedule.control_session_id) as { n: number };
+    const unknown = run.status === 'unknown';
     const message: AttentionMessage = {
       type: 'attention',
       id: `gian:attention:schedule-run-${run.id}`,
       session_id: schedule.control_session_id,
-      turn: turnRow.n,
+      turn: Math.max(1, turnRow.n),
       kind: 'error',
       timestamp: Date.parse(this.now().iso),
-      title: 'Scheduled run failed',
-      body: `A scheduled run failed (${errorCode}). Open the schedule run log for details.`,
+      title: unknown ? 'Scheduled run outcome unknown' : 'Scheduled run failed',
+      body: unknown
+        ? `A scheduled run ended with an unknown outcome (${errorCode}). Open the schedule run log for details.`
+        : `A scheduled run failed (${errorCode}). Open the schedule run log for details.`,
       provider: session.executor,
+      schedule: { schedule_id: schedule.id, run_id: run.id },
     };
     try {
       this.options.broadcaster.broadcast(message);

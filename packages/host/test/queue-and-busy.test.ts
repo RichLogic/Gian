@@ -178,28 +178,29 @@ function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
 // Wait one microtask tick so fire-and-forget chains in handleLifecycle settle.
 async function tick() { await new Promise(r => setTimeout(r, 0)); }
 
-const CLOSED_SESSION_STATES = ['completed', 'merged', 'discarded'] as const;
-type ClosedSessionState = typeof CLOSED_SESSION_STATES[number];
+// Only the user-set completion flag closes a session for input. A finalized
+// worktree outcome (merged/discarded) is legacy metadata: the product no
+// longer binds sessions to worktrees, and per ADR-0080 the CLI can resume, so
+// Gian resumes too.
 
-function closeSessionForInput(
+function completeSession(
   db: ReturnType<typeof openDatabase>,
   sessionId: string,
-  state: ClosedSessionState,
 ): void {
-  if (state === 'completed') {
-    db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
-      .run(new Date().toISOString(), sessionId);
-    return;
-  }
-  db.prepare('UPDATE sessions SET worktree_outcome = ? WHERE id = ?')
-    .run(state, sessionId);
+  db.prepare('UPDATE sessions SET completed_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), sessionId);
 }
 
-function closedSessionError(state: ClosedSessionState): RegExp {
-  return state === 'completed'
-    ? /session is completed; reopen it before sending more messages/
-    : new RegExp(`session is ${state}; create a new session to continue`);
+function finalizeWorktree(
+  db: ReturnType<typeof openDatabase>,
+  sessionId: string,
+  outcome: 'merged' | 'discarded',
+): void {
+  db.prepare('UPDATE sessions SET worktree_outcome = ? WHERE id = ?')
+    .run(outcome, sessionId);
 }
+
+const COMPLETED_SESSION_ERROR = /session is completed; reopen it before sending more messages/;
 
 // ---------------------------------------------------------------------------
 // QUEUE-001 — concurrent send must enqueue, not start a second turn.
@@ -286,154 +287,250 @@ test('QUEUE-001: queued message is consumed exactly once on turn.completed (seri
 });
 
 // ---------------------------------------------------------------------------
-// Completed and finalized sessions are closed for all new input. Every path
-// rejects before mutating the queue, transcript, proxy, or broadcast stream.
+// Completed sessions are closed for all new input. Every path rejects before
+// mutating the queue, transcript, proxy, or broadcast stream.
 // ---------------------------------------------------------------------------
 
-for (const closedState of CLOSED_SESSION_STATES) {
-  test(`sendMessage rejects when the session is ${closedState}`, async () => {
+test('sendMessage rejects when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    completeSession(db, session.id);
+
+    await assert.rejects(
+      sessions.sendMessage(session.id, 'hello'),
+      COMPLETED_SESSION_ERROR,
+      'completed session must refuse new turns',
+    );
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0, 'no turn was started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('enqueueMessage rejects without mutation when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    completeSession(db, session.id);
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+
+    assert.throws(
+      () => sessions.enqueueMessage(session.id, 'must-not-enqueue'),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(queue.list(session.id), [], 'completed session queue remains empty');
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected enqueue must not broadcast a phantom queue update',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('sendQueuedNow preserves FIFO without side effects when the session is completed', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+    completeSession(db, session.id);
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-first', 'queued-second'],
+      'rejected send-now must preserve queue length and FIFO order',
+    );
+    assert.equal(codexClient.startTurnCalls.length, 0, 'rejected send-now must not start a turn');
+    assert.equal(codexClient.steerCalls.length, 0, 'rejected send-now must not steer a turn');
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected send-now must not broadcast a queue pop',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('queue edit, remove, and clear preserve contents when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, queue, broadcaster, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    const queueBefore = queue.list(session.id);
+    const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
+    completeSession(db, session.id);
+
+    assert.throws(
+      () => sessions.updateQueueMessage(session.id, queueBefore[0]!.id, 'must-not-update'),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.throws(
+      () => sessions.removeFromQueue(session.id, queueBefore[0]!.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.throws(
+      () => sessions.clearQueue(session.id),
+      COMPLETED_SESSION_ERROR,
+    );
+    assert.deepEqual(
+      queue.list(session.id),
+      queueBefore,
+      'rejected queue mutations must preserve entry identity, contents, count, and FIFO order',
+    );
+    assert.equal(
+      broadcaster.messages.filter(message => message.type === 'queue:updated').length,
+      broadcastsBefore,
+      'rejected queue mutations must not broadcast a phantom update',
+    );
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('queue drain stops without popping when the session is completed', async () => {
+  const ctx = setup();
+  try {
+    const { sessions, proxyMgr, queue, db } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'turn-B');
+    assert.equal(queue.list(session.id).length, 1, 'one message queued behind active turn');
+
+    completeSession(db, session.id);
+    proxyMgr.client.fire({
+      method: 'turn.completed',
+      params: { sessionId: 'proxy_x', data: { status: 'completed' } },
+    });
+    await tick();
+
+    assert.equal(proxyMgr.client.startTurnCalls.length, 1,
+      'drain must not start another turn on a completed session');
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['turn-B'],
+      'drain must not pop the queued message');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0080 — a finalized worktree outcome never closes the session: the CLI
+// can resume, so Gian resumes too. Every input path behaves exactly as it
+// does for an ordinary open session.
+// ---------------------------------------------------------------------------
+
+const FINALIZED_WORKTREE_OUTCOMES = ['merged', 'discarded'] as const;
+
+for (const outcome of FINALIZED_WORKTREE_OUTCOMES) {
+  test(`sendMessage resumes a ${outcome} worktree session with a new turn`, async () => {
     const ctx = setup();
     try {
       const { sessions, proxyMgr, db } = ctx;
       const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-      closeSessionForInput(db, session.id, closedState);
+      finalizeWorktree(db, session.id, outcome);
 
-      await assert.rejects(
-        sessions.sendMessage(session.id, 'hello'),
-        closedSessionError(closedState),
-        `${closedState} session must refuse new turns`,
-      );
-      assert.equal(proxyMgr.client.startTurnCalls.length, 0, 'no turn was started');
-    } finally {
-      teardown(ctx);
-    }
-  });
-
-  test(`enqueueMessage rejects without mutation when the session is ${closedState}`, async () => {
-    const ctx = setup();
-    try {
-      const { sessions, queue, broadcaster, db } = ctx;
-      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-      closeSessionForInput(db, session.id, closedState);
-      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
-
-      assert.throws(
-        () => sessions.enqueueMessage(session.id, 'must-not-enqueue'),
-        closedSessionError(closedState),
-      );
-      assert.deepEqual(queue.list(session.id), [], 'closed session queue remains empty');
-      assert.equal(
-        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
-        broadcastsBefore,
-        'rejected enqueue must not broadcast a phantom queue update',
-      );
-    } finally {
-      teardown(ctx);
-    }
-  });
-
-  test(`sendQueuedNow preserves FIFO without side effects when the session is ${closedState}`, async () => {
-    const codexClient = new FakeCodexProxyClient();
-    const ctx = setup(codexClient);
-    try {
-      const { sessions, queue, broadcaster, db } = ctx;
-      const session = await sessions.createSession({
-        workspace_id: ctx.wsId,
-        executor: 'codex',
-        approval_mode: 'auto',
-      });
-      sessions.enqueueMessage(session.id, 'queued-first');
-      sessions.enqueueMessage(session.id, 'queued-second');
-      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
-      closeSessionForInput(db, session.id, closedState);
-
-      await assert.rejects(
-        sessions.sendQueuedNow(session.id),
-        closedSessionError(closedState),
-      );
+      const sent = await sessions.sendMessage(session.id, 'continue after finalize');
+      assert.ok(sent, `${outcome} session must accept a new turn`);
+      assert.equal(proxyMgr.client.startTurnCalls.length, 1, 'the turn reached the proxy');
+      const messages = db
+        .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
+        .all(session.id) as Array<{ data: string }>;
       assert.deepEqual(
-        queue.list(session.id).map(entry => entry.text),
-        ['queued-first', 'queued-second'],
-        'rejected send-now must preserve queue length and FIFO order',
-      );
-      assert.equal(codexClient.startTurnCalls.length, 0, 'rejected send-now must not start a turn');
-      assert.equal(codexClient.steerCalls.length, 0, 'rejected send-now must not steer a turn');
-      assert.equal(
-        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
-        broadcastsBefore,
-        'rejected send-now must not broadcast a queue pop',
+        messages.map(message => (JSON.parse(message.data) as { text: string }).text),
+        ['continue after finalize'],
+        'the resumed message lands on the transcript',
       );
     } finally {
       teardown(ctx);
     }
   });
 
-  test(`queue edit, remove, and clear preserve contents when the session is ${closedState}`, async () => {
-    const ctx = setup();
-    try {
-      const { sessions, queue, broadcaster, db } = ctx;
-      const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
-      sessions.enqueueMessage(session.id, 'queued-first');
-      sessions.enqueueMessage(session.id, 'queued-second');
-      const queueBefore = queue.list(session.id);
-      const broadcastsBefore = broadcaster.messages.filter(message => message.type === 'queue:updated').length;
-      closeSessionForInput(db, session.id, closedState);
-
-      assert.throws(
-        () => sessions.updateQueueMessage(session.id, queueBefore[0]!.id, 'must-not-update'),
-        closedSessionError(closedState),
-      );
-      assert.throws(
-        () => sessions.removeFromQueue(session.id, queueBefore[0]!.id),
-        closedSessionError(closedState),
-      );
-      assert.throws(
-        () => sessions.clearQueue(session.id),
-        closedSessionError(closedState),
-      );
-      assert.deepEqual(
-        queue.list(session.id),
-        queueBefore,
-        'rejected queue mutations must preserve entry identity, contents, count, and FIFO order',
-      );
-      assert.equal(
-        broadcaster.messages.filter(message => message.type === 'queue:updated').length,
-        broadcastsBefore,
-        'rejected queue mutations must not broadcast a phantom update',
-      );
-    } finally {
-      teardown(ctx);
-    }
-  });
-
-  test(`queue drain stops without popping when the session is ${closedState}`, async () => {
+  test(`queue drain pops and sends after the worktree is ${outcome}`, async () => {
     const ctx = setup();
     try {
       const { sessions, proxyMgr, queue, db } = ctx;
       const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
 
       await sessions.sendMessage(session.id, 'turn-A');
+      finalizeWorktree(db, session.id, outcome);
       sessions.enqueueMessage(session.id, 'turn-B');
-      assert.equal(queue.list(session.id).length, 1, 'one message queued behind active turn');
+      assert.equal(queue.list(session.id).length, 1, 'enqueue stays available after finalize');
 
-      closeSessionForInput(db, session.id, closedState);
       proxyMgr.client.fire({
         method: 'turn.completed',
         params: { sessionId: 'proxy_x', data: { status: 'completed' } },
       });
       await tick();
 
-      assert.equal(proxyMgr.client.startTurnCalls.length, 1,
-        'drain must not start another turn on a closed session');
-      assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['turn-B'],
-        'drain must not pop the queued message');
+      assert.equal(proxyMgr.client.startTurnCalls.length, 2,
+        'drain must start the queued turn on a resumable session');
+      assert.deepEqual(queue.list(session.id), [], 'drain must pop the queued message');
     } finally {
       teardown(ctx);
     }
   });
 }
 
-test('steerMessage rejects without proxy or transcript mutation after finalization', async () => {
+test('queue edit, remove, clear, and sendNow stay available on a merged worktree session', async () => {
+  const codexClient = new FakeCodexProxyClient();
+  const ctx = setup(codexClient);
+  try {
+    const { sessions, queue, db } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'codex',
+      approval_mode: 'auto',
+    });
+    sessions.enqueueMessage(session.id, 'queued-first');
+    sessions.enqueueMessage(session.id, 'queued-second');
+    finalizeWorktree(db, session.id, 'merged');
+
+    const [first, second] = queue.list(session.id);
+    sessions.updateQueueMessage(session.id, first!.id, 'queued-first-edited');
+    sessions.removeFromQueue(session.id, second!.id);
+    sessions.enqueueMessage(session.id, 'queued-third');
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-first-edited', 'queued-third'],
+      'queue mutations apply on a finalized session',
+    );
+
+    const receipt = await sessions.sendQueuedNow(session.id);
+    assert.equal(receipt.mode, 'started', 'send-now starts the head entry as a new turn');
+    assert.equal(codexClient.startTurnCalls.length, 1, 'send-now reached the proxy');
+    assert.deepEqual(
+      queue.list(session.id).map(entry => entry.text),
+      ['queued-third'],
+      'send-now popped exactly the head entry',
+    );
+
+    sessions.clearQueue(session.id);
+    assert.deepEqual(queue.list(session.id), [], 'clear empties the queue');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('steerMessage reaches the proxy after the worktree is merged', async () => {
   const codexClient = new FakeCodexProxyClient();
   const ctx = setup(codexClient);
   try {
@@ -444,20 +541,17 @@ test('steerMessage rejects without proxy or transcript mutation after finalizati
       approval_mode: 'auto',
     });
     await sessions.sendMessage(session.id, 'turn-A');
-    closeSessionForInput(db, session.id, 'merged');
+    finalizeWorktree(db, session.id, 'merged');
 
-    await assert.rejects(
-      sessions.steerMessage(session.id, 'must-not-steer'),
-      closedSessionError('merged'),
-    );
-    assert.equal(codexClient.steerCalls.length, 0, 'finalized session must not reach turn/steer');
+    await sessions.steerMessage(session.id, 'steer after finalize');
+    assert.equal(codexClient.steerCalls.length, 1, 'finalized session must reach turn/steer');
     const messages = db
       .prepare("SELECT data FROM events WHERE session_id = ? AND type = 'user_message' ORDER BY rowid")
       .all(session.id) as Array<{ data: string }>;
     assert.deepEqual(
       messages.map(message => (JSON.parse(message.data) as { text: string }).text),
-      ['turn-A'],
-      'rejected steer must not append a transcript event',
+      ['turn-A', 'steer after finalize'],
+      'the steer is recorded on the transcript',
     );
   } finally {
     teardown(ctx);

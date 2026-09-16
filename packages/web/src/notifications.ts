@@ -1,23 +1,20 @@
-import type { EventEnvelope, Session } from '@gian/shared';
-import { stripGianActionBlocks } from '@gian/shared';
-import { displayDataForEnvelope, displayTypeForEnvelope } from './transcript/apply.js';
+import type { AttentionMessage } from '@gian/shared';
 import { desktopBridge } from './desktop-bridge.js';
 
-const PREFS_KEY = 'gian.notificationPrefs.v1';
+// v2 stores device-level fields only. The user-level master/kind switches
+// moved into the Host config (`notifications` settings section), where the
+// Host gates the attention signal before broadcasting — keeping them in
+// localStorage would drift between devices.
+const PREFS_KEY_V2 = 'gian.notificationPrefs.v2';
+const PREFS_KEY_V1 = 'gian.notificationPrefs.v1';
 
-export interface NotificationPrefs {
+export interface DeviceNotificationPrefs {
   desktop: boolean;
-  sessionDone: boolean;
-  approvalNeeded: boolean;
-  errors: boolean;
   sound: boolean;
 }
 
-export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
+export const DEFAULT_DEVICE_NOTIFICATION_PREFS: DeviceNotificationPrefs = {
   desktop: true,
-  sessionDone: true,
-  approvalNeeded: true,
-  errors: true,
   sound: false,
 };
 
@@ -59,30 +56,54 @@ export function browserNotificationPermission(): BrowserNotificationPermission {
   return Notification.permission;
 }
 
-export function loadNotificationPrefs(): NotificationPrefs {
-  const raw = storage()?.getItem(PREFS_KEY);
-  if (!raw) return DEFAULT_NOTIFICATION_PREFS;
-  try {
-    const parsed = JSON.parse(raw) as Partial<NotificationPrefs>;
-    return {
-      desktop: typeof parsed.desktop === 'boolean' ? parsed.desktop : DEFAULT_NOTIFICATION_PREFS.desktop,
-      sessionDone: typeof parsed.sessionDone === 'boolean' ? parsed.sessionDone : DEFAULT_NOTIFICATION_PREFS.sessionDone,
-      approvalNeeded: typeof parsed.approvalNeeded === 'boolean' ? parsed.approvalNeeded : DEFAULT_NOTIFICATION_PREFS.approvalNeeded,
-      errors: typeof parsed.errors === 'boolean' ? parsed.errors : DEFAULT_NOTIFICATION_PREFS.errors,
-      sound: typeof parsed.sound === 'boolean' ? parsed.sound : DEFAULT_NOTIFICATION_PREFS.sound,
-    };
-  } catch {
-    return DEFAULT_NOTIFICATION_PREFS;
+export function loadDeviceNotificationPrefs(): DeviceNotificationPrefs {
+  const store = storage();
+  const rawV2 = store?.getItem(PREFS_KEY_V2);
+  if (rawV2) {
+    try {
+      const parsed = JSON.parse(rawV2) as Partial<DeviceNotificationPrefs>;
+      return {
+        desktop: typeof parsed.desktop === 'boolean'
+          ? parsed.desktop
+          : DEFAULT_DEVICE_NOTIFICATION_PREFS.desktop,
+        sound: typeof parsed.sound === 'boolean'
+          ? parsed.sound
+          : DEFAULT_DEVICE_NOTIFICATION_PREFS.sound,
+      };
+    } catch {
+      return { ...DEFAULT_DEVICE_NOTIFICATION_PREFS };
+    }
   }
+  // One-way v1 → v2 migration: only the device-level fields come forward;
+  // the retired kind switches are dropped (Host config owns them now).
+  const rawV1 = store?.getItem(PREFS_KEY_V1);
+  if (rawV1) {
+    try {
+      const parsed = JSON.parse(rawV1) as Partial<Record<string, unknown>>;
+      const migrated: DeviceNotificationPrefs = {
+        desktop: typeof parsed.desktop === 'boolean'
+          ? parsed.desktop
+          : DEFAULT_DEVICE_NOTIFICATION_PREFS.desktop,
+        sound: typeof parsed.sound === 'boolean'
+          ? parsed.sound
+          : DEFAULT_DEVICE_NOTIFICATION_PREFS.sound,
+      };
+      saveDeviceNotificationPrefs(migrated);
+      return migrated;
+    } catch {
+      return { ...DEFAULT_DEVICE_NOTIFICATION_PREFS };
+    }
+  }
+  return { ...DEFAULT_DEVICE_NOTIFICATION_PREFS };
 }
 
-export function saveNotificationPrefs(prefs: NotificationPrefs): NotificationPrefs {
-  storage()?.setItem(PREFS_KEY, JSON.stringify(prefs));
+export function saveDeviceNotificationPrefs(prefs: DeviceNotificationPrefs): DeviceNotificationPrefs {
+  storage()?.setItem(PREFS_KEY_V2, JSON.stringify(prefs));
   return prefs;
 }
 
-export function nativeNotificationPreferencesForMigration(): NotificationPrefs {
-  const preferences = loadNotificationPrefs();
+export function nativeNotificationPreferencesForMigration(): DeviceNotificationPrefs {
+  const preferences = loadDeviceNotificationPrefs();
   return {
     ...preferences,
     // Carry forward only consent already granted through the renderer. A
@@ -99,77 +120,40 @@ export async function requestDesktopNotificationPermission(): Promise<BrowserNot
   return Notification.requestPermission();
 }
 
-function sessionLabel(
-  session: Pick<Session, 'name' | 'agent_name'> | null | undefined,
-): string {
-  if (!session) return 'Session';
-  const name = session.name?.trim();
-  if (name) return name;
-  const agentName = session.agent_name?.trim();
-  return agentName || 'Session';
-}
-
-function notificationForEnvelope(
-  env: EventEnvelope,
-  session: Pick<Session, 'name' | 'agent_name'> | null | undefined,
-  prefs: NotificationPrefs,
-): { title: string; body: string; tag: string } | null {
-  const label = sessionLabel(session);
-  const type = displayTypeForEnvelope(env);
-  const data = displayDataForEnvelope(env);
-  if (type === 'state.turn-completed') {
-    if (!prefs.sessionDone) return null;
-    const summary = typeof data.summary === 'string' ? stripGianActionBlocks(data.summary).trim() : '';
-    return {
-      title: `Gian · ${label} completed`,
-      body: summary || `Turn ${env.turn} completed.`,
-      tag: `gian:${env.session_id}:completed:${env.turn}`,
-    };
-  }
-  if (type === 'interaction.approval' || type === 'interaction.question') {
-    if (!prefs.approvalNeeded) return null;
-    const title = typeof data.title === 'string' ? data.title : 'Approval needed';
-    const subject = typeof data.subject === 'string' ? data.subject : '';
-    return {
-      title: `Gian · ${title}`,
-      body: subject || label,
-      tag: `gian:${env.session_id}:approval:${env.call_id}`,
-    };
-  }
-  if (type === 'state.error') {
-    if (!prefs.errors) return null;
-    const message = typeof data.message === 'string' ? data.message : 'Session error';
-    return {
-      title: `Gian · ${label} failed`,
-      body: message,
-      tag: `gian:${env.session_id}:error:${env.call_id}`,
-    };
-  }
-  return null;
-}
-
-export function maybeNotifyForEnvelope(
-  env: EventEnvelope,
+/**
+ * Renderer fallback delivery (Browser / GianDev): presents the Host's
+ * `attention` message as-is — the title/body/privacy level and the stable
+ * dedupe id are exactly what the native path delivers. Suppression mirrors
+ * the native rule: a focused window already showing this Session stays
+ * quiet.
+ */
+export function maybeNotifyForAttention(
+  message: AttentionMessage,
   options: {
-    session?: Pick<Session, 'name' | 'agent_name'> | null;
+    visibleSessionId: string | null;
     onClick?: () => void;
-  } = {},
+  },
 ): boolean {
   // Signed desktop builds receive global, privacy-bounded `attention`
   // messages in Electron main. Keeping the renderer path active as well
-  // would double-notify the currently subscribed session. Browser/GianDev
-  // surfaces retain this fallback.
+  // would double-notify. Browser/GianDev surfaces retain this fallback.
   if (desktopBridge()?.notifications?.native) return false;
-  const prefs = loadNotificationPrefs();
+  const prefs = loadDeviceNotificationPrefs();
   if (!prefs.desktop || browserNotificationPermission() !== 'granted') return false;
-
-  const payload = notificationForEnvelope(env, options.session, prefs);
-  if (!payload) return false;
+  if (
+    document.hasFocus()
+    && document.visibilityState === 'visible'
+    && options.visibleSessionId === message.session_id
+  ) {
+    return false;
+  }
 
   try {
-    const notification = new Notification(payload.title, {
-      body: payload.body,
-      tag: payload.tag,
+    const notification = new Notification(message.title, {
+      body: message.body,
+      // The Host id is stable across replay, so the OS itself de-duplicates
+      // a re-broadcast of the same display event.
+      tag: message.id,
       silent: !prefs.sound,
     });
     notification.onclick = () => {

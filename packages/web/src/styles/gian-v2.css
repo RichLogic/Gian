@@ -419,15 +419,6 @@
 .ri-exec.codex  { color: var(--codex); }
 .ri-exec.kimi { color: var(--text); }
 .ri-exec.grok { color: var(--text-2); }
-.ri-hidden-badge {
-  position: absolute; top: 7px; right: 28px;
-  width: 14px; height: 14px;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--text-3);
-  opacity: 0.7;
-  pointer-events: none;
-}
-.ri-hidden-badge svg { width: 11px; height: 11px; }
 /* Row-start timer glyph (2026-09-15 owner): hangs in the row's icon gutter —
    the empty column left of the shared 43px title column, aligned with the
    group-header icons (~18px). The −25px/1em/5px triple (plus the row's 6px
@@ -460,8 +451,8 @@
    StatusIcon, which now owns per-row status colour. Neutral grey everywhere. */
 
 /* Session-row hover actions (pin / archive / complete). They cover the
-   row-end glyph (age / status / hidden badge) on hover; nothing stays visible
-   off-hover except a pinned subtask's pin (Tasks rail, .ri-act.on). */
+   row-end glyph (age / status) on hover; nothing stays visible off-hover
+   except a pinned subtask's pin (Tasks rail, .ri-act.on). */
 .ri-acts {
   position: absolute; right: 6px; top: 50%;
   transform: translateY(-50%);
@@ -479,8 +470,7 @@
 .ri-act:hover { background: var(--surface-3); color: var(--text); }
 .ri-act.on { color: var(--text-2); }
 .session-row:hover .ri-age,
-.session-row:hover .ri-status,
-.session-row:hover .ri-hidden-badge { opacity: 0; }
+.session-row:hover .ri-status { opacity: 0; }
 
 /* status pill */
 .pill {

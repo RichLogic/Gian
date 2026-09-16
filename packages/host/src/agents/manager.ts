@@ -104,7 +104,7 @@ const OFFICIAL_RUNTIME_IDS: Record<LegacyExecutorId, string> = {
   codex: 'codex',
   kimi: 'kimi',
   grok: 'grok',
-  dsh: 'dsh',
+  dsh: 'deepseek-harness',
   zcode: 'zcode',
 };
 

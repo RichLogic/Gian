@@ -74,7 +74,7 @@ export const REST_MUTATION_TO_OPERATION = {
   completeSubtask: ['task.completeSubtask'],
   reopenSubtask: ['task.reopenSubtask'],
   createWorkspace: ['workspace.create'],
-  updateWorkspace: ['workspace.rename', 'workspace.setHidden', 'workspace.pin'],
+  updateWorkspace: ['workspace.rename', 'workspace.pin'],
   reorderWorkspaces: ['workspace.reorder'],
   reorderTasks: ['task.reorder'],
   reorderSessions: ['session.reorder'],

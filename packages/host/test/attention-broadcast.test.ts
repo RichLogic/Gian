@@ -1,11 +1,18 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import type { ChatEvent } from '@gian/shared';
+import type { ChatEvent, NotificationPreferences, ServerToClientMessage } from '@gian/shared';
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '@gian/shared';
 import {
   ATTENTION_BODY_MAX_BYTES,
   ATTENTION_TITLE_MAX_BYTES,
   attentionMessageForEvent,
 } from '../src/session/event-coordinator.js';
+import {
+  AttentionDispatcher,
+  attentionGateForPreferences,
+  attentionKindEnabled,
+} from '../src/session/attention.js';
+import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 const base = {
   session_id: 'session-a',
@@ -214,4 +221,98 @@ test('attention identity is bounded and never exposes a provider call id', () =>
   assert.notEqual(first.id, different?.id);
   assert.match(first.id, /^gian:attention:[A-Za-z0-9_-]{43}$/u);
   assert.doesNotMatch(JSON.stringify(first), /provider-secret|Users|alice/);
+});
+
+test('attentionKindEnabled maps kinds onto the user-level preference section', () => {
+  const all: NotificationPreferences = { ...DEFAULT_NOTIFICATION_PREFERENCES };
+  for (const kind of ['turn-completed', 'approval', 'question', 'error'] as const) {
+    assert.equal(attentionKindEnabled(all, kind), true, kind);
+  }
+  assert.equal(attentionKindEnabled({ ...all, enabled: false }, 'error'), false);
+  assert.equal(attentionKindEnabled({ ...all, session_done: false }, 'turn-completed'), false);
+  assert.equal(attentionKindEnabled({ ...all, session_done: false }, 'error'), true);
+  assert.equal(attentionKindEnabled({ ...all, approval_needed: false }, 'approval'), false);
+  assert.equal(attentionKindEnabled({ ...all, approval_needed: false }, 'question'), false);
+  assert.equal(attentionKindEnabled({ ...all, approval_needed: false }, 'turn-completed'), true);
+  assert.equal(attentionKindEnabled({ ...all, errors: false }, 'error'), false);
+  assert.equal(attentionKindEnabled({ ...all, errors: false }, 'approval'), true);
+});
+
+function completionEvent(callId: string): ChatEvent<'state.turn-completed'> {
+  return {
+    ...base,
+    call_id: callId,
+    display: {
+      type: 'state.turn-completed',
+      data: { turnId: callId },
+    },
+  };
+}
+
+function errorEvent(callId: string): ChatEvent<'state.error'> {
+  return {
+    ...base,
+    call_id: callId,
+    display: {
+      type: 'state.error',
+      data: { message: 'provider stopped', retryable: false },
+    },
+  };
+}
+
+function capturingBroadcaster(): { messages: ServerToClientMessage[]; broadcaster: WsBroadcaster } {
+  const messages: ServerToClientMessage[] = [];
+  const broadcaster = {
+    add() {},
+    remove() {},
+    send() {},
+    broadcast(message: ServerToClientMessage) { messages.push(message); },
+    get size() { return 0; },
+  } as unknown as WsBroadcaster;
+  return { messages, broadcaster };
+}
+
+test('the master switch gates every attention broadcast', () => {
+  const { messages, broadcaster } = capturingBroadcaster();
+  let prefs: NotificationPreferences = { ...DEFAULT_NOTIFICATION_PREFERENCES, enabled: false };
+  const dispatcher = new AttentionDispatcher(
+    broadcaster,
+    attentionGateForPreferences(() => prefs),
+  );
+
+  assert.equal(dispatcher.broadcast(completionEvent('gated-off')), null);
+  assert.equal(messages.length, 0, 'master off broadcasts nothing');
+
+  // The suppressed event stays claimed: re-enabling must not replay it.
+  prefs = { ...DEFAULT_NOTIFICATION_PREFERENCES };
+  assert.equal(dispatcher.broadcast(completionEvent('gated-off')), null);
+  assert.equal(messages.length, 0);
+  const live = dispatcher.broadcast(completionEvent('after-reenable'));
+  assert.ok(live);
+  assert.deepEqual(messages, [live]);
+});
+
+test('a disabled kind is gated while other kinds still broadcast', () => {
+  const { messages, broadcaster } = capturingBroadcaster();
+  const prefs: NotificationPreferences = { ...DEFAULT_NOTIFICATION_PREFERENCES, session_done: false };
+  const dispatcher = new AttentionDispatcher(
+    broadcaster,
+    attentionGateForPreferences(() => prefs),
+  );
+
+  assert.equal(dispatcher.broadcast(completionEvent('kind-off')), null);
+  assert.equal(messages.length, 0, 'turn-completed is gated off');
+
+  const errorAttention = dispatcher.broadcast(errorEvent('kind-on'));
+  assert.ok(errorAttention);
+  assert.equal(errorAttention.kind, 'error');
+  assert.deepEqual(messages, [errorAttention]);
+});
+
+test('a dispatcher without a gate broadcasts everything (legacy construction)', () => {
+  const { messages, broadcaster } = capturingBroadcaster();
+  const dispatcher = new AttentionDispatcher(broadcaster);
+  const live = dispatcher.broadcast(completionEvent('ungated'));
+  assert.ok(live);
+  assert.deepEqual(messages, [live]);
 });

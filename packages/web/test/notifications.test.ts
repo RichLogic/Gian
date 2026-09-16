@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EventEnvelope } from '@gian/shared';
+import type { AttentionMessage } from '@gian/shared';
 import {
-  DEFAULT_NOTIFICATION_PREFS,
+  DEFAULT_DEVICE_NOTIFICATION_PREFS,
   browserNotificationPermission,
-  loadNotificationPrefs,
-  maybeNotifyForEnvelope,
+  loadDeviceNotificationPrefs,
+  maybeNotifyForAttention,
   nativeNotificationPreferencesForMigration,
   requestDesktopNotificationPermission,
-  saveNotificationPrefs,
+  saveDeviceNotificationPrefs,
   visibleSessionForNativeNotification,
 } from '../src/notifications.js';
 
@@ -40,21 +40,30 @@ function installNotification(permission: NotificationPermission) {
   });
 }
 
-function envelope(
-  event: 'turn_completed' | 'approval_requested' | 'session_error',
-  data: Record<string, unknown>,
-): EventEnvelope {
+function attention(overrides: Partial<AttentionMessage> = {}): AttentionMessage {
   return {
+    type: 'attention',
+    id: 'gian:attention:abc123',
     session_id: 'sess-1',
     turn: 3,
-    call_id: `${event}-1`,
-    event,
-    ts: Date.now(),
-    data,
+    kind: 'turn-completed',
+    timestamp: Date.now(),
+    title: 'Turn completed',
+    body: 'The agent finished turn 3.',
+    provider: 'codex',
+    ...overrides,
   };
 }
 
-describe('browser notifications', () => {
+function focusWindow(focused: boolean) {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(focused);
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: focused ? 'visible' : 'hidden',
+  });
+}
+
+describe('device notification preferences', () => {
   beforeEach(() => {
     localStorage.clear();
     delete window.gianDesktop;
@@ -71,8 +80,31 @@ describe('browser notifications', () => {
     });
   });
 
-  it('loads default notification preferences when storage is empty', () => {
-    expect(loadNotificationPrefs()).toEqual(DEFAULT_NOTIFICATION_PREFS);
+  it('loads device-level defaults when storage is empty', () => {
+    expect(loadDeviceNotificationPrefs()).toEqual(DEFAULT_DEVICE_NOTIFICATION_PREFS);
+  });
+
+  it('migrates only consent and sound from the v1 five-key format', () => {
+    localStorage.setItem('gian.notificationPrefs.v1', JSON.stringify({
+      desktop: true,
+      sessionDone: false,
+      approvalNeeded: false,
+      errors: false,
+      sound: true,
+    }));
+
+    expect(loadDeviceNotificationPrefs()).toEqual({ desktop: true, sound: true });
+    // The retired kind switches must not survive into v2 storage.
+    expect(JSON.parse(localStorage.getItem('gian.notificationPrefs.v2')!)).toEqual({
+      desktop: true,
+      sound: true,
+    });
+  });
+
+  it('prefers v2 storage over v1 once both exist', () => {
+    localStorage.setItem('gian.notificationPrefs.v1', JSON.stringify({ desktop: true, sound: true }));
+    saveDeviceNotificationPrefs({ desktop: false, sound: false });
+    expect(loadDeviceNotificationPrefs()).toEqual({ desktop: false, sound: false });
   });
 
   it('requests browser notification permission from a user gesture path', async () => {
@@ -84,26 +116,79 @@ describe('browser notifications', () => {
   });
 
   it('migrates native delivery only from previously granted consent', () => {
-    saveNotificationPrefs({ ...DEFAULT_NOTIFICATION_PREFS, sound: true });
+    saveDeviceNotificationPrefs({ desktop: true, sound: true });
     expect(nativeNotificationPreferencesForMigration()).toEqual({
-      ...DEFAULT_NOTIFICATION_PREFS,
-      sound: true,
       desktop: true,
+      sound: true,
     });
     installNotification('default');
     expect(nativeNotificationPreferencesForMigration().desktop).toBe(false);
   });
+});
 
-  it('sends a desktop notification for session completion when permission is granted', () => {
-    const sent = maybeNotifyForEnvelope(
-      envelope('turn_completed', { summary: 'Implemented the parser.' }),
-      { session: { name: 'Parser fix', agent_name: 'Codex' } },
-    );
+describe('maybeNotifyForAttention', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    delete window.gianDesktop;
+    installNotification('granted');
+    focusWindow(false);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+    Object.defineProperty(globalThis, 'Notification', {
+      configurable: true,
+      writable: true,
+      value: originalNotification,
+    });
+  });
+
+  it('delivers the Host text verbatim with the attention id as the tag', () => {
+    const message = attention();
+    const sent = maybeNotifyForAttention(message, { visibleSessionId: null });
 
     expect(sent).toBe(true);
     expect(FakeNotification.instances).toHaveLength(1);
-    expect(FakeNotification.instances[0]!.title).toBe('Gian · Parser fix completed');
-    expect(FakeNotification.instances[0]!.options?.body).toBe('Implemented the parser.');
+    expect(FakeNotification.instances[0]!.title).toBe('Turn completed');
+    expect(FakeNotification.instances[0]!.options?.body).toBe('The agent finished turn 3.');
+    expect(FakeNotification.instances[0]!.options?.tag).toBe('gian:attention:abc123');
+    expect(FakeNotification.instances[0]!.options?.silent).toBe(true);
+  });
+
+  it('honors the device sound preference', () => {
+    saveDeviceNotificationPrefs({ desktop: true, sound: true });
+    maybeNotifyForAttention(attention(), { visibleSessionId: null });
+    expect(FakeNotification.instances[0]!.options?.silent).toBe(false);
+  });
+
+  it('does not notify when device consent is off', () => {
+    saveDeviceNotificationPrefs({ desktop: false, sound: false });
+
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: null })).toBe(false);
+    expect(FakeNotification.instances).toHaveLength(0);
+  });
+
+  it('does not notify when browser permission has not been granted', () => {
+    installNotification('default');
+
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: null })).toBe(false);
+    expect(FakeNotification.instances).toHaveLength(0);
+  });
+
+  it('suppresses the session already visible in a focused window only', () => {
+    focusWindow(true);
+
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: 'sess-1' })).toBe(false);
+    expect(maybeNotifyForAttention(attention({ id: 'other' }), { visibleSessionId: 'sess-2' }))
+      .toBe(true);
+    expect(FakeNotification.instances).toHaveLength(1);
+  });
+
+  it('notifies a visible session while the window is unfocused', () => {
+    focusWindow(false);
+
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: 'sess-1' })).toBe(true);
   });
 
   it('leaves signed desktop delivery to Electron main to avoid duplicates', () => {
@@ -113,43 +198,7 @@ describe('browser notifications', () => {
       } as NonNullable<typeof window.gianDesktop>['notifications'],
     };
 
-    expect(maybeNotifyForEnvelope(envelope('turn_completed', {}))).toBe(false);
-    expect(FakeNotification.instances).toHaveLength(0);
-  });
-
-  it('uses the saved Agent name for unnamed sessions without provider branches', () => {
-    maybeNotifyForEnvelope(
-      envelope('turn_completed', {}),
-      { session: { name: null, agent_name: 'Kimi Assistant' } },
-    );
-
-    expect(FakeNotification.instances[0]!.title).toBe('Gian · Kimi Assistant completed');
-  });
-
-  it('uses a generic label when neither Session nor Agent has a name', () => {
-    maybeNotifyForEnvelope(
-      envelope('turn_completed', {}),
-      { session: { name: null, agent_name: null } },
-    );
-
-    expect(FakeNotification.instances[0]!.title).toBe('Gian · Session completed');
-  });
-
-  it('does not notify when browser permission has not been granted', () => {
-    installNotification('default');
-
-    const sent = maybeNotifyForEnvelope(envelope('turn_completed', {}));
-
-    expect(sent).toBe(false);
-    expect(FakeNotification.instances).toHaveLength(0);
-  });
-
-  it('honors per-event preferences', () => {
-    saveNotificationPrefs({ ...DEFAULT_NOTIFICATION_PREFS, sessionDone: false });
-
-    const sent = maybeNotifyForEnvelope(envelope('turn_completed', { summary: 'done' }));
-
-    expect(sent).toBe(false);
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: null })).toBe(false);
     expect(FakeNotification.instances).toHaveLength(0);
   });
 
@@ -157,7 +206,21 @@ describe('browser notifications', () => {
     Reflect.deleteProperty(globalThis, 'Notification');
 
     expect(browserNotificationPermission()).toBe('unsupported');
-    expect(maybeNotifyForEnvelope(envelope('session_error', { message: 'boom' }))).toBe(false);
+    expect(maybeNotifyForAttention(attention(), { visibleSessionId: null })).toBe(false);
+  });
+
+  it('clicking focuses the window, navigates, and closes the notification', () => {
+    const onClick = vi.fn();
+    const focus = vi.spyOn(window, 'focus').mockImplementation(() => undefined);
+    maybeNotifyForAttention(attention(), { visibleSessionId: null, onClick });
+
+    FakeNotification.instances[0]!.onclick?.call(
+      FakeNotification.instances[0]! as unknown as Notification,
+      new Event('click'),
+    );
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(FakeNotification.instances[0]!.close).toHaveBeenCalledTimes(1);
   });
 });
 

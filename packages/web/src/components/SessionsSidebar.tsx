@@ -40,7 +40,6 @@ const ICON = {
   plus:   'M12 5v14 M5 12h14',
   // lucide "timer" — session owns at least one live Schedule (row-end badge)
   timer:  'M10 2h4 M12 14l3-3 M20 14a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
-  eyeOff: 'M2 2l12 12M6.5 6.5a2 2 0 0 0 2.8 2.8M3.5 4.5a8 8 0 0 0-1.5 3.5C3 11.5 5.5 13 8 13a8 8 0 0 0 4-1.1M9 3a8 8 0 0 1 5 5 8 8 0 0 1-1 2',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
   // pushpin — pin / unpin rows (same glyph as the task pin in PathBreadcrumb)
@@ -158,8 +157,7 @@ export function SessionsSidebar({
   const filtered = active.filter(s => {
     // The per-Task Manager (type='manager') lives in Tasks mode only — it is
     // never a row in the Sessions list. Subtasks (type='subtask') DO appear
-    // here: a subtask is a 1:1 session. buildRailSections omits every Session
-    // owned by a hidden Workspace until Settings > Workspaces shows it again.
+    // here: a subtask is a 1:1 session.
     return s.type !== 'manager';
   });
 
@@ -175,7 +173,6 @@ export function SessionsSidebar({
       <SessionRow
         key={s.id}
         session={s}
-        wsHidden={s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1}
         drag={drag}
         {...makeRowHandlers(s)}
       />
@@ -236,7 +233,7 @@ export function SessionsSidebar({
                   <SidebarGroup
                     key={wsId}
                     wsId={wsId}
-                    list={sections.byWs.get(wsId)!}
+                    list={sections.byWs.get(wsId) ?? []}
                     workspace={wsById.get(wsId)}
                     isCollapsed={collapsed.has(wsId)}
                     onToggle={() => toggleGroup(wsId)}
@@ -264,7 +261,7 @@ export function SessionsSidebar({
           <SidebarGroup
             key={wsId}
             wsId={wsId}
-            list={sections.byWs.get(wsId)!}
+            list={sections.byWs.get(wsId) ?? []}
             workspace={wsById.get(wsId)}
             isCollapsed={collapsed.has(wsId)}
             onToggle={() => toggleGroup(wsId)}
@@ -274,8 +271,8 @@ export function SessionsSidebar({
             groupDrag={{ props: projectWsDnd.rowProps(wsId), className: projectWsDnd.rowClass(wsId) }}
           />
         ))}
-        {/* 无归属: sessions of hidden workspaces stay reachable here instead
-            of disappearing from the rail. */}
+        {/* 无归属: sessions whose workspace is gone (NULL workspace_id after
+            workspace delete) stay reachable here. */}
         {sections.unfiled.length > 0 && (
           <>
             <SidebarSection
@@ -515,11 +512,10 @@ export function SessionHoverCard({
 }
 
 export function SessionRow({
-  session, active, wsHidden, hideAge = false, hidePin = false, workspaceName, onSelect, onPin, onArchive, drag,
+  session, active, hideAge = false, hidePin = false, workspaceName, onSelect, onPin, onArchive, drag,
 }: {
   session: Session;
   active: boolean;
-  wsHidden?: boolean;
   /** Tasks rail (T4, 2026-09-06): no relative-time stamp at the row end. */
   hideAge?: boolean;
   /** Tasks rail (2026-09-06): no pin concept there — the pin button hides. */
@@ -582,15 +578,6 @@ export function SessionRow({
         : statusGlyphShown(session.status, session.unread === 1 && !active)
           ? <StatusIcon status={session.status} unread={session.unread === 1 && !active} />
           : !hideAge && <span className={`ri-age ${session.executor}`} title={t('coding.session.lastActivity')}>{relTime(session.updated_at)}</span>}
-      {wsHidden && (
-        <span
-          className="ri-hidden-badge"
-          title={t('coding.session.workspaceHidden')}
-          aria-label={t('coding.session.workspaceHidden.aria')}
-        >
-          <SvgIcon d={ICON.eyeOff} size={11} />
-        </span>
-      )}
       {hover.rect && !deleting && (
         <SessionHoverCard
           session={session}

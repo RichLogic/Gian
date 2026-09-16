@@ -32,7 +32,7 @@ function generation(root: string): ManagedRuntimeGeneration {
       runtimeId: 'claude',
       version: '2.1.159',
       artifactSha256: 'c'.repeat(64),
-      entryPath: join(root, 'runtimes', 'claude', '2.1.159', 'bin', 'claude'),
+      entryPath: join(root, 'runtimes', 'claude', '2.1.159', 'c'.repeat(64), 'bin', 'claude'),
       ownership: 'managed',
     },
     companions: [],

@@ -62,7 +62,6 @@ export function useAppShortcuts({
           activeSessionId
           && session?.executor === 'codex'
           && session.completed_at == null
-          && session.worktree_outcome == null
         ) {
           event.preventDefault();
           // Pending policy: the dispatcher's duplicate guard blocks repeat

@@ -111,9 +111,6 @@ export interface SessionAgentResolver {
 }
 
 function assertSessionAcceptsInput(session: Session): void {
-  if (session.worktree_outcome) {
-    throw new Error(`session is ${session.worktree_outcome}; create a new session to continue`);
-  }
   if (session.completed_at) {
     throw new Error('session is completed; reopen it before sending more messages');
   }
@@ -908,7 +905,16 @@ export class SessionManager {
       // Persist the response identity before crossing the Proxy boundary. A
       // lost reply can then be retried with the same response id and payload.
       const isDeny = decision === 'decline' || decision === 'keep_planning';
-      const actionId = isDeny ? 'decline' : decision === 'allow_session' ? 'allow_session' : 'allow_once';
+      // exit_plan_mode cards record the proxy-advertised wire actionIds at
+      // request time (cc-proxy v2 whitelists allow_once/reject_once, kimi
+      // relays ACP optionIds); a hardcoded 'decline' would be rejected with
+      // INTERACTION_ACTION_NOT_FOUND by those proxies.
+      const wireActions = exitPlanWireActions(pending);
+      const actionId = isDeny
+        ? wireActions?.deny ?? 'decline'
+        : decision === 'allow_session'
+          ? 'allow_session'
+          : wireActions?.allow ?? 'allow_once';
       const values = isDeny ? {} : answers ?? {};
       this.saveInteraction(sessionId, approvalId, {
         responseId,
@@ -2392,6 +2398,20 @@ function isV2Client(client: unknown): client is ProtocolV2SessionClient {
     && 'protocolV2' in client
     && (client as { protocolV2?: true }).protocolV2 === true
     && 'runtimeHost' in client;
+}
+
+/** Proxy-advertised wire actionIds recorded on an exit_plan_mode request. */
+function exitPlanWireActions(
+  pending: { category: string; payload?: Record<string, unknown> } | undefined,
+): { allow: string; deny: string } | null {
+  if (pending?.category !== 'exit_plan_mode') return null;
+  const raw = pending.payload?.['wireActions'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const allow = (raw as Record<string, unknown>)['allow'];
+  const deny = (raw as Record<string, unknown>)['deny'];
+  return typeof allow === 'string' && allow && typeof deny === 'string' && deny
+    ? { allow, deny }
+    : null;
 }
 
 function providerNativeSessionId(session: { nativeSession?: { id?: string } }): string | null {

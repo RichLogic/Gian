@@ -793,16 +793,14 @@ export function TasksSidebar({
   );
 
   // 未分配 (2026-09-06): untasked standalone Sessions — Tasks mode must reach
-  // EVERY conversation, not just task-bound subtasks. Hidden-workspace
-  // sessions stay reachable here exactly like the Project rail's 无归属.
+  // EVERY conversation, not just task-bound subtasks.
   // Most recently updated first (2026-09-15 owner).
   const wsById = useMemo(() => new Map(workspaces.map(w => [w.id, w])), [workspaces]);
   const unassigned = useMemo(
     () => sessions
       .filter(s => s.task_id === null
         && s.archived === 0
-        && s.type !== 'manager'
-        && !(s.workspace_id != null && wsById.get(s.workspace_id)?.hidden === 1))
+        && s.type !== 'manager')
       .sort(compareSessionsByUpdatedDesc),
     [sessions, wsById],
   );

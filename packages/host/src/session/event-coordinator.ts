@@ -1109,6 +1109,13 @@ export class SessionEventCoordinator {
     sessionId: string,
     turn: number,
   ): ChatEvent[] {
+    // Record the raw context kind map first: exit_plan_mode requests carry no
+    // display nativeOptions by design, so the registry must not depend on the
+    // projected shape. Resolved events keep their post-projection forget in
+    // the display loop below — the lookup must still see the entry here.
+    if (notification.method === 'interaction.requested') {
+      this.observeRawInteractionEvent(sessionId, notification);
+    }
     const events = projectNotification(
       provider,
       notification,
@@ -1266,6 +1273,7 @@ export class SessionEventCoordinator {
           scopeOptions: d.scopeOptions,
           ...(d.questions ? { questions: d.questions } : {}),
           ...(d.planActions ? { planActions: d.planActions } : {}),
+          ...(d.wireActions ? { wireActions: d.wireActions } : {}),
           ...(d.actions ? { actions: d.actions } : {}),
           ...(d.inputs ? { inputs: d.inputs } : {}),
         },
@@ -1406,9 +1414,9 @@ export class SessionEventCoordinator {
   private maybeAutoSendNext(sessionId: string): boolean {
     let session: Session;
     try { session = this.sessions.get(sessionId); } catch { return false; }
-    // Finalized worktrees and user-completed sessions are closed for input:
-    // stop before popping so their queues remain intact.
-    if (session.worktree_outcome || session.completed_at) return false;
+    // User-completed sessions are closed for input: stop before popping so
+    // their queues remain intact.
+    if (session.completed_at) return false;
     const next = this.queue.popNext(sessionId);
     if (!next) return false;
     this.broadcastQueueUpdated(sessionId);

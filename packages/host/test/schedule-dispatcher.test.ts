@@ -634,11 +634,67 @@ test('a failed/unknown Run raises an error attention tied to the control convers
     assert.equal(attention[0]!.kind, 'error');
     assert.equal(attention[0]!.session_id, fx.controlSessionId);
     assert.equal(attention[0]!.id, `gian:attention:schedule-run-${runId}`);
+    assert.equal(attention[0]!.title, 'Scheduled run failed');
+    // Clicking the notification opens the Timer detail's run log for THIS
+    // run — the body promises the schedule run log, so the target must match.
+    assert.deepEqual(attention[0]!.schedule, { schedule_id: scheduleId, run_id: runId });
     // NOTIFY-001: OS notification carries only generic text + the stable
     // code — never the raw error, paths, or the Schedule name.
     assert.ok(attention[0]!.body.includes('SCHEDULE_FORK_FAILED'));
     assert.equal(JSON.stringify(attention[0]!).includes('proxy fork exploded'), false);
     assert.equal(JSON.stringify(attention[0]!).includes('Nightly'), false);
+  } finally {
+    await teardown(fx);
+  }
+});
+
+test('an unknown Run raises a distinct unknown-outcome attention with the schedule target (P2)', async () => {
+  const fx = await setup();
+  try {
+    const scheduleId = createScheduleRow(fx);
+    const runId = insertRun(fx, scheduleId);
+    fx.broadcaster.messages.length = 0;
+
+    fx.dispatcher.markUnknown(runId, 'SCHEDULE_DISPATCH_UNKNOWN', 'canonical Turn evidence contradicts the run state');
+
+    const attention = fx.broadcaster.messages.filter(
+      (m): m is Extract<ServerToClientMessage, { type: 'attention' }> => (
+        m.type === 'attention' && m.id.startsWith('gian:attention:schedule-run-')
+      ),
+    );
+    assert.equal(attention.length, 1, 'exactly one attention for the unknown run');
+    assert.equal(attention[0]!.title, 'Scheduled run outcome unknown');
+    assert.ok(attention[0]!.body.includes('unknown outcome'));
+    assert.ok(attention[0]!.body.includes('SCHEDULE_DISPATCH_UNKNOWN'));
+    assert.ok(attention[0]!.body.includes('Open the schedule run log'));
+    assert.deepEqual(attention[0]!.schedule, { schedule_id: scheduleId, run_id: runId });
+    // The raw contradiction detail never crosses the OS boundary either.
+    assert.equal(JSON.stringify(attention[0]!).includes('contradicts'), false);
+  } finally {
+    await teardown(fx);
+  }
+});
+
+test('failure attention passes through the same user-level gate as session attention (P2)', async () => {
+  const fx = await setup();
+  try {
+    const gated = new ScheduleRunDispatcher(fx.service, fx.sessions, fx.db, {
+      now: () => ({ ms: fx.clockMs, iso: new Date(fx.clockMs).toISOString() }),
+      broadcaster: fx.broadcaster as unknown as WsBroadcaster,
+      attentionGate: () => false,
+    });
+    const scheduleId = createScheduleRow(fx);
+    const runId = insertRun(fx, scheduleId);
+    fx.broadcaster.messages.length = 0;
+
+    gated.markUnknown(runId, 'SCHEDULE_DISPATCH_UNKNOWN', undefined);
+
+    const attention = fx.broadcaster.messages.filter(
+      (m): m is Extract<ServerToClientMessage, { type: 'attention' }> => (
+        m.type === 'attention' && m.id.startsWith('gian:attention:schedule-run-')
+      ),
+    );
+    assert.equal(attention.length, 0, 'master/kind gate off → no failure attention');
   } finally {
     await teardown(fx);
   }
@@ -676,8 +732,8 @@ test('fail-closed landing still applies to a manually paused schedule (P1-4)', a
     });
     fx.service.pauseSchedule(schedule.id);
     const run = fx.service.runNow({ schedule_id: schedule.id });
-    // The control conversation is now unusable (merged).
-    fx.db.prepare("UPDATE sessions SET worktree_outcome = 'merged' WHERE id = ?")
+    // The control conversation is now unusable (completed).
+    fx.db.prepare("UPDATE sessions SET completed_at = datetime('now') WHERE id = ?")
       .run(fx.controlSessionId);
     await fx.dispatcher.dispatchRun(fx.service.repository.runRow(run.id)!);
     const settled = fx.service.repository.runRow(run.id)!;

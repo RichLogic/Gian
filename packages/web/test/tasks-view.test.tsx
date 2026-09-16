@@ -522,8 +522,10 @@ describe('unassigned group (未分配)', () => {
     expect(onSelectSession).toHaveBeenCalledWith('sess-loose');
   });
 
-  it('omits archived, manager, and hidden-workspace sessions', async () => {
+  it('omits archived and manager sessions; hidden-flagged workspaces still list theirs', async () => {
     renderTasks({
+      // The retired workspace hidden flag no longer excludes anything — the
+      // group still renders because ws-hidden's untasked session is eligible.
       workspaces: [workspace('ws-1'), { ...workspace('ws-hidden'), hidden: 1 }],
       sessions: [
         subtask({ id: 'sess-archived', type: 'coding', task_id: null, archived: 1 }),
@@ -531,8 +533,10 @@ describe('unassigned group (未分配)', () => {
         subtask({ id: 'sess-hidden-ws', type: 'coding', task_id: null, workspace_id: 'ws-hidden' }),
       ],
     });
-    // Nothing eligible → the group itself stays hidden.
-    await waitFor(() => expect(screen.queryByTestId('tasks-section-unassigned')).not.toBeInTheDocument());
+    await screen.findByTestId('tasks-section-unassigned');
+    expect(screen.getByTestId('session-row-sess-hidden-ws')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-sess-archived')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-sess-manager')).not.toBeInTheDocument();
   });
 });
 

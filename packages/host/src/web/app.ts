@@ -16,7 +16,8 @@ import { TaskManager } from '../task/manager.js';
 import { ApprovalManager } from '../approval/index.js';
 import { QueueManager } from '../queue/index.js';
 import { NativeJsonlWatcher } from '../native/watcher.js';
-import { AttentionDispatcher } from '../session/attention.js';
+import { AttentionDispatcher, attentionGateForPreferences } from '../session/attention.js';
+import { loadConfig } from '../storage/config.js';
 import { makeWsHandlers } from './ws-handler.js';
 import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
 import { WorkbenchTerminalManager } from '../term/manager.js';
@@ -166,7 +167,11 @@ export function createApp(ctx: AppContext): AppHandle {
   runtimeGuardian?.start();
   const approvals = new ApprovalManager(broadcaster);
   const queue = new QueueManager(ctx.db);
-  const attention = new AttentionDispatcher(broadcaster);
+  // One user-level gate for every `attention` broadcast (session events and
+  // scheduled-run failures alike). It reads the live config so a Settings
+  // change takes effect without a restart.
+  const attentionGate = attentionGateForPreferences(() => loadConfig(ctx.db).notifications);
+  const attention = new AttentionDispatcher(broadcaster, attentionGate);
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster, attention);
   const toolCredentials = new GianToolCredentialManager(ctx.db);
   // No raw internal token survives the Host process. A restart invalidates
@@ -253,6 +258,7 @@ export function createApp(ctx: AppContext): AppHandle {
   const scheduleLedger = new ScheduleCommandLedger(ctx.db);
   const scheduleDispatcher = new ScheduleRunDispatcher(scheduleService, sessions, ctx.db, {
     broadcaster,
+    attentionGate,
   });
   const scheduleOrchestrator = new ScheduleOrchestrator(
     { service: scheduleService, dispatcher: scheduleDispatcher, broadcaster, db: ctx.db, sessions },

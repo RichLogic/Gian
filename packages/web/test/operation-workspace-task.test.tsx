@@ -424,7 +424,7 @@ describe('workspace REST operations (proposal §8, product definitions)', () => 
     vi.useRealTimers();
   });
 
-  it('rename/hidden/pin commit optimistic overlays synchronously, before the REST promise settles', () => {
+  it('rename/pin commit optimistic overlays synchronously, before the REST promise settles', () => {
     const { store, dispatcher } = setup();
     vi.mocked(updateWorkspace).mockReturnValue(new Promise(() => {}));
 
@@ -433,9 +433,6 @@ describe('workspace REST operations (proposal §8, product definitions)', () => 
     expect(store.getOverlay(entityFieldKey('workspace:w1', 'name'))?.value).toBe('After');
     expect(store.getOverlay(entityFieldKey('workspace:w1', 'name'))?.previous).toBe('Before');
     expect(updateWorkspace).toHaveBeenCalledWith('w1', { name: 'After' });
-
-    dispatcher.dispatch('workspace.setHidden', { workspaceId: 'w1', hidden: true });
-    expect(store.getOverlay(entityFieldKey('workspace:w1', 'hidden'))?.value).toBe(1);
 
     dispatcher.dispatch('workspace.pin', { workspaceId: 'w1', pinned: true });
     expect(store.getOverlay(entityFieldKey('workspace:w1', 'pinned'))?.value).toBe(1);
@@ -583,17 +580,17 @@ describe('workspace REST operations (proposal §8, product definitions)', () => 
     const { store, dispatcher, unresolved } = setup();
     vi.mocked(updateWorkspace).mockReturnValue(new Promise(() => {})); // never settles
 
-    const run = dispatcher.dispatch('workspace.setHidden', { workspaceId: 'w1', hidden: true });
+    const run = dispatcher.dispatch('workspace.pin', { workspaceId: 'w1', pinned: true });
     vi.advanceTimersByTime(10_001);
 
     expect(store.getRun(run.id)?.phase).toBe('timed-out');
-    const overlay = store.getOverlay(entityFieldKey('workspace:w1', 'hidden'));
+    const overlay = store.getOverlay(entityFieldKey('workspace:w1', 'pinned'));
     expect(overlay?.value).toBe(1); // NOT rolled back
     expect(overlay?.unresolved).toBe(true);
     expect(unresolved).toEqual(['workspace:w1']);
 
-    // Reload says hidden is still 0 → drop and report ("may not have been applied").
-    const report = store.reconcileUnresolved('workspace:w1', { hidden: 0 });
+    // Reload says pinned is still 0 → drop and report ("may not have been applied").
+    const report = store.reconcileUnresolved('workspace:w1', { pinned: 0 });
     expect(report.dropped).toHaveLength(1);
     expect(store.getEntityOverlays('workspace:w1')).toHaveLength(0);
   });

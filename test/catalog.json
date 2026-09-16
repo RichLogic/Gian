@@ -163,6 +163,7 @@
         "packages/host/test/managed-runtime-delivery.test.ts",
         "packages/host/test/managed-runtime-generation-store.test.ts",
         "packages/host/test/managed-runtime-installer.test.ts",
+        "packages/host/test/managed-runtime-layout-migration.test.ts",
         "packages/host/test/agent-catalog-home.test.ts",
         "packages/host/test/runtime-download.test.ts",
         "packages/host/test/model-002-warmup-retry.test.ts",

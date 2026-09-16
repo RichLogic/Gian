@@ -177,4 +177,5 @@ export const ZH: Messages = {
   'interaction.resolvedHere': '已在此设备处理',
   'interaction.resolvedElsewhere': '已在其他设备处理',
   'interaction.expired': '已过期',
+  'interaction.respondFailed': '提交失败',
 };

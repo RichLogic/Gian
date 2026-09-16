@@ -1,5 +1,6 @@
 import { useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import type {
+  AttentionMessage,
   EventEnvelope,
   Executor,
   RunnerInfo,
@@ -19,7 +20,6 @@ import {
 } from '../components/composer/capabilities.js';
 import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
-import { maybeNotifyForEnvelope } from '../notifications.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { dispatchAttachmentUpload, dispatchMessageSend } from '../operations/message.js';
 import { sessionEntityKey } from '../operations/session.js';
@@ -114,6 +114,11 @@ interface UseAppSocketInput {
    *  auto-clear dispatch through the operation layer (Phase 2b). */
   ops: OperationDispatcher;
   translate?: (key: string) => string;
+  /** Global attention signal (Host-gated single source for system
+   *  notifications). Optional for embedded/test consumers; the full App
+   *  supplies it and owns suppression + delivery, because those need the
+   *  current mode/viewState. */
+  onAttention?: (message: AttentionMessage) => void;
 }
 
 async function deliverCreatedSessionFirstMessage(
@@ -214,12 +219,6 @@ export function useAppSocket(input: UseAppSocketInput): void {
 
     const handleEnvelope = (envelope: EventEnvelope, executor: Executor) => {
       const current = latest.current;
-      const notifyingSession = current.sessionsRef.current
-        .find(session => session.id === envelope.session_id) ?? null;
-      maybeNotifyForEnvelope(envelope, {
-        session: notifyingSession,
-        onClick: () => current.setActiveSessionId(envelope.session_id),
-      });
       const nextPending = nextPendingFromEnvelope(envelope);
       if (nextPending !== null) {
         current.setPendingBySession(previous => ({
@@ -704,6 +703,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
             ...previous,
             [message.session_id]: message.queue,
           }));
+          return;
+        case 'attention':
+          current.onAttention?.(message);
           return;
         case 'schedule:changed':
           // Coarse invalidation only (contract N): the Timer list/detail

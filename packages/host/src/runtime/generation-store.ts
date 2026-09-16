@@ -10,6 +10,7 @@ import {
 } from '@gian/shared';
 
 import { fsyncDirectory, writeFileAtomic } from '../catalog/atomic.js';
+import { migrateRuntimeLayout } from './migrate-runtime-layout.js';
 
 const MAX_RECORD_BYTES = 256 * 1024;
 const GENERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -202,6 +203,11 @@ export class ManagedRuntimeGenerationStore {
       mkdir(this.generationRoot, { recursive: true, mode: 0o700 }),
       mkdir(join(this.dataDir, 'plugins'), { recursive: true, mode: 0o700 }),
     ]);
+    // One-time, idempotent Runtime layout migration (runtimes/managed/* →
+    // runtimes/*, Runtime id `dsh` → `deepseek-harness`, legacy tree
+    // cleanup). It must finish before any generation record is parsed so
+    // recovery below sees only the migrated, fail-closed state.
+    await migrateRuntimeLayout(this.dataDir);
     for (const entry of await readdir(this.generationRoot, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       await this.recover(entry.name, undefined, true);

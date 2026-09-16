@@ -512,13 +512,10 @@ test('unknown fixture Session create/reattach uses stored binding after Agent de
   const { store, receipts, assets } = await installFixture(root, ['1.0.0'], () => {
     if (!db) return [];
     return db.prepare(
-      'SELECT proxy_binding_json, worktree_outcome FROM sessions WHERE proxy_binding_json IS NOT NULL',
-    ).all().flatMap((row: { proxy_binding_json: string | null; worktree_outcome: string | null }) => {
+      'SELECT proxy_binding_json FROM sessions WHERE proxy_binding_json IS NOT NULL',
+    ).all().flatMap((row: { proxy_binding_json: string | null }) => {
       const parsed = parseSessionProxyBinding(row.proxy_binding_json);
-      return parsed.ok && isResumableSessionBinding({
-        proxy_binding: parsed.binding,
-        worktree_outcome: row.worktree_outcome,
-      })
+      return parsed.ok && isResumableSessionBinding({ proxy_binding: parsed.binding })
         ? [{ pluginId: parsed.binding.pluginId, pluginVersion: parsed.binding.pluginVersion }]
         : [];
     });
@@ -794,7 +791,7 @@ test('exact v3 reattach preserves stored protocol 2.0 and passes the saved Runti
   await prepared.releaseUnusedLease();
 });
 
-test('exact Runtime comparison covers every canonical OpenRuntimeProfile fact and releases rejects', async () => {
+test('exact Runtime accepts launchable drift, rejects identity drift, and releases rejects', async () => {
   const entry = '/tmp/proxy.mjs';
   const digest = '8'.repeat(64);
   const stored = openProfile('agent-exact');
@@ -807,18 +804,7 @@ test('exact Runtime comparison covers every canonical OpenRuntimeProfile fact an
     processScope: 'session',
     runtimeProfile: stored,
   };
-  const mutations: Array<[string, import('@gian/shared').OpenRuntimeProfile]> = [
-    ['id', { ...stored, id: 'runtime-profile-2' }],
-    ['runtimeId', { ...stored, runtimeId: 'runtime-other' }],
-    ['path', { ...stored, path: '/tmp/runtime-other' }],
-    ['version', { ...stored, version: '1.0.1' }],
-    ['configHome', { ...stored, configHome: '/tmp/config-other' }],
-    ['contentFingerprint', { ...stored, contentFingerprint: 'fingerprint-other' }],
-    ['verifiedVersions', { ...stored, verifiedVersions: ['1.0.1'] }],
-    ['verification', { ...stored, verification: 'unverified' }],
-  ];
-
-  for (const [field, resolvedProfile] of mutations) {
+  const plannerFor = (resolvedProfile: import('@gian/shared').OpenRuntimeProfile) => {
     let released = 0;
     const planner = new SessionBindingPlanner({
       resolveCurrent: async () => null,
@@ -836,13 +822,168 @@ test('exact Runtime comparison covers every canonical OpenRuntimeProfile fact an
         }),
       } as unknown as RuntimeResolver,
     });
+    return { planner, released: () => released };
+  };
+
+  const identityMutations: Array<[string, import('@gian/shared').OpenRuntimeProfile]> = [
+    ['runtimeId', { ...stored, runtimeId: 'runtime-other' }],
+    ['path', { ...stored, path: '/tmp/runtime-other' }],
+    ['pluginId', { ...stored, pluginId: parseProxyPluginId('io.gian.other') }],
+  ];
+  for (const [field, resolvedProfile] of identityMutations) {
+    const { planner, released } = plannerFor(resolvedProfile);
     await assert.rejects(
       () => planner.prepareExact(binding),
       /Runtime|path|profile/i,
       field,
     );
-    assert.equal(released, 1, `${field} mismatch must release the prepared lease`);
+    assert.equal(released(), 1, `${field} mismatch must release the prepared lease`);
   }
+
+  const driftMutations: Array<[string, import('@gian/shared').OpenRuntimeProfile]> = [
+    ['id', { ...stored, id: 'runtime-profile-2' }],
+    ['version', { ...stored, version: '1.0.1' }],
+    ['contentFingerprint', { ...stored, contentFingerprint: 'fingerprint-other' }],
+    ['verifiedVersions', { ...stored, verifiedVersions: ['1.0.1'] }],
+    ['verification', { ...stored, verification: 'unverified' }],
+  ];
+  for (const [field, resolvedProfile] of driftMutations) {
+    const { planner } = plannerFor(resolvedProfile);
+    const prepared = await planner.prepareExact(binding);
+    assert.ok(prepared.remintedBinding, `${field} drift must re-mint the stored binding`);
+    assert.deepEqual(prepared.sessionBinding, { ...binding, runtimeProfile: resolvedProfile }, field);
+    assert.deepEqual(prepared.remintedBinding, prepared.sessionBinding, field);
+    assert.deepEqual(
+      prepared.launchBinding.runtimeProfile,
+      { identity: resolvedProfile.id },
+      `${field} drift must launch against the fresh profile identity`,
+    );
+    const lease = await prepared.acquireLease();
+    assert.equal(lease?.binaryPath, resolvedProfile.path ?? '/tmp/fixture-runtime');
+    await lease?.release();
+    await prepared.releaseUnusedLease();
+  }
+
+  const { planner } = plannerFor(openProfile('agent-exact'));
+  const prepared = await planner.prepareExact(binding);
+  assert.equal(prepared.remintedBinding, undefined);
+  assert.strictEqual(prepared.sessionBinding, binding);
+  assert.deepEqual(prepared.launchBinding.runtimeProfile, { identity: stored.id });
+  const lease = await prepared.acquireLease();
+  await lease?.release();
+  await prepared.releaseUnusedLease();
+});
+
+test('Runtime upgrade on resume re-mints and persists the exact binding', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-remint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = join(root, 'proxy.mjs');
+  await writeFile(entry, 'export {}\n');
+  const digest = '5'.repeat(64);
+  const agent: UserAgent = {
+    id: randomUUID(),
+    name: 'Remint',
+    pluginId: parseProxyPluginId('io.gian.fixture'),
+    proxy: null,
+    cliPath: '/tmp/fixture-runtime',
+    defaults: { model: '', thinking: '', mode: '' },
+  };
+  const baseProfile = (agentId: string): import('@gian/shared').OpenRuntimeProfile => ({
+    ...openProfile(agentId),
+    configHome: null,
+  });
+  const upgradedProfile = (agentId: string): import('@gian/shared').OpenRuntimeProfile => ({
+    ...baseProfile(agentId),
+    id: 'runtime-profile-2',
+    version: '1.0.1',
+    contentFingerprint: 'fingerprint-2',
+    verifiedVersions: ['1.0.1'],
+  });
+  const plannerFor = (profileFor: (agentId: string) => import('@gian/shared').OpenRuntimeProfile) => (
+    new SessionBindingPlanner({
+      resolveCurrent: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
+      resolveExact: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
+      runtimeResolver: {
+        resolve: async (input: { agentId: string; selectedPath: string | null }) => ({
+          profile: profileFor(input.agentId),
+          lease: {
+            binaryPath: input.selectedPath ?? '/tmp/fixture-runtime',
+            version: '1.0.0',
+            source: 'override' as const,
+            env: Object.freeze({}),
+            release: async () => {},
+          },
+        }),
+      } as unknown as RuntimeResolver,
+    })
+  );
+  const db = openDatabase(root);
+  const wsId = randomUUID();
+  db.prepare('INSERT OR IGNORE INTO workspaces (id, name, path) VALUES (?, ?, ?)')
+    .run(wsId, 'ws', root);
+  const makeSessions = (proxy: FakeProxyManager, planner: SessionBindingPlanner) => new SessionManager(
+    db,
+    proxy as unknown as ProxyManager,
+    new CapturingBroadcaster() as unknown as WsBroadcaster,
+    new ApprovalManager(new CapturingBroadcaster() as unknown as WsBroadcaster),
+    new QueueManager(db),
+    root,
+    null,
+    undefined,
+    undefined,
+    resolverFor([agent]),
+    undefined,
+    planner,
+  );
+  const bindingRow = (sessionId: string) => db.prepare(
+    'SELECT proxy_binding_json, runtime_profile_json FROM sessions WHERE id = ?',
+  ).get(sessionId) as { proxy_binding_json: string | null; runtime_profile_json: string | null };
+
+  const first = makeSessions(
+    new FakeProxyManager('native-remint', false, false, 'always'),
+    plannerFor(baseProfile),
+  );
+  const created = await first.createSession({ workspace_id: wsId, agent_id: agent.id });
+  const createdProfile = created.proxy_binding?.runtimeProfile as
+    import('@gian/shared').OpenRuntimeProfile | null;
+  assert.equal(createdProfile?.version, '1.0.0');
+
+  const second = makeSessions(
+    new FakeProxyManager('native-remint', false, false, 'always'),
+    plannerFor(upgradedProfile),
+  );
+  await second.sendMessage(created.id, 'resume after the CLI self-update');
+  const reminted = second.getSession(created.id);
+  const remintedProfile = reminted.proxy_binding?.runtimeProfile as
+    import('@gian/shared').OpenRuntimeProfile | null;
+  assert.equal(remintedProfile?.id, 'runtime-profile-2');
+  assert.equal(remintedProfile?.version, '1.0.1');
+  assert.equal(remintedProfile?.contentFingerprint, 'fingerprint-2');
+  assert.deepEqual(remintedProfile?.verifiedVersions, ['1.0.1']);
+  assert.equal(remintedProfile?.path, '/tmp/fixture-runtime');
+  assert.equal(remintedProfile?.runtimeId, 'fixture-runtime');
+  assert.equal(reminted.proxy_binding?.pluginVersion, '1.0.0');
+  assert.equal(reminted.proxy_binding?.manifestSha256, digest);
+  const remintedRow = bindingRow(created.id);
+  assert.ok(remintedRow.proxy_binding_json?.includes('"id":"runtime-profile-2"'));
+  assert.ok(remintedRow.proxy_binding_json?.includes('"version":"1.0.1"'));
+  assert.ok(remintedRow.runtime_profile_json?.includes('"id":"runtime-profile-2"'));
+  assert.ok(remintedRow.runtime_profile_json?.includes('"version":"1.0.1"'));
+  db.prepare(`UPDATE turns SET status = 'completed' WHERE session_id = ? AND status = 'running'`)
+    .run(created.id);
+
+  const before = bindingRow(created.id).proxy_binding_json;
+  const third = makeSessions(
+    new FakeProxyManager('native-remint', false, false, 'always'),
+    plannerFor(upgradedProfile),
+  );
+  await third.sendMessage(created.id, 'resume without further drift');
+  assert.equal(
+    bindingRow(created.id).proxy_binding_json,
+    before,
+    'an unchanged generation must not rewrite the stored binding',
+  );
+  db.close();
 });
 
 test('prepared Runtime leases transfer only to new processes and release on reuse', async (t) => {
@@ -1364,7 +1505,7 @@ test('create racing a current package flip binds wholly to one generation', asyn
   );
 });
 
-test('resumable bindings exclude finished worktrees and keep archived sessions', () => {
+test('resumable bindings keep finished worktrees and archived sessions (ADR-0080)', () => {
   const binding: SessionProxyBinding = {
     schemaVersion: 1,
     pluginId: parseProxyPluginId('io.gian.fixture'),
@@ -1374,11 +1515,10 @@ test('resumable bindings exclude finished worktrees and keep archived sessions',
     processScope: 'session',
     runtimeProfile: null,
   };
-  assert.equal(isResumableSessionBinding({ proxy_binding: binding, worktree_outcome: null }), true);
-  assert.equal(isResumableSessionBinding({
-    proxy_binding: binding,
-    worktree_outcome: 'merged',
-  }), false);
+  assert.equal(isResumableSessionBinding({ proxy_binding: binding }), true);
+  // A finalized worktree outcome is legacy metadata and never blocks resume.
+  const legacyFinalizedRow = { proxy_binding: binding, worktree_outcome: 'merged' };
+  assert.equal(isResumableSessionBinding(legacyFinalizedRow), true);
   assert.equal(isResumableSessionBinding({
     proxy_binding: binding,
     proxy_binding_error: 'PROXY_BINDING_INVALID',

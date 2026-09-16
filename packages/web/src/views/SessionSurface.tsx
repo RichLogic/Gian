@@ -135,7 +135,6 @@ export function SessionSurface({
                     ...(session.turn_config ?? {}),
                     [optionId]: value,
                   })}
-                onDelete={() => commands.onDelete(session.id)}
                 onReopen={onReopen}
                 onOpenAgents={onOpenAgents}
                 onShowLastTurnChanges={onShowLastTurnChanges}

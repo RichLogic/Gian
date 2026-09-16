@@ -69,7 +69,6 @@ export interface SessionCommands {
   ) => void;
   onArchive: (sessionId: string, archived: boolean) => void;
   onPin: (sessionId: string, pinned: boolean) => void;
-  onDelete: (sessionId: string) => void;
   onRecover: (sessionId: string) => void;
   onMerge: (sessionId: string) => void;
   onDrop: (sessionId: string) => void;
@@ -161,7 +160,6 @@ export function useSessionCommands({
         ops.dispatch('session.setTurnConfig', { sessionId, optionId, value, turnConfig }),
       onArchive: (sessionId, archived) => ops.dispatch('session.archive', { sessionId, archived }),
       onPin: (sessionId, pinned) => ops.dispatch('session.pin', { sessionId, pinned }),
-      onDelete: sessionId => ops.dispatch('session.delete', { sessionId }),
       onRecover: sessionId => ops.dispatch('session.recover', { sessionId }),
       onMerge: sessionId => { ops.dispatch('session.merge', { sessionId }); },
       onDrop: sessionId => { ops.dispatch('session.drop', { sessionId }); },
