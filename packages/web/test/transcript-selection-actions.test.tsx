@@ -43,6 +43,13 @@ function firstTextNode(root: HTMLElement): Text {
   return node;
 }
 
+function selectionChanged(): void {
+  act(() => {
+    document.dispatchEvent(new Event('selectionchange'));
+    vi.advanceTimersToNextFrame();
+  });
+}
+
 function selectBetween(start: HTMLElement, startOffset: number, end: HTMLElement, endOffset: number): void {
   const range = document.createRange();
   range.setStart(firstTextNode(start), startOffset);
@@ -50,7 +57,7 @@ function selectBetween(start: HTMLElement, startOffset: number, end: HTMLElement
   const selection = window.getSelection()!;
   selection.removeAllRanges();
   selection.addRange(range);
-  act(() => document.dispatchEvent(new Event('selectionchange')));
+  selectionChanged();
 }
 
 function enabledActions() {
@@ -77,6 +84,8 @@ function renderTranscript(actions: TranscriptSelectionActionsConfig, items = ITE
 }
 
 beforeEach(() => {
+  // Commit the RAF-driven toolbar and its effects before dispatching UI events.
+  vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });
   localStorage.clear();
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
     configurable: true,
@@ -95,6 +104,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   window.getSelection()?.removeAllRanges();
   if (rectDescriptor) {
     Object.defineProperty(Range.prototype, 'getBoundingClientRect', rectDescriptor);
@@ -182,7 +192,7 @@ describe('Transcript selected-text actions', () => {
     selectBetween(userText, 0, userText, 6);
     await screen.findByRole('toolbar');
     window.getSelection()?.removeAllRanges();
-    act(() => document.dispatchEvent(new Event('selectionchange')));
+    selectionChanged();
     await waitFor(() => expect(screen.queryByRole('toolbar')).toBeNull());
 
     selectBetween(userText, 0, userText, 6);
@@ -190,12 +200,12 @@ describe('Transcript selected-text actions', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('toolbar')).toBeNull();
 
-    act(() => document.dispatchEvent(new Event('selectionchange')));
+    selectionChanged();
     await screen.findByRole('toolbar');
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('toolbar')).toBeNull();
 
-    act(() => document.dispatchEvent(new Event('selectionchange')));
+    selectionChanged();
     await screen.findByRole('toolbar');
     view.rerender(
       <LocaleProvider locale="en">
