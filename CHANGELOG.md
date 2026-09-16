@@ -139,7 +139,7 @@ development verification; see [0.6.0] for the cumulative user-facing changes
 it contains. Dev package file names and build receipts now carry the app
 version, and app versions may use prerelease suffixes such as `-beta1`.
 
-## Proxy Installer Releases - 2026-09-15
+## Proxy Installer Releases - 2026-09-16
 
 ### Added
 

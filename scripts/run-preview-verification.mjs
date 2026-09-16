@@ -33,7 +33,7 @@ export function previewSteps(base) {
     {
       id: 'web-smoke',
       label: 'Isolated app-shell browser smoke',
-      args: ['test:e2e:run', '--', 'e2e/specs/01-app-loads.spec.ts'],
+      args: ['test:e2e:run', '--', 'test/e2e/specs/01-app-loads.spec.ts'],
     },
     {
       id: 'desktop-smoke',

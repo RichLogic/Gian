@@ -16,6 +16,8 @@ test('preview requires a base and keeps full/package/provider gates separate', (
     'desktop-smoke',
   ]);
   assert.ok(previewSteps('main').every(step => !step.args.some(arg => arg.includes('canary'))));
+  assert.deepEqual(previewSteps('main').find(step => step.id === 'web-smoke').args,
+    ['test:e2e:run', '--', 'test/e2e/specs/01-app-loads.spec.ts']);
 });
 
 test('preview summary exposes duration and resource evidence', () => {

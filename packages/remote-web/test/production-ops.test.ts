@@ -68,6 +68,49 @@ function emptyState(): RemoteUiState {
 }
 
 describe('production controller operations', () => {
+  it.each(['send-failure', 'command-rejected'] as const)('observes command rejection while transport send is pending: %s', async (failure) => {
+    let relay: FakeRelay | undefined;
+    let releaseSend!: () => void;
+    let rejectSend!: (error: Error) => void;
+    const sending = new Promise<void>((resolve, reject) => {
+      releaseSend = resolve;
+      rejectSend = reject;
+    });
+    const { controller } = await pairedController({
+      createRelay(input) {
+        relay = new FakeRelay(input);
+        const send = relay.sendControl.bind(relay);
+        relay.sendControl = async (message) => {
+          await send(message);
+          if ((message as { method?: string }).method === 'session.subscribe') await sending;
+        };
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      controller.actions.retryTranscript(generateCanonicalId());
+      await viWait(async () => relay!.sent.some(message => message.method === 'session.subscribe'));
+      const request = relay!.sent.find(message => message.method === 'session.subscribe')!;
+      if (failure === 'command-rejected') {
+        await relay!.emit({
+          type: 'command.result',
+          command_id: String(request.command_id),
+          ok: false,
+          error: { code: 'UNKNOWN_OUTCOME', message: 'disconnected before session.subscribe returned' },
+        });
+      } else rejectSend(new RemoteProtocolError('HOST_OFFLINE', 'send failed before receipt'));
+      // Let the runtime's unhandled-rejection check run before transport settles.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(controller.state.mutations[String(request.command_id)]?.phase)
+        .toBe(failure === 'command-rejected' ? 'unknown' : 'failed');
+    } finally {
+      releaseSend();
+      controller.close();
+    }
+  });
+
   it('allows slow Host projections to finish before rebuilding the Relay', () => {
     expect(READ_STALL_RECONNECT_MS).toBeGreaterThanOrEqual(30_000);
     expect(READ_COMMAND_TIMEOUT_MS).toBeGreaterThanOrEqual(READ_STALL_RECONNECT_MS * 3);

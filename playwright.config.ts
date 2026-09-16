@@ -12,7 +12,8 @@ const HOST_BASE = `http://127.0.0.1:${HOST_PORT}`;
 const WEB_BASE = `http://127.0.0.1:${WEB_PORT}`;
 
 export default defineConfig({
-  testDir: './e2e/specs',
+  testDir: '.',
+  testMatch: ['e2e/specs/**/*.spec.ts', 'test/e2e/specs/**/*.spec.ts'],
   // Bound the whole run as well as individual tests. This includes worker and
   // webServer teardown, so a stranded Host cannot leave a local quality gate
   // silent forever or consume the entire hosted job timeout.

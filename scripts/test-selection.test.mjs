@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { publicManifest } from './delivery-certificate.mjs';
 import {
   buildAffectedPlan,
@@ -17,11 +18,12 @@ test('selection map is structurally valid and has no stale mappings', () => {
 });
 
 test('the real selection map remains valid after public source curation', () => {
+  const tree = execFileSync('git', ['write-tree'], { encoding: 'utf8' }).trim();
   assert.doesNotThrow(() => validateSelectionMap(inputs.map, {
     entries: inputs.entries,
     packageScripts: JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).scripts,
     specialEntrypoints: inputs.catalog.specialEntrypoints ?? [],
-    repositoryPaths: publicManifest().map(entry => entry.path),
+    repositoryPaths: publicManifest(tree).map(entry => entry.path),
   }));
 });
 
@@ -174,7 +176,7 @@ test('unknown paths fail closed to every deterministic catalog entry', () => {
 });
 
 test('a directly changed E2E spec is reported or safely falls back when curated out', () => {
-  const path = 'e2e/specs/01-app-loads.spec.ts';
+  const path = 'test/e2e/specs/01-app-loads.spec.ts';
   const plan = buildAffectedPlan([path], 'quick', inputs);
   if (!inputs.entries.some(entry => entry.path === path)) {
     assert.equal(plan.fallbackFull, true);

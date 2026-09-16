@@ -24,6 +24,8 @@
         "pnpm-workspace.yaml",
         "tsconfig.json",
         "test/*.json",
+        "test/e2e/**",
+        "playwright.config.ts",
         "scripts/run-tests.mjs",
         "scripts/test-catalog.mjs",
         "scripts/run-affected-tests.mjs",

@@ -2,15 +2,16 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import test from 'node:test';
+import { isPublicPath } from './delivery-certificate.mjs';
 
 const workflowUrl = new URL('../.github/workflows/ci.yml', import.meta.url);
 const releaseWorkflowUrl = new URL('../.github/workflows/release.yml', import.meta.url);
 const securityWorkflowUrl = new URL('../.github/workflows/security-audit.yml', import.meta.url);
 const proxyCertificationWorkflowUrl = new URL('../.github/workflows/proxy-certification.yml', import.meta.url);
 const proxyReleaseWorkflowUrl = new URL('../.github/workflows/proxy-release.yml', import.meta.url);
-const previewSmokeSpecUrl = new URL('../e2e/specs/01-app-loads.spec.ts', import.meta.url);
-const proxyUiSpecUrl = new URL('../e2e/specs/12-proxy-v2-mock.spec.ts', import.meta.url);
-const proxyUiNavigationUrl = new URL('../e2e/fixtures/navigation.ts', import.meta.url);
+const previewSmokeSpecUrl = new URL('../test/e2e/specs/01-app-loads.spec.ts', import.meta.url);
+const proxyUiSpecUrl = new URL('../test/e2e/specs/12-proxy-v2-mock.spec.ts', import.meta.url);
+const proxyUiNavigationUrl = new URL('../test/e2e/fixtures/navigation.ts', import.meta.url);
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 const privateCheckout = existsSync(new URL('../AGENTS.md', import.meta.url));
 const privateOnly = { skip: privateCheckout ? false : 'curated public source omits private CI/E2E inputs' };
@@ -59,7 +60,13 @@ test('nightly and manual CI run isolated E2E and retain failure artifacts', priv
   assert.match(workflow, /test-results\//);
 });
 
-test('private smoke fixtures retain their navigation contracts', privateOnly, async () => {
+test('public certification fixtures retain their navigation contracts', async () => {
+  for (const path of ['test/e2e/specs/01-app-loads.spec.ts', 'test/e2e/specs/12-proxy-v2-mock.spec.ts', 'test/e2e/fixtures/navigation.ts']) {
+    assert.equal(isPublicPath(path), true);
+  }
+  const config = await readFile(new URL('../playwright.config.ts', import.meta.url), 'utf8');
+  assert.match(config, /testDir: '\.'/);
+  assert.match(config, /test\/e2e\/specs\/\*\*\/\*\.spec\.ts/);
   const [previewSmokeSpec, proxyUiSpec, proxyUiNavigation] = await Promise.all([
     readFile(previewSmokeSpecUrl, 'utf8'),
     readFile(proxyUiSpecUrl, 'utf8'),

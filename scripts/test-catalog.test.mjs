@@ -14,7 +14,7 @@ test('catalog reconciles every current standard test exactly once', () => {
   const { catalog, entries } = loadValidatedCatalog();
   const counts = Object.groupBy(entries, entry => entry.scope);
   const discoveredE2eCount = discoverStandardTests(catalog)
-    .filter(path => path.startsWith('e2e/specs/'))
+    .filter(path => path.startsWith('e2e/specs/') || path.startsWith('test/e2e/specs/'))
     .length;
   const hasInternalTraceability = existsSync(
     new URL('../docs/quality/traceability.md', import.meta.url),

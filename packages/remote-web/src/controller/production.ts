@@ -464,23 +464,22 @@ export function createProductionController(options: ProductionControllerOptions)
         [commandId]: { commandId, label, phase: 'pending', startedAt: Date.now() },
       },
     });
-    try {
-      await transport.relay.sendControl({
-        type: 'command.request',
-        command_id: commandId,
-        created_at: Date.now(),
-        attempt_id: attemptId,
-        method,
-        params,
-      });
-    } catch (error) {
+    // Observe the result before async encryption/send can race with disconnect.
+    const sending = Promise.resolve().then(() => transport.relay.sendControl({
+      type: 'command.request',
+      command_id: commandId,
+      created_at: Date.now(),
+      attempt_id: attemptId,
+      method,
+      params,
+    })).catch((error) => {
       const waiter = pending.get(commandId);
       pending.delete(commandId);
       finishMutation(commandId, 'failed', errorCode(error), error instanceof Error ? error.message : 'send failed');
       waiter?.reject(error);
       throw error;
-    }
-    return result;
+    });
+    return Promise.all([sending, result]).then(([, response]) => response);
   }
 
   function dispatchCommand(method: RemoteMethod, params: unknown, label: string): void {

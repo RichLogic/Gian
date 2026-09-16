@@ -15,6 +15,7 @@
     "packages/tool-cli/test",
     "packages/tool-mcp/test",
     "e2e/specs",
+    "test/e2e/specs",
     "packages/proxies/dsh-bridge/test",
     "packages/proxies/dsh-proxy/test",
     "packages/proxies/zcode-proxy/test",
@@ -878,7 +879,8 @@
     {
       "id": "playwright-e2e",
       "patterns": [
-        "e2e/specs/*.spec.ts"
+        "e2e/specs/*.spec.ts",
+        "test/e2e/specs/*.spec.ts"
       ],
       "module": "e2e",
       "scope": "e2e",

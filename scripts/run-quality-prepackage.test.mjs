@@ -69,11 +69,13 @@ test('curated source skips only absent internal E2E and remains package-ready', 
 });
 
 test('the public Proxy qualification spec does not impersonate the internal browser suite', () => {
-  const available = new Set(['/repo/e2e/specs/12-proxy-v2-mock.spec.ts']);
+  const available = new Set(['/repo/test/e2e/specs/12-proxy-v2-mock.spec.ts']);
   assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
-  available.add('/repo/e2e/specs/01-app-loads.spec.ts');
+  available.add('/repo/test/e2e/specs/01-app-loads.spec.ts');
   assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
   available.add('/repo/docs/quality/traceability.md');
+  assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), false);
+  available.add('/repo/e2e/specs/02-workspace-and-session.spec.ts');
   assert.equal(hasInternalBrowserJourneys('/repo', path => available.has(path)), true);
 });
 

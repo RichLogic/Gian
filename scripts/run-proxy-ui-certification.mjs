@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { shippingProxyIds } from './build-proxy-artifacts.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const spec = 'e2e/specs/12-proxy-v2-mock.spec.ts';
+const spec = 'test/e2e/specs/12-proxy-v2-mock.spec.ts';
 
 function timestampSlug() {
   return new Date().toISOString().replaceAll(':', '').replaceAll('-', '').replace(/\.\d{3}Z$/, 'Z');

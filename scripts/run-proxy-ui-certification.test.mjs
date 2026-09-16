@@ -13,6 +13,7 @@ test('Proxy UI certification defaults to every shipping Proxy', () => {
   const plan = proxyUiPlan(options.providers);
   assert.deepEqual(plan.map(step => step.provider), options.providers);
   for (const step of plan) {
+    assert.equal(step.args.at(-1), 'test/e2e/specs/12-proxy-v2-mock.spec.ts');
     assert.deepEqual(step.args.slice(0, 4), [
       'scripts/run-e2e.mjs',
       '--proxy-mock',

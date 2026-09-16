@@ -39,7 +39,7 @@ function walk(directory, output = []) {
 }
 
 function isStandardTestPath(path) {
-  if (path.startsWith('e2e/specs/')) return path.endsWith('.spec.ts');
+  if (path.startsWith('e2e/specs/') || path.startsWith('test/e2e/specs/')) return path.endsWith('.spec.ts');
   if (path.startsWith('scripts/')) return path.endsWith('.test.mjs');
   return /\/test\/.*\.test\.(?:mjs|ts|tsx)$/.test(`/${path}`);
 }
