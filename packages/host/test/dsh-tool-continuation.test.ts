@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,11 @@ import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 
 // Real Tool -> SessionManager -> Host validator -> compiled DSH Proxy stdio.
 // Only the native bridge fixture is fake; no Provider CLI, account or model.
+// The declared pluginVersion must match the compiled Proxy's self-reported
+// identity exactly, so read it from the Proxy package instead of a literal.
+const DSH_PLUGIN_VERSION = (JSON.parse(
+  readFileSync(fileURLToPath(new URL('../../proxies/dsh-proxy/package.json', import.meta.url)), 'utf8'),
+) as { version: string }).version;
 test('session.send completes twice in one DSH Session after authenticated reattach', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-dsh-tool-'));
   const db = openDatabase(dir);
@@ -27,7 +32,7 @@ test('session.send completes twice in one DSH Session after authenticated reatta
   const logs: string[] = [];
   const host = new ProtocolV2Host({
     entry: fileURLToPath(new URL('../../proxies/dsh-proxy/dist/src/cli/spawn.js', import.meta.url)),
-    pluginId: agent.pluginId!, pluginVersion: '0.3.0', processScope: 'shared', executor: 'dsh',
+    pluginId: agent.pluginId!, pluginVersion: DSH_PLUGIN_VERSION, processScope: 'shared', executor: 'dsh',
     dataDir: dir, hostVersion: '0.5.5', protocolVersions: ['2.1'],
     env: {
       GIAN_DSH_HOST_ENTRY: process.execPath,
