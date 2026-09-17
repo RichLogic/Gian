@@ -22,7 +22,7 @@
   },
   "channels": {
     "stable": {
-      "pluginVersion": "0.1.6"
+      "pluginVersion": "0.3.1"
     }
   }
 }

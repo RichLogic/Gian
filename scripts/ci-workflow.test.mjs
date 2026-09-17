@@ -110,6 +110,11 @@ test('Proxy publication consumes a qualified macOS ARM64 certificate and never t
   assert.doesNotMatch(release, /--target/);
   assert.doesNotMatch(release, /git push origin "refs\/tags\/\$\{TAG\}"/);
   assert.doesNotMatch(release, /build-proxy-artifacts\.mjs/);
+  // Proxy bundles share the App releases feed: every publish must re-pin the
+  // newest full App release as /releases/latest or electron-updater 404s.
+  assert.match(release, /Restore the App latest-release marker/);
+  assert.match(release, /gh release edit "\$\{APP_TAG\}" --latest/);
+  assert.match(release, /releases\/latest' --jq '.tag_name'/);
 });
 
 test('release installs dependencies after public source admission and before the version gate', async () => {
