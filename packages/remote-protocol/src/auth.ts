@@ -268,6 +268,11 @@ export const hostHeartbeatRequestSchema = z.strictObject({
   ...authRequestBase,
 });
 
+export const hostUpdateProfileRequestSchema = z.strictObject({
+  ...authRequestBase,
+  name: nameSchema.trim().min(1),
+});
+
 export const hostHeartbeatResultSchema = z.strictObject({
   protocol: authProtocolSchema,
   lease_expires_at: unixMsSchema,

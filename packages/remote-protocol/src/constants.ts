@@ -9,6 +9,7 @@ export const REMOTE_MAX_MINOR_VERSION = 1 as const;
 export const WIRE_FEATURES = [
   'wire.snapshot_parts',
   'wire.content_resume',
+  'wire.transcript_page',
 ] as const;
 
 export const REMOTE_METHODS = [
