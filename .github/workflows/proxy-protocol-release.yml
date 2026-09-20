@@ -1,0 +1,99 @@
+name: Release Proxy Protocol Package
+on:
+  push:
+    tags: ['proxy-protocol-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing proxy-protocol-vX.Y.Z tag on public Gian main
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: proxy-protocol-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.repository == 'RichLogic/Gian' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Validate immutable public protocol source
+        id: source
+        env:
+          PROTOCOL_TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$PROTOCOL_TAG" =~ ^proxy-protocol-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          SHA=$(git rev-parse --verify "refs/tags/$PROTOCOL_TAG^{commit}")
+          git merge-base --is-ancestor "$SHA" origin/main
+          if gh release view "$PROTOCOL_TAG" >/dev/null 2>&1; then echo 'Protocol package already published; never replace its bytes'; exit 1; fi
+          git checkout --detach "$SHA"
+          test "proxy-protocol-v$(node -p "require('./packages/proxy-protocol/package.json').version")" = "$PROTOCOL_TAG"
+          node scripts/delivery-certificate.mjs verify-public-source
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$PROTOCOL_TAG" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - name: Install locked protocol dependencies
+        run: pnpm --filter @gian/proxy-protocol... install --frozen-lockfile
+      - name: Verify protocol and package tooling
+        run: |
+          node --test scripts/proxy-protocol-package.test.mjs
+          pnpm --filter @gian/proxy-protocol test
+          node scripts/proxy-protocol-package.mjs pack "$RUNNER_TEMP/proxy-protocol-package"
+      - name: Verify isolated archive runtime and TypeScript consumers
+        run: |
+          mkdir "$RUNNER_TEMP/proxy-protocol-consumer"
+          cp scripts/fixtures/proxy-protocol-consumer.mts "$RUNNER_TEMP/proxy-protocol-consumer/consumer.mts"
+          cd "$RUNNER_TEMP/proxy-protocol-consumer"
+          node -e 'require("fs").writeFileSync("package.json",JSON.stringify({name:"proxy-protocol-consumer",private:true,type:"module"}))'
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP"/proxy-protocol-package/*.tgz
+          "$GITHUB_WORKSPACE/packages/proxy-protocol/node_modules/.bin/tsc" --target ES2022 --module NodeNext --moduleResolution NodeNext --lib ES2022,DOM --skipLibCheck --typeRoots "$GITHUB_WORKSPACE/packages/proxy-protocol/node_modules/@types" --outDir compiled consumer.mts
+          node compiled/consumer.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxy-protocol-${{ steps.source.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/proxy-protocol-package/*.tgz
+            ${{ runner.temp }}/proxy-protocol-package/protocol-package.json
+            ${{ runner.temp }}/proxy-protocol-package/SHA256SUMS
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.package.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: proxy-protocol-${{ needs.package.outputs.sha }}
+          path: artifact
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Publish the tested bytes without changing the App latest marker
+        env:
+          PROTOCOL_TAG: ${{ needs.package.outputs.tag }}
+          PROTOCOL_SHA: ${{ needs.package.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse "refs/tags/$PROTOCOL_TAG^{commit}")" = "$PROTOCOL_SHA"
+          git merge-base --is-ancestor "$PROTOCOL_SHA" origin/main
+          (cd artifact && sha256sum --check SHA256SUMS)
+          node --input-type=module -e 'import fs from "node:fs"; import {verifyProtocolArchive} from "./delivery/proxies/scripts/protocol-dependency.mjs"; const c=JSON.parse(fs.readFileSync("artifact/protocol-package.json")); if(c.tag!==process.env.PROTOCOL_TAG||c.sourceCommit!==process.env.PROTOCOL_SHA)throw Error("Protocol release source mismatch"); verifyProtocolArchive(c,fs.readFileSync(`artifact/${c.filename}`));'
+          gh release create "$PROTOCOL_TAG" artifact/*.tgz artifact/protocol-package.json artifact/SHA256SUMS --verify-tag --latest=false --title "Proxy Protocol $PROTOCOL_TAG" --notes-file packages/proxy-protocol/CHANGELOG.md
