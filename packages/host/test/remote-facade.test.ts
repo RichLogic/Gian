@@ -36,7 +36,7 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
   const context = setupRemoteHarness();
   try {
     const device = seedDevice(context);
-    assert.equal(REMOTE_METHODS.length, 15);
+    assert.equal(REMOTE_METHODS.length, 16);
     for (const method of REMOTE_METHODS) {
       assert.equal(typeof method, 'string');
     }
@@ -55,6 +55,26 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
       role: 'admin',
     }));
     assert.equal(role.ok, false);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('Remote Protocol 1.1 logo requests retain the older Host fallback without creating ledger entries', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const request = command('proxy.logo', { proxy: 'claude', variant: 'light' });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await context.runtime.commands.execute(device, request);
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, 'INVALID_FRAME');
+      assert.equal(result.error?.message, 'unsupported method proxy.logo');
+    }
+    const ledger = context.db.prepare(
+      'SELECT COUNT(*) AS count FROM remote_command_ledger WHERE device_id = ? AND command_id = ?',
+    ).get(device.id, request.command_id) as { count: number };
+    assert.equal(ledger.count, 0);
   } finally {
     teardownRemoteHarness(context);
   }

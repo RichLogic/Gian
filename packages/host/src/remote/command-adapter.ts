@@ -117,7 +117,7 @@ export class RemoteCommandAdapter {
     }
     const params = parseRemoteMethodParams(command.method, command.params);
     this.rejectCraftedFields(command.params);
-    if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read') {
+    if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read' && command.method !== 'proxy.logo') {
       this.upsertLedger(device.id, command, 'accepted');
     }
     return { kind: 'accepted', params };
@@ -188,6 +188,9 @@ export class RemoteCommandAdapter {
         return this.respond(device, command, params as Record<string, unknown>);
       case 'file.preview':
         return this.preview(device, params as { handle_id: string });
+      case 'proxy.logo':
+        // Logo serving is not in this App release; newer clients keep their fallback.
+        throw new RemoteProtocolError('INVALID_FRAME', 'unsupported method proxy.logo');
       default: {
         const _exhaustive: never = method;
         throw new RemoteProtocolError('INVALID_FRAME', `unsupported method ${String(_exhaustive)}`);
