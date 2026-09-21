@@ -5,8 +5,10 @@ import {
   COMMAND_RETENTION_MS,
   generateCanonicalId,
   generateUuidV7,
+  MAX_PROXY_LOGO_BYTES,
   parseCommandRequest,
   parseRemoteMethodParams,
+  proxyLogoResultSchema,
   REMOTE_METHOD_LIST,
   RemoteProtocolError,
   sessionUpdateParamsSchema,
@@ -30,6 +32,7 @@ test('RemoteMethod registry is closed and exhaustive', () => {
     'queue.send_now',
     'interaction.respond',
     'file.preview',
+    'proxy.logo',
   ]);
   assert.throws(() => parseRemoteMethodParams('session.send', { session_id: generateCanonicalId() }));
   assert.doesNotThrow(() => parseRemoteMethodParams('catalog.read', {}));
@@ -42,6 +45,30 @@ test('RemoteMethod registry is closed and exhaustive', () => {
   assert.equal(sessionUpdateParamsSchema.safeParse({
     session_id: generateCanonicalId(),
     session_revision: 'rev-1',
+    path: '/tmp/secret',
+  }).success, false);
+});
+
+test('proxy.logo params and result are closed and bounded', () => {
+  assert.doesNotThrow(() => parseRemoteMethodParams('proxy.logo', { proxy: 'claude', variant: 'light' }));
+  assert.throws(() => parseRemoteMethodParams('proxy.logo', { proxy: 'claude', variant: 'auto' }));
+  assert.throws(() => parseRemoteMethodParams('proxy.logo', { proxy: 'claude' }));
+  assert.equal(proxyLogoResultSchema.safeParse({
+    media_type: 'image/png',
+    data_base64: Buffer.from('png-bytes').toString('base64'),
+    sha256: 'a'.repeat(64),
+  }).success, true);
+  // Oversized payloads stay inside the relay frame budget.
+  assert.equal(proxyLogoResultSchema.safeParse({
+    media_type: 'image/png',
+    data_base64: Buffer.alloc(MAX_PROXY_LOGO_BYTES + 3).toString('base64'),
+    sha256: 'a'.repeat(64),
+  }).success, false);
+  // Unknown fields are rejected (closed contract).
+  assert.equal(proxyLogoResultSchema.safeParse({
+    media_type: 'image/png',
+    data_base64: 'aGk=',
+    sha256: 'a'.repeat(64),
     path: '/tmp/secret',
   }).success, false);
 });

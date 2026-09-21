@@ -45,6 +45,9 @@ export const sha256HexSchema = z.string().regex(HEX64_RE, 'Expected lowercase SH
 
 export const base64UrlSchema = z.string().regex(BASE64URL_RE, 'Expected canonical base64url.');
 
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+export const base64Schema = z.string().regex(BASE64_RE, 'Expected canonical base64.');
+
 export const unixMsSchema = nonNegativeSafeIntegerSchema;
 
 export const p256PublicJwkSchema = z.strictObject({

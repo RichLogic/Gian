@@ -12,6 +12,7 @@ import {
   MAX_CONTENT_CHUNK_PLAINTEXT_BYTES,
   MAX_FILE_PREVIEW_BYTES,
   MAX_HELLO_CAPABILITIES,
+  MAX_PROXY_LOGO_BASE64_CHARS,
   MAX_QUEUE_ENTRIES,
   MAX_SESSION_PAGE_TURNS,
   MAX_SNAPSHOT_PARTS,
@@ -36,6 +37,7 @@ import {
   utf8ByteLength,
 } from './serialize.js';
 import {
+  base64Schema,
   boundedStringSchema,
   canonicalIdSchema,
   nameSchema,
@@ -361,6 +363,10 @@ export const interactionRespondParamsSchema = z.strictObject({
 export const filePreviewParamsSchema = z.strictObject({
   handle_id: canonicalIdSchema,
 });
+export const proxyLogoParamsSchema = z.strictObject({
+  proxy: nameSchema,
+  variant: z.enum(['light', 'dark']),
+});
 
 export const REMOTE_METHOD_PARAMS = {
   'catalog.read': catalogReadParamsSchema,
@@ -378,6 +384,7 @@ export const REMOTE_METHOD_PARAMS = {
   'queue.send_now': queueSendNowParamsSchema,
   'interaction.respond': interactionRespondParamsSchema,
   'file.preview': filePreviewParamsSchema,
+  'proxy.logo': proxyLogoParamsSchema,
 } as const;
 
 export const catalogReadResultSchema = z.strictObject({
@@ -430,6 +437,14 @@ export const filePreviewResultSchema = z.strictObject({
   transfer_id: canonicalIdSchema,
   file: remoteFileRefSchema,
   preview_max_bytes: z.literal(MAX_FILE_PREVIEW_BYTES),
+});
+
+/** Branding bytes for one Proxy, so Remote clients can render the same logo
+ *  local Web serves over HTTP. Read-only; carries no device grant. */
+export const proxyLogoResultSchema = z.strictObject({
+  media_type: z.enum(['image/png', 'image/webp']),
+  data_base64: base64Schema.min(1).max(MAX_PROXY_LOGO_BASE64_CHARS),
+  sha256: sha256HexSchema,
 });
 
 const transcriptItemBaseSchema = {
@@ -572,6 +587,7 @@ export const REMOTE_METHOD_RESULTS = {
     resolved: z.literal(true),
   }),
   'file.preview': filePreviewResultSchema,
+  'proxy.logo': proxyLogoResultSchema,
 } as const;
 
 export function parseRemoteMethodParams(method: RemoteMethod, params: unknown): unknown {

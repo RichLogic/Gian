@@ -28,6 +28,7 @@ export const REMOTE_METHODS = [
   'queue.send_now',
   'interaction.respond',
   'file.preview',
+  'proxy.logo',
 ] as const;
 
 export const BUSINESS_CAPABILITY_IDS = [
@@ -74,6 +75,7 @@ export const REMOTE_ERROR_CODES = [
   'TRANSFER_CONFLICT',
   'FILE_REFERENCE_EXPIRED',
   'FILE_TOO_LARGE',
+  'RESOURCE_NOT_FOUND',
   'UNKNOWN_OUTCOME',
 ] as const;
 
@@ -121,6 +123,10 @@ export const SNAPSHOT_SPLIT_THRESHOLD_BYTES = 384 * 1024;
 export const SNAPSHOT_PART_BYTES = 256 * 1024;
 export const MAX_STRING_CHARS = 16 * 1024;
 export const MAX_NAME_CHARS = 256;
+/** Proxy branding logos travel inside command results; capped well under the
+ *  512 KiB relay frame budget after base64 expansion (4*ceil(n/3) = 174,764). */
+export const MAX_PROXY_LOGO_BYTES = 128 * 1024;
+export const MAX_PROXY_LOGO_BASE64_CHARS = 174_764;
 export const MAX_ID_CHARS = 64;
 export const MAX_ARRAY_ITEMS = 256;
 export const MAX_QUEUE_ENTRIES = 64;
