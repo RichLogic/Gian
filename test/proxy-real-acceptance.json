@@ -132,7 +132,6 @@
   "providers": {
     "claude": {
       "displayName": "Claude Code",
-      "pluginVersion": "0.3.1",
       "processScope": "session",
       "binary": "~/.local/bin/claude-mix",
       "cheapestConfig": {
@@ -174,7 +173,6 @@
     },
     "codex": {
       "displayName": "Codex",
-      "pluginVersion": "0.3.1",
       "processScope": "shared",
       "binary": "codex",
       "cheapestConfig": {
@@ -222,7 +220,6 @@
     },
     "kimi": {
       "displayName": "Kimi Code",
-      "pluginVersion": "0.3.1",
       "processScope": "shared",
       "binary": "~/.kimi-code/bin/kimi",
       "cheapestConfig": {
@@ -263,7 +260,6 @@
     },
     "grok": {
       "displayName": "Grok Build",
-      "pluginVersion": "0.3.4",
       "processScope": "session",
       "binary": "grok",
       "cheapestConfig": {
@@ -308,7 +304,6 @@
     "dsh": {
       "displayName": "DeepSeek Harness",
       "pluginId": "ai.deepseek.harness",
-      "pluginVersion": "0.3.1",
       "processScope": "shared",
       "binary": "packages/proxies/dsh-bridge/.dsh-runtime/node_modules/.bin/dsh",
       "preferredProvider": "opencode-go",
@@ -348,7 +343,6 @@
     "zcode": {
       "displayName": "ZCode",
       "pluginId": "com.zhipu.zcode",
-      "pluginVersion": "0.3.1",
       "processScope": "shared",
       "binary": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       "interactionDelayMs": 25000,

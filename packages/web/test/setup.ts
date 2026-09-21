@@ -83,6 +83,18 @@ if (!('ClipboardEvent' in globalThis)) {
   });
 }
 
+// `DragEvent` — jsdom doesn't ship it, and @lexical/utils' clipboard helpers
+// reference the constructor (`event instanceof DragEvent`) whenever the
+// rich-text editor handles a paste.
+if (!('DragEvent' in globalThis)) {
+  Object.defineProperty(globalThis, 'DragEvent', {
+    configurable: true,
+    value: class DragEvent extends MouseEvent {
+      readonly dataTransfer: DataTransfer | null = null;
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket — the App opens one on mount. Without a stub the test
 // framework throws on `new WebSocket(...)`. Tests that want to assert on

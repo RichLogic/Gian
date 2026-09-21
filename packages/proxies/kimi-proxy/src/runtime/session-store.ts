@@ -129,44 +129,65 @@ export class KimiSessionStoreGuard {
     }
   }
 
-  async assertCompatible(candidateVersion: string, observedStoreOwnerVersion?: string): Promise<void> {
+  /**
+   * Detects session-store compatibility conditions without blocking. The CLI
+   * is authoritative for whether its own store can be opened (ADR-0080), so
+   * every condition — downgrade, unknown owner, corrupt or unknown Gian
+   * bookkeeping metadata — is reported to the caller for observability and
+   * never thrown.
+   */
+  async evaluateCompatibility(
+    candidateVersion: string,
+    observedStoreOwnerVersion?: string,
+  ): Promise<KimiDataVersionError[]> {
     const candidate = parseVersion(candidateVersion);
     if (!candidate) {
-      throw new KimiDataVersionError(
+      return [new KimiDataVersionError(
         'KIMI_STORE_INCOMPATIBLE',
         `Kimi reported an unsupported semantic version: ${JSON.stringify(candidateVersion)}.`,
-      );
+      )];
     }
-    const [recordedFloor, hasSessionData] = await Promise.all([
-      this.readRecordedFloor(),
-      this.hasSessionData(),
-    ]);
+    let recordedFloor: string | null;
+    let hasSessionData: boolean;
+    try {
+      [recordedFloor, hasSessionData] = await Promise.all([
+        this.readRecordedFloor(),
+        this.hasSessionData(),
+      ]);
+    } catch (error) {
+      return [error instanceof KimiDataVersionError
+        ? error
+        : new KimiDataVersionError(
+          'KIMI_STORE_CORRUPT',
+          error instanceof Error ? error.message : String(error),
+        )];
+    }
 
+    const conditions: KimiDataVersionError[] = [];
     let floor = recordedFloor;
     if (observedStoreOwnerVersion) {
       if (!parseVersion(observedStoreOwnerVersion)) {
-        throw new KimiDataVersionError(
+        conditions.push(new KimiDataVersionError(
           'KIMI_STORE_INCOMPATIBLE',
           `The Kimi session store owner reported an unsupported version: ${JSON.stringify(observedStoreOwnerVersion)}.`,
-        );
-      }
-      if (!floor || compareKimiVersions(observedStoreOwnerVersion, floor) > 0) {
+        ));
+      } else if (!floor || compareKimiVersions(observedStoreOwnerVersion, floor) > 0) {
         floor = observedStoreOwnerVersion;
       }
     }
     if (hasSessionData && !floor) {
-      throw new KimiDataVersionError(
+      conditions.push(new KimiDataVersionError(
         'KIMI_STORE_OWNER_MISSING',
-        'Kimi session data exists, but its last compatible CLI version cannot be established. '
-          + 'Activate the official Kimi binary from the same KIMI_CODE_HOME before using another runtime.',
-      );
+        'Kimi session data exists, but its last compatible CLI version cannot be established.',
+      ));
     }
     if (floor && compareKimiVersions(candidate.raw, floor) < 0) {
-      throw new KimiDataVersionError(
+      conditions.push(new KimiDataVersionError(
         'KIMI_STORE_DOWNGRADE',
-        `Kimi ${candidate.raw} cannot open a session store last observed at ${floor}; automatic downgrade is blocked.`,
-      );
+        `Kimi ${candidate.raw} is older than the session store's last observed version ${floor}.`,
+      ));
     }
+    return conditions;
   }
 
   async recordActivation(version: string): Promise<void> {

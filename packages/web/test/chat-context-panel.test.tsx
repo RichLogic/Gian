@@ -4,10 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { ChatContextPanel } from '../src/components/ChatContextPanel.js';
 import { PlanChip } from '../src/components/PlanChip.js';
 import {
-  BrowserLinkOpenContext,
   ChatPanelOpenContext,
 } from '../src/presentation/chat-panel.js';
-import { AgentSpawnRow, MarkdownText } from '../src/transcript/items.js';
+import { AgentSpawnRow, LinkBehaviorContext, MarkdownText } from '../src/transcript/items.js';
 import type { AgentSpawnItem } from '../src/types.js';
 
 function kimiAgent(overrides: Partial<AgentSpawnItem> = {}): AgentSpawnItem {
@@ -160,9 +159,9 @@ describe('content-owned link routing', () => {
     const user = userEvent.setup();
     const openBrowser = vi.fn();
     render(
-      <BrowserLinkOpenContext.Provider value={openBrowser}>
+      <LinkBehaviorContext.Provider value={{ openWebUrl: openBrowser }}>
         <MarkdownText>{'[Gian docs](https://example.com/docs)'}</MarkdownText>
-      </BrowserLinkOpenContext.Provider>,
+      </LinkBehaviorContext.Provider>,
     );
 
     await user.click(screen.getByRole('link', { name: 'Gian docs' }));

@@ -15,7 +15,7 @@ import type {
   ThinkingEffort,
 } from '@gian/shared';
 import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
-import { loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
+import { loadAllFiles, loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
 
@@ -709,6 +709,89 @@ export function flatFiltered(
   groups: Array<{ source: SlashCommandSource; items: SlashCommand[] }>,
 ): SlashCommand[] {
   return groups.flatMap(group => group.items);
+}
+
+// ---------------------------------------------------------------------------
+// Working-tree file options for the composer's `@` file-reference trigger.
+// ---------------------------------------------------------------------------
+
+/** One row in the `@` file popover: the chip label is `name`, the context
+ *  item carries the absolute `path`, and `relPath` is display-only. */
+export interface ComposerFileOption {
+  path: string;
+  relPath: string;
+  name: string;
+}
+
+const fileListCache = new Map<string, string[]>();
+const fileListPromises = new Map<string, Promise<string[]>>();
+
+export function getWorkingTreeFilesCached(workingTreeId: string): string[] | undefined {
+  return fileListCache.get(workingTreeId);
+}
+
+/** Flat recursive file list for a working tree, cached per tree id like the
+ *  slash-command cache. `loadAllFiles` already fails soft to []. */
+export function fetchWorkingTreeFilesCached(workingTreeId: string): Promise<string[]> {
+  const hit = fileListCache.get(workingTreeId);
+  if (hit) return Promise.resolve(hit);
+  const inflight = fileListPromises.get(workingTreeId);
+  if (inflight) return inflight;
+  const request = Promise.resolve()
+    .then(() => loadAllFiles(workingTreeId))
+    .then(files => {
+      fileListCache.set(workingTreeId, files);
+      fileListPromises.delete(workingTreeId);
+      return files;
+    })
+    .catch(error => {
+      fileListPromises.delete(workingTreeId);
+      throw error;
+    });
+  fileListPromises.set(workingTreeId, request);
+  return request;
+}
+
+/** Test teardown helper; the cache is session-lifetime in production. */
+export function clearWorkingTreeFilesCache(): void {
+  fileListCache.clear();
+  fileListPromises.clear();
+}
+
+export const FILE_OPTION_LIMIT = 8;
+
+function fileOptionRank(relPath: string, query: string): number {
+  const name = relPath.slice(relPath.lastIndexOf('/') + 1).toLowerCase();
+  if (name === query) return 0;
+  if (name.startsWith(query)) return 1;
+  if (name.includes(query)) return 2;
+  return 3; // matched somewhere in the directory portion
+}
+
+/** Case-insensitive substring filter over working-tree-relative paths, ranked
+ *  basename-first (exact > prefix > substring > path substring), shortest path
+ *  winning ties. Returns at most `limit` options with absolute paths resolved
+ *  against `rootPath`. */
+export function filterFileOptions(
+  relPaths: string[],
+  query: string,
+  rootPath: string,
+  limit = FILE_OPTION_LIMIT,
+): ComposerFileOption[] {
+  const root = rootPath.replace(/\/+$/, '');
+  const q = query.trim().toLowerCase();
+  const ranked = relPaths
+    .filter(relPath => !q || relPath.toLowerCase().includes(q))
+    .map(relPath => ({ relPath, rank: fileOptionRank(relPath, q) }));
+  ranked.sort((a, b) =>
+    a.rank - b.rank
+    || a.relPath.length - b.relPath.length
+    || a.relPath.localeCompare(b.relPath));
+  return ranked.slice(0, limit).map(({ relPath }) => ({
+    path: `${root}/${relPath}`,
+    relPath,
+    name: relPath.slice(relPath.lastIndexOf('/') + 1),
+  }));
 }
 
 export interface ComposerModeOption {

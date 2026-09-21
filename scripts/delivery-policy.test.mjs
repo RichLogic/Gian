@@ -5,7 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { assertExecutionAllowed } from './execution-policy.mjs';
-import { assertHeadlessTests, requiresFullSuite } from './source-gate.mjs';
+import { assertHeadlessTests, requiresFullSuite, sourcePolicyChecks } from './source-gate.mjs';
+
+test('source policy keeps executable quality gates without requiring a retired ledger', () => {
+  const checks = sourcePolicyChecks(['quality:traceability', 'typecheck', 'quality:docs']);
+  assert.equal(checks.includes('quality:traceability'), false);
+  assert.equal(checks.includes('typecheck'), false);
+  for (const id of ['quality:test-catalog', 'quality:test-selection',
+    'quality:versions', 'quality:operations:strict', 'quality:docs']) {
+    assert.ok(checks.includes(id), id);
+  }
+});
 import { assertSourceCertificate, assertPublicSource, assertDesktopAcceptance, isPublicPath, DESKTOP_CHECKS, DESKTOP_PLAN } from './delivery-certificate.mjs';
 import { allocatePorts, validatePorts } from './dev-ports.mjs';
 import { assertDevOAuthConfiguration, assertDevSigningEntitlements, devPackageConfiguration, requireDevOAuthClientId } from './dev-package-config.mjs';
@@ -29,12 +39,32 @@ test('merge tests reject Desktop and external side effects even in system scope'
   assert.equal(requiresFullSuite(['packages/web/src/views/AgentsView.tsx']), false);
 });
 
-test('source certification requires exact full main CI provenance and curated content', () => {
-  const run = { id: 12, run_attempt: 1, head_sha: 'a'.repeat(40), conclusion: 'success', head_branch: 'main', event: 'push', path: '.github/workflows/ci.yml', repository: { full_name: 'RichLogic/Gian-Dev' } };
+test('ordinary local verification also requires selection and does not authorize Desktop or packaging', () => {
+  for (const env of [{}, { CI: 'true' }, { GITHUB_ACTIONS: 'true' }, { GIAN_ALLOW_DESKTOP_E2E: '1' }]) {
+    assert.throws(() => assertExecutionAllowed('verification', env), /Owner-selected/);
+  }
+  const selected = { GIAN_ALLOW_LOCAL_VERIFICATION: '1' };
+  assert.doesNotThrow(() => assertExecutionAllowed('verification', selected));
+  assert.throws(() => assertExecutionAllowed('desktop', selected), /explicit user permission/);
+  assert.throws(() => assertExecutionAllowed('package', selected), /restricted/);
+  assert.doesNotThrow(() => assertExecutionAllowed('verification', {
+    GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
+  }));
+});
+
+test('source certification requires exact full version-branch CI provenance and curated content', () => {
+  const run = { id: 12, run_attempt: 1, head_sha: 'a'.repeat(40), conclusion: 'success', head_branch: 'release/0.6.2', event: 'push', path: '.github/workflows/ci.yml', repository: { full_name: 'RichLogic/Gian-Dev' } };
   const cert = { schema: 1, status: 'PASS', full: true, repository: run.repository.full_name, sha: run.head_sha, runId: 12, runAttempt: 1, manifest: [] };
   assert.doesNotThrow(() => assertSourceCertificate(cert, run, []));
   for (const patch of [{ full: false }, { sha: 'b'.repeat(40) }, { runId: 13 }, { runAttempt: 2 }, { runAttempt: undefined }]) assert.throws(() => assertSourceCertificate({ ...cert, ...patch }, run, []));
-  assert.throws(() => assertSourceCertificate(cert, { ...run, event: 'pull_request' }, []));
+  assert.doesNotThrow(() => assertSourceCertificate(cert, { ...run, event: 'workflow_dispatch' }, []));
+  assert.doesNotThrow(() => assertSourceCertificate(cert, { ...run, head_branch: 'release/12.30.456' }, []));
+  for (const event of ['pull_request', 'pull_request_target', 'schedule']) {
+    assert.throws(() => assertSourceCertificate(cert, { ...run, event }, []));
+  }
+  for (const head_branch of ['main', 'fix/sidechat', 'release/latest', 'release/0.6', 'release/v0.6.2', 'release/0.6.2/extra', 'release/0.6.2-rc1', undefined]) {
+    assert.throws(() => assertSourceCertificate(cert, { ...run, head_branch }, []));
+  }
   assert.throws(() => assertSourceCertificate(cert, run, [{ path: 'changed' }]));
   assert.equal(isPublicPath('docs/secret.md'), false);
   assert.equal(isPublicPath('AGENTS.md'), false);

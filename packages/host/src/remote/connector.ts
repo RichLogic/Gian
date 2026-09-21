@@ -6,6 +6,7 @@ import {
   MAX_CONCURRENT_TRANSFERS_PER_DEVICE,
   MAX_STRING_CHARS,
   RemoteProtocolError,
+  acceptRemoteHello,
   assertInnerContentPlaintext,
   base64UrlToBytes,
   bytesToBase64Url,
@@ -124,6 +125,8 @@ export class RemoteConnector {
   generation = generateCanonicalId();
   private attempts = 0;
   private closed = false;
+  private protocolMode: 'pending' | 'legacy' | 'negotiated' = 'pending';
+  private wireFeatures: readonly string[] = [];
   private peerTransportAck = -1;
   private readonly transferAckOffset = new Map<string, number>();
   private readonly activeDownloadTransfers = new Set<string>();
@@ -143,6 +146,7 @@ export class RemoteConnector {
       device: RemoteDeviceRecord,
       command: CommandRequest,
       hooks?: {
+        snapshotParts?: boolean;
         onAccepted?: () => Promise<void>;
         onResultSent?: () => Promise<void>;
       },
@@ -151,6 +155,7 @@ export class RemoteConnector {
     _auth?: RemoteServerAuthClient,
     _hostId?: string,
     private readonly services?: {
+      hostVersion?: string;
       attachments?: RemoteAttachmentService;
       fileRefs?: RemoteFileRefService;
       transcriptPage?: (sessionId: string, deviceId: string) => {
@@ -303,6 +308,25 @@ export class RemoteConnector {
         this.cancelInitialSnapshot();
       }
       assertFrameClassMatchesInner(frame.frame_class, message.type);
+      if (message.type === 'hello') {
+        if (this.protocolMode !== 'pending') throw new RemoteProtocolError('INVALID_FRAME', 'hello must be the first business message');
+        try {
+          const reply = acceptRemoteHello(message, {
+            deviceId: this.device.id, connectionId: this.crypto.connectionId,
+            hostGeneration: this.crypto.hostGeneration, hostVersion: this.services?.hostVersion ?? 'unknown',
+          });
+          this.wireFeatures = reply.negotiated_capabilities;
+          this.protocolMode = 'negotiated';
+          await this.sendControl(reply);
+        } catch (error) {
+          await this.sendControl({ type: 'error', code: 'PROTOCOL_VERSION_UNSUPPORTED', message: error instanceof Error ? error.message : 'Remote negotiation failed' });
+          this.close();
+        }
+        return;
+      }
+      // Explicit transition for already deployed clients without hello. Do not
+      // widen a negotiated peer's capabilities through this compatibility path.
+      if (this.protocolMode === 'pending') this.protocolMode = 'legacy';
       if (message.type === 'command.request') {
         const command = parseCommandRequest(message, Date.now());
         // Commands leave the frame queue so one slow execution cannot stall
@@ -310,9 +334,11 @@ export class RemoteConnector {
         // content sliding window and must keep flowing. Per-device command
         // order stays FIFO through this dedicated chain.
         const hooks: {
+          snapshotParts?: boolean;
           onAccepted?: () => Promise<void>;
           onResultSent?: () => Promise<void>;
         } = {
+          snapshotParts: this.protocolMode === 'legacy' || this.wireFeatures.includes('wire.snapshot_parts'),
           onAccepted: async () => {
             await this.sendControl({
               type: 'command.accepted',
@@ -367,7 +393,7 @@ export class RemoteConnector {
           await this.sendControl({ type: 'snapshot.required', reason: 'gap_evicted' });
           return;
         }
-        const transcriptPage = subscribedSessionId
+        const transcriptPage = subscribedSessionId && (this.protocolMode === 'legacy' || this.wireFeatures.includes('wire.transcript_page'))
           ? this.services?.transcriptPage?.(subscribedSessionId, this.device.id) ?? null
           : null;
         await this.sendControl({

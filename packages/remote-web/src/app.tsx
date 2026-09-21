@@ -62,6 +62,9 @@ function Breadcrumb() {
 function InitialConnectionPanel() {
   const t = useT();
   const state = useRemoteState();
+  if (!state.currentHostId) return <div className="rw-initial-loading" role="status">
+    <strong>{t('host.select')}</strong><span>{t('host.selectHint')}</span>
+  </div>;
   return (
     <>
       <ConnectionBanner connection={state.connection} />
@@ -74,6 +77,8 @@ function InitialConnectionPanel() {
         <span className="spinner" aria-hidden="true" />
         <strong>{t('conn.initial.title')}</strong>
         <span>{t('conn.initial.desc')}</span>
+        {state.connectionPhase && <span>{t(`conn.phase.${state.connectionPhase}`)}</span>}
+        {state.connectionFailed && <span>{t('conn.failedHint')}</span>}
       </div>
     </>
   );

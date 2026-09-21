@@ -28,11 +28,12 @@ function companionPath(binaryPath: string): string {
 }
 
 export class SavedPathRuntimeError extends Error {
-  readonly code = 'RUNTIME_SAVED_PATH_INVALID';
+  readonly code: string;
 
-  constructor(message: string) {
+  constructor(message: string, code = 'RUNTIME_SAVED_PATH_INVALID') {
     super(message);
     this.name = 'SavedPathRuntimeError';
+    this.code = code;
   }
 }
 
@@ -44,7 +45,18 @@ export async function assertSavedAbsoluteRuntimePath(path: string): Promise<void
   if (!isCanonicalAbsolutePath(path)) {
     throw new SavedPathRuntimeError('Saved Runtime path must be a canonical absolute path.');
   }
-  const info = await lstat(path);
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new SavedPathRuntimeError(
+        `Saved Runtime path is missing: ${path}`,
+        'RUNTIME_SAVED_PATH_MISSING',
+      );
+    }
+    throw error;
+  }
   if (!info.isFile() || info.isSymbolicLink()) {
     throw new SavedPathRuntimeError('Saved Runtime path must be a regular file.');
   }

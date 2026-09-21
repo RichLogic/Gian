@@ -88,7 +88,13 @@ export async function activateDefaultKimiStore(binaryPath) {
     join(rootDir, 'packages/proxies/kimi-proxy/dist/src/runtime/session-store.js')
   );
   const guard = new guardModule.KimiSessionStoreGuard(preflight.kimiCodeHome);
-  await guard.assertCompatible(preflight.candidateVersion, preflight.candidateVersion);
+  // Advisory since ADR-0082: report store conditions, never block activation.
+  for (const condition of await guard.evaluateCompatibility(
+    preflight.candidateVersion,
+    preflight.candidateVersion,
+  )) {
+    process.stderr.write(`Kimi session-store condition (${condition.kind}): ${condition.message}\n`);
+  }
   await guard.recordActivation(preflight.candidateVersion);
   return {
     ...preflight,

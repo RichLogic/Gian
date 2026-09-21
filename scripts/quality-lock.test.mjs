@@ -4,6 +4,42 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { acquireQualityLock, QUALITY_LOCK_ENV } from './quality-lock.mjs';
+import { acquireLocalVerification, LOCAL_VERIFICATION_TOKEN, localNodeTestArgs, localVitestArgs } from './local-verification.mjs';
+
+test('local verification shares a slot across worktrees and nested runners retain it', t => {
+  const root = mkdtempSync(join(tmpdir(), 'gian-local-verification-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const approved = { GIAN_ALLOW_LOCAL_VERIFICATION: '1' };
+  const first = acquireLocalVerification('worktree A', approved, root);
+  try {
+    assert.throws(() => acquireLocalVerification('worktree B', approved, root), /already running/);
+    assert.throws(() => acquireLocalVerification('bad inherited lease', {
+      ...approved, [LOCAL_VERIFICATION_TOKEN]: 'wrong',
+    }, root), /inheritance is invalid/);
+    const nested = acquireLocalVerification('nested typecheck', first.env, root);
+    nested.release();
+    assert.throws(() => acquireLocalVerification('worktree B', approved, root), /already running/);
+    // A preview/package quality token must not be confused with the local slot.
+    assert.throws(() => acquireLocalVerification('foreign quality gate', {
+      ...approved, [QUALITY_LOCK_ENV]: first.env[LOCAL_VERIFICATION_TOKEN],
+    }, root), /already running/);
+  } finally { first.release(); }
+  acquireLocalVerification('next queued task', approved, root).release();
+});
+
+test('local verification rejects unselected runs without creating a slot; hosted workers are unchanged', t => {
+  const root = mkdtempSync(join(tmpdir(), 'gian-local-verification-policy-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  assert.throws(() => acquireLocalVerification('not approved', {}, root), /Owner-selected/);
+  assert.equal(existsSync(join(root, 'output')), false);
+  const hosted = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' };
+  acquireLocalVerification('hosted tests', hosted, root).release();
+  assert.equal(existsSync(join(root, 'output')), false);
+  assert.deepEqual(localNodeTestArgs({}), ['--test-concurrency=1']);
+  assert.deepEqual(localVitestArgs({}), ['--maxWorkers=1', '--minWorkers=1', '--no-file-parallelism']);
+  assert.deepEqual(localNodeTestArgs(hosted), []);
+  assert.deepEqual(localVitestArgs(hosted), []);
+});
 
 test('quality lock rejects a concurrent gate and supports inherited nested gates', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'gian-quality-lock-'));

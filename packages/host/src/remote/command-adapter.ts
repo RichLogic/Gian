@@ -70,6 +70,7 @@ export class RemoteCommandAdapter {
     device: RemoteDeviceRecord,
     command: CommandRequest,
     hooks?: {
+      snapshotParts?: boolean;
       onAccepted?: () => Promise<void>;
       onResultSent?: () => Promise<void>;
     },
@@ -126,12 +127,15 @@ export class RemoteCommandAdapter {
   // state and command waiter until every part has been verified.
   private async refresh(
     device: RemoteDeviceRecord,
-    hooks?: { onResultSent?: () => Promise<void> },
+    hooks?: { onResultSent?: () => Promise<void>; snapshotParts?: boolean },
   ): Promise<unknown> {
     const snapshot = this.deps.snapshot(device) as RemoteStateSnapshot;
     const payloadBytes = new TextEncoder().encode(canonicalJson(snapshot)).byteLength;
     if (payloadBytes <= SNAPSHOT_SPLIT_THRESHOLD_BYTES) {
       return snapshot;
+    }
+    if (hooks?.snapshotParts === false) {
+      throw new RemoteProtocolError('PROTOCOL_VERSION_UNSUPPORTED', 'The remote client did not negotiate snapshot parts');
     }
     if (!this.deps.pushSnapshotParts || !hooks) {
       throw new RemoteProtocolError('FRAME_TOO_LARGE', 'snapshot part transport is unavailable');
@@ -150,6 +154,7 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: unknown,
     hooks?: {
+      snapshotParts?: boolean;
       onAccepted?: () => Promise<void>;
       onResultSent?: () => Promise<void>;
     },

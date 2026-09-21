@@ -135,6 +135,14 @@ function EnrollmentBlock({
             onChange={e => setToken(e.target.value)}
           />
           <span className="hint">{t('settings.remote.enrollmentToken.hint')}</span>
+          <details className="rs-enrollment-help">
+            <summary>{t('settings.remote.enrollmentToken.get')}</summary>
+            <p className="hint">{t('settings.remote.enrollmentToken.selfHosted')}</p>
+            <code>gian-remote-server enrollment create</code>
+            <p className="hint">{t('settings.remote.enrollmentToken.docker')}</p>
+            <code>docker compose exec remote gian-remote-server enrollment create</code>
+            <p className="hint">{t('settings.remote.enrollmentToken.admin')}</p>
+          </details>
         </dd>
       </dl>
       {enrollment.kind === 'connect-failed' && (
@@ -222,7 +230,8 @@ function ConnectedBlock({
         <dt>{t('settings.remote.serverUrl')}</dt>
         <dd className="rs-value">{info.serverUrl}</dd>
         <dt>{t('settings.remote.hostRemoteName')}</dt>
-        <dd className="rs-value">{info.hostRemoteName}</dd>
+        <dd className="rs-value"><HostNameEditor controller={controller} name={info.hostRemoteName}
+          enabled={enrollment.kind === 'connected' && enrollment.link === 'online'} /></dd>
         <dt>{t('settings.remote.status')}</dt>
         <dd className="rs-value" data-testid="remote-link-status">{linkLabel}</dd>
         <dt>{t('settings.remote.lastHeartbeat')}</dt>
@@ -257,6 +266,29 @@ function ConnectedBlock({
       {controller.setPublicUrl && <PublicUrlEditor controller={controller} info={info} />}
     </div>
   );
+}
+
+function HostNameEditor({ controller, name, enabled }: {
+  controller: RemoteSettingsController; name: string; enabled: boolean;
+}) {
+  const t = useT();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(name);
+  useEffect(() => { setValue(name); setEditing(false); }, [name]);
+  if (!editing) return <div className="rs-actions">
+    <span>{name}</span>
+    {controller.setHostName && <button type="button" className="btn secondary" disabled={!enabled}
+      onClick={() => setEditing(true)}>{t('settings.remote.hostName.rename')}</button>}
+  </div>;
+  return <div className="rs-actions">
+    <input className="input" aria-label={t('settings.remote.hostRemoteName')} value={value} maxLength={256}
+      onChange={event => setValue(event.target.value)} />
+    <button type="button" className="btn secondary" disabled={!enabled || !value.trim() || value.trim() === name}
+      onClick={() => void controller.setHostName?.(value.trim())}>{t('settings.remote.hostName.save')}</button>
+    <button type="button" className="btn secondary" onClick={() => { setValue(name); setEditing(false); }}>
+      {t('settings.remote.pair.cancel')}
+    </button>
+  </div>;
 }
 
 function IdentityChangedBlock({
@@ -400,9 +432,42 @@ function PairingBlock({
           </div>
         </div>
       </div>
+      {pairing.kind === 'awaiting-claim' && pairing.qrPayload && remaining > 0 && (
+        <PairingLink key={pairing.qrPayload} url={pairing.qrPayload} />
+      )}
       {pairing.kind === 'claimed' && (
         <PairingClaimDialog controller={controller} pairing={{ ...pairing, decision: state.busy ? 'pending' : pairing.decision }} />
       )}
+    </div>
+  );
+}
+
+function PairingLink({ url }: { url: string }) {
+  const t = useT();
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  }
+  return (
+    <div className="rs-pair-link">
+      <label className="rs-pair-label" htmlFor="remote-pairing-link">{t('settings.remote.pair.link')}</label>
+      <div className="rs-actions">
+        <input id="remote-pairing-link" className="input" type="text" readOnly value={url}
+          onFocus={event => event.currentTarget.select()} />
+        <button type="button" className="btn secondary" onClick={() => void copy()}>
+          {t('settings.remote.pair.copyLink')}
+        </button>
+      </div>
+      <p className="hint">{t('settings.remote.pair.linkHint')}</p>
+      <span className="hint" role="status">
+        {copyState === 'copied' && t('settings.remote.pair.linkCopied')}
+        {copyState === 'failed' && t('settings.remote.pair.copyFailed')}
+      </span>
     </div>
   );
 }

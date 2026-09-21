@@ -11,6 +11,7 @@ import { SessionManager } from '../src/session/manager.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
+import { proxyRequestTimeoutError } from '../src/proxy/protocol-v2-client.js';
 import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { EMPTY_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
@@ -43,6 +44,15 @@ class SidechatForkStubClient implements ProxyClient {
   forkCalls = 0;
   startTurnCalls: Array<{ config: Record<string, ConfigValue> }> = [];
   setNames: string[] = [];
+  interactionResponses: Array<{
+    sessionId: string;
+    interactionId: string;
+    responseId: string;
+    actionId: string;
+    values: Record<string, string | boolean | string[]>;
+    turnId?: string;
+  }> = [];
+  respondInteractionError: Error | null = null;
 
   isExited() { return false; }
   processGroupId() { return this.pgid; }
@@ -175,7 +185,17 @@ class SidechatForkStubClient implements ProxyClient {
     this.setNames.push(name);
   }
   async interruptTurn() {}
-  async respondInteraction() {}
+  async respondInteraction(params: {
+    sessionId: string;
+    interactionId: string;
+    responseId: string;
+    actionId: string;
+    values: Record<string, string | boolean | string[]>;
+    turnId?: string;
+  }) {
+    if (this.respondInteractionError) throw this.respondInteractionError;
+    this.interactionResponses.push(params);
+  }
   async closeSession() {}
   async deleteNativeSession(_nativeSessionId: string) {}
   async shutdown() {}
@@ -1045,6 +1065,193 @@ test('Fork rejects a persisted Session option whose Catalog binding changed', as
         error instanceof ProxyProtocolError && error.code === 'CONFIG_BINDING_INVALID'
       ),
     );
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+function emitInteractionRequested(
+  child: SidechatForkStubClient,
+  sidechatId: string,
+  turnId: string,
+  interactionId: string,
+  actionIds: string[],
+): void {
+  for (const handler of child.notificationHandlers) {
+    handler({
+      jsonrpc: '2.0',
+      method: 'interaction.requested',
+      params: {
+        eventId: `${interactionId}-event`,
+        streamId: child.stream,
+        sequence: 1,
+        sessionId: sidechatId,
+        turnId,
+        emittedAt: '2026-09-17T08:00:00.000Z',
+        data: {
+          interactionId,
+          title: 'Permission required',
+          presentation: { kind: 'permission' },
+          inputs: [],
+          actions: actionIds.map((id) => ({ id, label: id, style: 'primary' })),
+        },
+      },
+    } as never);
+  }
+}
+
+test('Side Chat approval resolves through the transient child route', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    await ctx.sessions.createSidechat(parent.id, 'sc_approval');
+    await ctx.sessions.sendMessage('sc_approval', 'run the risky tool');
+    const child = ctx.proxyMgr.client.children.get('sc_approval');
+    assert.ok(child);
+    const turnId = ctx.sessions.listSidechats().find((item) => item.id === 'sc_approval')
+      ?.user_inputs[0]?.turn_id;
+    assert.ok(turnId);
+    emitInteractionRequested(child, 'sc_approval', turnId, 'int-1', ['allow_once', 'reject_once']);
+    assert.equal(
+      ctx.sessions.listSidechats().find((item) => item.id === 'sc_approval')?.state,
+      'waiting_interaction',
+    );
+
+    // The pre-fix failure mode: respondApproval looked the Side Chat up in
+    // the sessions table and threw before ever reaching the Proxy.
+    assert.throws(() => ctx.sessions.getSession('sc_approval'), /session not found/);
+
+    await ctx.sessions.respondApproval('sc_approval', 'int-1', 'allow_once', undefined, 'allow_once');
+    assert.equal(child.interactionResponses.length, 1);
+    const response = child.interactionResponses[0]!;
+    assert.equal(response.sessionId, 'sc_approval');
+    assert.equal(response.interactionId, 'int-1');
+    assert.equal(response.actionId, 'allow_once');
+    assert.equal(response.turnId, turnId);
+    assert.deepEqual(response.values, {});
+    assert.ok(response.responseId);
+
+    // SIDECHAT-001: the answer stays transient — no sessions row, no
+    // proxy_interactions persistence for the Side Chat id.
+    assert.equal(
+      (ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE id = ?').get('sc_approval') as { n: number }).n,
+      0,
+    );
+    assert.equal(
+      (ctx.db.prepare('SELECT COUNT(*) AS n FROM proxy_interactions WHERE session_id = ?').get('sc_approval') as { n: number }).n,
+      0,
+    );
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('Side Chat decline maps to the advertised deny action; unknown native options are rejected', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    await ctx.sessions.createSidechat(parent.id, 'sc_decline');
+    await ctx.sessions.sendMessage('sc_decline', 'edit the file');
+    const child = ctx.proxyMgr.client.children.get('sc_decline');
+    assert.ok(child);
+    const turnId = ctx.sessions.listSidechats().find((item) => item.id === 'sc_decline')
+      ?.user_inputs[0]?.turn_id;
+    assert.ok(turnId);
+    emitInteractionRequested(child, 'sc_decline', turnId, 'int-2', ['allow_once', 'reject_once']);
+
+    await ctx.sessions.respondApproval('sc_decline', 'int-2', 'decline');
+    const decline = child.interactionResponses.at(-1);
+    assert.equal(decline?.actionId, 'reject_once');
+    assert.deepEqual(decline?.values, {});
+
+    await ctx.sessions.respondApproval('sc_decline', 'int-2', 'allow_once', { note: 'go ahead' });
+    const allow = child.interactionResponses.at(-1);
+    assert.equal(allow?.actionId, 'allow_once');
+    assert.deepEqual(allow?.values, { note: 'go ahead' });
+
+    await assert.rejects(
+      ctx.sessions.respondApproval('sc_decline', 'int-2', 'allow_once', undefined, 'bogus_option'),
+      (error: unknown) => (
+        error instanceof Error
+        && (error as { code?: unknown }).code === 'INVALID_APPROVAL_OPTION'
+      ),
+    );
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  }
+});
+
+test('a timed-out Side Chat RPC rejects and quarantines only that Side Chat', async () => {
+  const ctx = setup();
+  try {
+    const parent = await ctx.sessions.createSession({ workspace_id: ctx.wsId, executor: 'claude' });
+    await ctx.sessions.createSidechat(parent.id, 'sc_wedge');
+    await ctx.sessions.createSidechat(parent.id, 'sc_domain');
+    await ctx.sessions.sendMessage('sc_wedge', 'trigger approval');
+    const wedged = ctx.proxyMgr.client.children.get('sc_wedge');
+    assert.ok(wedged);
+    const turnId = ctx.sessions.listSidechats().find((item) => item.id === 'sc_wedge')
+      ?.user_inputs[0]?.turn_id;
+    assert.ok(turnId);
+    emitInteractionRequested(wedged, 'sc_wedge', turnId, 'int-wedge', ['allow_once', 'reject_once']);
+
+    // The shared Proxy (kimi shape) never answers interaction.respond; the
+    // bounded client deadline rejects and the coordinator isolates the Side
+    // Chat instead of leaving a permanently pending dispatch.
+    wedged.respondInteractionError = proxyRequestTimeoutError(
+      'io.gian.kimi',
+      'interaction.respond',
+      15_000,
+    );
+    await assert.rejects(
+      ctx.sessions.respondApproval('sc_wedge', 'int-wedge', 'allow_once', undefined, 'allow_once'),
+      /did not answer interaction\.respond within 15000ms/,
+    );
+    const quarantined = ctx.sessions.listSidechats().find((item) => item.id === 'sc_wedge');
+    assert.equal(quarantined?.status, 'unavailable');
+    assert.equal(quarantined?.state, 'error');
+    assert.match(quarantined?.last_error ?? '', /did not answer interaction\.respond/);
+    assert.equal(
+      ctx.broadcaster.messages.some((message) => (
+        message.type === 'sidechat:updated'
+        && message.sidechat.id === 'sc_wedge'
+        && message.sidechat.status === 'unavailable'
+      )),
+      true,
+    );
+    assert.equal(
+      ctx.sessions.listSidechats().find((item) => item.id === 'sc_domain')?.status,
+      'open',
+    );
+
+    // A Proxy-reported domain error is NOT a client timeout: it rejects but
+    // must not quarantine the Side Chat.
+    await ctx.sessions.sendMessage('sc_domain', 'trigger approval');
+    const domain = ctx.proxyMgr.client.children.get('sc_domain');
+    assert.ok(domain);
+    const domainTurnId = ctx.sessions.listSidechats().find((item) => item.id === 'sc_domain')
+      ?.user_inputs[0]?.turn_id;
+    assert.ok(domainTurnId);
+    emitInteractionRequested(domain, 'sc_domain', domainTurnId, 'int-domain', ['allow_once']);
+    domain.respondInteractionError = new ProxyProtocolError(
+      'INTERACTION_ACTION_NOT_FOUND',
+      '[INTERACTION_ACTION_NOT_FOUND] unknown action',
+      'request',
+    );
+    await assert.rejects(
+      ctx.sessions.respondApproval('sc_domain', 'int-domain', 'allow_once', undefined, 'allow_once'),
+      /INTERACTION_ACTION_NOT_FOUND/,
+    );
+    assert.equal(
+      ctx.sessions.listSidechats().find((item) => item.id === 'sc_domain')?.status,
+      'open',
+    );
+
+    // stopTurn on the wedged Side Chat surfaces the interrupt path through
+    // the same quarantine-on-timeout guard (interrupt itself resolves on the
+    // stub; a wedged proxy times out the same way — covered at the client
+    // layer in protocol-v2-client tests).
+    await assert.doesNotReject(ctx.sessions.stopTurn('sc_domain'));
   } finally {
     rmSync(ctx.dir, { recursive: true, force: true });
   }

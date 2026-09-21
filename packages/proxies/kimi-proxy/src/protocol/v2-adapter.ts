@@ -300,6 +300,11 @@ function standardError(error: unknown): KimiProtocolError {
     })();
     return new KimiProtocolError(code, error.message, false);
   }
+  if (error instanceof Error && (error as { code?: unknown }).code === 'RPC_TIMEOUT') {
+    // The wedged shared runtime was fenced by the RPC deadline; the request
+    // is retryable against the fresh runtime.
+    return new KimiProtocolError('RUNTIME_ERROR', error.message, true);
+  }
   return new KimiProtocolError(
     'INTERNAL',
     error instanceof Error ? error.message : String(error),
@@ -1106,6 +1111,8 @@ export class KimiProtocolV2Adapter {
     const mapped = options
       .map(catalogConfigOption)
       .filter((option) => option.control !== 'select' || (option.choices && option.choices.length > 0))
+      // gian.proxy/2.3 forbids the legacy role field on turn config options;
+      // roles come from specialCatalogs in the process-level catalog.
       .map(({ role: _role, ...option }) => option);
     if (mapped.length === 0) return {};
     return {
@@ -1143,6 +1150,20 @@ export class KimiProtocolV2Adapter {
         throw new KimiProtocolError('INVALID_PARAMS', 'nativeSession.history must be "none" or "replay".');
       }
       history = historyValue;
+    }
+    if (nativeSessionId) {
+      // The Host-side adopt path only consults its own DB: adopting a native
+      // session owned by a live Side Chat fork would steal the fork's native
+      // binding (the service-level stale-binding recovery must never apply to
+      // it). Refuse while the Side Chat exists; sidechat.close frees it.
+      for (const sidechatId of this.sidechats.keys()) {
+        if (this.sessions.get(sidechatId)?.nativeSessionId === nativeSessionId) {
+          throw new KimiProtocolError(
+            'CONFLICT',
+            `Native session ${nativeSessionId} is owned by a live Side Chat.`,
+          );
+        }
+      }
     }
     const config = record(params.config);
     // Every advertised Kimi option is turn-bound (ACP applies

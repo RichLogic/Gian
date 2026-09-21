@@ -38,7 +38,12 @@ describe('CatalogMarkdown', () => {
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe('https://example.com/docs');
     expect(links[0].getAttribute('rel')).toContain('noopener');
-    // Unsafe/degraded links render as plain text instead.
+    // No in-app browser behavior is mounted here → status-quo _blank.
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    // Unsafe/degraded links render as plain text instead — never anchors,
+    // never inert spans.
+    expect(container.querySelector('.link-inert')).toBeNull();
+    expect(screen.getByText('http').tagName).not.toBe('A');
     expect(container.textContent).toContain('js');
     expect(container.textContent).toContain('data');
     expect(container.textContent).toContain('relative');

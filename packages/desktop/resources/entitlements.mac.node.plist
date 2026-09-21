@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the bundled Node runtime only (Contents/Resources/runtime/node),
+  applied by packages/desktop/ci-sign-node.cjs; the App and its helpers keep the
+  stricter entitlements.mac(.inherit).plist sets.
+
+  disable-library-validation: Gian-managed JS CLI runtimes (e.g. DeepSeek Harness)
+  load native .node addons (@koromix/koffi, node-addon-require-builtin) that ship
+  adhoc-signed upstream, so Hardened Runtime library validation would refuse to
+  dlopen them into our Developer ID signed Node ("mapping process and mapped file
+  (non-platform) have different Team IDs").
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

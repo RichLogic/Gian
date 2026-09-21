@@ -5,6 +5,7 @@ import { listenRemoteApp, makeRemoteTestApp } from '../../remote-server/test/fix
 import { createProductionController } from '../../remote-web/src/controller/create.js';
 import { MemoryEncryptedHostCache } from '../../remote-web/src/cache/encrypted-cache.js';
 import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/identity.js';
+import { DeviceRelayClient } from '../../remote-web/src/transport/relay-client.js';
 import { makeTestApp } from './fixtures/test-app.js';
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promise<T> {
@@ -18,12 +19,25 @@ async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promi
   throw new Error(`timed out waiting for condition: ${String(last)}`);
 }
 
-test('production controller pairs through real Server+Host and matches snapshot host id', async () => {
+for (const silentHelloPeer of [false, true]) {
+test(`production controller pairs through real Server+Host (${silentHelloPeer ? 'silent hello compatibility' : 'negotiated protocol'})`, async () => {
   const hostApp = await makeTestApp();
+  if (silentHelloPeer) {
+    const connectDevice = hostApp.app.remote.connectDevice.bind(hostApp.app.remote);
+    hostApp.app.remote.connectDevice = (...args) => {
+      const connector = connectDevice(...args);
+      const send = connector.sendControl.bind(connector);
+      connector.sendControl = async message => {
+        if ((message as { type?: string }).type !== 'hello.ok') await send(message);
+      };
+      return connector;
+    };
+  }
   const { handle, fetch } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle);
   const identity = new MemoryBrowserIdentityStore();
   let controller: ReturnType<typeof createProductionController> | undefined;
+  const relays: DeviceRelayClient[] = [];
   try {
     const created = await (await fetch('/api/v1/admin/host-enrollments', {
       method: 'POST',
@@ -56,6 +70,11 @@ test('production controller pairs through real Server+Host and matches snapshot 
       identity,
       cache: new MemoryEncryptedHostCache(),
       autoRestore: false,
+      createRelay: (input) => {
+        const relay = new DeviceRelayClient(input);
+        relays.push(relay);
+        return relay;
+      },
       platform: 'macOS',
       userAgent: 'GianRemoteSystemTest',
     });
@@ -78,6 +97,7 @@ test('production controller pairs through real Server+Host and matches snapshot 
     assert.equal(controller.state.currentHostId, enrollBody.host_id);
     assert.equal(controller.state.hosts[0]?.id, enrollBody.host_id);
     assert.notEqual(controller.state.snapshotReceivedAt, null);
+    assert.equal(relays.at(-1)?.protocolMode, silentHelloPeer ? 'legacy' : 'negotiated');
   } finally {
     controller?.close();
     hostApp.app.remote.close();
@@ -85,3 +105,4 @@ test('production controller pairs through real Server+Host and matches snapshot 
     await hostApp.cleanup();
   }
 });
+}

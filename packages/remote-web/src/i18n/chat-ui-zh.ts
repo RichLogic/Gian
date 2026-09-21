@@ -13,6 +13,7 @@ export const CHAT_UI_ZH: Record<string, string> = {
   'composer.context.pastedText': '粘贴的文本',
   'composer.context.quote': '引用',
   'composer.context.remove': '移除上下文',
+  'links.unavailable': '无法在此打开此链接',
   'message.attachment.download': '下载',
   'transcript.agent': 'Agent',
   'transcript.agentOpen': '打开 Agent 详情',

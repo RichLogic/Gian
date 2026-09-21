@@ -1341,6 +1341,135 @@ test('DSH applies Settings model, effort, and mode defaults on its first turn', 
   }
 });
 
+test('DSH seeds a role-less Agent option default (provider) into turn_config', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupDsh(() => ({
+    model: '',
+    thinking: '',
+    mode: '',
+    options: { provider: 'vendor-b' },
+  }));
+  try {
+    proxyMgr.client.options.splice(0, proxyMgr.client.options.length, {
+      id: 'provider',
+      name: 'Provider',
+      type: 'select',
+      currentValue: 'deepseek-official',
+      scope: 'turn',
+      choices: [
+        { value: 'deepseek-official', label: 'DeepSeek' },
+        { value: 'vendor-b', label: 'Vendor B' },
+      ],
+    });
+
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'dsh' });
+    assert.deepEqual(session.turn_config, { provider: 'vendor-b' });
+
+    await sessions.sendMessage(session.id, 'use the configured provider');
+    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.provider, 'vendor-b');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('explicit turn_config beats the Agent option default', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupDsh(() => ({
+    model: '',
+    thinking: '',
+    mode: '',
+    options: { provider: 'vendor-b' },
+  }));
+  try {
+    proxyMgr.client.options.splice(0, proxyMgr.client.options.length, {
+      id: 'provider',
+      name: 'Provider',
+      type: 'select',
+      currentValue: 'deepseek-official',
+      scope: 'turn',
+      choices: [
+        { value: 'deepseek-official', label: 'DeepSeek' },
+        { value: 'vendor-b', label: 'Vendor B' },
+      ],
+    });
+
+    const session = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'dsh',
+      turn_config: { provider: 'deepseek-official' },
+    });
+    assert.deepEqual(session.turn_config, { provider: 'deepseek-official' });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('DSH skips unknown or unadvertised Agent option defaults', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupDsh(() => ({
+    model: '',
+    thinking: '',
+    mode: '',
+    // vendor-c is not in the catalog choices; ghost is not in the catalog.
+    options: { provider: 'vendor-c', ghost: 'x' },
+  }));
+  try {
+    proxyMgr.client.options.splice(0, proxyMgr.client.options.length, {
+      id: 'provider',
+      name: 'Provider',
+      type: 'select',
+      currentValue: 'deepseek-official',
+      scope: 'turn',
+      choices: [
+        { value: 'deepseek-official', label: 'DeepSeek' },
+        { value: 'vendor-b', label: 'Vendor B' },
+      ],
+    });
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'dsh' });
+    assert.deepEqual(session.turn_config, {});
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kimi applies a role-less Agent option default to session-bound config', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setupKimi(() => ({
+    model: '',
+    thinking: '',
+    mode: '',
+    options: { provider: 'vendor-b' },
+  }));
+  try {
+    proxyMgr.client.options.push({
+      id: 'provider',
+      name: 'Provider',
+      type: 'select',
+      currentValue: 'deepseek-official',
+      scope: 'session',
+      choices: [
+        { value: 'deepseek-official', label: 'DeepSeek' },
+        { value: 'vendor-b', label: 'Vendor B' },
+      ],
+    });
+
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'kimi' });
+    assert.equal(session.executor_config.values['provider'], 'vendor-b');
+    assert.equal(proxyMgr.client.lastCreateParams?.sessionConfig?.['provider'], 'vendor-b');
+
+    // An explicit session_config value wins over the Agent default.
+    await sessions.deleteSession(session.id);
+    const explicit = await sessions.createSession({
+      workspace_id: wsId,
+      executor: 'kimi',
+      session_config: { provider: 'deepseek-official' },
+    });
+    assert.equal(explicit.executor_config.values['provider'], 'deepseek-official');
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('managed approval presets do not leak into an older Codex native policy catalog', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup(() => ({
     model: '',

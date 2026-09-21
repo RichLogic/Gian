@@ -1,10 +1,37 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderApp } from './render-app.js';
 import type { PairingFailure } from '../src/controller/types.js';
 
 describe('pairing / auth pages (B1)', () => {
+  it('offers Add computer in the selector and returns to existing pairings on cancel', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({});
+    const hosts = controller.state.hosts;
+    await user.click(screen.getByRole('button', { name: '切换 Host' }));
+    await user.click(screen.getByRole('menuitem', { name: '添加电脑' }));
+    expect(screen.getByRole('textbox', { name: '配对短码' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(controller.state.hosts).toEqual(hosts);
+    expect(screen.getByRole('button', { name: '切换 Host' })).toBeInTheDocument();
+  });
+
+  it('distinguishes computers with the same name and prompts for selection', async () => {
+    const user = userEvent.setup();
+    renderApp({ scenario: {
+      currentHostId: null, snapshotReceivedAt: null,
+      auth: { kind: 'challenge-login', hosts: [] },
+      hosts: [
+        { id: 'aaaaaaaa-1111', name: 'Gian Host', online: true, sessionCount: 0 },
+        { id: 'bbbbbbbb-2222', name: 'Gian Host', online: true, sessionCount: 0 },
+      ],
+    } });
+    expect(screen.getByText(/从上方菜单选择已配对的电脑/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '切换 Host' }));
+    expect(screen.getByRole('menuitemradio', { name: /Gian Host · aaaaaaaa/ })).toBeInTheDocument();
+    expect(screen.getByRole('menuitemradio', { name: /Gian Host · bbbbbbbb/ })).toBeInTheDocument();
+  });
   it('PC short-code page: 8 segmented boxes, security copy, no app shell', () => {
     renderApp({ scenario: { auth: { kind: 'pairing', pairing: { kind: 'enter-code', attemptsLeft: 5 } } } });
     expect(document.querySelector('.topbar')).toBeNull();
@@ -60,6 +87,30 @@ describe('pairing / auth pages (B1)', () => {
     expect(controller.state.auth).toMatchObject({ pairing: { deviceName: '我的手机' } });
     await user.click(screen.getByRole('button', { name: '确认配对' }));
     expect(controller.state.auth).toMatchObject({ pairing: { kind: 'waiting', deviceName: '我的手机' } });
+  });
+
+  it.each([false, true])('QR invitation copies the full link without claiming; clipboard failure=%s', async fail => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText');
+    if (fail) writeText.mockRejectedValueOnce(new Error('clipboard denied'));
+    else writeText.mockResolvedValueOnce(undefined);
+    const pairingUrl = 'https://remote.test/#nonce=unclaimed-invitation-nonce';
+    const { controller } = renderApp({
+      scenario: { auth: { kind: 'pairing', pairing: {
+        kind: 'qr-confirm', hostName: 'Home Mac', deviceName: 'This browser', pairingUrl,
+      } } },
+    });
+    try {
+      const link = screen.getByRole('textbox', { name: '配对链接' });
+      expect(link).toHaveValue(pairingUrl);
+      expect(link).toHaveAttribute('readonly');
+      await user.click(screen.getByRole('button', { name: '复制配对链接' }));
+      expect(writeText).toHaveBeenCalledWith(pairingUrl);
+      expect(await screen.findByText(fail ? '复制失败，请选中链接手动复制。' : '配对链接已复制。')).toBeInTheDocument();
+      expect(controller.state.auth).toMatchObject({ pairing: { kind: 'qr-confirm' } });
+      await user.click(screen.getByRole('button', { name: '确认配对' }));
+      expect(screen.queryByRole('textbox', { name: '配对链接' })).toBeNull();
+    } finally { writeText.mockRestore(); }
   });
 
   it.each<[PairingFailure, string, string]>([

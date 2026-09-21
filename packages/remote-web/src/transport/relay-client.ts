@@ -2,6 +2,10 @@ import {
   CONTENT_WINDOW_CHUNKS,
   RELAY_PROTOCOL,
   RemoteProtocolError,
+  createRemoteHello,
+  validateRemoteHelloReply,
+  type Hello,
+  type HelloOk,
   assertFrameClassMatchesInner,
   assertInnerContentPlaintext,
   base64UrlToBytes,
@@ -130,11 +134,19 @@ export class DeviceRelayClient implements DeviceRelayLike {
   private acceptWaiter: ((accept: CryptoAccept) => void) | null = null;
   private acceptReject: ((error: Error) => void) | null = null;
   private frozenOffer: FrozenCryptoOffer | null = null;
+  private helloOffer: Hello | null = null;
+  private helloGeneration = '';
+  private helloResolve: ((reply: HelloOk | null) => void) | null = null;
+  private helloReject: ((error: Error) => void) | null = null;
+  private helloTimer: ReturnType<typeof setTimeout> | null = null;
+  private protocolReady = false;
+  private readonly deferredControl: Array<{ type?: string; [key: string]: unknown }> = [];
+  protocolMode: 'pending' | 'legacy' | 'negotiated' = 'pending';
 
   constructor(private readonly input: DeviceRelayClientOptions) {}
 
   get isOpen(): boolean {
-    return !this.closed && this.crypto !== null && this.socket?.readyState === WebSocket.OPEN;
+    return !this.closed && this.protocolReady && this.crypto !== null && this.socket?.readyState === WebSocket.OPEN;
   }
 
   async connect(): Promise<void> {
@@ -216,11 +228,39 @@ export class DeviceRelayClient implements DeviceRelayLike {
         connectionId: this.input.cryptoConnectionId,
       },
     });
-    await this.enqueueInbound(async () => {
-      while (this.pending.length) {
-        await this.openFrame(this.pending.shift());
-      }
+    this.helloOffer = createRemoteHello(this.input.deviceId, 'remote-web');
+    this.helloGeneration = accept.host_generation;
+    const negotiated = new Promise<HelloOk | null>((resolve, reject) => {
+      this.helloResolve = resolve;
+      this.helloReject = reject;
+      // Existing Hosts ignore hello. This bounded transition preserves those
+      // deployments; an explicit rejection or socket close NEVER falls back.
+      this.helloTimer = setTimeout(() => resolve(null), 1500);
     });
+    // Install the rejection handler before sending or draining queued frames.
+    const outcome = negotiated.then(reply => ({ reply }), error => ({ error }));
+    try {
+      await this.enqueueSealed('control', this.helloOffer);
+      await this.enqueueInbound(async () => {
+        while (this.pending.length) {
+          await this.openFrame(this.pending.shift());
+        }
+      });
+      const result = await outcome;
+      if ('error' in result) throw result.error;
+      if (this.closed) throw new RemoteProtocolError('HOST_OFFLINE', 'Connection closed during Remote negotiation');
+      this.protocolMode = result.reply ? 'negotiated' : 'legacy';
+      this.protocolReady = true;
+      for (const message of this.deferredControl.splice(0)) await this.input.handlers.onControl(message);
+    } catch (error) {
+      this.close('remote_negotiation_failed');
+      throw error;
+    } finally {
+      if (this.helloTimer) clearTimeout(this.helloTimer);
+      this.helloTimer = null;
+      this.helloResolve = null;
+      this.helloReject = null;
+    }
   }
 
   async sendControl(message: object): Promise<void> {
@@ -284,6 +324,10 @@ export class DeviceRelayClient implements DeviceRelayLike {
   close(reason = 'device_closed'): void {
     if (this.closed) return;
     this.closed = true;
+    this.protocolReady = false;
+    this.helloReject?.(new RemoteProtocolError('HOST_OFFLINE', reason));
+    if (this.helloTimer) clearTimeout(this.helloTimer);
+    this.deferredControl.length = 0;
     this.crypto?.close();
     this.crypto = null;
     this.acceptReject?.(new Error(reason));
@@ -381,7 +425,32 @@ export class DeviceRelayClient implements DeviceRelayLike {
       noteAck: (ack) => {
         this.peerTransportAck = Math.max(this.peerTransportAck, ack);
       },
-      onControl: message => this.input.handlers.onControl(message),
+      onControl: async message => {
+        if (message.type === 'hello.ok') {
+          try {
+            if (!this.helloOffer) throw new RemoteProtocolError('INVALID_FRAME', 'Unsolicited hello reply');
+            const reply = validateRemoteHelloReply(message, this.helloOffer, this.input.cryptoConnectionId, this.helloGeneration);
+            if (this.protocolMode === 'legacy') this.protocolMode = 'negotiated';
+            this.helloResolve?.(reply);
+          } catch (error) {
+            this.helloReject?.(error instanceof Error ? error : new Error('Invalid hello reply'));
+            this.close('remote_negotiation_failed');
+          }
+          return;
+        }
+        const control = message as { type?: string; [key: string]: unknown };
+        if (message.type === 'error' && control.code === 'PROTOCOL_VERSION_UNSUPPORTED') {
+          this.helloReject?.(new RemoteProtocolError('PROTOCOL_VERSION_UNSUPPORTED', String(control.message ?? 'Remote protocol mismatch')));
+          this.close('remote_protocol_unsupported');
+          return;
+        }
+        if (!this.protocolReady) {
+          if (this.deferredControl.length >= 64) { this.close('remote_negotiation_overflow'); return; }
+          this.deferredControl.push(control);
+          return;
+        }
+        await this.input.handlers.onControl(control);
+      },
       sendError: async message => {
         try {
           await this.sendControl(message);

@@ -193,3 +193,5 @@
 .rs-live-actions { border: 0; padding: 0; margin: 0; min-width: 0; }
 .rs-public-url { margin-top: 16px; }
 .rs-public-url .input { flex: 1; min-width: 0; }
+.rs-pair-link { margin-top: 16px; min-width: 0; }
+.rs-pair-link .input { flex: 1; min-width: 0; }

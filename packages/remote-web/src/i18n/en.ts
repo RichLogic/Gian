@@ -31,6 +31,11 @@ export const EN: Messages = {
     'Once paired, this device can remotely view and operate sessions on this Host. ' +
     'After confirming you still have to allow this device in Gian on the Mac. You can revoke it at any time.',
   'pair.qr.confirm': 'Confirm pairing',
+  'pair.qr.browserHint': 'Want to use Safari or another browser? Open this page there before confirming, or copy the pairing link below. Pairing applies only to the browser that confirms.',
+  'pair.qr.link': 'Pairing link',
+  'pair.qr.copyLink': 'Copy pairing link',
+  'pair.qr.linkCopied': 'Pairing link copied.',
+  'pair.qr.copyFailed': 'Could not copy. Select the link and copy it manually.',
 
   // Pairing — waiting for the local confirmation
   'pair.wait.title': 'Pairing request sent',
@@ -68,6 +73,13 @@ export const EN: Messages = {
 
   // Host selector
   'host.selector.label': 'Switch Host',
+  'host.select': 'Choose computer',
+  'host.selectHint': 'Choose a paired computer from the menu above, or add another computer.',
+  'host.add': 'Add computer',
+  'conn.phase.auth': 'Authenticating this browser with the Remote Server…',
+  'conn.phase.relay': 'Connecting to the computer and establishing encryption…',
+  'conn.phase.sync': 'Waiting for the computer to send its sessions…',
+  'conn.failedHint': 'Connection failed at this stage. Retrying automatically; you can switch or add a computer above.',
   'host.status.online': 'online',
   'host.status.offline': 'offline',
   'host.status.reconnecting': 'reconnecting',

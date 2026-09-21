@@ -26,13 +26,11 @@ import { FileRefRehypeContext } from './transcript/items.js';
 import type { PlanLifecycleState } from './transcript/apply.js';
 import {
   DiffOpenContext,
-  FileLinkHrefContext,
-  FileLinkOpenContext,
   ImageZoomContext,
   PlanOpenContext,
-  RelativeLinkOpenContext,
   ScheduleOpenContext,
 } from './transcript/items.js';
+import { LinkBehaviorProvider } from './links/LinkBehaviorProvider.js';
 import { ScheduleConfirmationHost } from './components/ScheduleConfirmations.js';
 import {
   getScheduleConfirmationsSnapshot,
@@ -213,14 +211,9 @@ function reconcileUnresolvedEntity(
   }
 }
 
-/** Right-click/status-bar href for transcript file links (the local desktop
- *  shell maps them to the editor scheme; clicks themselves route through
- *  FileLinkOpenContext into the in-app Sheet). encodeURI keeps `/` and `:`
- *  intact; covers spaces and unicode in paths. */
-function fileLinkHref(absPath: string, line?: number): string {
-  const encoded = encodeURI(absPath);
-  return line ? `vscode://file/${encoded}:${line}` : `vscode://file/${encoded}`;
-}
+/** Right-click/status-bar hrefs for transcript file links come from
+ *  `fileLinkHref` in links/link-behavior.ts, surfaced through the unified
+ *  LinkBehaviorProvider mounted below. */
 
 export function App() {
   useAppZoom();
@@ -908,6 +901,7 @@ export function App() {
     toggleRail,
     openFileInSheet,
     openRelativeFileHref,
+    openUrlInBrowser,
     showChangesDiff,
     openTranscriptDiffInSheet,
     openCommitInSheet,
@@ -1707,9 +1701,7 @@ export function App() {
         data-panel-resizing={panelLayout.resizing ? 'true' : undefined}
       >
           {mode === 'sessions' && (
-          <FileLinkHrefContext.Provider value={fileLinkHref}>
-          <FileLinkOpenContext.Provider value={(absPath, line) => { void openFileInSheet(absPath, false, line); }}>
-          <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
+          <LinkBehaviorProvider openFileInSheet={openFileInSheet} openRelativeFileHref={openRelativeFileHref} openUrlInBrowser={openUrlInBrowser}>
           <FileRefRehypeContext.Provider value={fileRehype}>
           <DiffOpenContext.Provider value={(item) => { void openTranscriptDiffInSheet(item); }}>
           <PlanOpenContext.Provider value={(payload) => {
@@ -1812,9 +1804,7 @@ export function App() {
           </PlanOpenContext.Provider>
           </DiffOpenContext.Provider>
           </FileRefRehypeContext.Provider>
-          </RelativeLinkOpenContext.Provider>
-          </FileLinkOpenContext.Provider>
-          </FileLinkHrefContext.Provider>
+          </LinkBehaviorProvider>
           )}
           {mode === 'spaces' && (
             <Suspense fallback={null}>
@@ -1932,11 +1922,7 @@ export function App() {
               ariaLabel="Resize conversation and context panels"
               onMouseDown={panelLayout.onMainSheetMouseDown}
             />
-            <FileLinkHrefContext.Provider value={fileLinkHref}>
-            <FileLinkOpenContext.Provider value={(absPath, line) => {
-              void openFileInSheet(absPath, false, line);
-            }}>
-            <RelativeLinkOpenContext.Provider value={openRelativeFileHref}>
+            <LinkBehaviorProvider openFileInSheet={openFileInSheet} openRelativeFileHref={openRelativeFileHref} openUrlInBrowser={openUrlInBrowser}>
             <FileRefRehypeContext.Provider value={fileRehype}>
             {/* Rows rendered INSIDE the panel (event feed) push their detail
              *  back into this same panel — same routing as transcript rows. */}
@@ -1969,9 +1955,7 @@ export function App() {
               />
             </ChatPanelOpenContext.Provider>
             </FileRefRehypeContext.Provider>
-            </RelativeLinkOpenContext.Provider>
-            </FileLinkOpenContext.Provider>
-            </FileLinkHrefContext.Provider>
+            </LinkBehaviorProvider>
           </>
         )}
         {sheetMounted && (

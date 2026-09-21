@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "@gian/proxy-protocol",
+  "repository": "RichLogic/Gian",
+  "version": "1.0.0",
+  "tag": "proxy-protocol-v1.0.0",
+  "filename": "gian-proxy-protocol-1.0.0.tgz",
+  "url": "https://github.com/RichLogic/Gian/releases/download/proxy-protocol-v1.0.0/gian-proxy-protocol-1.0.0.tgz",
+  "sourceCommit": "1dc1a16c322b4d467ca8ed54bff0c22b65e0feff",
+  "size": 94358,
+  "sha256": "ac4f53cfec83e882cbe4bb26c05b7792e3e56d6b642442523b51e66d487506c3",
+  "integrity": "sha512-bZjTBf4YX4QbJ/5n1jr4rmYk/Th30TXdqiMuTFkAleGjxX6EIB9C2f1wPrZlB0mqWJdII3zqC5PrmWAStEJ5iQ==",
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

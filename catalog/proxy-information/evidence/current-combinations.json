@@ -1,0 +1,137 @@
+{
+  "catalog": "https://github.com/RichLogic/Gian-Proxies/releases/tag/catalog-v1.7.0",
+  "sequence": 7,
+  "issuedAt": "2026-09-20T10:52:18Z",
+  "sourceId": "gian-official",
+  "plugins": [
+    {
+      "id": "claude",
+      "displayName": "Claude Code",
+      "version": "0.3.1",
+      "protocolRange": ">=2.2 <3.0",
+      "processScope": "session",
+      "combination": {
+        "certificate": {
+          "id": "proxies-51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2-35502936964-2",
+          "sha256": "f3091c9b99359ac29e02bdf09a93e9b84f3ae6cf73a8b043a8d51178b2a81b5b"
+        },
+        "companions": [],
+        "generationId": "claude-0.3.1-runtime-2.1.159",
+        "runtime": {
+          "asset": {
+            "sha256": "5adf7b4d349f743d669cd5adf2ce76dbb5e146d8ab99b3a63c5aef2ef15595f9",
+            "size": 215250336,
+            "url": "https://downloads.claude.ai/claude-code-releases/2.1.159/darwin-arm64/claude"
+          },
+          "entryRelativePath": "bin/claude",
+          "format": "raw",
+          "kind": "native-binary",
+          "runtimeId": "claude",
+          "version": "2.1.159"
+        }
+      }
+    },
+    {
+      "id": "codex",
+      "displayName": "Codex",
+      "version": "0.3.1",
+      "protocolRange": ">=2.2 <3.0",
+      "processScope": "shared",
+      "combination": {
+        "certificate": {
+          "id": "proxies-51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2-35502936964-2",
+          "sha256": "f3091c9b99359ac29e02bdf09a93e9b84f3ae6cf73a8b043a8d51178b2a81b5b"
+        },
+        "companions": [],
+        "generationId": "codex-0.3.1-runtime-0.153.4",
+        "runtime": {
+          "asset": {
+            "sha256": "35438da1fbf7a6db7ddb3bcec84448fa6015ba188461472a97d9d1da7d9c4353",
+            "size": 111554884,
+            "url": "https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-package-aarch64-apple-darwin.tar.gz"
+          },
+          "entryRelativePath": "bin/codex",
+          "format": "tar.gz",
+          "kind": "native-binary",
+          "runtimeId": "codex",
+          "version": "0.153.4"
+        }
+      }
+    },
+    {
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "version": "0.3.2",
+      "protocolRange": ">=2.2 <3.0",
+      "processScope": "shared",
+      "combination": {
+        "certificate": {
+          "id": "proxies-51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2-35502936964-2",
+          "sha256": "f3091c9b99359ac29e02bdf09a93e9b84f3ae6cf73a8b043a8d51178b2a81b5b"
+        },
+        "companions": [],
+        "generationId": "kimi-0.3.2-runtime-2.0.0",
+        "runtime": {
+          "asset": {
+            "sha256": "09d7e59721e75ea59ca987a89b7455c56c5bc9153958edd184318e855a9b81ff",
+            "size": 58600114,
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.0.0/kimi-code-darwin-arm64.tar.gz"
+          },
+          "entryRelativePath": "kimi",
+          "format": "tar.gz",
+          "kind": "native-binary",
+          "runtimeId": "kimi",
+          "version": "2.0.0"
+        }
+      }
+    },
+    {
+      "id": "ai.deepseek.harness",
+      "displayName": "DeepSeek Harness",
+      "version": "0.3.1",
+      "protocolRange": ">=2.2 <3.0",
+      "processScope": "shared",
+      "combination": {
+        "certificate": {
+          "id": "proxies-51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2-35502936964-2",
+          "sha256": "f3091c9b99359ac29e02bdf09a93e9b84f3ae6cf73a8b043a8d51178b2a81b5b"
+        },
+        "companions": [],
+        "generationId": "dsh-0.3.1-runtime-0.1.1-rc.2",
+        "runtime": {
+          "asset": {
+            "sha256": "0456ae6605862f840379dec22766e4aa73221c5fb9abf92375d6fd630fe40ec3",
+            "size": 45137691,
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.1/gian-runtime-dsh-0.1.1-rc.2-darwin-arm64.tar.gz"
+          },
+          "entryRelativePath": "node_modules/@deepseek-ai/dsh/lib/bin.js",
+          "format": "tar.gz",
+          "kind": "native-binary",
+          "runtimeId": "deepseek-harness",
+          "version": "0.1.1-rc.2"
+        }
+      }
+    },
+    {
+      "id": "com.zhipu.zcode",
+      "displayName": "ZCode",
+      "version": "0.3.2",
+      "protocolRange": ">=2.2 <3.0",
+      "processScope": "shared",
+      "combination": {
+        "certificate": {
+          "id": "proxies-51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2-35502936964-2",
+          "sha256": "f3091c9b99359ac29e02bdf09a93e9b84f3ae6cf73a8b043a8d51178b2a81b5b"
+        },
+        "companions": [],
+        "generationId": "zcode-0.3.2-runtime-0.16.5",
+        "runtime": {
+          "artifactSha256": "e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8",
+          "kind": "external-app",
+          "runtimeId": "zcode",
+          "version": "0.16.5"
+        }
+      }
+    }
+  ]
+}

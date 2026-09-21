@@ -12,7 +12,7 @@ import {
   recommendedCliVersionFromManifest,
   verifiedCliVersionsFromManifest,
 } from '../src/agents/manager.js';
-import { RuntimeResolver } from '../src/runtime/resolver.js';
+import { RuntimeResolver, RuntimeResolverError } from '../src/runtime/resolver.js';
 import { developmentEntries, testResolver } from './runtime-test-harness.js';
 
 const execFileAsync = promisify(execFile);
@@ -350,7 +350,7 @@ test('agent manager validates and persists a user CLI path', async t => {
   assert.equal(reloaded.getAgent(agent.id).cliPath, claude);
   await assert.rejects(
     reloaded.updateAgent(agent.id, { cliPath: join(root, 'missing') }),
-    /not usable|ENOENT|access/i,
+    (error: unknown) => error instanceof RuntimeResolverError && error.code === 'RUNTIME_ROOT_MISSING',
   );
   // A failed path probe never reaches the persisted config.
   assert.equal(reloaded.getAgent(agent.id).cliPath, claude);
@@ -521,6 +521,7 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     model: 'opus',
     thinking: 'high',
     mode: 'ask',
+    options: {},
   });
   const agent = manager.listAgents().find(candidate => candidate.proxy === 'claude')!;
   await manager.updateAgent(agent.id, { defaults: { mode: 'auto', thinking: 'xhigh' } });
@@ -530,12 +531,204 @@ test('agent manager migrates and persists Proxy-owned session defaults', async t
     model: 'opus',
     thinking: 'xhigh',
     mode: 'auto',
+    options: {},
   });
   assert.deepEqual(reloaded.proxyDefaults('claude'), {
     model: 'opus',
     thinking: 'xhigh',
     mode: 'auto',
+    options: {},
   });
+});
+
+test('agents.json v5 migrates to v6 with a data-neutral options map', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-v6-options-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, 'agents.json'), JSON.stringify({
+    schemaVersion: 5,
+    agents: [
+      {
+        id: 'agent-claude-1',
+        name: 'Claude',
+        pluginId: 'claude',
+        proxy: 'claude',
+        cliPath: null,
+        defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
+      },
+      {
+        id: 'agent-dsh-1',
+        name: 'DSH',
+        pluginId: 'ai.deepseek.harness',
+        proxy: 'dsh',
+        cliPath: null,
+        defaults: {
+          model: 'deepseek-chat',
+          thinking: '',
+          mode: '',
+          options: { provider: 'deepseek-official' },
+        },
+      },
+    ],
+  }));
+  const options = {
+    allowCreateWithoutCatalog: true,
+    dataDir,
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  } as const;
+
+  const manager = await AgentManager.create(options);
+  assert.deepEqual(manager.getAgent('agent-claude-1').defaults, {
+    model: 'sonnet', thinking: 'high', mode: 'ask', options: {},
+  });
+  assert.deepEqual(manager.getAgent('agent-dsh-1').defaults, {
+    model: 'deepseek-chat', thinking: '', mode: '', options: { provider: 'deepseek-official' },
+  });
+  const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
+    schemaVersion: number;
+    agents: Array<{ defaults: Record<string, unknown> }>;
+  };
+  assert.equal(persisted.schemaVersion, 6);
+  assert.deepEqual(persisted.agents[0]!.defaults, {
+    model: 'sonnet', thinking: 'high', mode: 'ask', options: {},
+  });
+  assert.deepEqual(persisted.agents[1]!.defaults['options'], { provider: 'deepseek-official' });
+});
+
+test('agent defaults normalize role-less options to a bounded scalar map', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-options-normalize-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  const oversized: Record<string, unknown> = {};
+  for (let i = 0; i < 70; i += 1) oversized[`bulk_${i}`] = i;
+  await writeFile(join(dataDir, 'agents.json'), JSON.stringify({
+    schemaVersion: 6,
+    agents: [{
+      id: 'agent-claude-1',
+      name: 'Claude',
+      pluginId: 'claude',
+      proxy: 'claude',
+      cliPath: null,
+      defaults: {
+        model: '',
+        thinking: '',
+        mode: '',
+        options: {
+          provider: 'deepseek-official',
+          'bad key': 'dropped',
+          '': 'dropped',
+          ['x'.repeat(129)]: 'dropped',
+          nested: { no: true },
+          list: [1],
+          count: 3,
+          flag: true,
+          nothing: null,
+          ...oversized,
+        },
+      },
+    }],
+  }));
+  const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir,
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  const options = manager.getAgent('agent-claude-1').defaults.options;
+  assert.equal(options['provider'], 'deepseek-official');
+  assert.equal(options['count'], 3);
+  assert.equal(options['flag'], true);
+  assert.equal(options['nothing'], null);
+  assert.equal('bad key' in options, false);
+  assert.equal('' in options, false);
+  assert.equal('nested' in options, false);
+  assert.equal('list' in options, false);
+  assert.ok(Object.keys(options).length <= 64);
+});
+
+test('updateAgent merges option defaults per key, deletes on null, stays atomic', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-options-merge-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, 'agents.json'), JSON.stringify({
+    schemaVersion: 6,
+    agents: [
+      {
+        id: 'agent-claude-1',
+        name: 'Claude One',
+        pluginId: 'claude',
+        proxy: 'claude',
+        cliPath: null,
+        defaults: { model: 'sonnet', thinking: 'high', mode: 'ask', options: {} },
+      },
+      {
+        id: 'agent-claude-2',
+        name: 'Claude Two',
+        pluginId: 'claude',
+        proxy: 'claude',
+        cliPath: null,
+        defaults: { model: '', thinking: '', mode: '', options: {} },
+      },
+    ],
+  }));
+  const options = {
+    dataDir,
+    releaseVersion: '0.1.0',
+    allowCreateWithoutCatalog: true,
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  } as const;
+
+  const manager = await AgentManager.create(options);
+  const agent = manager.getAgent('agent-claude-1');
+
+  await manager.updateAgent(agent.id, {
+    defaults: { options: { provider: 'deepseek-official', region: 'us' } },
+  });
+  assert.deepEqual(manager.getAgent(agent.id).defaults.options, {
+    provider: 'deepseek-official', region: 'us',
+  });
+
+  // An absent options map leaves the stored entries untouched; the triplet
+  // still merges field by field.
+  await manager.updateAgent(agent.id, { defaults: { model: 'opus' } });
+  assert.deepEqual(manager.getAgent(agent.id).defaults, {
+    model: 'opus',
+    thinking: 'high',
+    mode: 'ask',
+    options: { provider: 'deepseek-official', region: 'us' },
+  });
+
+  // null deletes exactly one key.
+  await manager.updateAgent(agent.id, { defaults: { options: { provider: null } } });
+  assert.deepEqual(manager.getAgent(agent.id).defaults.options, { region: 'us' });
+
+  // A rejected patch commits nothing — neither the name nor the defaults.
+  await assert.rejects(
+    manager.updateAgent(agent.id, {
+      name: 'claude two',
+      defaults: { options: { region: null } },
+    }),
+    (error: unknown) => error instanceof Error && 'code' in error
+      && (error as { code: string }).code === 'AGENT_NAME_TAKEN',
+  );
+  assert.deepEqual(manager.getAgent(agent.id).defaults.options, { region: 'us' });
+  assert.equal(manager.getAgent(agent.id).name, agent.name);
+
+  const reloaded = await AgentManager.create(options);
+  assert.deepEqual(reloaded.getAgent(agent.id).defaults.options, { region: 'us' });
 });
 
 test('agent manager verifies and atomically activates a GitHub proxy archive', {
@@ -1178,15 +1371,15 @@ test('v1 agents.json migrates one default Agent per configured kind', async t =>
     ['claude', 'Claude Code', claude],
     ['codex', 'Codex', null],
   ]);
-  assert.deepEqual(agents[0]!.defaults, { model: 'sonnet', thinking: '', mode: 'ask' });
-  assert.deepEqual(agents[1]!.defaults, { model: 'gpt-5', thinking: 'high', mode: '' });
+  assert.deepEqual(agents[0]!.defaults, { model: 'sonnet', thinking: '', mode: 'ask', options: {} });
+  assert.deepEqual(agents[1]!.defaults, { model: 'gpt-5', thinking: 'high', mode: '', options: {} });
 
-  // The persisted file is schema v5 and survives a reload untouched.
+  // The persisted file is schema v6 and survives a reload untouched.
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
     schemaVersion: number;
     agents: unknown[];
   };
-  assert.equal(persisted.schemaVersion, 5);
+  assert.equal(persisted.schemaVersion, 6);
   assert.equal(persisted.agents.length, 2);
   const reloaded = await AgentManager.create({
     allowCreateWithoutCatalog: true,
@@ -1257,7 +1450,7 @@ test('agents.json v2 migrates to v3 and removes persisted Agent colors', async t
     schemaVersion: number;
     agents: Array<Record<string, unknown>>;
   };
-  assert.equal(persisted.schemaVersion, 5);
+  assert.equal(persisted.schemaVersion, 6);
   assert.equal('color' in persisted.agents[0]!, false);
 });
 
@@ -1350,7 +1543,7 @@ test('agent CRUD persists and delete removes only the target Agent', async t => 
 
   const reloaded = await AgentManager.create(options);
   assert.deepEqual(reloaded.listAgents().map(agent => agent.name), ['Claude B']);
-  assert.deepEqual(reloaded.agentDefaults(claudeB.id), { model: 'opus', thinking: '', mode: '' });
+  assert.deepEqual(reloaded.agentDefaults(claudeB.id), { model: 'opus', thinking: '', mode: '', options: {} });
   assert.throws(() => reloaded.getAgent(claudeA.id), /agent not found/);
   await assert.rejects(reloaded.deleteAgent(claudeA.id), /agent not found/);
 });
@@ -1498,7 +1691,7 @@ test('v3 agents.json migrates to v4 pluginId and preserves official identity', a
     schemaVersion: number;
     agents: Array<{ pluginId: string; proxy: string }>;
   };
-  assert.equal(persisted.schemaVersion, 5);
+  assert.equal(persisted.schemaVersion, 6);
   assert.equal(persisted.agents[0]?.pluginId, 'ai.deepseek.harness');
 });
 

@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { runBoundedCommand } from '@gian/proxy-protocol/node';
 
 const SETUP_URL = 'https://zcode.z.ai';
@@ -13,6 +13,40 @@ export const ZCODE_CLI_CONFIG_READINESS_ISSUE = {
     + 'Gian will not create or modify this file.',
   repairable: true,
 } as const;
+
+export const ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE = {
+  code: 'zcode_builtin_provider_config_missing',
+  message: 'ZCode builtin provider config (zcode-builtin.json) is not reachable from the CLI '
+    + "entry's own lookup paths, so a standalone-spawned app-server exits at startup. "
+    + 'ZCode.app 3.12.3 (2026-09-16) ships it under Contents/Resources/config/provider/, '
+    + 'which the embedded CLI cannot resolve for bundle-path launches. '
+    + 'Select a ZCode build whose standalone CLI works, or retry after ZCode fixes standalone '
+    + 'embedding (Gian-Dev #163).',
+  repairable: true,
+} as const;
+
+/** Mirror the embedded CLI's own bundled-config resolution
+ * (`resolveBundledZCodeBuiltinProviderConfig` in zcode.cjs): next to the
+ * entry, then five levels up plus config/provider. A file anywhere else is
+ * invisible to a standalone spawn and the app-server exits at startup. */
+export function builtinProviderConfigCandidates(entryPath: string): [string, string] {
+  const dir = dirname(resolve(entryPath));
+  return [
+    join(dir, 'provider', 'zcode-builtin.json'),
+    resolve(dir, '../../../../../config/provider/zcode-builtin.json'),
+  ];
+}
+
+export async function locateBuiltinProviderConfig(entryPath: string): Promise<string | null> {
+  for (const candidate of builtinProviderConfigCandidates(entryPath)) {
+    try {
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch {
+      // Candidate absent; try the next lookup path.
+    }
+  }
+  return null;
+}
 
 function firstVersion(text: string): string | null {
   return text.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
@@ -77,11 +111,18 @@ export async function probeZcodeRuntime(path: string): Promise<{
   const configHome = join(homeDir(), '.zcode');
   const configPath = join(configHome, 'cli', 'config.json');
   let readinessIssue: { code: string; message: string; repairable: boolean } | undefined;
-  try {
-    const info = await stat(configPath);
-    if (!info.isFile()) readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
-  } catch {
-    readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
+  // The builtin provider config gates startup itself: without it the
+  // app-server exits before serving any request, so it outranks the
+  // model-config check.
+  if (await locateBuiltinProviderConfig(path) === null) {
+    readinessIssue = { ...ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE };
+  } else {
+    try {
+      const info = await stat(configPath);
+      if (!info.isFile()) readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
+    } catch {
+      readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
+    }
   }
   return {
     runtimeId: 'zcode',

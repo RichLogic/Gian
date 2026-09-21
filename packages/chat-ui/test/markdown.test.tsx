@@ -1,16 +1,12 @@
 // chat-ui markdown: GFM rendering, fenced-code copy button, and the safe
 // link contract — external links and file references only travel through the
-// app-provided callbacks; the package never opens a URL by itself.
+// app-provided `LinkBehavior`; the package never opens a URL by itself.
 
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render } from '@testing-library/react';
 import { MarkdownText, FileLink } from '../src/markdown.js';
-import {
-  BrowserLinkOpenContext,
-  FileLinkHrefContext,
-  FileLinkOpenContext,
-  RelativeLinkOpenContext,
-} from '../src/contexts.js';
+import { LinkBehaviorContext } from '../src/links/LinkBehaviorContext.js';
+import type { LinkBehavior } from '../src/links/LinkBehaviorContext.js';
 
 describe('MarkdownText', () => {
   it('renders GFM tables and inline code', () => {
@@ -39,16 +35,16 @@ describe('MarkdownText', () => {
   });
 
   it('routes external links through the app callback instead of navigating', () => {
-    const openBrowser = vi.fn();
+    const openWebUrl = vi.fn();
     const { container } = render(
-      <BrowserLinkOpenContext.Provider value={openBrowser}>
+      <LinkBehaviorContext.Provider value={{ openWebUrl }}>
         <MarkdownText>{'[site](https://example.com)'}</MarkdownText>
-      </BrowserLinkOpenContext.Provider>,
+      </LinkBehaviorContext.Provider>,
     );
     const link = container.querySelector('a')!;
     expect(link.getAttribute('target')).toBeNull(); // in-app routing: no _blank
     expect(fireEvent.click(link)).toBe(false);
-    expect(openBrowser).toHaveBeenCalledWith('https://example.com');
+    expect(openWebUrl).toHaveBeenCalledWith('https://example.com');
   });
 
   it('opens external links in a new tab when no browser callback is mounted', () => {
@@ -58,18 +54,20 @@ describe('MarkdownText', () => {
     expect(link.getAttribute('rel')).toContain('noopener');
   });
 
-  it('swallows unresolved relative links so the SPA never navigates', () => {
+  it('renders unresolved relative links as inert spans (no dead <a>, no swallowed click) when no fallback is mounted', () => {
     const { container } = render(<MarkdownText>{'[missing](./missing.md)'}</MarkdownText>);
-    const link = container.querySelector('a')!;
-    expect(fireEvent.click(link)).toBe(false);
+    expect(container.querySelector('a')).toBeNull();
+    const span = container.querySelector('span.link-inert')!;
+    expect(span.textContent).toContain('missing');
+    expect(span.getAttribute('title')).toContain('./missing.md');
   });
 
   it('routes unresolved relative links to the click-time fallback when mounted', () => {
     const openRelative = vi.fn();
     const { container } = render(
-      <RelativeLinkOpenContext.Provider value={openRelative}>
+      <LinkBehaviorContext.Provider value={{ openRelative }}>
         <MarkdownText>{'[missing](./missing.md)'}</MarkdownText>
-      </RelativeLinkOpenContext.Provider>,
+      </LinkBehaviorContext.Provider>,
     );
     expect(fireEvent.click(container.querySelector('a')!)).toBe(false);
     expect(openRelative).toHaveBeenCalledWith('./missing.md');
@@ -77,31 +75,33 @@ describe('MarkdownText', () => {
 });
 
 describe('FileLink', () => {
+  function withBehavior(behavior: LinkBehavior, ui: React.ReactElement) {
+    return <LinkBehaviorContext.Provider value={behavior}>{ui}</LinkBehaviorContext.Provider>;
+  }
+
   it('routes clicks through the app open callback, never a synthesized URL', () => {
-    const open = vi.fn();
+    const openFile = vi.fn();
     const { container } = render(
-      <FileLinkOpenContext.Provider value={open}>
-        <FileLink path="/repo/src/a.ts" line={12} />
-      </FileLinkOpenContext.Provider>,
+      withBehavior({ openFile }, <FileLink path="/repo/src/a.ts" line={12} />),
     );
     const link = container.querySelector('a.file-link')!;
     expect(fireEvent.click(link)).toBe(false);
-    expect(open).toHaveBeenCalledWith('/repo/src/a.ts', 12);
+    expect(openFile).toHaveBeenCalledWith('/repo/src/a.ts', 12);
   });
 
-  it('never fabricates an editor-scheme href by itself', () => {
+  it('never fabricates an editor-scheme href by itself — and never renders a dead <a>', () => {
     const { container } = render(<FileLink path="/repo/src/a.ts" />);
-    const link = container.querySelector('a.file-link')!;
-    expect(link.getAttribute('href')).toBeNull();
-    // Inert without a handler: the click is still prevented.
-    expect(fireEvent.click(link)).toBe(false);
+    expect(container.querySelector('a')).toBeNull();
+    const span = container.querySelector('span.file-link')!;
+    expect(span.getAttribute('title')).toBe('/repo/src/a.ts');
   });
 
   it('uses the app-supplied href factory when one is mounted', () => {
     const { container } = render(
-      <FileLinkHrefContext.Provider value={(p, line) => `app://open${p}${line ? `:${line}` : ''}`}>
-        <FileLink path="/repo/src/a.ts" line={3} />
-      </FileLinkHrefContext.Provider>,
+      withBehavior(
+        { openFile: vi.fn(), fileHref: (p, line) => `app://open${p}${line ? `:${line}` : ''}` },
+        <FileLink path="/repo/src/a.ts" line={3} />,
+      ),
     );
     expect(container.querySelector('a.file-link')!.getAttribute('href')).toBe('app://open/repo/src/a.ts:3');
   });

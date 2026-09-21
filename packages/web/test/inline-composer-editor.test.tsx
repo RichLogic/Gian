@@ -13,7 +13,10 @@ import {
   $setSelection,
   COPY_COMMAND,
   CUT_COMMAND,
+  KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_RIGHT_COMMAND,
+  KEY_ENTER_COMMAND,
+  KEY_ESCAPE_COMMAND,
   PASTE_COMMAND,
   type LexicalEditor,
   UNDO_COMMAND,
@@ -21,8 +24,10 @@ import {
 
 import {
   InlineComposerEditor,
+  type ComposerFileReference,
   type InlineComposerEditorHandle,
 } from '../src/components/composer/InlineComposerEditor.js';
+import type { ComposerFileOption } from '../src/components/composer/capabilities.js';
 
 const rangeRect = Object.getOwnPropertyDescriptor(Range.prototype, 'getBoundingClientRect');
 const textRect = Object.getOwnPropertyDescriptor(Text.prototype, 'getBoundingClientRect');
@@ -117,6 +122,9 @@ describe('InlineComposerEditor', () => {
     await waitFor(() => expect(handle.current).not.toBeNull());
     const lexicalEditor = (editor as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
     expect(lexicalEditor).toBeDefined();
+    // Caret insertion is a focused interaction: focus the DOM root so the
+    // editor treats the selection as a live caret.
+    act(() => handle.current?.rootElement()?.focus());
     act(() => lexicalEditor?.update(() => {
       const textNode = $getRoot().getFirstDescendant();
       expect($isTextNode(textNode)).toBe(true);
@@ -217,8 +225,15 @@ describe('InlineComposerEditor', () => {
     lexicalEditor?.getEditorState().read(() => {
       const selection = $getSelection();
       expect($isRangeSelection(selection)).toBe(true);
-      // Collapsed to the paragraph-level caret right after the chip.
-      expect($isElementNode(selection?.anchor.getNode())).toBe(true);
+      if (!$isRangeSelection(selection)) return;
+      // Collapsed somewhere past the chip: either a paragraph-level caret or
+      // inside the (possibly empty) text node that follows it.
+      expect(selection.isCollapsed()).toBe(true);
+      const anchorNode = selection.anchor.getNode();
+      expect(anchorNode.getType()).not.toBe('composer-reference');
+      if ($isTextNode(anchorNode)) {
+        expect(anchorNode.getPreviousSibling()?.getType()).toBe('composer-reference');
+      }
     });
   });
 
@@ -345,5 +360,467 @@ describe('InlineComposerEditor', () => {
 
     await waitFor(() => expect(target).toHaveTextContent('Use "src" now'));
     expect(target.querySelector('[data-reference-id]')).toBeNull();
+  });
+});
+
+describe('InlineComposerEditor markdown', () => {
+  const MARKDOWN_ROUND_TRIPS: Array<[string, string]> = [
+    ['a heading', '# Title'],
+    ['multi-level headings', '## Sub\n\n### Third'],
+    ['bold, italic, and bold-italic', '**bold** and *italic* and ***both***'],
+    ['inline code', 'run `pnpm test` now'],
+    ['an unordered list', '- one\n- two'],
+    ['an ordered list', '1. first\n2. second'],
+    ['a blockquote', '> quoted\n> lines'],
+    ['a code fence', '```ts\nconst x = 1;\n```'],
+    ['separate paragraphs', 'first\n\nsecond'],
+  ];
+
+  function renderedEditor(): LexicalEditor {
+    const root = screen.getByRole('textbox');
+    const editor = (root as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
+    if (!editor) throw new Error('expected lexical editor on contenteditable');
+    return editor;
+  }
+
+  function placeCaretAtDocumentEnd(editor: LexicalEditor): void {
+    act(() => editor.update(() => {
+      let node = $getRoot().getLastChild();
+      while (node && $isElementNode(node) && node.getChildrenSize() > 0) {
+        node = node.getLastChild();
+      }
+      if ($isTextNode(node)) node.selectEnd();
+      else if ($isElementNode(node)) node.selectEnd();
+    }, { discrete: true }));
+  }
+
+  function typeText(editor: LexicalEditor, text: string): void {
+    act(() => editor.update(() => {
+      const selection = $getSelection();
+      if ($isRangeSelection(selection)) selection.insertText(text);
+    }, { discrete: true }));
+  }
+
+  it.each(MARKDOWN_ROUND_TRIPS)('round-trips %s through draft write and export', async (_name, markdown) => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument({ version: 1, segments: [{ type: 'text', text: markdown }] }));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
+      version: 1,
+      segments: [{ type: 'text', text: markdown }],
+    }));
+  });
+
+  it('restores markdown drafts into rich nodes', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={() => {}}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument({
+      version: 1,
+      segments: [{ type: 'text', text: '# Title\n\n- one\n- two\n\n> note\n\n```js\ncode\n```' }],
+    }));
+    const editor = screen.getByRole('textbox');
+    expect(editor.querySelector('h1')).toHaveTextContent('Title');
+    expect(editor.querySelectorAll('ul li')).toHaveLength(2);
+    expect(editor.querySelector('blockquote')).toHaveTextContent('note');
+    expect(editor.querySelector('code.composer-md-codeblock')).toHaveTextContent('code');
+  });
+
+  it('keeps reference chips as segment boundaries inside markdown blocks', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    const document = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: '# Head\n\n- item ' },
+        { type: 'reference' as const, id: 'ctx-1', referenceType: 'context' as const, label: 'src' },
+        { type: 'text' as const, text: ' tail\n\n> quote' },
+      ],
+    };
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument(document));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual(document));
+    const editor = screen.getByRole('textbox');
+    const chip = editor.querySelector('[data-reference-id="ctx-1"]');
+    expect(chip).not.toBeNull();
+    expect(chip?.closest('li')).not.toBeNull();
+    expect(editor.querySelector('blockquote')).toHaveTextContent('quote');
+  });
+
+  it('restores a chip-leading draft into a fresh paragraph', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    const document = {
+      version: 1 as const,
+      segments: [
+        { type: 'reference' as const, id: 'file-1', referenceType: 'attachment' as const, label: 'notes.md' },
+        { type: 'text' as const, text: ' check this' },
+      ],
+    };
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument(document));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual(document));
+    const editor = screen.getByRole('textbox');
+    expect(editor.querySelector('[data-reference-id="file-1"]')).not.toBeNull();
+    expect(editor).toHaveTextContent('notes.md check this');
+  });
+
+  it('Enter in a paragraph delegates to onKeyDown for submit', async () => {
+    const onKeyDown = vi.fn(() => true);
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: 'hello' }] }}
+        placeholder="Message"
+        onChange={() => {}}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+    ));
+    expect(onKeyDown).toHaveBeenCalledTimes(1);
+    editor.getEditorState().read(() => {
+      expect($getRoot().getChildrenSize()).toBe(1);
+    });
+  });
+
+  it('Enter inside a list splits the item, exits on an empty item, then submits', async () => {
+    const onKeyDown = vi.fn(() => true);
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '- one' }] }}
+        placeholder="Message"
+        onChange={() => {}}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    const enter = () => act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+    ));
+
+    // Enter inside the item splits the list instead of submitting.
+    enter();
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => expect(root.querySelectorAll('li')).toHaveLength(2));
+
+    // Enter on the empty trailing item exits the list into a paragraph.
+    enter();
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => {
+      editor.getEditorState().read(() => {
+        expect($getRoot().getChildren().map(node => node.getType())).toEqual(['list', 'paragraph']);
+      });
+    });
+
+    // Enter in that paragraph submits again.
+    enter();
+    expect(onKeyDown).toHaveBeenCalledTimes(1);
+  });
+
+  it('Enter inside a code fence adds a line instead of submitting', async () => {
+    const onKeyDown = vi.fn(() => true);
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '```\nfirst\n```' }] }}
+        placeholder="Message"
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+    ));
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
+      version: 1,
+      segments: [{ type: 'text', text: '```\nfirst\n\n```' }],
+    }));
+  });
+
+  it('transforms a heading shortcut while typing', async () => {
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    act(() => editor.update(() => {
+      $getRoot().getFirstChild()?.selectStart();
+    }, { discrete: true }));
+    typeText(editor, '#');
+    typeText(editor, ' ');
+    await waitFor(() => expect(root.querySelector('h1')).not.toBeNull());
+    typeText(editor, 'Title');
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('# Title'));
+  });
+
+  it('transforms a bold shortcut while typing', async () => {
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    act(() => editor.update(() => {
+      $getRoot().getFirstChild()?.selectStart();
+    }, { discrete: true }));
+    typeText(editor, '**bold*');
+    typeText(editor, '*');
+    await waitFor(() => expect(root.querySelector('strong')).toHaveTextContent('bold'));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('**bold**'));
+  });
+
+  it('transforms a list shortcut while typing', async () => {
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    act(() => editor.update(() => {
+      $getRoot().getFirstChild()?.selectStart();
+    }, { discrete: true }));
+    typeText(editor, '-');
+    typeText(editor, ' ');
+    await waitFor(() => expect(root.querySelector('ul li')).not.toBeNull());
+    typeText(editor, 'item');
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('- item'));
+  });
+
+  it('keeps slash-command userText intact for the / prefix', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument({
+      version: 1,
+      segments: [{ type: 'text', text: '/model fast' }],
+    }));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('/model fast'));
+    expect(screen.getByRole('textbox').querySelector('h1, ul, blockquote, pre')).toBeNull();
+  });
+});
+
+describe('InlineComposerEditor @ file mention', () => {
+  const FILES: ComposerFileOption[] = [
+    { path: '/repo/src/index.ts', relPath: 'src/index.ts', name: 'index.ts' },
+    { path: '/repo/src/app.ts', relPath: 'src/app.ts', name: 'app.ts' },
+  ];
+
+  function renderedEditor(): LexicalEditor {
+    const root = screen.getByRole('textbox');
+    const editor = (root as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
+    if (!editor) throw new Error('expected lexical editor on contenteditable');
+    return editor;
+  }
+
+  function typeText(editor: LexicalEditor, text: string): void {
+    act(() => editor.update(() => {
+      const selection = $getSelection();
+      if ($isRangeSelection(selection)) selection.insertText(text);
+    }, { discrete: true }));
+  }
+
+  function renderMentionEditor(props?: {
+    onFileQuery?: (query: string) => Promise<ComposerFileOption[]>;
+    onFileReference?: (file: ComposerFileReference) => void;
+    onChange?: (document: unknown, userText: string) => void;
+  }) {
+    return render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={props?.onChange ?? (() => {})}
+        {...(props?.onFileQuery ? { onFileQuery: props.onFileQuery } : {})}
+        {...(props?.onFileReference ? { onFileReference: props.onFileReference } : {})}
+      />,
+    );
+  }
+
+  function openPopover(editor: LexicalEditor, query: string): void {
+    act(() => editor.update(() => {
+      $getRoot().getFirstChild()?.selectStart();
+    }, { discrete: true }));
+    typeText(editor, `@${query}`);
+  }
+
+  function keydown(editor: LexicalEditor, command: typeof KEY_ENTER_COMMAND, key: string): void {
+    act(() => editor.dispatchCommand(command, new KeyboardEvent('keydown', { key, cancelable: true })));
+  }
+
+  it('opens the popover at the caret, accepts the first row with Enter, and inserts a file chip', async () => {
+    const onFileQuery = vi.fn(async (query: string) =>
+      FILES.filter(file => file.relPath.toLowerCase().includes(query.toLowerCase())));
+    const onFileReference = vi.fn();
+    const onChange = vi.fn();
+    renderMentionEditor({ onFileQuery, onFileReference, onChange });
+    const editor = renderedEditor();
+    openPopover(editor, 'ind');
+
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-pop')).not.toBeNull());
+    const row = document.body.querySelector('.cmp-file-row')!;
+    expect(row.querySelector('.cmp-file-name')!.textContent).toBe('index.ts');
+    // The matched substring is bolded; the muted directory trails the name.
+    expect(row.querySelector('.cmp-file-name strong')!.textContent).toBe('ind');
+    expect(row.querySelector('.cmp-file-path')!.textContent).toBe('src');
+    expect(document.body.querySelector('.cmp-file-hint')!.textContent).toContain('↑↓');
+    // The first row is preselected once results land.
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-row.active')).not.toBeNull());
+
+    keydown(editor, KEY_ENTER_COMMAND, 'Enter');
+    expect(onFileReference).toHaveBeenCalledTimes(1);
+    const reference = onFileReference.mock.calls[0]![0] as ComposerFileReference;
+    expect(reference).toEqual({
+      id: expect.any(String),
+      path: '/repo/src/index.ts',
+      name: 'index.ts',
+    });
+
+    // The typed query is replaced by the chip plus a trailing space.
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
+      version: 1,
+      segments: [
+        { type: 'reference', id: reference.id, referenceType: 'context', label: 'index.ts', kind: 'file' },
+        { type: 'text', text: ' ' },
+      ],
+    }));
+    expect(document.body.querySelector('.cmp-file-pop')).toBeNull();
+
+    const chip = screen.getByRole('textbox').querySelector('.composer-inline-reference')!;
+    expect(chip.getAttribute('data-reference-kind')).toBe('file');
+    expect(chip.querySelector('.cir-glyph')).not.toBeNull();
+    expect(chip.querySelector('.cir-label')!.textContent).toBe('index.ts');
+  });
+
+  it('moves the highlight with the arrow keys and accepts it with Enter', async () => {
+    const onFileQuery = vi.fn(async () => FILES);
+    const onFileReference = vi.fn();
+    renderMentionEditor({ onFileQuery, onFileReference });
+    const editor = renderedEditor();
+    openPopover(editor, '');
+
+    await waitFor(() => expect(document.body.querySelectorAll('.cmp-file-row')).toHaveLength(2));
+    keydown(editor, KEY_ARROW_DOWN_COMMAND, 'ArrowDown');
+    const rows = document.body.querySelectorAll('.cmp-file-row');
+    expect(rows[1]!.className).toContain('active');
+
+    keydown(editor, KEY_ENTER_COMMAND, 'Enter');
+    expect(onFileReference).toHaveBeenCalledWith(expect.objectContaining({ name: 'app.ts' }));
+  });
+
+  it('dismisses on Escape without inserting a chip', async () => {
+    const onFileQuery = vi.fn(async () => FILES);
+    const onFileReference = vi.fn();
+    renderMentionEditor({ onFileQuery, onFileReference });
+    const editor = renderedEditor();
+    openPopover(editor, 'a');
+
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-pop')).not.toBeNull());
+    keydown(editor, KEY_ESCAPE_COMMAND, 'Escape');
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-pop')).toBeNull());
+    expect(onFileReference).not.toHaveBeenCalled();
+    // The literal query text stays in the editor.
+    expect(screen.getByRole('textbox').textContent).toContain('@a');
+  });
+
+  it('shows the empty state when no files match', async () => {
+    const onFileQuery = vi.fn(async () => []);
+    renderMentionEditor({ onFileQuery, onFileReference: vi.fn() });
+    const editor = renderedEditor();
+    openPopover(editor, 'zzzz');
+
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-empty')).not.toBeNull());
+    expect(document.body.querySelector('.cmp-file-empty')!.textContent).toBe('No matching files');
+  });
+
+  it('selects a row by pointer', async () => {
+    const onFileQuery = vi.fn(async () => FILES);
+    const onFileReference = vi.fn();
+    renderMentionEditor({ onFileQuery, onFileReference });
+    const editor = renderedEditor();
+    openPopover(editor, 'app');
+
+    await waitFor(() => expect(document.body.querySelectorAll('.cmp-file-row')).toHaveLength(2));
+    const row = [...document.body.querySelectorAll('.cmp-file-row')]
+      .find(el => el.textContent?.includes('app.ts'))!;
+    act(() => {
+      // jsdom has no PointerEvent constructor; React's onPointerDown listens
+      // for the 'pointerdown' event type, which a plain MouseEvent satisfies.
+      row.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+    });
+    expect(onFileReference).toHaveBeenCalledWith(expect.objectContaining({ name: 'app.ts' }));
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-pop')).toBeNull());
+  });
+
+  it('keeps @ as plain text when no file query source is provided', async () => {
+    renderMentionEditor({});
+    const editor = renderedEditor();
+    openPopover(editor, 'ind');
+    // Give the (absent) plugin a beat to wrongly open.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(document.body.querySelector('.cmp-file-pop')).toBeNull();
+    expect(screen.getByRole('textbox').textContent).toContain('@ind');
   });
 });

@@ -10,6 +10,7 @@ import {
 import type { AgentSpawnItem, AutoNoticeItem, CommandItem, CompactionItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from './types.js';
 import { formatElapsed, formatTime, formatBytes, isNativeImageMime } from './utils.js';
 import { MarkdownText, FileLink } from './markdown.js';
+import { LinkifiedText } from './links/linkify-text.js';
 import { CopyButton } from './copy-button.js';
 import { Caret } from './approval-cards.js';
 import { ContextCards } from './context-cards.js';
@@ -463,7 +464,9 @@ export function UserMessage({
                   return true;
                 }}
               />
-            ) : item.text}
+            ) : (
+              <LinkifiedText text={item.text} />
+            )}
           </div>
         )}
         <div className="msg-foot user">

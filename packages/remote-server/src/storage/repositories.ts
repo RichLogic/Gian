@@ -128,6 +128,10 @@ export class RemoteRepositories {
     return this.db.prepare('SELECT * FROM hosts WHERE id = ?').get(hostId) as HostRow | undefined;
   }
 
+  renameHost(hostId: string, name: string): void {
+    this.db.prepare('UPDATE hosts SET name = ? WHERE id = ? AND revoked_at IS NULL').run(name, hostId);
+  }
+
   setHostCredential(hostId: string, refreshSecret: string): void {
     const now = this.now();
     this.db.prepare(`

@@ -100,6 +100,7 @@ function initialTurnConfigFromCreate(
     mode: string | null;
     serviceTier: 'fast' | null;
   },
+  agentOptions?: Record<string, ConfigValue>,
 ): Record<string, ConfigValue> {
   const config: Record<string, ConfigValue> = { ...(explicit ?? {}) };
   for (const option of options) {
@@ -110,6 +111,15 @@ function initialTurnConfigFromCreate(
       && (!option.choices || option.choices.some(choice => Object.is(choice.value, roles.mode)))) {
       config[option.id] = roles.mode;
     } else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
+    else if (!option.category && agentOptions?.[option.id] !== undefined) {
+      // Role-less Agent option defaults (e.g. provider) seed the initial turn
+      // config; explicit create values already won above. Ids absent from the
+      // catalog never iterate, so unknown stored ids are skipped here.
+      const value = agentOptions[option.id]!;
+      if (!option.choices || option.choices.some(choice => Object.is(choice.value, value))) {
+        config[option.id] = value;
+      }
+    }
   }
   return config;
 }
@@ -232,6 +242,7 @@ export class SessionLifecycleService {
           model: '',
           thinking: '',
           mode: '',
+          options: {},
         })
         : this.proxyDefaults?.(executor);
     const configuredMode = managedDefaults?.mode.trim() ?? '';
@@ -300,6 +311,7 @@ export class SessionLifecycleService {
                 model: defaultModel,
                 thinking: defaultEffort,
                 mode: configuredMode,
+                options: { ...(managedDefaults.options ?? {}) },
               },
             }
           : {}),
@@ -331,6 +343,7 @@ export class SessionLifecycleService {
           : approvalMode,
         serviceTier,
       },
+      managedDefaults?.options ?? undefined,
     );
     const publish = this.db.transaction(() => {
       this.db

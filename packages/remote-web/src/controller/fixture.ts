@@ -325,7 +325,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
   let respondOutcome: ScriptedOutcome = 'success';
 
   const hosts = scenario.hosts ?? sampleHosts();
-  const currentHostId = scenario.currentHostId ?? hosts[0]?.id ?? null;
+  const currentHostId = scenario.currentHostId === undefined ? hosts[0]?.id ?? null : scenario.currentHostId;
   const hostData = new Map<string, HostData>();
   for (const host of hosts) {
     hostData.set(host.id, scenario.hostData?.[host.id] ?? defaultHostData(host.id));
@@ -641,6 +641,9 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
 
   const actions: RemoteUiActions = {
     restoreBrowserSession() {},
+    startPairing() {
+      update({ addingHost: true, auth: { kind: 'pairing', pairing: { kind: 'enter-code', attemptsLeft: 5 } } });
+    },
 
     selectHost(hostId) {
       if (hostId === state.currentHostId || !hostData.has(hostId)) return;
@@ -934,6 +937,10 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
     },
 
     cancelPairing() {
+      if (state.addingHost) {
+        update({ addingHost: false, auth: { kind: 'authenticated' } });
+        return;
+      }
       if (state.auth.kind === 'pairing') {
         update({ auth: { kind: 'pairing', pairing: { kind: 'failed', reason: 'cancelled' } } });
       }

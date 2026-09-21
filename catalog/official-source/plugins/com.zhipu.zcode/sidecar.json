@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "id": "com.zhipu.zcode",
   "displayName": "ZCode",
-  "pluginVersion": "0.1.1",
+  "pluginVersion": "0.3.2",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",
@@ -24,12 +24,12 @@
       "light": {
         "path": "assets/logo-light.png",
         "mediaType": "image/png",
-        "sha256": "5fccf017018fb8eaa82cbba87400856f7daa2d0107ad5511ff4d1b80cee68536"
+        "sha256": "5725ded891aa51f9f44d25b8fdab9cdbe4a04f4358821764bbb034600c2477a3"
       },
       "dark": {
         "path": "assets/logo-dark.png",
         "mediaType": "image/png",
-        "sha256": "531633dce7369d43fcdc9cb22ad2586ba4568fe798cc051949021634227215f1"
+        "sha256": "5725ded891aa51f9f44d25b8fdab9cdbe4a04f4358821764bbb034600c2477a3"
       }
     }
   }

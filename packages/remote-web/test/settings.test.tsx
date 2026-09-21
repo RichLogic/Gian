@@ -4,6 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { renderApp } from './render-app.js';
 
 describe('remote settings (B9)', () => {
+  it('adds a computer from Settings without disconnecting existing pairings', async () => {
+    const user = userEvent.setup();
+    const { controller } = renderApp({ scenario: { view: { kind: 'settings' } } });
+    const hosts = controller.state.hosts;
+    await user.click(screen.getByRole('button', { name: '添加电脑' }));
+    expect(controller.state.addingHost).toBe(true);
+    expect(controller.state.hosts).toEqual(hosts);
+  });
   it('theme + accent controls apply to the document', async () => {
     const user = userEvent.setup();
     renderApp({ scenario: { view: { kind: 'settings' } }, viewport: 'wide' });

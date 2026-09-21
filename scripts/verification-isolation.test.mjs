@@ -50,6 +50,15 @@ test('active and orphaned runtime records isolate verification; restricted proce
   assert.throws(() => needsVerificationIsolation(root, () => { throw new Error('EPERM'); }), /EPERM/);
 });
 
+test('unselected verification stops before snapshot creation or dependency installation', t => {
+  const { root, git } = fixture(t);
+  mkdirSync(join(root, '.gian-runtime'));
+  writeFileSync(join(root, '.gian-runtime', 'services.json'), JSON.stringify({ worktree: root, supervisorPid: process.pid }));
+  assert.throws(() => main(['build'], root, {}), /Owner-selected/);
+  assert.equal(existsSync(join(root, '.gian-runtime', 'verification')), false);
+  assert.equal(git(['worktree', 'list', '--porcelain']).toString().match(/^worktree /gm).length, 1);
+});
+
 test('normal build runs in a separately installed checkout while live dist and source stay intact', t => {
   const { root, git } = fixture(t);
   mkdirSync(join(root, 'packages', 'fixture'), { recursive: true });
@@ -66,7 +75,7 @@ mkdirSync('../../output', { recursive: true }); writeFileSync('../../output/proo
   const dist = join(root, 'packages', 'fixture', 'dist'); mkdirSync(dist);
   writeFileSync(join(dist, 'index.js'), 'live');
   const before = git(['status', '--porcelain']).toString();
-  assert.equal(main(['build'], root), 0);
+  assert.equal(main(['build'], root, { ...process.env, GIAN_ALLOW_LOCAL_VERIFICATION: '1' }), 0);
   assert.equal(readFileSync(join(dist, 'index.js'), 'utf8'), 'live');
   assert.equal(git(['status', '--porcelain']).toString(), before);
   assert.equal(git(['worktree', 'list', '--porcelain']).toString().match(/^worktree /gm).length, 1);

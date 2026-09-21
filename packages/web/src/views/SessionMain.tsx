@@ -444,6 +444,12 @@ export function SessionMain({
             executor={session.executor}
             agentId={session.agent_id ?? null}
             workspaceId={workspace?.id}
+            workingTree={workspace
+              ? {
+                  id: session.worktree_path ? `wt:${session.id}` : `ws:${session.workspace_id}`,
+                  path: session.worktree_path ?? workspace.path,
+                }
+              : null}
           />
         </>
       )}

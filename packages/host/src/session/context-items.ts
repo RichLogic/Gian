@@ -1,5 +1,5 @@
-import { realpathSync, statSync } from 'node:fs';
-import { basename, isAbsolute } from 'node:path';
+import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { basename, isAbsolute, resolve, sep } from 'node:path';
 import {
   MAX_MESSAGE_CONTEXT_ITEMS,
   MAX_PASTED_TEXT_BYTES,
@@ -8,11 +8,26 @@ import {
   normalizeComposerDocument,
   normalizeBrowserElementCapture,
   type ComposerDocument,
+  type FileContextItem,
   type InputItem,
   type MessageContextItem,
 } from '@gian/shared';
 
 const MAX_CONTEXT_ITEM_ID_LENGTH = 128;
+
+/**
+ * Compile caps for `file` context items. A referenced file is inlined into the
+ * compiled prompt as UTF-8 text, bounded by BOTH limits (whichever hits
+ * first): 100 KiB keeps a worst-case reference near ~25k tokens, and 2000
+ * lines keeps long generated/minified files readable. Truncated content ends
+ * with a `[truncated]` marker line and carries `truncated: true` in the
+ * reference metadata. Binary files (NUL byte in the first 8 KiB) and files
+ * that vanished or became unreadable after validation degrade to a path-only
+ * note — they never fail the send.
+ */
+export const MAX_FILE_CONTEXT_BYTES = 100 * 1024;
+export const MAX_FILE_CONTEXT_LINES = 2000;
+export const FILE_CONTEXT_TRUNCATED_MARKER = '[truncated]';
 
 function requireId(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CONTEXT_ITEM_ID_LENGTH) {
@@ -63,6 +78,73 @@ const USER_REQUEST_PREFIX = 'User request:\n';
 const EMPTY_USER_REQUEST = 'User request: Use the attached context.';
 const REFERENCE_CLOSE = '\n</GianReference>\n';
 
+/** Read at most `maxBytes + 1` of a regular file through one descriptor; null
+ *  when the path cannot be opened or is not a regular file. */
+function readFileHead(path: string, maxBytes: number): Buffer | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return null;
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) return null;
+    const target = Math.min(info.size, maxBytes + 1);
+    const buffer = Buffer.allocUnsafe(target);
+    let total = 0;
+    while (total < target) {
+      const bytesRead = readSync(fd, buffer, total, target - total, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    return buffer.subarray(0, total);
+  } catch {
+    return null;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/**
+ * Inline payload for a `file` context item: a one-line metadata JSON head
+ * (path + line count + truncation flag) followed by the raw UTF-8 content.
+ * Returns null when the file cannot contribute text (vanished, unreadable,
+ * binary) — the caller then degrades to the generic path-only embed.
+ */
+function compileFileReferencePayload(item: FileContextItem): string | null {
+  const bytes = readFileHead(item.path, MAX_FILE_CONTEXT_BYTES);
+  if (bytes === null) return null;
+  // NUL-byte sniff on the first 8 KiB, same heuristic as the file routes.
+  if (bytes.subarray(0, Math.min(bytes.length, 8192)).includes(0)) return null;
+  let truncated = bytes.length > MAX_FILE_CONTEXT_BYTES;
+  let text = bytes.toString('utf8');
+  if (truncated) {
+    // The +1 byte probe can split a multi-byte sequence at the cut point.
+    text = text.replace(/�+$/, '');
+  }
+  let lines = text.split(/\r\n|\r|\n/);
+  if (lines.length > MAX_FILE_CONTEXT_LINES) {
+    lines = lines.slice(0, MAX_FILE_CONTEXT_LINES);
+    truncated = true;
+  }
+  const lineCount = text.length === 0 ? 0 : lines.length;
+  const metadata = {
+    type: 'file',
+    id: item.id,
+    path: item.path,
+    name: item.name,
+    lineCount,
+    ...(truncated ? { truncated: true } : {}),
+  };
+  const body = lines.slice(0, lineCount).join('\n');
+  return `${JSON.stringify(metadata)}\n${body}${truncated ? `\n${FILE_CONTEXT_TRUNCATED_MARKER}` : ''}`;
+}
+
 function compileOrderedDocument(
   document: ComposerDocument,
   contextItems: MessageContextItem[],
@@ -80,7 +162,10 @@ function compileOrderedDocument(
       return `\n[Attached resource ${attachmentIndex}: ${JSON.stringify(segment.label)}]\n`;
     }
     const item = contexts.get(segment.id);
-    return `\n<GianReference label=${JSON.stringify(segment.label)}>\n${JSON.stringify(item, null, 2)}\n</GianReference>\n`;
+    const payload = item?.type === 'file'
+      ? compileFileReferencePayload(item) ?? JSON.stringify(item, null, 2)
+      : JSON.stringify(item, null, 2);
+    return `\n<GianReference label=${JSON.stringify(segment.label)}>\n${payload}\n</GianReference>\n`;
   }).join('');
   return [
     ORDERED_DOCUMENT_PREFIX,
@@ -88,13 +173,42 @@ function compileOrderedDocument(
   ].join('\n\n');
 }
 
+/** Options for `normalizeMessageContextItems`. */
+export interface NormalizeMessageContextOptions {
+  /** Session working-tree root that `file` items are confined to. A string
+   *  enforces confinement (the resolved real path must stay inside the root's
+   *  real path); `null` rejects file items outright (no tree context, e.g. a
+   *  Side Chat without a resolvable parent); `undefined` skips confinement —
+   *  reserved for replaying Host-compiled history, where the item was already
+   *  confined when the message was sent. */
+  workingTreeRoot?: string | null;
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return null;
+  }
+}
+
+function isWithinRoot(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
 /** Validate client context at the Host boundary and canonicalize live paths. */
-export function normalizeMessageContextItems(value: unknown): MessageContextItem[] {
+export function normalizeMessageContextItems(
+  value: unknown,
+  options?: NormalizeMessageContextOptions,
+): MessageContextItem[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new Error('context_items must be an array');
   if (value.length > MAX_MESSAGE_CONTEXT_ITEMS) {
     throw new Error(`a message can contain at most ${MAX_MESSAGE_CONTEXT_ITEMS} context items`);
   }
+  const rootReal = typeof options?.workingTreeRoot === 'string'
+    ? realpathOrNull(options.workingTreeRoot) ?? resolve(options.workingTreeRoot)
+    : null;
 
   return value.map((raw): MessageContextItem => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -133,6 +247,41 @@ export function normalizeMessageContextItems(value: unknown): MessageContextItem
         throw new Error(`folder context is not a directory: ${item.path}`);
       }
       return { type: 'folder', id, path, name: basename(path) || path };
+    }
+    if (item.type === 'file') {
+      if (typeof item.path !== 'string' || !isAbsolute(item.path)) {
+        throw new Error('file context path must be absolute');
+      }
+      if (options?.workingTreeRoot === null) {
+        throw new Error('file context requires a session working tree');
+      }
+      const resolved = realpathOrNull(item.path);
+      let regular: boolean | null = null;
+      if (resolved !== null) {
+        try {
+          regular = statSync(resolved).isFile();
+        } catch {
+          regular = null; // lost the stat race — degrade like a missing file
+        }
+      }
+      if (resolved !== null && regular === true) {
+        if (rootReal && !isWithinRoot(resolved, rootReal)) {
+          throw new Error(`file context escapes the session working tree: ${item.path}`);
+        }
+        return { type: 'file', id, path: resolved, name: basename(resolved) || resolved };
+      }
+      if (regular === false) {
+        throw new Error(`file context is not a regular file: ${item.path}`);
+      }
+      // The file vanished (or a dangling symlink): keep a path-only reference
+      // so the send degrades gracefully at compile time. Without a real path
+      // to compare, confine lexically — nothing will ever be read from it.
+      const lexical = resolve(item.path);
+      if (rootReal && !isWithinRoot(lexical, rootReal)) {
+        throw new Error(`file context escapes the session working tree: ${item.path}`);
+      }
+      const name = typeof item.name === 'string' && item.name ? item.name : basename(lexical) || lexical;
+      return { type: 'file', id, path: lexical, name };
     }
     if (item.type === 'browserElement') {
       const capture = normalizeBrowserElementCapture(item);
@@ -201,6 +350,27 @@ function parseJsonString(token: string): string | null {
   }
 }
 
+/** Recover the context item from a file reference's inline payload: a one-line
+ *  metadata JSON head followed by raw file content (which is not valid JSON as
+ *  a whole). Returns the parsed head when it looks like a file item. */
+function fileReferenceHead(payload: string): unknown | null {
+  const newline = payload.indexOf('\n');
+  const head = newline === -1 ? payload : payload.slice(0, newline);
+  try {
+    const value: unknown = JSON.parse(head);
+    if (
+      !!value && typeof value === 'object' && !Array.isArray(value)
+      && (value as { type?: unknown }).type === 'file'
+      && typeof (value as { id?: unknown }).id === 'string'
+    ) {
+      return value;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function decompileOrderedDocument(body: string): DecompiledMessageContext | null {
   const segments: ComposerDocument['segments'] = [];
   const rawItems: unknown[] = [];
@@ -222,7 +392,8 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
     if (match[1] !== undefined) {
       // Context reference: recover the embedded item JSON. A pasted text can
       // itself contain the closing tag, so accept the first closing position
-      // whose payload parses as JSON.
+      // whose payload parses as JSON — or, for file references with inlined
+      // content, whose metadata head parses.
       const contentStart = match.index + match[0].length;
       let item: unknown;
       let contentEnd = -1;
@@ -230,11 +401,18 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
       for (;;) {
         const closeIndex = body.indexOf(REFERENCE_CLOSE, searchFrom);
         if (closeIndex === -1) break;
+        const payload = body.slice(contentStart, closeIndex);
         try {
-          item = JSON.parse(body.slice(contentStart, closeIndex));
+          item = JSON.parse(payload);
           contentEnd = closeIndex + REFERENCE_CLOSE.length;
           break;
         } catch {
+          const head = fileReferenceHead(payload);
+          if (head !== null) {
+            item = head;
+            contentEnd = closeIndex + REFERENCE_CLOSE.length;
+            break;
+          }
           searchFrom = closeIndex + 1;
         }
       }
@@ -245,7 +423,8 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
         seenContextIds.add(id);
         rawItems.push(item);
       }
-      segments.push({ type: 'reference', id, referenceType: 'context', label });
+      const kind = (item as { type?: unknown })?.type === 'file' ? 'file' as const : undefined;
+      segments.push({ type: 'reference', id, referenceType: 'context', label, ...(kind ? { kind } : {}) });
       cursor = contentEnd;
       COMPILED_MARKER.lastIndex = contentEnd;
       continue;

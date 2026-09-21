@@ -1,0 +1,100 @@
+name: GianDev selected acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: Comma-separated selected groups (remote,agent-defaults,recovery,proxy-fixtures)
+        default: remote,agent-defaults,recovery,proxy-fixtures
+        required: true
+        type: string
+      remote_ui:
+        description: Read-only browser checks on the deployed Remote (no pairing claim or account login)
+        default: false
+        type: boolean
+      remote_build:
+        description: Exact deployed Remote build_id required when remote_ui is selected
+        default: fdc2a306a6873240c8023ececa26d6c948fccf21
+        type: string
+      agent_defaults_ui:
+        description: Fake DSH browser journey for saved Agent defaults (no Provider login)
+        default: true
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: giandev-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  selected:
+    if: startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require version branch
+        shell: bash
+        run: '[[ "$GITHUB_REF" =~ ^refs/heads/release/[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Exact selected source regressions
+        env:
+          SELECTED_GROUPS: ${{ inputs.groups }}
+        run: node scripts/run-giandev-acceptance.mjs --group "$SELECTED_GROUPS" --execute
+      - name: Typecheck (current workspace entrypoint, once)
+        run: pnpm typecheck
+      - name: Build browser journey dependencies
+        if: inputs.agent_defaults_ui
+        run: pnpm build
+      - name: Install isolated Chromium
+        if: inputs.agent_defaults_ui
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Persisted Agent defaults with fake Provider
+        if: inputs.agent_defaults_ui
+        env:
+          PLAYWRIGHT_CHANNEL: chromium
+        run: node scripts/run-e2e.mjs --proxy-mock --proxy-provider dsh test/e2e/specs/12-proxy-v2-mock.spec.ts --grep "acceptance:"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selected-acceptance-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            output/acceptance/
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+  remote-ui:
+    if: startsWith(github.ref, 'refs/heads/release/') && inputs.remote_ui
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Require version branch
+        shell: bash
+        run: '[[ "$GITHUB_REF" =~ ^refs/heads/release/[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Deployed Remote read-only invitation checks
+        env:
+          GIAN_REMOTE_ACCEPTANCE: '1'
+          GIAN_REMOTE_ACCEPTANCE_URL: https://gian-remote.fun
+          GIAN_REMOTE_ACCEPTANCE_BUILD: ${{ inputs.remote_build }}
+        run: pnpm exec playwright test --config playwright.remote-acceptance.config.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployed-remote-ui-${{ github.sha }}-${{ github.run_attempt }}
+          path: output/acceptance/
+          if-no-files-found: ignore

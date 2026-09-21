@@ -33,6 +33,22 @@ test('parseRunOptions defaults to the safe daily scopes', () => {
   });
 });
 
+test('nested verification keeps only execution consent and the local lease from Gian variables', () => {
+  assert.deepEqual(sanitizedTestEnv({
+    PATH: '/bin',
+    GIAN_ALLOW_LOCAL_VERIFICATION: '1',
+    GIAN_LOCAL_VERIFICATION_TOKEN: 'lease',
+    GIAN_ALLOW_DESKTOP_E2E: '1',
+    GIAN_ALLOW_REAL_AGENT_TURN: '1',
+    GIAN_DATA_DIR: '/production',
+    GIAN_DESKTOP_TOKEN: 'credential',
+  }), {
+    PATH: '/bin',
+    GIAN_ALLOW_LOCAL_VERIFICATION: '1',
+    GIAN_LOCAL_VERIFICATION_TOKEN: 'lease',
+  });
+});
+
 test('parseRunOptions accepts explicit unique scopes and quality gates', () => {
   assert.deepEqual(
     parseRunOptions(['--scope', 'system', '--scope', 'system', '--quality-gates', '--list']),

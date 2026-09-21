@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -38,6 +38,7 @@
   },
   "build": {
     "beforePack": "./ci-package.cjs",
+    "afterPack": "./ci-sign-node.cjs",
     "appId": "com.gian.desktop",
     "productName": "Gian",
     "asar": true,
@@ -86,8 +87,8 @@
       "hardenedRuntime": true,
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.inherit.plist",
-      "binaries": [
-        "Contents/Resources/runtime/node"
+      "signIgnore": [
+        "Contents/Resources/runtime/node$"
       ]
     },
     "dmg": {

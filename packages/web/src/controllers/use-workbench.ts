@@ -40,6 +40,7 @@ import {
   findBlankBrowserTab,
   PENDING_BROWSER_TAB_URL,
 } from '../presentation/browser-tabs.js';
+import { createBrowserUrlOpener } from '../links/open-url-in-browser.js';
 import { readWtViewOverride, resolveViewedTreeId, writeWtViewOverride } from '../presentation/wt-view.js';
 import type { ChatPanelRequest, ChatPanelTarget } from '../presentation/chat-panel.js';
 import type { AppAuthStatus } from './use-app-auth.js';
@@ -1352,6 +1353,23 @@ export function useWorkbench({
     });
   }
 
+  /** Open an arbitrary http(s) link (transcript, Sheet, user messages,
+   *  Catalog docs) in a desktop Browser tab, sharing openBrowserPreview's
+   *  blank-tab reuse. Returns false off-Electron so the link behavior falls
+   *  back to a plain `_blank` window. */
+  function openUrlInBrowser(url: string): boolean {
+    return createBrowserUrlOpener({
+      tabs: wbTabs,
+      urls: browserTabUrlsRef.current,
+      claimTab: (tabId, target) => { browserTabUrlsRef.current.set(tabId, target); },
+      revealBrowserTab: (tabId) => {
+        if (tabId) revealSheetTab('browser', tabId);
+        setActiveRail('browser');
+      },
+      createBrowserTab: createAndRevealBrowserTab,
+    })(url);
+  }
+
   return {
     wtView,
     setWtView,
@@ -1391,5 +1409,6 @@ export function useWorkbench({
     addBrowserTab,
     openWorkspaceInSheet,
     openProjectInBrowser,
+    openUrlInBrowser,
   };
 }

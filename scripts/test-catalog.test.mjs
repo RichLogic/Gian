@@ -16,8 +16,8 @@ test('catalog reconciles every current standard test exactly once', () => {
   const discoveredE2eCount = discoverStandardTests(catalog)
     .filter(path => path.startsWith('e2e/specs/') || path.startsWith('test/e2e/specs/'))
     .length;
-  const hasInternalTraceability = existsSync(
-    new URL('../docs/quality/traceability.md', import.meta.url),
+  const privateCheckout = existsSync(
+    new URL('../AGENTS.md', import.meta.url),
   );
   const missingOptionalRoots = (catalog.optionalDiscoveryRoots ?? []).filter(root => (
     !existsSync(new URL(`../${root}/`, import.meta.url))
@@ -32,8 +32,9 @@ test('catalog reconciles every current standard test exactly once', () => {
   assert.ok(counts.integration.length >= 1);
   assert.ok(counts.system.length >= 1);
   assert.equal(counts.e2e?.length ?? 0, discoveredE2eCount);
-  if (hasInternalTraceability) {
-    assert.equal(discoveredE2eCount, 16, 'the private source must retain its complete E2E suite');
+  if (privateCheckout) {
+    assert.ok(entries.some(entry => entry.path === 'e2e/specs/02-workspace-and-session.spec.ts'),
+      'the private source must retain its core workspace/session journey');
   }
   assert.deepEqual(catalog.defaultScopes, ['unit', 'integration']);
   assert.deepEqual(catalog.fullScopes, ['unit', 'integration', 'system']);

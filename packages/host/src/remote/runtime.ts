@@ -1,4 +1,6 @@
+import { hostname } from 'node:os';
 import {
+  MAX_NAME_CHARS,
   PRESENCE_HEARTBEAT_MS,
   RemoteProtocolError,
   cryptoAcceptPayload,
@@ -105,7 +107,7 @@ export class RemoteRuntime {
   private detachHostEvents: (() => void) | null = null;
 
   constructor(deps: RemoteRuntimeDeps) {
-    this.hostName = deps.hostName ?? 'Gian Host';
+    this.hostName = deps.hostName ?? (hostname().replace(/\.local$/i, '').trim().slice(0, MAX_NAME_CHARS) || 'Gian Host');
     this.hostVersion = deps.hostVersion;
     this.sessions = deps.sessions;
     this.tasks = deps.tasks;
@@ -269,6 +271,31 @@ export class RemoteRuntime {
   setPublicUrl(url: string): void {
     if (!this.enrollment.current()) throw new Error('not_enrolled');
     this.enrollment.setPublicUrl(remoteOrigin(url));
+  }
+
+  async setHostName(name: string): Promise<void> {
+    const next = name.trim();
+    if (!next || next.length > MAX_NAME_CHARS) throw new Error('invalid_host_name');
+    const enrollment = this.enrollment.current();
+    if (!enrollment) throw new Error('not_enrolled');
+    const epoch = this.connectionEpoch;
+    await this.ensureRelay();
+    const checkCurrent = () => {
+      if (epoch !== this.connectionEpoch || this.enrollment.current()?.hostId !== enrollment.hostId) {
+        throw new Error('connection_cancelled');
+      }
+    };
+    checkCurrent();
+    try { await this.authClient!.renameHost(next); }
+    catch (error) {
+      if (!(error instanceof RemoteProtocolError) || error.code !== 'AUTH_REQUIRED') throw error;
+      await this.connectRelay();
+      checkCurrent();
+      await this.authClient!.renameHost(next);
+    }
+    checkCurrent();
+    this.enrollment.setHostName(next);
+    this.fanout({ type: 'snapshot.required', reason: 'revision_mismatch' });
   }
 
   async disableRemote(): Promise<void> {
@@ -444,6 +471,7 @@ export class RemoteRuntime {
       this.enrollment.current()?.hostId,
       {
         attachments: this.attachments,
+        hostVersion: this.hostVersion,
         fileRefs: this.fileRefs,
         transcriptPage: (sessionId, deviceId) => {
           if (!this.projector.isSessionIdVisible(sessionId)) return null;

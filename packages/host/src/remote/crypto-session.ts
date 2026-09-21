@@ -59,6 +59,10 @@ export class PeerCryptoSession {
     return this.binding.connectionId;
   }
 
+  get hostGeneration(): string {
+    return this.binding.hostGeneration;
+  }
+
   get inboundAck(): number {
     return this.inboundExpected === 0 ? 0 : this.inboundExpected - 1;
   }

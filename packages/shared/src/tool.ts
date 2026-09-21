@@ -175,7 +175,14 @@ export interface GianToolCatalogAgent {
   name: string;
   proxy: UserAgent['proxy'];
   ready: boolean;
-  defaults: { model: string | null; thinking: string | null; mode: string | null };
+  defaults: {
+    model: string | null;
+    thinking: string | null;
+    mode: string | null;
+    /** Agent defaults for role-less catalog options; `null` deletes a key
+     *  when echoed back in a defaults patch. */
+    option_defaults: Record<string, ConfigValue | null>;
+  };
   models: Array<{
     id: string;
     label: string;
@@ -637,7 +644,7 @@ function contextItems(value: unknown, label: string): void {
       if (entry['origin'] !== undefined && entry['origin'] !== 'selection') {
         invalid(`${label}[${index}].origin is invalid`);
       }
-    } else if (type === 'folder') {
+    } else if (type === 'folder' || type === 'file') {
       exact(entry, ['type', 'id', 'path', 'name'], `${label}[${index}]`);
       string(entry['id'], `${label}[${index}].id`);
       string(entry['path'], `${label}[${index}].path`);

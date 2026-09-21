@@ -17,7 +17,7 @@ import { ControllerProvider } from './ui/controller-context.js';
 import { LocaleProvider, resolveRemoteWebLocale } from './i18n/index.js';
 import { ViewportProvider } from './ui/viewport.js';
 import { FIXTURE_SCENARIOS } from './scenarios.js';
-import { readPairingLink } from './pairing-link.js';
+import { preparePairingLink } from './pairing-link.js';
 
 declare global {
   interface Window {
@@ -58,14 +58,14 @@ if (boot !== 'production') {
   }
 } else {
   const injected = window.__GIAN_REMOTE__;
-  const pairingLink = readPairingLink(window.location.href);
-  if (window.location.pathname + window.location.search + window.location.hash !== pairingLink.cleanUrl) {
-    window.history.replaceState(null, '', pairingLink.cleanUrl);
-  }
+  const pairingLink = preparePairingLink(window.location.href, url => {
+    window.history.replaceState(null, '', url);
+  });
   const controller = createProductionController({
     baseUrl: window.location.origin,
     publicOrigin: injected?.publicOrigin ?? window.location.origin,
     pairingNonce: pairingLink.nonce,
+    onPairingLinkDismissed: pairingLink.dismiss,
   });
   content = (
     <ControllerProvider controller={controller}>

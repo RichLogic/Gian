@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
+  AgentProxyDefaults,
   ProxyNotification,
   ServerToClientMessage,
   UserAgent,
@@ -39,7 +40,7 @@ const AGENT: UserAgent = {
   pluginId: 'claude',
   proxy: 'claude',
   cliPath: null,
-  defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
+  defaults: { model: 'sonnet', thinking: 'high', mode: 'ask', options: {} },
 };
 
 class FakeProxyClient implements ProxyClient {
@@ -62,6 +63,14 @@ class FakeProxyClient implements ProxyClient {
       catalogRevision: 'tool-test',
       input: [{ type: 'text' as const }],
       configOptions: [
+        {
+          id: 'provider', displayName: 'Provider', binding: 'turn' as const,
+          control: 'select' as const, required: false, defaultValue: 'vendor-a',
+          choices: [
+            { value: 'vendor-a', displayName: 'Vendor A' },
+            { value: 'vendor-b', displayName: 'Vendor B' },
+          ],
+        },
         {
           id: 'model', displayName: 'Model', binding: 'turn' as const, role: 'model',
           control: 'select' as const, required: true, defaultValue: 'sonnet',
@@ -165,7 +174,8 @@ function agentStatus(): UserAgentStatus {
   };
 }
 
-function setup() {
+function setup(agentDefaults?: AgentProxyDefaults) {
+  const agent: UserAgent = agentDefaults ? { ...AGENT, defaults: agentDefaults } : AGENT;
   const dir = mkdtempSync(join(tmpdir(), 'gian-tool-test-'));
   const db = openDatabase(dir);
   const workspaceId = randomUUID();
@@ -181,11 +191,11 @@ function setup() {
     cliPathForSession: () => null,
     requireCliPathForSession: () => null,
     agentRuntime: id => {
-      if (id !== AGENT.id) throw new Error(`agent not found: ${id}`);
-      return { agent: AGENT, cliPath: null };
+      if (id !== agent.id) throw new Error(`agent not found: ${id}`);
+      return { agent, cliPath: null };
     },
     agentRuntimeProfile: async () => null,
-    agentsForKind: executor => executor === AGENT.proxy ? [AGENT] : [],
+    agentsForKind: executor => executor === agent.proxy ? [agent] : [],
   };
   const sessions = new SessionManager(
     db,
@@ -205,16 +215,16 @@ function setup() {
   approvals.setGetModeFn(sessionId => sessions.getApprovalModeForActiveTurn(sessionId));
 
   const agents = {
-    listAgents: () => [AGENT],
+    listAgents: () => [agent],
     getAgent: (id: string) => {
-      if (id !== AGENT.id) throw new Error(`agent not found: ${id}`);
-      return AGENT;
+      if (id !== agent.id) throw new Error(`agent not found: ${id}`);
+      return agent;
     },
     agentStatus: async (id: string) => {
-      if (id !== AGENT.id) throw new Error(`agent not found: ${id}`);
-      return agentStatus();
+      if (id !== agent.id) throw new Error(`agent not found: ${id}`);
+      return { ...agentStatus(), defaults: agent.defaults };
     },
-    agentRuntimePath: () => ({ proxy: AGENT.proxy, cliPath: null }),
+    agentRuntimePath: () => ({ proxy: agent.proxy, cliPath: null }),
   } as unknown as AgentManager;
   const tasks = new TaskManager(db);
   const tool = new GianToolService({
@@ -225,7 +235,7 @@ function setup() {
     broadcaster: broadcaster as unknown as WsBroadcaster,
     agents,
   });
-  return { dir, db, workspaceId, proxy, broadcaster, approvals, sessions, tasks, tool };
+  return { dir, db, workspaceId, proxy, broadcaster, approvals, sessions, tasks, tool, agent };
 }
 
 function teardown(context: ReturnType<typeof setup>): void {
@@ -915,6 +925,52 @@ test('GIAN-TOOL-001: minimum public-contract journey reaches a completed Task', 
       view: 'messages',
     });
     assert.equal((read.data as { turns: unknown[] }).turns.length, 2);
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-001: catalog.get_create_options exposes Agent option_defaults', async () => {
+  const context = setup({ model: 'sonnet', thinking: 'high', mode: 'ask', options: { provider: 'vendor-b' } });
+  try {
+    const catalog = await call(context, 'catalog.get_create_options', { refresh: false });
+    assert.equal(catalog.ok, true);
+    const agents = (catalog.data as {
+      agents: Array<{ id: string; defaults: { model: string | null; option_defaults: Record<string, unknown> } }>;
+    }).agents;
+    assert.equal(agents[0]!.id, AGENT.id);
+    assert.equal(agents[0]!.defaults.model, 'sonnet');
+    assert.deepEqual(agents[0]!.defaults.option_defaults, { provider: 'vendor-b' });
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-001: session.create inherits Agent option defaults and explicit config wins', async () => {
+  const context = setup({ model: 'sonnet', thinking: 'high', mode: 'ask', options: { provider: 'vendor-b' } });
+  try {
+    const inherited = await call(context, 'session.create', {
+      workspace_id: context.workspaceId,
+      agent_id: AGENT.id,
+    }, 'inherit-options');
+    assert.equal(inherited.ok, true);
+    assert.equal(
+      (inherited.data as { resolved_config: { turn: Record<string, unknown> } })
+        .resolved_config.turn.provider,
+      'vendor-b',
+    );
+
+    const overridden = await call(context, 'session.create', {
+      workspace_id: context.workspaceId,
+      agent_id: AGENT.id,
+      config: { turn: { provider: 'vendor-a' } },
+    }, 'override-options');
+    assert.equal(overridden.ok, true);
+    assert.equal(
+      (overridden.data as { resolved_config: { turn: Record<string, unknown> } })
+        .resolved_config.turn.provider,
+      'vendor-a',
+    );
   } finally {
     teardown(context);
   }

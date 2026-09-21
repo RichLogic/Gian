@@ -1,4 +1,4 @@
-import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProductExecutor, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
 import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
@@ -55,6 +55,8 @@ import {
   fetchModesCached,
   fetchSteerCached,
   fetchSlashCached,
+  fetchWorkingTreeFilesCached,
+  filterFileOptions,
   flatFiltered,
   getCatalogCached,
   getModelsCached,
@@ -114,6 +116,7 @@ const EMPTY_DRAFT: ComposerDraft = {
 
 function contextReferenceLabel(item: MessageContextItem): string {
   if (item.type === 'folder') return item.name;
+  if (item.type === 'file') return item.name;
   if (item.type === 'browserElement') return item.name || item.selector;
   const preview = item.text.replace(/\s+/g, ' ').trim();
   return preview.slice(0, 80) || 'Pasted text';
@@ -173,6 +176,11 @@ function draftContextItems(value: unknown): MessageContextItem[] {
     const candidate = item as Record<string, unknown>;
     if (typeof candidate.id !== 'string') return [];
     if (candidate.type === 'folder') {
+      return typeof candidate.path === 'string' && typeof candidate.name === 'string'
+        ? [candidate as unknown as MessageContextItem]
+        : [];
+    }
+    if (candidate.type === 'file') {
       return typeof candidate.path === 'string' && typeof candidate.name === 'string'
         ? [candidate as unknown as MessageContextItem]
         : [];
@@ -458,6 +466,7 @@ export function Composer({
   onSetNativeConfig, onSetTurnConfig, onSetServiceTier, canSteer,
   disabled, running, executor, agentId = null,
   workspaceId,
+  workingTree = null,
   footer,
   disabledSubmitBehavior = 'queue',
   variant = 'full',
@@ -527,6 +536,10 @@ export function Composer({
    *  path; undefined resolves through the kind default. */
   agentId?: string | null;
   workspaceId?: string;
+  /** Session's own working tree (never the breadcrumb override — the Host
+   *  confines `file` context items to the session tree). Drives the `@`
+   *  file-reference popover; omitted for restricted variants and Side Chat. */
+  workingTree?: { id: string; path: string } | null;
   footer?: import('react').ReactNode;
   /** Restricted variants omit attachment, bypass, slash and screenshot
    *  actions. `fixed` renders all config as inherited; `sidechat` makes only
@@ -659,6 +672,28 @@ export function Composer({
     const referenceIds = composerReferenceIds(nextDocument);
     if (activeReference && !referenceIds.has(activeReference.id)) setActiveReference(null);
   }
+
+  // `@` file-reference popover (editor-owned typeahead; data from the cached
+  // working-tree file list). Disabled for restricted variants and once the
+  // context-item cap is reached — a chip without a matching context item
+  // would fail Host validation at send.
+  const workingTreeId = workingTree?.id ?? null;
+  const workingTreePath = workingTree?.path ?? null;
+  const fileMentionEnabled = !fixed && !hardDisabled
+    && workingTreeId !== null && workingTreePath !== null
+    && contextItems.length < MAX_MESSAGE_CONTEXT_ITEMS;
+  const handleFileQuery = useCallback(async (query: string) => {
+    if (!workingTreeId || !workingTreePath) return [];
+    const files = await fetchWorkingTreeFilesCached(workingTreeId);
+    return filterFileOptions(files, query, workingTreePath);
+  }, [workingTreeId, workingTreePath]);
+  const handleFileReference = useCallback((file: { id: string; path: string; name: string }) => {
+    setContextItems(previous => {
+      if (previous.length >= MAX_MESSAGE_CONTEXT_ITEMS) return previous;
+      if (previous.some(item => item.id === file.id)) return previous;
+      return [...previous, { type: 'file', id: file.id, path: file.path, name: file.name }];
+    });
+  }, []);
   const steerEnabled = canSteer ?? fetchedSteer ?? executor === 'codex';
   const sessionNativeOptions = session.native_config_options ?? [];
   const [nativeOptions, setNativeOptions] = useState(sessionNativeOptions);
@@ -1682,6 +1717,9 @@ export function Composer({
             onChange={handleDocumentChange}
             onKeyDown={handleEditorKeyDown}
             onPaste={handlePaste}
+            {...(fileMentionEnabled
+              ? { onFileQuery: handleFileQuery, onFileReference: handleFileReference }
+              : {})}
             onReferenceActivate={(id) => {
               // 2026-09-10 owner call: chips preview on hover/focus only — a
               // plain click performs no action, EXCEPT image chips, which go

@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "id": "codex",
   "displayName": "Codex",
-  "pluginVersion": "0.2.16",
+  "pluginVersion": "0.3.1",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",
@@ -32,5 +32,12 @@
         "sha256": "91b9fb986d2623f746433928a5395e258bfec013b695a534132f9785df82d24b"
       }
     }
-  }
+  },
+  "skills": [
+    {
+      "name": "gian-session",
+      "path": "skills/gian-session/SKILL.md",
+      "sha256": "9fb2b9d3a2828eebdf1a5ca1701b183b7dae38ddbcb008598ed6c5b0bb8217fc"
+    }
+  ]
 }

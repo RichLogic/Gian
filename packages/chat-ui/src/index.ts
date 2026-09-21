@@ -21,6 +21,24 @@ export * from './identity.js';
 export * from './event-feed.js';
 export { normalizeGfmTables } from './markdown-tables.js';
 export { MarkdownText, FileLink } from './markdown.js';
+export { classifyLink, type LinkKind, type LinkTarget } from './links/classify.js';
+export {
+  transcriptPolicy,
+  strictHttpsPolicy,
+  plainTextPolicy,
+  type LinkPolicy,
+  type LinkDisplay,
+} from './links/policy.js';
+export {
+  LinkBehaviorContext,
+  LinkPolicyContext,
+  useLinkBehavior,
+  useLinkPolicy,
+  type LinkBehavior,
+} from './links/LinkBehaviorContext.js';
+export { LinkAnchor } from './links/LinkAnchor.js';
+export { LinkifiedText, splitLinkTokens, type LinkTextToken } from './links/linkify-text.js';
+export { LinkKindIcon } from './links/link-icons.js';
 export { CopyButton } from './copy-button.js';
 export * from './items.js';
 export { ApprovalLine } from './approval-cards.js';

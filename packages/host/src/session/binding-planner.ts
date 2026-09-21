@@ -17,7 +17,8 @@ import {
 } from '@gian/shared';
 
 import type { ProxyLaunchBinding } from '../proxy/launch-binding.js';
-import { openRuntimeIdentity, type RuntimeResolver } from '../runtime/resolver.js';
+import { openRuntimeIdentity, RuntimeResolverError, type RuntimeResolver } from '../runtime/resolver.js';
+import { RuntimeFingerprintError } from '../runtime/fingerprint.js';
 import { createSavedPathRuntimeLease } from '../runtime/saved-path.js';
 import type { TrustedLaunch } from '../runtime/trusted-launch.js';
 import type { RuntimeLease } from '../runtime/types.js';
@@ -176,6 +177,13 @@ function assertLaunchableProfile(profile: OpenRuntimeProfile): void {
   }
 }
 
+/** True when the persisted Runtime content root no longer exists on disk
+ *  (as opposed to having drifted while still present). */
+function isMissingRuntimeRootError(error: unknown): boolean {
+  return (error instanceof RuntimeResolverError && error.code === 'RUNTIME_ROOT_MISSING')
+    || (error instanceof RuntimeFingerprintError && error.code === 'RUNTIME_ROOT_MISSING');
+}
+
 export function assertHandshakeMatchesBinding(
   initialized: InitializeResult,
   binding: SessionProxyBinding,
@@ -258,17 +266,50 @@ export class SessionBindingPlanner {
     }
     const agentId = binding.runtimeProfile?.agentId ?? 'session';
     const storedPath = sessionRuntimeCliPath(binding.runtimeProfile);
-    const prepared = await this.prepareFromLaunch(
-      launch,
-      agentId,
-      storedPath,
-      binding.runtimeProfile,
-      binding.protocolVersion,
-      binding.runtimeProfile?.configHome ?? null,
-    );
+    const storedConfigHome = binding.runtimeProfile?.configHome ?? null;
+    let prepared: PreparedSessionLaunch;
+    let runtimePathRediscovered = false;
+    try {
+      prepared = await this.prepareFromLaunch(
+        launch,
+        agentId,
+        storedPath,
+        binding.runtimeProfile,
+        binding.protocolVersion,
+        storedConfigHome,
+      );
+    } catch (error) {
+      if (
+        storedPath !== null
+        && launch.schemaVersion >= 4
+        && launch.runtime.kind === 'external'
+        && this.options.runtimeResolver
+        && isMissingRuntimeRootError(error)
+      ) {
+        // The persisted Runtime path vanished (for example a managed Runtime
+        // layout migration removed the old flat tree). Fall back to the
+        // current generation through discovery and re-mint the binding on
+        // success; a missing file must never surface as a raw ENOENT from
+        // rehydrate.
+        prepared = await this.prepareFromLaunch(
+          launch,
+          agentId,
+          null,
+          binding.runtimeProfile,
+          binding.protocolVersion,
+          storedConfigHome,
+          true,
+        );
+        runtimePathRediscovered = true;
+      } else {
+        throw error;
+      }
+    }
     let runtimeDrifted = false;
     try {
-      runtimeDrifted = this.assertExactRuntime(binding, prepared.sessionBinding);
+      runtimeDrifted = runtimePathRediscovered
+        ? true
+        : this.assertExactRuntime(binding, prepared.sessionBinding);
     } catch (error) {
       try {
         await prepared.releaseUnusedLease();
@@ -324,6 +365,7 @@ export class SessionBindingPlanner {
     providedProfile?: SessionRuntimeProfile | null,
     exactProtocolVersion?: string,
     configHome: string | null = null,
+    allowRuntimeRediscovery = false,
   ): Promise<PreparedSessionLaunch> {
     const protocolVersion = exactProtocolVersion ?? pinnedProtocol(launch);
     const pluginId = parseProxyPluginId(launch.pluginId);
@@ -395,7 +437,7 @@ export class SessionBindingPlanner {
           'External Runtime v4 launches require RuntimeResolver.',
         );
       }
-      if (!selectedPath) {
+      if (!selectedPath && !allowRuntimeRediscovery) {
         throw new SessionBindingError(
           'BINDING_RUNTIME_PATH_REQUIRED',
           'External Runtime binding requires the stored selected path.',
@@ -412,7 +454,7 @@ export class SessionBindingPlanner {
       }
       try {
         assertLaunchableProfile(resolved.profile);
-        if (resolved.profile.path !== selectedPath) {
+        if (selectedPath !== null && resolved.profile.path !== selectedPath) {
           throw new SessionBindingError(
             'BINDING_RUNTIME_PATH_MISMATCH',
             'Resolved Runtime path drifted from the selected path.',

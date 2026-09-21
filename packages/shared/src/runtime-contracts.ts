@@ -197,7 +197,7 @@ function isSideChatAnchor(value: unknown): boolean {
 
 function isMessageContextItem(value: unknown): boolean {
   if (!isRecord(value) || !isString(value.id) || !isString(value.type)) return false;
-  if (value.type === 'folder') {
+  if (value.type === 'folder' || value.type === 'file') {
     return isString(value.path) && isString(value.name);
   }
   if (value.type === 'browserElement') {

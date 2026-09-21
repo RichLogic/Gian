@@ -165,6 +165,14 @@ export function validateCatalog(catalog, discoveredPaths, baseDir = rootDir) {
     if (!existsSync(resolve(baseDir, filePath))) {
       throw new Error(`special entrypoint does not exist: ${entrypoint.path}`);
     }
+    if (entrypoint.testPaths !== undefined) {
+      requireStringArray(entrypoint.testPaths, 'testPaths', entrypoint.id);
+      for (const path of entrypoint.testPaths) {
+        if (!entries.some(entry => entry.path === path && entry.scope === 'e2e')) {
+          throw new Error(`special entrypoint ${entrypoint.id} references an unregistered E2E test: ${path}`);
+        }
+      }
+    }
   }
   return entries;
 }

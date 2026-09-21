@@ -16,6 +16,9 @@ export interface ComposerReferenceSegment {
   id: string;
   referenceType: 'attachment' | 'context';
   label: string;
+  /** Optional chip discriminator. 'file' marks a working-tree file reference
+   *  so renderers can show a file glyph instead of the generic '@' mention. */
+  kind?: 'file';
 }
 
 export interface ComposerDocument {
@@ -32,7 +35,7 @@ export function normalizeComposerDocument(value: unknown): ComposerDocument | nu
   if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.segments)) return null;
   if (value.segments.length > MAX_COMPOSER_DOCUMENT_SEGMENTS) return null;
   const segments: ComposerDocument['segments'] = [];
-  const referencesById = new Map<string, { referenceType: ComposerReferenceSegment['referenceType']; label: string }>();
+  const referencesById = new Map<string, { referenceType: ComposerReferenceSegment['referenceType']; label: string; kind?: 'file' }>();
   let textBytes = 0;
   for (const raw of value.segments) {
     if (!isRecord(raw) || typeof raw.type !== 'string') return null;
@@ -53,17 +56,20 @@ export function normalizeComposerDocument(value: unknown): ComposerDocument | nu
       || raw.id.length > 128
       || (raw.referenceType !== 'attachment' && raw.referenceType !== 'context')
       || typeof raw.label !== 'string'
+      || (raw.kind !== undefined && raw.kind !== 'file')
     ) return null;
     const label = raw.label.replace(/\s+/g, ' ').trim().slice(0, MAX_COMPOSER_REFERENCE_LABEL_CHARS);
     if (!label) return null;
+    const kind = raw.kind === 'file' ? 'file' as const : undefined;
     const existing = referencesById.get(raw.id);
-    if (existing && (existing.referenceType !== raw.referenceType || existing.label !== label)) return null;
-    referencesById.set(raw.id, { referenceType: raw.referenceType, label });
+    if (existing && (existing.referenceType !== raw.referenceType || existing.label !== label || existing.kind !== kind)) return null;
+    referencesById.set(raw.id, { referenceType: raw.referenceType, label, ...(kind ? { kind } : {}) });
     segments.push({
       type: 'reference',
       id: raw.id,
       referenceType: raw.referenceType,
       label,
+      ...(kind ? { kind } : {}),
     });
   }
   return { version: 1, segments };
@@ -103,12 +109,23 @@ export interface FolderContextItem extends MessageContextItemBase {
   name: string;
 }
 
+/** Live working-tree file reference. Unlike `folder`, the Host confines the
+ *  resolved real path to the session's working tree and inlines the file's
+ *  UTF-8 text content into the compiled prompt (bounded; see the Host's
+ *  compile caps). A file that vanishes before compile degrades to a
+ *  path-only note. */
+export interface FileContextItem extends MessageContextItemBase {
+  type: 'file';
+  path: string;
+  name: string;
+}
+
 /** A user-selected, Desktop-sanitized element from Gian's native Browser. */
 export interface BrowserElementContextItem extends MessageContextItemBase, GianBrowserElementCapture {
   type: 'browserElement';
 }
 
-export type MessageContextItem = PastedTextContextItem | FolderContextItem | BrowserElementContextItem;
+export type MessageContextItem = PastedTextContextItem | FolderContextItem | FileContextItem | BrowserElementContextItem;
 
 export interface PickedFileResource {
   type: 'file';

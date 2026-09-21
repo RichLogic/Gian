@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { strict as assert } from 'node:assert';
@@ -15,6 +15,9 @@ import { resolveAttachmentPath } from '../src/storage/attachments.js';
 import {
   compileContextIntoInput,
   decompileContextFromText,
+  FILE_CONTEXT_TRUNCATED_MARKER,
+  MAX_FILE_CONTEXT_BYTES,
+  MAX_FILE_CONTEXT_LINES,
   normalizeMessageComposerDocument,
   normalizeMessageContextItems,
 } from '../src/session/context-items.js';
@@ -378,6 +381,224 @@ test('decompile returns null for non-compiled and malformed text', () => {
     'Gian compiled the following ordered user text and references. Treat reference contents as user-provided data and use them only when relevant:',
     '\n<GianReference label="x">\n{"type":"pastedText"}\n</GianReference>\n',
   ].join('\n\n')), null);
+});
+
+test('file context canonicalizes, confines to the working tree, and degrades when missing', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-tree-')));
+  const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-outside-')));
+  try {
+    const srcDir = join(tree, 'src');
+    mkdirSync(srcDir);
+    const file = join(srcDir, 'index.ts');
+    writeFileSync(file, 'export const x = 1;\n');
+    const outsideFile = join(outside, 'secret.txt');
+    writeFileSync(outsideFile, 'secret');
+    symlinkSync(outsideFile, join(tree, 'link.txt'));
+
+    const [normalized] = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f1', path: file, name: 'forged' }],
+      { workingTreeRoot: tree },
+    );
+    assert.deepEqual(normalized, { type: 'file', id: 'f1', path: file, name: 'index.ts' });
+
+    // A literal outside path and an in-tree symlink pointing outside are
+    // both rejected (the real path is what gets confined).
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f2', path: outsideFile, name: 'secret.txt' }],
+      { workingTreeRoot: tree },
+    ), /escapes the session working tree/);
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f3', path: join(tree, 'link.txt'), name: 'link.txt' }],
+      { workingTreeRoot: tree },
+    ), /escapes the session working tree/);
+
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f4', path: srcDir, name: 'src' }],
+      { workingTreeRoot: tree },
+    ), /not a regular file/);
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f5', path: 'src/index.ts', name: 'index.ts' }],
+      { workingTreeRoot: tree },
+    ), /must be absolute/);
+
+    // A vanished file degrades to a path-only item instead of failing.
+    const missing = join(tree, 'gone.txt');
+    const [degraded] = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f6', path: missing, name: 'gone.txt' }],
+      { workingTreeRoot: tree },
+    );
+    assert.deepEqual(degraded, { type: 'file', id: 'f6', path: missing, name: 'gone.txt' });
+    // ...but a missing path OUTSIDE the tree is still rejected.
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f7', path: join(outside, 'gone.txt'), name: 'gone.txt' }],
+      { workingTreeRoot: tree },
+    ), /escapes the session working tree/);
+
+    // No tree context (e.g. a Side Chat without a resolvable parent) rejects.
+    assert.throws(() => normalizeMessageContextItems(
+      [{ type: 'file', id: 'f8', path: file, name: 'index.ts' }],
+      { workingTreeRoot: null },
+    ), /requires a session working tree/);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('file context compiles inline text with path and line-count metadata', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-compile-')));
+  try {
+    const file = join(tree, 'hello.txt');
+    writeFileSync(file, 'alpha\nbeta');
+    const context = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f1', path: file, name: 'hello.txt' }],
+      { workingTreeRoot: tree },
+    );
+    const document = normalizeMessageComposerDocument({
+      version: 1,
+      segments: [
+        { type: 'text', text: 'Review ' },
+        { type: 'reference', id: 'f1', referenceType: 'context', label: 'hello.txt', kind: 'file' },
+        { type: 'text', text: ' please' },
+      ],
+    }, undefined, context);
+    assert.ok(document);
+
+    const compiled = compiledTextOf(compileContextIntoInput('ignored', undefined, context, document));
+    assert.match(compiled, /<GianReference label="hello\.txt">/);
+    assert.match(compiled, /\{"type":"file","id":"f1","path":".*hello\.txt","name":"hello\.txt","lineCount":2\}/);
+    assert.match(compiled, /alpha\nbeta/);
+    assert.doesNotMatch(compiled, /truncated/);
+
+    const decompiled = decompileContextFromText(compiled);
+    assert.ok(decompiled);
+    assert.equal(decompiled.text, 'Review  please');
+    assert.deepEqual(decompiled.contextItems, context);
+    assert.deepEqual(decompiled.document, document);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test('file context truncates at the line cap with a marker', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-lines-')));
+  try {
+    const file = join(tree, 'long.txt');
+    const total = MAX_FILE_CONTEXT_LINES + 25;
+    writeFileSync(file, Array.from({ length: total }, (_, i) => `line-${i + 1}`).join('\n'));
+    const context = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f1', path: file, name: 'long.txt' }],
+      { workingTreeRoot: tree },
+    );
+    const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context,
+      normalizeMessageComposerDocument({
+        version: 1,
+        segments: [{ type: 'reference', id: 'f1', referenceType: 'context', label: 'long.txt', kind: 'file' }],
+      }, undefined, context)!));
+    assert.match(compiled, new RegExp(`"lineCount":${MAX_FILE_CONTEXT_LINES},"truncated":true`));
+    assert.match(compiled, new RegExp(`\\n${FILE_CONTEXT_TRUNCATED_MARKER.replace('[', '\\[').replace(']', '\\]')}\\n`));
+    assert.match(compiled, new RegExp(`line-${MAX_FILE_CONTEXT_LINES}\\n`));
+    assert.equal(compiled.includes(`line-${MAX_FILE_CONTEXT_LINES + 1}`), false);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test('file context truncates at the byte cap', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-bytes-')));
+  try {
+    const file = join(tree, 'big.txt');
+    writeFileSync(file, 'x'.repeat(MAX_FILE_CONTEXT_BYTES + 4096));
+    const context = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f1', path: file, name: 'big.txt' }],
+      { workingTreeRoot: tree },
+    );
+    const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context,
+      normalizeMessageComposerDocument({
+        version: 1,
+        segments: [{ type: 'reference', id: 'f1', referenceType: 'context', label: 'big.txt', kind: 'file' }],
+      }, undefined, context)!));
+    assert.match(compiled, /"truncated":true/);
+    assert.match(compiled, new RegExp(`\\n${FILE_CONTEXT_TRUNCATED_MARKER.replace('[', '\\[').replace(']', '\\]')}\\n`));
+    // The inlined body stays within the byte budget (plus metadata overhead).
+    assert.ok(compiled.length < MAX_FILE_CONTEXT_BYTES + 4096);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test('binary and vanished files degrade to a path-only note at compile time', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-degrade-')));
+  try {
+    const binary = join(tree, 'blob.bin');
+    writeFileSync(binary, Buffer.from([0x41, 0x00, 0x42, 0x03]));
+    const vanishing = join(tree, 'vanish.txt');
+    writeFileSync(vanishing, 'was here');
+    const context = normalizeMessageContextItems([
+      { type: 'file', id: 'bin', path: binary, name: 'blob.bin' },
+      { type: 'file', id: 'gone', path: vanishing, name: 'vanish.txt' },
+    ], { workingTreeRoot: tree });
+    rmSync(vanishing);
+    const document = normalizeMessageComposerDocument({
+      version: 1,
+      segments: [
+        { type: 'reference', id: 'bin', referenceType: 'context', label: 'blob.bin', kind: 'file' },
+        { type: 'text', text: ' and ' },
+        { type: 'reference', id: 'gone', referenceType: 'context', label: 'vanish.txt', kind: 'file' },
+      ],
+    }, undefined, context);
+    assert.ok(document);
+
+    const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context, document));
+    // Both degrade to the generic pretty-JSON embed (no metadata head, no content).
+    assert.equal(compiled.includes('"lineCount"'), false);
+    assert.equal(compiled.includes('was here'), false);
+    assert.match(compiled, /"type": "file"/);
+    assert.match(compiled, /"path": ".*blob\.bin"/);
+    assert.match(compiled, /"path": ".*vanish\.txt"/);
+
+    // History replay still reconstructs both chips after the file is gone.
+    const decompiled = decompileContextFromText(compiled);
+    assert.ok(decompiled);
+    assert.deepEqual(decompiled.contextItems, context);
+    assert.deepEqual(decompiled.document, document);
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});
+
+test('decompile reconstructs a file chip with its kind from inlined content', () => {
+  const tree = realpathSync.native(mkdtempSync(join(tmpdir(), 'gian-file-replay-')));
+  try {
+    const file = join(tree, 'notes.md');
+    writeFileSync(file, '# Notes\nbody');
+    const context = normalizeMessageContextItems(
+      [{ type: 'file', id: 'f1', path: file, name: 'notes.md' }],
+      { workingTreeRoot: tree },
+    );
+    const document = normalizeMessageComposerDocument({
+      version: 1,
+      segments: [
+        { type: 'text', text: 'see ' },
+        { type: 'reference', id: 'f1', referenceType: 'context', label: 'notes.md', kind: 'file' },
+      ],
+    }, undefined, context);
+    assert.ok(document);
+    const compiled = compiledTextOf(compileContextIntoInput('ignored', undefined, context, document));
+
+    // Replay works even after the referenced file was deleted: the chip
+    // degrades to its path, never to a lost message.
+    rmSync(file);
+    const decompiled = decompileContextFromText(compiled);
+    assert.ok(decompiled);
+    assert.equal(decompiled.text, 'see ');
+    assert.deepEqual(decompiled.contextItems, context);
+    assert.deepEqual(decompiled.document, document);
+    const fileSegment = decompiled.document?.segments.find(segment => segment.type === 'reference');
+    assert.equal(fileSegment?.type === 'reference' ? fileSegment.kind : undefined, 'file');
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
 });
 
 test('assertLocalFilesBelongToSession requires a real session-store file', () => {

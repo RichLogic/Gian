@@ -73,6 +73,7 @@ import {
   type RecoverableCommand,
 } from './pending-commands.js';
 import { sessionSendParams } from './session-send.js';
+import { createHostSelectionStore, type HostSelectionStore } from '../host-selection.js';
 import {
   draftIsEmpty,
   emptyDraft,
@@ -107,6 +108,8 @@ export interface ProductionControllerOptions {
   userAgent?: string;
   createRelay?: DeviceRelayFactory;
   pairingNonce?: string;
+  onPairingLinkDismissed?: () => void;
+  hostSelection?: HostSelectionStore;
   readStallMs?: number;
   readTimeoutMs?: number;
   reconnectBaseMs?: number;
@@ -183,6 +186,7 @@ export function createProductionController(options: ProductionControllerOptions)
     reconnects: number;
   }>();
   const hostSessions = new Map<string, HostAuthSession>();
+  const hostDrafts = new Map<string, RemoteUiState['drafts']>();
   const uploadWaiters = new Map<string, {
     hostId: string;
     resolve: (value: AttachmentUploadResult) => void;
@@ -192,14 +196,30 @@ export function createProductionController(options: ProductionControllerOptions)
   const downloads = new Map<string, DownloadTransfer>();
 
   let state: RemoteUiState = emptyUiState();
+  const hostSelection = options.hostSelection ?? createHostSelectionStore();
+  let navigationGeneration = 0;
+  let pairingReturnHostId: string | null = null;
   let qrNonce = options.pairingNonce;
   let pairingGeneration = 0;
   let restoreInFlight: Promise<void> | null = null;
   let restoreAgain = false;
-  if (qrNonce) state.auth = {
-    kind: 'pairing',
-    pairing: { kind: 'qr-confirm', hostName: new URL(options.publicOrigin).host, deviceName: 'This browser' },
-  };
+  if (qrNonce) {
+    const pairingUrl = new URL('/', options.baseUrl);
+    pairingUrl.hash = new URLSearchParams({ nonce: qrNonce }).toString();
+    state.auth = {
+      kind: 'pairing',
+      pairing: {
+        kind: 'qr-confirm', hostName: new URL(options.publicOrigin).host,
+        deviceName: 'This browser', pairingUrl: pairingUrl.href,
+      },
+    };
+  }
+
+  function dismissPairingLink(): void {
+    if (!qrNonce) return;
+    qrNonce = undefined;
+    options.onPairingLinkDismissed?.();
+  }
 
   function emit(): void {
     for (const listener of listeners) listener();
@@ -217,11 +237,14 @@ export function createProductionController(options: ProductionControllerOptions)
   }
 
   async function clearHostPairingMaterial(hostId: string): Promise<void> {
+    if (hostSelection.get() === hostId) hostSelection.set(null);
     hostSessions.delete(hostId);
+    hostDrafts.delete(hostId);
     await Promise.all([
       identity.clearHost(hostId),
       cache.clear(hostId),
     ]);
+    update({ hosts: state.hosts.filter(host => host.id !== hostId) });
   }
 
   function hostRuntime(hostId: string) {
@@ -241,6 +264,28 @@ export function createProductionController(options: ProductionControllerOptions)
     const runtime = hostRuntime(hostId);
     runtime.epoch += 1;
     return runtime.epoch;
+  }
+
+  function prepareHostView(hostId: string): void {
+    refreshInFlight = null;
+    if (state.currentHostId && state.currentHostId !== hostId) hostDrafts.set(state.currentHostId, state.drafts);
+    const drafts = state.currentHostId === hostId ? state.drafts : hostDrafts.get(hostId) ?? {};
+    // A switched-away projection is no longer mounted. Ask for a full
+    // snapshot on return, never replay deltas over another Host's state.
+    const runtime = hostRuntime(hostId);
+    runtime.lastEventSequence = -1;
+    runtime.snapshotRevision = '';
+    runtime.hostGeneration = '';
+    const unknownCommandId = runtime.recoverable.find(command => (
+      showsUnknownOutcome(command.method) && state.mutations[command.commandId]?.phase === 'unknown'
+    ))?.commandId ?? null;
+    update({ currentHostId: hostId, connection: { kind: 'resyncing', synced: 0, total: 1 },
+      auth: { kind: 'challenge-login', hosts: state.hosts }, snapshotReceivedAt: null,
+      mobilePage: 'chat', fileViewer: null, view: { kind: 'empty' },
+      tasks: [], sessions: [], workspaces: [], interactions: [], capabilities: {},
+      catalog: null, catalogInvalidated: true, transcripts: {}, drafts,
+      queueNotice: null, unknownCommandId, interactionErrors: {}, interactionPhases: {},
+      fileDownload: { status: 'idle' } });
   }
 
   function clearRelayBinding(): void {
@@ -291,7 +336,7 @@ export function createProductionController(options: ProductionControllerOptions)
     runtime.snapshotRevision = snapshot.revision;
     runtime.hostGeneration = snapshot.host_generation;
     const next = applySnapshotToState(state, snapshot);
-    update(next);
+    update({ ...next, connectionPhase: undefined, connectionFailed: false });
     void cache.put(snapshot.host.id, snapshot);
     if (next.view.kind === 'chat') hydrateSessionDetached(next.view.sessionId, 'initial', true);
   }
@@ -377,7 +422,7 @@ export function createProductionController(options: ProductionControllerOptions)
         'unknown',
         'UNKNOWN_OUTCOME',
         'disconnected before result',
-        showsUnknownOutcome(command.method),
+        showsUnknownOutcome(command.method) && state.currentHostId === hostId,
       );
     }
     for (const [transferId, waiter] of [...uploadWaiters]) {
@@ -1084,6 +1129,18 @@ export function createProductionController(options: ProductionControllerOptions)
     return session;
   }
 
+  async function refreshPairedHosts(isCurrent: () => boolean): Promise<void> {
+    try {
+      const me = await auth.me();
+      if (!isCurrent()) return;
+      update({ hosts: (me.hosts ?? []).map(host => ({
+        ...state.hosts.find(existing => existing.id === host.host_id),
+        id: host.host_id, name: host.name, online: host.online,
+        sessionCount: state.hosts.find(existing => existing.id === host.host_id)?.sessionCount ?? 0,
+      })) });
+    } catch { /* A directory refresh must not interrupt a working Host connection. */ }
+  }
+
   async function authenticateHost(
     hostId: string,
     options: { forceRefresh?: boolean } = {},
@@ -1122,6 +1179,7 @@ export function createProductionController(options: ProductionControllerOptions)
       await run;
     } catch (error) {
       if (closed || epoch !== hostRuntime(hostId).epoch) return;
+      if (state.currentHostId === hostId) update({ connectionFailed: true });
       if (devicePairingWasLost(error)) {
         await clearHostPairingMaterial(hostId);
         if (!closed && epoch === hostRuntime(hostId).epoch && state.currentHostId === hostId) {
@@ -1140,10 +1198,13 @@ export function createProductionController(options: ProductionControllerOptions)
   async function connectHostUnlocked(hostId: string, epoch: number): Promise<void> {
     if (closed || epoch !== hostRuntime(hostId).epoch) return;
     cancelReconnect();
-    update({ connection: { kind: 'resyncing', synced: 0, total: 1 }, currentHostId: hostId });
+    update({ connection: { kind: 'resyncing', synced: 0, total: 1 }, currentHostId: hostId,
+      connectionPhase: 'auth', connectionFailed: false });
     const hostIdentity = await identity.hostIdentity(hostId);
     let session = await authenticateHost(hostId);
     if (closed || epoch !== hostRuntime(hostId).epoch) return;
+    void refreshPairedHosts(() => !closed && epoch === hostRuntime(hostId).epoch && state.currentHostId === hostId);
+    update({ connectionPhase: 'relay' });
     let ticket;
     try {
       ticket = await auth.wsTicket(session.accessToken, hostId);
@@ -1211,6 +1272,7 @@ export function createProductionController(options: ProductionControllerOptions)
         return;
       }
       const runtime = hostRuntime(hostId);
+      update({ connectionPhase: 'sync' });
       if (runtime.lastEventSequence >= 0 && runtime.snapshotRevision && runtime.hostGeneration) {
         await nextRelay.sendControl({
           type: 'resume.request',
@@ -1264,6 +1326,7 @@ export function createProductionController(options: ProductionControllerOptions)
         pairing: { kind: 'waiting', deviceName, expiresAt: Date.now() + PAIRING_TTL_MS },
       },
       currentHostId: claimed.host_id,
+      drafts: hostDrafts.get(claimed.host_id) ?? {},
     });
     const started = Date.now();
     let pollDelayMs = PAIRING_POLL_INITIAL_MS;
@@ -1277,6 +1340,11 @@ export function createProductionController(options: ProductionControllerOptions)
         await auth.challenge(browserId, claimed.host_id);
         if (!current()) return;
         await connectHost(claimed.host_id);
+        if (!current()) return;
+        hostSelection.set(claimed.host_id);
+        pairingReturnHostId = null;
+        update({ addingHost: false });
+        await refreshPairedHosts(current);
         return;
       } catch (error) {
         if (!current()) return;
@@ -1300,8 +1368,10 @@ export function createProductionController(options: ProductionControllerOptions)
   }
 
   async function restore(): Promise<void> {
+    const generation = navigationGeneration;
     try {
       const me = await auth.me();
+      if (closed || generation !== navigationGeneration || state.addingHost) return;
       const hosts = (me.hosts ?? []).map((host) => ({
         id: host.host_id,
         name: host.name,
@@ -1312,17 +1382,21 @@ export function createProductionController(options: ProductionControllerOptions)
         await restoreRememberedHosts();
         return;
       }
-      if (hosts.length === 1) {
+      const preferred = hostSelection.get();
+      const selected = hosts.find(host => host.id === preferred) ?? (hosts.length === 1 ? hosts[0] : undefined);
+      if (selected) {
         update({
           auth: { kind: 'challenge-login', hosts },
           hosts,
-          currentHostId: hosts[0]!.id,
+          currentHostId: selected.id,
         });
-        await connectHost(hosts[0]!.id);
+        await connectHost(selected.id);
         return;
       }
+      hostSelection.set(null);
       update({ auth: { kind: 'challenge-login', hosts }, hosts });
     } catch {
+      if (closed || generation !== navigationGeneration || state.addingHost) return;
       if (state.connection.kind === 'device_revoked') return;
       if (state.auth.kind === 'challenge-login' && state.currentHostId) return;
       await restoreRememberedHosts();
@@ -1330,7 +1404,7 @@ export function createProductionController(options: ProductionControllerOptions)
   }
 
   function requestRestore(): void {
-    if (closed || qrNonce) return;
+    if (closed || qrNonce || state.addingHost) return;
     if (restoreInFlight) {
       restoreAgain = true;
       return;
@@ -1350,7 +1424,9 @@ export function createProductionController(options: ProductionControllerOptions)
   }
 
   async function restoreRememberedHosts(): Promise<void> {
+    const generation = navigationGeneration;
     const hostIds = await identity.listHostIds();
+    if (closed || generation !== navigationGeneration || state.addingHost) return;
     if (hostIds.length === 0) return;
     // Authentication must not wait for encrypted snapshot-cache I/O. The
     // live snapshot supplies the canonical Host name and Session counts once
@@ -1361,11 +1437,12 @@ export function createProductionController(options: ProductionControllerOptions)
       online: false,
       sessionCount: 0,
     }));
-    if (hosts.length !== 1) {
+    const selected = hosts.find(host => host.id === hostSelection.get()) ?? (hosts.length === 1 ? hosts[0] : undefined);
+    if (!selected) {
       update({ auth: { kind: 'challenge-login', hosts }, hosts });
       return;
     }
-    const host = hosts[0]!;
+    const host = selected;
     update({
       auth: { kind: 'challenge-login', hosts },
       hosts,
@@ -1416,7 +1493,9 @@ export function createProductionController(options: ProductionControllerOptions)
       retireHostSession(hostId, 'disconnected');
     }
     hostSessions.delete(hostId);
+    hostDrafts.delete(hostId);
     await identity.clearHost(hostId);
+    if (hostSelection.get() === hostId) hostSelection.set(null);
     await cache.clear(hostId);
     const hosts = state.hosts.filter((host) => host.id !== hostId);
     const next = hosts[0];
@@ -1437,17 +1516,28 @@ export function createProductionController(options: ProductionControllerOptions)
       requestRestore();
     },
 
+    startPairing() {
+      ++navigationGeneration;
+      ++pairingGeneration;
+      cancelReconnect();
+      if (pollTimer) clearTimeout(pollTimer);
+      dismissPairingLink();
+      pairingReturnHostId = state.currentHostId;
+      if (state.currentHostId) hostDrafts.set(state.currentHostId, state.drafts);
+      if (state.currentHostId) retireHostSession(state.currentHostId, 'replaced');
+      update({ addingHost: true, currentHostId: null, connection: { kind: 'browser_offline' },
+        auth: { kind: 'pairing', pairing: { kind: 'enter-code', attemptsLeft: 5 } } });
+    },
+
     selectHost(hostId) {
+      if (!state.hosts.some(host => host.id === hostId)) return;
       if (hostId === state.currentHostId) return;
+      ++navigationGeneration;
+      hostSelection.set(hostId);
       cancelReconnect();
       if (state.currentHostId) retireHostSession(state.currentHostId, 'replaced');
       bumpEpoch(hostId);
-      update({
-        currentHostId: hostId,
-        connection: { kind: 'resyncing', synced: 0, total: 1 },
-        catalog: null,
-        catalogInvalidated: true,
-      });
+      prepareHostView(hostId);
       void connectHost(hostId).catch(() => undefined);
     },
     selectSession(sessionId) {
@@ -1756,6 +1846,7 @@ export function createProductionController(options: ProductionControllerOptions)
         await auth.logout().catch(() => undefined);
         await cache.clear();
         hostSessions.clear();
+        hostDrafts.clear();
         abortAllDownloads();
         relay?.close('logout');
         clearRelayBinding();
@@ -1785,17 +1876,40 @@ export function createProductionController(options: ProductionControllerOptions)
     confirmQrPairing() {
       if (qrNonce && state.auth.kind === 'pairing' && state.auth.pairing.kind === 'qr-confirm') {
         const nonce = qrNonce;
-        qrNonce = undefined;
+        dismissPairingLink();
         void claimAndWait(undefined, state.auth.pairing.deviceName, nonce);
       }
     },
     cancelPairing() {
+      dismissPairingLink();
       ++pairingGeneration;
       if (state.currentHostId) bumpEpoch(state.currentHostId);
       if (pollTimer) clearTimeout(pollTimer);
+      if (state.addingHost) {
+        cancelReconnect();
+        if (state.currentHostId) retireHostSession(state.currentHostId, 'replaced');
+        const hosts = state.hosts;
+        const previous = pairingReturnHostId;
+        pairingReturnHostId = null;
+        update({ addingHost: false, currentHostId: null, mobilePage: 'chat', snapshotReceivedAt: null,
+          auth: hosts.length ? { kind: 'challenge-login', hosts }
+            : { kind: 'pairing', pairing: { kind: 'enter-code', attemptsLeft: 5 } } });
+        if (previous && hosts.some(host => host.id === previous)) actions.selectHost(previous);
+        return;
+      }
       setPairingFailure('cancelled');
     },
     restartPairing() {
+      dismissPairingLink();
+      if (state.addingHost) {
+        ++pairingGeneration;
+        cancelReconnect();
+        if (pollTimer) clearTimeout(pollTimer);
+        if (state.currentHostId) retireHostSession(state.currentHostId, 'replaced');
+        update({ currentHostId: null, connection: { kind: 'browser_offline' },
+          auth: { kind: 'pairing', pairing: { kind: 'enter-code', attemptsLeft: 5 } } });
+        return;
+      }
       const generation = ++pairingGeneration;
       const hostId = state.currentHostId;
       cancelReconnect();
@@ -1815,15 +1929,12 @@ export function createProductionController(options: ProductionControllerOptions)
       })();
     },
     challengeLogin(hostId) {
+      ++navigationGeneration;
+      hostSelection.set(hostId);
       if (state.currentHostId && state.currentHostId !== hostId) {
         retireHostSession(state.currentHostId, 'replaced');
       }
-      update({
-        currentHostId: hostId,
-        connection: { kind: 'resyncing', synced: 0, total: 1 },
-        catalog: null,
-        catalogInvalidated: true,
-      });
+      prepareHostView(hostId);
       void connectHost(hostId).catch(() => undefined);
     },
   };

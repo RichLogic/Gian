@@ -5,7 +5,7 @@
   "description": "ai.deepseek.harness \u2014 shared-scope Gian Proxy translating gian.proxy/2.1 over gian.dsh.bridge/1.0",
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
-  "gianProxy": { "releaseId": "dsh", "shipping": true, "realAcceptance": { "binaryEnv": "DSH_BIN", "setup": "dsh-profile" } },
+  "gianProxy": { "releaseId": "dsh", "shipping": true, "realAcceptance": { "binaryEnv": "DSH_BIN", "setup": "dsh-profile" }, "bundlePackages": [{ "directory": "dsh-bridge", "path": "bridge", "files": ["package.json", "dist/src", "cordis.patch.yml"] }] },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",

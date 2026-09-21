@@ -1,4 +1,5 @@
 import type { Session, Workspace } from '@gian/shared';
+import { useMemo } from 'react';
 import type { SessionCommands } from '../controllers/use-session-commands.js';
 import type { TranscriptHistoryState } from '../controllers/use-transcript-hydration.js';
 import type { ActionControlState } from '../components/action-gating.js';
@@ -8,12 +9,13 @@ import {
 import type { ChatPanelRequest } from '../presentation/chat-panel.js';
 import {
   DiffOpenContext,
-  FileLinkOpenContext,
   FileRefRehypeContext,
+  LinkBehaviorContext,
   PlanOpenContext,
-  RelativeLinkOpenContext,
 } from '../transcript/items.js';
 import type { PlanOpenPayload } from '../transcript/items.js';
+import type { LinkBehavior } from '../transcript/items.js';
+import { fileLinkHref } from '../links/link-behavior.js';
 import type { DiffItem, QueueEntry, TranscriptItem } from '../types.js';
 import { SessionMain } from './SessionMain.js';
 
@@ -36,7 +38,7 @@ interface SessionSurfaceProps {
   commands: SessionCommands;
   onOpenFile: (absolutePath: string, line?: number) => void;
   /** Click-time fallback for relative markdown links the render-time linkify
-   *  pass didn't resolve (see RelativeLinkOpenContext). */
+   *  pass didn't resolve (routed through LinkBehavior.openRelative). */
   onOpenRelativeFile: (href: string) => void;
   onOpenDiff: (item: DiffItem) => void;
   onOpenPlan: (payload: PlanOpenPayload) => void;
@@ -83,9 +85,14 @@ export function SessionSurface({
   forkAtTurnControl,
   sideChatControl,
 }: SessionSurfaceProps) {
+  const linkBehavior = useMemo<LinkBehavior>(() => ({
+    openWebUrl: null,
+    openFile: onOpenFile,
+    fileHref: fileLinkHref,
+    openRelative: onOpenRelativeFile,
+  }), [onOpenFile, onOpenRelativeFile]);
   const content = (
-    <FileLinkOpenContext.Provider value={onOpenFile}>
-      <RelativeLinkOpenContext.Provider value={onOpenRelativeFile}>
+    <LinkBehaviorContext.Provider value={linkBehavior}>
       <FileRefRehypeContext.Provider value={fileRehype}>
         <DiffOpenContext.Provider value={onOpenDiff}>
           <PlanOpenContext.Provider value={onOpenPlan}>
@@ -145,8 +152,7 @@ export function SessionSurface({
           </PlanOpenContext.Provider>
         </DiffOpenContext.Provider>
       </FileRefRehypeContext.Provider>
-      </RelativeLinkOpenContext.Provider>
-    </FileLinkOpenContext.Provider>
+    </LinkBehaviorContext.Provider>
   );
 
   return containerClassName ? <div className={containerClassName}>{content}</div> : content;

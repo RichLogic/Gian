@@ -1,6 +1,5 @@
 import type { Context } from 'react';
 import {
-  BrowserLinkOpenContext as ChatUiBrowserLinkOpenContext,
   ChatPanelOpenContext as ChatUiChatPanelOpenContext,
   type ChatUiPanelRequest,
 } from '@gian/chat-ui';
@@ -30,6 +29,3 @@ export type ChatPanelTarget = ChatPanelRequest & { sessionId: string };
 export const ChatPanelOpenContext = ChatUiChatPanelOpenContext as unknown as Context<
   ((request: ChatPanelRequest) => void) | null
 >;
-
-/** Routes ordinary web links to the Browser rail. */
-export const BrowserLinkOpenContext = ChatUiBrowserLinkOpenContext;

@@ -1,0 +1,21 @@
+services:
+  remote:
+    image: ${REMOTE_IMAGE:?An immutable image digest is required}
+    restart: unless-stopped
+    init: true
+    env_file: ${REMOTE_RUNTIME_ENV:?Set the absolute runtime.env path}
+    ports:
+      - "127.0.0.1:${REMOTE_PORT:-8787}:8787"
+    volumes:
+      - remote-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+volumes:
+  remote-data:
+    name: ${REMOTE_DATA_VOLUME:-gian-remote_remote-data}

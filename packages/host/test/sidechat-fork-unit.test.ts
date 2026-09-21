@@ -602,6 +602,128 @@ test('Side Chat event compaction preserves the first assistant turn while the se
   }
 });
 
+for (const kind of ['text', 'reasoning'] as const) {
+  test(`Side Chat preserves streamed ${kind} through content-less completion and rehydration`, () => {
+    const ctx = tempDb();
+    try {
+      const store = new SidechatTransientStore(ctx.db);
+      store.upsert(record());
+      for (const delta of ['first ', 'answer']) {
+        store.appendEvent('sc_1', {
+          method: 'content.delta',
+          params: { turnId: 't1', data: { contentId: 'body', kind, delta } },
+        });
+      }
+      const completion = {
+        jsonrpc: '2.0',
+        method: 'content.completed',
+        params: {
+          eventId: 'completed-body', streamId: 'stream-sc', sequence: 3,
+          sessionId: 'sc_1', turnId: 't1', sourceTurnId: 'native-t1',
+          emittedAt: '2026-08-20T00:00:02.000Z',
+          data: { contentId: 'body', kind, stepId: 'step-1' },
+        },
+      };
+      store.appendEvent('sc_1', completion);
+      store.appendEvent('sc_1', completion);
+      store.appendEvent('sc_1', {
+        method: 'content.delta',
+        params: { turnId: 't1', data: { contentId: 'body', kind, delta: ' late' } },
+      });
+      store.appendEvent('sc_1', {
+        method: 'turn.completed', params: { turnId: 't1', data: { stopReason: 'completed' } },
+      });
+
+      const reloaded = new SidechatTransientStore(ctx.db).get('sc_1')!;
+      const snapshot = toPublicSidechat(reloaded);
+      assert.equal(snapshot.state, 'idle');
+      assert.equal(snapshot.events.length, 2);
+      assert.deepEqual(snapshot.events[0], {
+        ...completion,
+        params: { ...completion.params, data: { ...completion.params.data, content: 'first answer' } },
+      });
+      assert.equal('content' in completion.params.data, false, 'compaction must not mutate the incoming event');
+    } finally {
+      ctx.close();
+    }
+  });
+}
+
+test('Side Chat explicit completed content wins, including an empty replacement', () => {
+  const ctx = tempDb();
+  try {
+    const store = new SidechatTransientStore(ctx.db);
+    for (const content of ['authoritative answer', '']) {
+      store.upsert(record());
+      store.appendEvent('sc_1', {
+        method: 'content.delta',
+        params: { turnId: 't1', data: { contentId: 'answer', kind: 'text', delta: 'obsolete draft' } },
+      });
+      store.appendEvent('sc_1', {
+        method: 'content.completed',
+        params: { turnId: 't1', data: { contentId: 'answer', kind: 'text', content } },
+      });
+      store.appendEvent('sc_1', {
+        method: 'content.completed',
+        params: { turnId: 't1', data: { contentId: 'answer', kind: 'text' } },
+      });
+      const events = store.get('sc_1')!.events;
+      assert.equal(events.length, 1);
+      assert.equal(eventData(events[0]).content, content);
+    }
+  } finally {
+    ctx.close();
+  }
+});
+
+test('Side Chat completion never borrows content from another turn, content id or kind', () => {
+  const ctx = tempDb();
+  try {
+    const store = new SidechatTransientStore(ctx.db);
+    store.upsert(record());
+    store.appendEvent('sc_1', {
+      method: 'content.delta',
+      params: { turnId: 't1', data: { contentId: 'answer', kind: 'text', delta: 'first turn' } },
+    });
+    store.appendEvent('sc_1', {
+      method: 'content.delta',
+      params: { turnId: 't1', data: { contentId: 'thought', kind: 'reasoning', delta: 'private thought' } },
+    });
+    for (const [turnId, contentId] of [['t2', 'answer'], ['t1', 'absent'], ['t1', 'thought']]) {
+      store.appendEvent('sc_1', {
+        method: 'content.completed', params: { turnId, data: { contentId, kind: 'text' } },
+      });
+      assert.equal('content' in eventData(store.get('sc_1')!.events.at(-1)), false);
+    }
+    store.appendEvent('sc_1', {
+      method: 'content.completed',
+      params: { turnId: 't1', data: { contentId: 'answer', kind: 'text' } },
+    });
+    assert.equal(eventData(store.get('sc_1')!.events.at(-1)).content, 'first turn');
+  } finally {
+    ctx.close();
+  }
+});
+
+test('Side Chat materialized completion retains the compacted content bound', () => {
+  const ctx = tempDb();
+  try {
+    const store = new SidechatTransientStore(ctx.db);
+    store.upsert(record());
+    store.appendEvent('sc_1', {
+      method: 'content.delta',
+      params: { turnId: 't1', data: { contentId: 'answer', kind: 'text', delta: 'x'.repeat(1024 * 1024 + 1) } },
+    });
+    store.appendEvent('sc_1', {
+      method: 'content.completed',
+      params: { turnId: 't1', data: { contentId: 'answer', kind: 'text' } },
+    });
+    assert.equal(String(eventData(store.get('sc_1')!.events[0]).content).length, 1024 * 1024);
+  } finally {
+    ctx.close();
+  }
+});
+
 function eventMethod(event: unknown): string | null {
   if (!event || typeof event !== 'object') return null;
   const method = (event as { method?: unknown }).method;

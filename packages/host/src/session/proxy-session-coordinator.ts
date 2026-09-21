@@ -420,9 +420,20 @@ export class ProxySessionCoordinator {
         || !option.choices || option.choices.some(choice => Object.is(choice.value, byRole))
         ? byRole
         : undefined;
+      // Role-less Agent option defaults (e.g. provider) sit between persisted
+      // session state and the Proxy's own defaultValue, choice-validated like
+      // the role path. Unknown stored ids never appear in the catalog loop.
+      const byAgentOption = !option.role
+        ? args.executorDefaults?.options?.[option.id]
+        : undefined;
+      const supportedAgentValue = byAgentOption === undefined || byAgentOption === null
+        || !option.choices || option.choices.some(choice => Object.is(choice.value, byAgentOption))
+        ? byAgentOption
+        : undefined;
       const value = args.sessionConfig?.[option.id]
         ?? persisted
         ?? supportedRoleValue
+        ?? supportedAgentValue
         ?? option.defaultValue;
       if (value !== undefined && value !== '') sessionConfig[option.id] = value;
     }

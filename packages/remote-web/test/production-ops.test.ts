@@ -69,6 +69,141 @@ function emptyState(): RemoteUiState {
 }
 
 describe('production controller operations', () => {
+  it('ignores an outstanding automatic restore after the user chooses Add computer', async () => {
+    let release!: () => void;
+    let reached = false;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const connect = vi.fn((input: DeviceRelayClientOptions) => new FakeRelay(input));
+    const { controller } = await pairedController({
+      autoRestore: true, createRelay: connect,
+      async beforeGet() { reached = true; await waiting; },
+    });
+    try {
+      await viWait(async () => reached);
+      controller.actions.startPairing();
+      release();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(connect).not.toHaveBeenCalled();
+      expect(controller.state).toMatchObject({ addingHost: true, currentHostId: null,
+        auth: { kind: 'pairing', pairing: { kind: 'enter-code' } } });
+    } finally { release(); controller.close(); }
+  });
+  it('requests a full snapshot after switching back and keeps drafts partitioned by Host', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      extraHosts: [hostB],
+      createRelay(input) { const relay = new FakeRelay(input); relays.push(relay); return relay; },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      await relays[0]!.emit({ ...sampleSnapshot(hostId, 'Office'), event_sequence: 1 });
+      const draftId = generateCanonicalId();
+      controller.actions.setDraftText(draftId, 'unsent office draft');
+      controller.actions.selectHost(hostB);
+      expect(controller.state.sessions).toEqual([]);
+      expect(controller.state.drafts[draftId]).toBeUndefined();
+      await viWait(async () => relays.length === 2 && controller.state.connection.kind === 'online');
+      controller.actions.selectHost(hostId);
+      expect(controller.state.drafts[draftId]?.text).toBe('unsent office draft');
+      await viWait(async () => relays.length === 3 && relays[2]!.sent.some(message => message.method === 'state.refresh'));
+      expect(relays[2]!.sent.some(message => message.type === 'resume.request')).toBe(false);
+    } finally { controller.close(); }
+  });
+  it('keeps other Hosts selectable while the remembered computer fails authentication', async () => {
+    const { controller } = await pairedController({
+      extraHosts: [hostB], autoRestore: true, reconnectBaseMs: 10_000,
+      hostSelection: { get: () => hostId, set() {} },
+      beforeRequest(path, body) {
+        if (path === '/api/v1/sessions/device-challenge' && (body as { host_id: string }).host_id === hostId) {
+          throw new Error('network failed');
+        }
+      },
+      createRelay: input => new FakeRelay(input),
+    });
+    try {
+      await viWait(async () => controller.state.connectionFailed === true);
+      expect(controller.state.connectionPhase).toBe('auth');
+      expect(controller.state.hosts.map(host => host.id)).toEqual([hostId, hostB]);
+      controller.actions.selectHost(hostB);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      expect(controller.state.currentHostId).toBe(hostB);
+    } finally { controller.close(); }
+  });
+  it('restores the selected paired Host and keeps the full list available', async () => {
+    let selected: string | null = hostB;
+    const connected: string[] = [];
+    const { controller } = await pairedController({
+      extraHosts: [hostB], autoRestore: true,
+      hostSelection: { get: () => selected, set: id => { selected = id; } },
+      createRelay(input) { connected.push(input.hostId); return new FakeRelay(input); },
+    });
+    try {
+      await viWait(async () => controller.state.connection.kind === 'online');
+      expect(connected).toEqual([hostB]);
+      expect(controller.state.hosts.map(host => host.id)).toEqual([hostId, hostB]);
+      controller.actions.selectHost(hostId);
+      await viWait(async () => connected.length === 2);
+      expect(selected).toBe(hostId);
+    } finally { controller.close(); }
+  });
+
+  it('does not connect an unknown remembered selection when several paired Hosts exist', async () => {
+    let selected: string | null = 'removed-host';
+    const connect = vi.fn((input: DeviceRelayClientOptions) => new FakeRelay(input));
+    const { controller } = await pairedController({
+      extraHosts: [hostB], autoRestore: true, createRelay: connect,
+      hostSelection: { get: () => selected, set: id => { selected = id; } },
+    });
+    try {
+      await viWait(async () => controller.state.hosts.length === 2);
+      expect(controller.state.currentHostId).toBeNull();
+      expect(connect).not.toHaveBeenCalled();
+      expect(selected).toBeNull();
+    } finally { controller.close(); }
+  });
+
+  it('adding a computer suppresses old-Host restore and cancel keeps existing keys', async () => {
+    const paths: string[] = [];
+    const { controller, identity } = await pairedController({
+      autoRestore: true, onRequest: path => paths.push(path),
+      createRelay: input => new FakeRelay(input),
+    });
+    try {
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const key = await identity.hostIdentity(hostId);
+      controller.actions.startPairing();
+      const previousCalls = paths.length;
+      controller.actions.restoreBrowserSession();
+      await Promise.resolve();
+      expect(paths).toHaveLength(previousCalls);
+      expect(controller.state).toMatchObject({ addingHost: true, currentHostId: null,
+        auth: { kind: 'pairing', pairing: { kind: 'enter-code' } } });
+      controller.actions.cancelPairing();
+      await viWait(async () => controller.state.connection.kind === 'online');
+      expect(controller.state.currentHostId).toBe(hostId);
+      expect(await identity.hostIdentity(hostId)).toBe(key);
+    } finally { controller.close(); }
+  });
+
+  it('refreshes all pairings after adding a second Host without a page reload', async () => {
+    const { controller, identity } = await pairedController({
+      autoRestore: true, pairingHost: hostB, createRelay: input => new FakeRelay(input),
+    });
+    try {
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const originalKey = await identity.hostIdentity(hostId);
+      controller.actions.startPairing();
+      controller.actions.submitPairingCode('K7DM-F2Q9');
+      await viWait(async () => controller.state.currentHostId === hostB
+        && controller.state.connection.kind === 'online' && controller.state.addingHost === false);
+      expect(controller.state.hosts.map(host => host.id)).toEqual([hostId, hostB]);
+      expect(await identity.hostIdentity(hostId)).toBe(originalKey);
+      controller.actions.selectHost(hostId);
+      await viWait(async () => controller.state.currentHostId === hostId && controller.state.connection.kind === 'online');
+    } finally { controller.close(); }
+  });
+
   it.each(['send-failure', 'command-rejected'] as const)('observes command rejection while transport send is pending: %s', async (failure) => {
     let relay: FakeRelay | undefined;
     let releaseSend!: () => void;
@@ -1067,12 +1202,13 @@ describe('production controller operations', () => {
     controller.actions.selectHost(hostB);
     await viWait(async () => controller.state.connection.kind === 'online' && controller.state.currentHostId === hostB);
     expect(controller.state.mutations[commandId]?.phase).toBe('unknown');
-    expect(controller.state.unknownCommandId).toBe(commandId);
+    expect(controller.state.unknownCommandId).toBeNull();
     const hostBStatus = (relays.get(hostB)?.sent ?? []).filter((message) => (
       message.type === 'command.request' && message.method === 'command.status'
     ));
     expect(hostBStatus).toEqual([]);
     controller.actions.selectHost(hostId);
+    expect(controller.state.unknownCommandId).toBe(commandId);
     await viWait(async () => (
       (relays.get(hostId)?.sent ?? []).some((message) => (
         message.type === 'command.request'
@@ -2298,6 +2434,9 @@ function remoteSession(id: string) {
 }
 
 async function pairedController(options: {
+  beforeGet?: () => Promise<void>;
+  hostSelection?: import('../src/host-selection.js').HostSelectionStore;
+  pairingHost?: string;
   extraHosts?: string[];
   autoRestore?: boolean;
   cache?: EncryptedHostCache;
@@ -2325,11 +2464,17 @@ async function pairedController(options: {
   }
   const hostKey = await exportPublicJwk((await generateP256KeyPair()).publicKey);
   let ticketRequests = 0;
+  let pairClaimed = false;
   const http: RemoteHttpClient = {
     cookies: new MemoryCookieJar(),
     async request(path, body, token) {
       await options.beforeRequest?.(path, body);
       options.onRequest?.(path);
+      if (path === '/api/v1/pairings/claim' && options.pairingHost) {
+        pairClaimed = true;
+        return { protocol: AUTH_PROTOCOL, pairing_id: generateCanonicalId(), host_id: options.pairingHost,
+          status: 'pending_confirmation', crypto_connection_id: generateCanonicalId() };
+      }
       if (path === '/api/v1/sessions/logout') {
         return { protocol: AUTH_PROTOCOL, ok: true };
       }
@@ -2370,11 +2515,12 @@ async function pairedController(options: {
       throw new Error(path);
     },
     async get(path) {
+      await options.beforeGet?.();
       if (path === '/api/v1/me') {
         if (options.meFails) throw new RemoteProtocolError('AUTH_REQUIRED', 'refresh cookie unavailable');
         return {
           protocol: AUTH_PROTOCOL,
-          hosts: [hostId, ...(options.extraHosts ?? [])].map((id) => ({
+          hosts: [hostId, ...(options.extraHosts ?? []), ...(pairClaimed && options.pairingHost ? [options.pairingHost] : [])].map((id) => ({
             host_id: id,
             name: id === hostB ? 'Laptop' : 'Office',
             online: true,
@@ -2400,6 +2546,7 @@ async function pairedController(options: {
     readTimeoutMs: options.readTimeoutMs,
     reconnectBaseMs: options.reconnectBaseMs,
     reconnectMaxMs: options.reconnectMaxMs,
+    hostSelection: options.hostSelection,
   });
   return { identity, cache, controller, extraHosts: options.extraHosts };
 }

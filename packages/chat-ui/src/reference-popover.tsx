@@ -214,7 +214,7 @@ function clipLines(text: string): string {
 }
 
 /** Floating detail card for a context reference (browser element, pasted
- *  text, folder). Used by the transcript's context chips and reference
+ *  text, folder, file). Used by the transcript's context chips and reference
  *  documents. */
 export function ContextReferencePopover({
   item,
@@ -234,7 +234,7 @@ export function ContextReferencePopover({
   onMouseLeave?: () => void;
 }) {
   const t = useChatUiT();
-  const title = item.type === 'folder'
+  const title = item.type === 'folder' || item.type === 'file'
     ? item.name
     : item.type === 'browserElement'
       ? t('composer.context.browserElement')
@@ -272,6 +272,9 @@ export function ContextReferencePopover({
           </>
         )}
         {item.type === 'folder' && (
+          <span className="ref-pop-url" title={item.path}>{item.path}</span>
+        )}
+        {item.type === 'file' && (
           <span className="ref-pop-url" title={item.path}>{item.path}</span>
         )}
       </div>

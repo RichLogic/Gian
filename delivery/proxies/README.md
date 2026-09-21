@@ -1,0 +1,69 @@
+# Gian Proxies
+
+Official independently released Gian Proxy packages and the signed Proxy Catalog.
+Development is integrated in GianDev; this public repository is a reproducible
+source export, not a copy of private Git history.
+
+## Contents
+
+- Claude, Codex, Kimi, DSH and ZCode shipping Proxies, each independently versioned.
+- Release versions come from each Proxy package on GianDev main. Export does
+  not assign a repository-wide version or automatically bump Proxy versions.
+- Grok source remains non-shipping. Its presence does not authorize a release.
+- DSH Proxy includes its exact Bridge rather than relying on an App-bundled copy.
+- Catalog source, Markdown documentation, logos, compiler and signing workflows.
+- Exact public `@gian/proxy-protocol` archive dependency from RichLogic/Gian.
+- Shared support source and the production Runtime extractor snapshot. No Host,
+  Web, Desktop or private protocol checkout is needed to build this product.
+
+## Build and release
+
+Use Node 24 and the pinned pnpm version. `pnpm install --frozen-lockfile` followed
+by `pnpm build` builds the standalone product. No Provider credentials are needed.
+
+1. Dispatch **Qualify Proxy Artifacts** on main. The hosted macOS ARM64 workflow
+   verifies source provenance, compiles, exercises Proxy contracts with fake
+   Runtimes, verifies exact managed Runtime candidates with the production
+   extractor, builds archives once and self-tests their extracted entry points.
+2. Create each immutable `proxy-<releaseId>-v<version>` tag at that qualified
+   public commit. Dispatch **Publish Certified Proxies** with its run ID. The
+   publisher authenticates the run and rehashes the downloaded artifact; it does
+   not rebuild. Existing releases must match byte-for-byte or publication fails.
+3. Create `catalog-v1.<sequence>.0` at the intended main source commit. Dispatch
+   **Publish Signed Catalog** with the qualification run, sequence and explicit
+   issue time. It checks published assets, compiles the Catalog and verifies the
+   signature with the pinned App public key before publication.
+
+The Catalog-production environment requires the existing
+`GIAN_CATALOG_SIGNING_KEY_PEM` Secret. Never regenerate the signing key, put it
+in a repository or send it through chat. Proxy build jobs do not receive it.
+The first migrated Catalog sequence must exceed the legacy source's sequence 6.
+Catalog consumers select `catalog-v1.*`; they must not use the repository's
+generic latest release as a Proxy version. Proxy releases use `--latest=false`.
+
+Certificates bind actual bytes and explicitly exclude App/Desktop acceptance,
+Host/Web journeys and real Provider turns. Those are separate consumer checks,
+not invented successful stages in this product's certificate. ZCode remains
+an external-App exception; a published adapter does not repair upstream ZCode
+standalone embedding or certify execution of the current installed ZCode App.
+
+## Updates
+
+Change source in GianDev and export an integrated commit with
+`node scripts/export-proxies.mjs --ref main --output <new-empty-directory>`.
+The exporter uses the platform Ruby YAML parser to retain locked dependency
+versions and writes standard YAML-compatible JSON. Never hand-edit generated
+snapshot files in this repository or overwrite an existing immutable release.
+Catalog documentation changes can reuse an unexpired qualified release without
+rebuilding Proxy archives; Proxy or Runtime changes require new qualification.
+
+Author tutorials and structured history in `catalog/proxy-information/`. Catalog
+publication validates that source and its certified Runtime snapshot, then
+projects nine chapters into v1 setup/usage/troubleshooting and history Markdown
+into overview in the temporary compilation input. The signed wire schema and
+existing immutable Proxy coordinates stay unchanged. A dedicated App history
+view is a separate consumer change; basic.md contains review examples, not
+installed-state data. Publication runs the focused projection checks in CI.
+
+Old Gian and Gian-Proxy-Catalog releases remain available during migration.
+Publishing here does not change any installed App's trusted source or data.

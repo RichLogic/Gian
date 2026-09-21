@@ -1,11 +1,11 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   ProxyCatalogItem,
   RuntimeDiscoverResponse,
   RuntimeProbeResponse,
 } from '@gian/shared';
+import { useLinkBehavior } from '@gian/chat-ui';
 import { useT } from '../i18n/index.js';
-import { BrowserLinkOpenContext } from '../presentation/chat-panel.js';
 import { runtimeEntityKey } from '../operations/catalog.js';
 import {
   useOperationDispatch,
@@ -56,7 +56,7 @@ export function ProxyRuntimeSetup({
   const t = useT();
   const dispatch = useOperationDispatch();
   const store = useOperationStore();
-  const openBrowser = useContext(BrowserLinkOpenContext);
+  const openBrowser = useLinkBehavior()?.openWebUrl ?? null;
   const runs = usePendingOperations(runtimeEntityKey(item.pluginId));
   const busy = runs.length > 0;
 

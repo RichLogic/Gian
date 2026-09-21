@@ -25,6 +25,18 @@ describe('UserMessage', () => {
     expect(text.getAttribute('data-transcript-turn')).toBe('1');
   });
 
+  it('linkifies URLs in user message text (sent messages no longer render links as inert text)', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({ text: 'check https://example.com/docs please' })} />,
+    );
+    const text = container.querySelector('.msg-text.user-text')!;
+    const link = text.querySelector('a[data-link-kind="web"]')!;
+    expect(link.getAttribute('href')).toBe('https://example.com/docs');
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toContain('noopener');
+    expect(text.textContent).toBe('check https://example.com/docs please');
+  });
+
   it('renders image attachments inline and routes zoom through the callback', () => {
     const zoom = vi.fn();
     const { container } = render(

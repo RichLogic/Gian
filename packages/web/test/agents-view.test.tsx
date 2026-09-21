@@ -742,6 +742,143 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     await waitFor(() => expect(api.updateAgent).toHaveBeenCalledWith('a-1', { name: 'Renamed' }));
   });
 
+  // ── Role-less catalog option defaults (e.g. dsh provider) ────────────────
+
+  function dshLikeCapabilities(providerChoices = [
+    { value: 'deepseek-official', displayName: 'DeepSeek' },
+    { value: 'vendor-b', displayName: 'Vendor B' },
+  ]) {
+    return {
+      catalogRevision: 'dsh-rev-1',
+      capabilities: { 'catalog.resolve': {} },
+      configOptions: [
+        {
+          id: 'provider', displayName: 'Provider', binding: 'turn', control: 'select',
+          required: false, defaultValue: 'deepseek-official', choices: providerChoices,
+        },
+        {
+          id: 'model', displayName: 'Model', binding: 'turn', role: 'model', control: 'select',
+          required: true, defaultValue: 'deepseek-chat',
+          choices: [
+            { value: 'deepseek-chat', displayName: 'DeepSeek Chat' },
+            { value: 'deepseek-reasoner', displayName: 'DeepSeek Reasoner' },
+          ],
+        },
+        {
+          id: 'region', displayName: 'Region', binding: 'turn', control: 'select',
+          required: false, defaultValue: 'us',
+          choices: [
+            { value: 'us', displayName: 'US' },
+            { value: 'eu', displayName: 'EU' },
+          ],
+          enabledWhen: [{ optionId: 'provider', oneOf: ['vendor-b'] }],
+        },
+      ],
+      input: [{ type: 'text' }],
+      slashCommands: [],
+    };
+  }
+
+  function dshAgent(defaults?: Partial<UserAgentStatus['defaults']>) {
+    return agent({
+      id: 'a-dsh',
+      name: 'DSH Agent',
+      pluginId: 'ai.deepseek.harness',
+      proxy: 'dsh',
+      proxyName: 'DeepSeek Harness',
+      defaults: {
+        model: 'deepseek-chat',
+        thinking: '',
+        mode: '',
+        options: {},
+        ...defaults,
+      },
+    });
+  }
+
+  /** Resolve mock: model choices depend on the requested provider. */
+  function mockProviderDependentResolve() {
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(async (_kind, params) => {
+      const provider = (params.turnConfig?.['provider'] ?? params.sessionConfig?.['provider'])
+        ?? 'deepseek-official';
+      const base = dshLikeCapabilities();
+      return {
+        ...base,
+        configOptions: base.configOptions.map(option => (
+          option.id === 'model'
+            ? provider === 'vendor-b'
+              ? { ...option, choices: [{ value: 'vendor-b-model', displayName: 'Vendor B Model' }] }
+              : option
+            : option
+        )),
+        resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
+      } as never;
+    });
+  }
+
+  it('renders a Provider default select for a dsh-like catalog, never for claude-like', async () => {
+    mockApi([dshAgent(), agent({ id: 'a-claude', name: 'Claude Agent' })]);
+    vi.mocked(api.loadProxyCapabilities).mockImplementation(async kind => (
+      kind === 'dsh' ? dshLikeCapabilities() as never : capabilities()
+    ));
+    mockProviderDependentResolve();
+    renderAgents();
+
+    fireEvent.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    const dshPanel = await screen.findByTestId('agents-detail-panel');
+    await waitFor(() => expect(
+      within(dshPanel).getByTestId('agent-default-option-provider'),
+    ).toBeTruthy());
+    // A role-less option gated by enabledWhen stays disabled while the stored
+    // provider does not satisfy the condition.
+    expect(
+      (within(dshPanel).getByTestId('agent-default-option-region') as HTMLSelectElement).disabled,
+    ).toBe(true);
+
+    fireEvent.click(within(dshPanel).getByRole('button', { name: 'Close' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Claude Agent/ }));
+    const claudePanel = await screen.findByTestId('agents-detail-panel');
+    await waitFor(() => expect(within(claudePanel).getByLabelText('Model')).toBeTruthy());
+    expect(within(claudePanel).queryByTestId('agent-default-option-provider')).toBeNull();
+  });
+
+  it('changing Provider writes one atomic patch and clears the dependent model default', async () => {
+    mockApi([dshAgent({ options: { provider: 'deepseek-official' } })]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(dshLikeCapabilities() as never);
+    mockProviderDependentResolve();
+    renderAgents();
+
+    fireEvent.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    const panel = await screen.findByTestId('agents-detail-panel');
+    const provider = await waitFor(() => {
+      const select = within(panel).getByTestId('agent-default-option-provider') as HTMLSelectElement;
+      expect(select.disabled).toBe(false);
+      return select;
+    });
+    expect(provider.value).toBe('deepseek-official');
+    // The initial re-resolve matches the stored defaults: no write yet.
+    expect(api.updateAgent).not.toHaveBeenCalled();
+
+    fireEvent.change(provider, { target: { value: 'vendor-b' } });
+    await waitFor(() => expect(api.updateAgent).toHaveBeenCalledTimes(1));
+    expect(api.updateAgent).toHaveBeenCalledWith('a-dsh', {
+      defaults: { options: { provider: 'vendor-b' }, model: '' },
+    });
+  });
+
+  it('an enabledWhen-satisfying provider default enables the gated option', async () => {
+    mockApi([dshAgent({ model: '', options: { provider: 'vendor-b' } })]);
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(dshLikeCapabilities() as never);
+    mockProviderDependentResolve();
+    renderAgents();
+
+    fireEvent.click(await screen.findByRole('button', { name: /DSH Agent/ }));
+    const panel = await screen.findByTestId('agents-detail-panel');
+    await waitFor(() => expect(
+      (within(panel).getByTestId('agent-default-option-region') as HTMLSelectElement).disabled,
+    ).toBe(false));
+  });
+
   // ── No-restart Agent management (WP7 semantics on the WP4 surface): Agent
   //  create/delete/path changes take effect immediately; no restart confirm,
   //  no restartApp, no restartRequired affordance anywhere. ────────────────

@@ -38,6 +38,18 @@ export function normalizeProtocolCatalog<T extends ProxyCatalog>(catalog: T): T 
 
 export type NotificationHandler = (notification: ProxyNotification) => void;
 
+/** Bound for session.create / turn.* / interaction.respond RPCs. These can
+ *  wait on Provider runtime bootstrap inside the Proxy, so they get a
+ *  generous bound; the Web operation layer already settles 'unknown' after
+ *  10s and retries, so leaving them unbounded would pile work onto a wedged
+ *  shared Proxy (kimi) with no way for the Host to surface the failure. */
+export const PROXY_SESSION_RPC_TIMEOUT_MS = 30_000;
+
+/** Bound for sidechat.* control RPCs. They are lightweight stream operations
+ *  on an already-running parent session, so they fail fast; the Side Chat
+ *  coordinator quarantines just the affected Side Chat on timeout. */
+export const PROXY_SIDECHAT_RPC_TIMEOUT_MS = 15_000;
+
 export interface ProtocolV2HostOptions extends ProtocolV2ClientOptions {
   /** Present for official product launches; omitted for open pluginIds. */
   executor?: Executor;
@@ -342,7 +354,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
             : {}),
         },
       } : {}),
-    });
+    }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
     this.stream = result.session.streamId;
     this.nativeSessionId = result.session.nativeSession?.id ?? params.nativeSessionId ?? null;
     this.cwd = params.cwd;
@@ -399,7 +411,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
         turnId,
         input: params.input,
         config: params.config,
-      });
+      }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
     } catch (error) {
       if (this.activeTurnId === turnId) this.activeTurnId = null;
       throw error;
@@ -415,7 +427,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       sessionId: this.hostSessionId,
       streamId: this.requireStream(),
       turnId: this.requireTurn(),
-    });
+    }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
   }
 
   async steerTurn(params: SteerTurnParams): Promise<{ ok: true; turnId: string }> {
@@ -425,7 +437,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       streamId: this.requireStream(),
       turnId,
       input: params.input,
-    });
+    }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
   }
 
   async respondInteraction(params: RespondInteractionParams): Promise<void> {
@@ -437,7 +449,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       responseId: params.responseId,
       actionId: params.actionId,
       values: params.values,
-    });
+    }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
   }
 
   async setName(name: string): Promise<void> {
@@ -491,7 +503,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       parentSessionId: this.hostSessionId,
       parentStreamId: this.requireStream(),
       sidechatId: params.sidechatId,
-    });
+    }, { timeoutMs: PROXY_SIDECHAT_RPC_TIMEOUT_MS });
     const child = this.host.createSessionClient(params.sidechatId);
     child.attachFromSnapshot(result.sidechat.streamId, this.cwd ?? undefined);
     return result.sidechat;
@@ -505,7 +517,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       sidechatId: params.sidechatId,
       parentSessionId: this.hostSessionId,
       resumeRef: params.resumeRef,
-    });
+    }, { timeoutMs: PROXY_SIDECHAT_RPC_TIMEOUT_MS });
     const child = this.host.createSessionClient(params.sidechatId);
     child.attachFromSnapshot(result.sidechat.streamId, this.cwd ?? undefined);
     return result.sidechat;
@@ -516,7 +528,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
     streamId?: string;
     resumeRef: { id: string };
   }): Promise<{ ok: true; sidechatId: string; providerDataDeleted: boolean }> {
-    return this.host.request('sidechat.close', params);
+    return this.host.request('sidechat.close', params, { timeoutMs: PROXY_SIDECHAT_RPC_TIMEOUT_MS });
   }
 
   async forkSession(params: {

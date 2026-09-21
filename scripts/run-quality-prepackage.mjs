@@ -14,7 +14,6 @@ export const PREPACKAGE_STEPS = [
   { id: 'typecheck', label: 'Type check', args: ['typecheck'] },
   { id: 'tests', label: 'Unit, integration, system, and contract tests', args: ['test:all'] },
   { id: 'build', label: 'Production build', args: ['build'] },
-  { id: 'traceability', label: 'Traceability registry', args: ['quality:traceability'] },
   { id: 'functional-evidence', label: 'Functional evidence crosswalk', args: ['quality:functional-evidence'] },
   { id: 'docs', label: 'Documentation links', args: ['quality:docs'] },
   { id: 'e2e', label: 'Isolated browser journeys', args: ['test:e2e:run'] },
@@ -73,7 +72,7 @@ export function prepackageSkipReason(stepId, options) {
 }
 
 export function hasInternalBrowserJourneys(sourceRoot, fileExists = existsSync) {
-  return fileExists(join(sourceRoot, 'docs', 'quality', 'traceability.md'))
+  return fileExists(join(sourceRoot, 'AGENTS.md'))
     && fileExists(join(sourceRoot, 'e2e', 'specs', '02-workspace-and-session.spec.ts'));
 }
 

@@ -1,11 +1,11 @@
-import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { OpenAppPrefs } from '@gian/shared';
+import { LinkAnchor } from '@gian/chat-ui';
 import { useT } from '../i18n/index.js';
 import { normalizeGfmTables } from '../markdown-tables.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
-import { BrowserLinkOpenContext } from '../presentation/chat-panel.js';
 import { AppIcon } from './AppIcon.js';
 import {
   SHEET_GROUP_ORDER,
@@ -199,31 +199,12 @@ function FileBody({ lines, scrollLine }: { lines: Array<[string, string, string?
  *  (react-markdown's default: no rehype-raw) so previewed file contents can't
  *  inject markup. Styling hangs off the shared `.md-preview` class. */
 function MarkdownPreview({ source }: { source: string }) {
-  const openBrowser = useContext(BrowserLinkOpenContext);
   const normalized = useMemo(() => normalizeGfmTables(source), [source]);
   return (
     <div className="md-preview">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children }) => {
-            const routesToBrowser = !!href && /^https?:\/\//i.test(href);
-            return (
-              <a
-                href={href}
-                target={routesToBrowser && openBrowser ? undefined : '_blank'}
-                rel="noreferrer noopener"
-                onClick={event => {
-                  if (!routesToBrowser || !openBrowser || !href) return;
-                  event.preventDefault();
-                  openBrowser(href);
-                }}
-              >
-                {children}
-              </a>
-            );
-          },
-        }}
+        components={{ a: LinkAnchor as never }}
       >
         {normalized}
       </ReactMarkdown>

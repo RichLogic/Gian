@@ -18,8 +18,9 @@ class FakeGuard {
     return true;
   }
 
-  async assertCompatible(candidate, observed) {
-    FakeGuard.calls.push(['assertCompatible', candidate, observed]);
+  async evaluateCompatibility(candidate, observed) {
+    FakeGuard.calls.push(['evaluateCompatibility', candidate, observed]);
+    return [];
   }
 }
 
@@ -44,12 +45,13 @@ test('Kimi store preflight is read-only and checks the same-home CLI version', a
     binaryPath: '/fixture/kimi-home/bin/kimi',
     candidateVersion: '0.31.1',
     sessionDataPresent: true,
+    conditions: [],
     compatible: true,
   });
   assert.deepEqual(FakeGuard.calls, [
     ['construct', '/fixture/kimi-home'],
     ['hasSessionData'],
-    ['assertCompatible', '0.31.1', '0.31.1'],
+    ['evaluateCompatibility', '0.31.1', '0.31.1'],
   ]);
   assert.equal(execCalls[0][0], '/fixture/kimi-home/bin/kimi');
   assert.deepEqual(execCalls[0][1], ['--version']);

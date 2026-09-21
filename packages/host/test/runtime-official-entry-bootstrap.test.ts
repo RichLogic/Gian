@@ -84,6 +84,15 @@ async function writeExecutable(path: string, source: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
+async function writeZcodeBuiltinConfig(entry: string): Promise<void> {
+  // A usable standalone fixture needs the provider config next to its entry.
+  // Keep this separate from the user's ~/.zcode/cli/config.json so tests can
+  // independently exercise bootstrap readiness and missing user configuration.
+  const provider = join(dirname(entry), 'provider');
+  await mkdir(provider, { recursive: true });
+  await writeFile(join(provider, 'zcode-builtin.json'), '{}\n');
+}
+
 async function pluginVersion(packageDir: string): Promise<string> {
   const pkg = JSON.parse(
     await readFile(join(repoRoot, 'packages', 'proxies', packageDir, 'package.json'), 'utf8'),
@@ -135,6 +144,7 @@ test('official spawn.js bootstraps 2.2 without Runtime and without vendor childr
   }
   const zcode = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
   await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
+  await writeZcodeBuiltinConfig(zcode);
   await mkdir(join(root, '.zcode', 'cli'), { recursive: true });
   await writeFile(join(root, '.zcode', 'cli', 'config.json'), '{"ok":true}\n');
   await mkdir(join(root, '.kimi-code', 'bin'), { recursive: true });
@@ -209,7 +219,7 @@ test('official spawn.js bootstraps 2.2 without Runtime and without vendor childr
   }
 });
 
-test('Kimi and ZCode readiness issues do not start a Session', { timeout: 30_000 }, async (t) => {
+test('ZCode readiness issues do not start a Session; Kimi store state stays advisory', { timeout: 30_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-official-ready-'));
   t.after(async () => {
     const { rm } = await import('node:fs/promises');
@@ -247,8 +257,15 @@ test('Kimi and ZCode readiness issues do not start a Session', { timeout: 30_000
       'runtime.probe',
       { path: discovered.candidates[0]!.path },
     );
-    assert.ok(probed.readinessIssue, `${item.name} should report readinessIssue`);
-    assert.equal(probed.readinessIssue?.repairable, true);
+    if (item.name === 'kimi') {
+      // Since ADR-0080 Kimi session-store conditions are advisory: the probe
+      // logs them but never reports a readinessIssue that would block a
+      // Session. The CLI's own session/new or session/load verdict decides.
+      assert.equal(probed.readinessIssue, undefined, 'kimi store state must not block Sessions');
+    } else {
+      assert.ok(probed.readinessIssue, `${item.name} should report readinessIssue`);
+      assert.equal(probed.readinessIssue?.repairable, true);
+    }
     await assert.rejects(
       () => client.request('session.create', {
         sessionId: 'nope',
@@ -261,7 +278,7 @@ test('Kimi and ZCode readiness issues do not start a Session', { timeout: 30_000
   }
 });
 
-test('Kimi and ZCode readiness produce no Host lease and no default Runtime fallback', { timeout: 40_000 }, async (t) => {
+test('ZCode readiness produces no Host lease; Kimi store state leases normally', { timeout: 40_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-official-lease-'));
   t.after(async () => {
     const { rm } = await import('node:fs/promises');
@@ -275,6 +292,7 @@ test('Kimi and ZCode readiness produce no Host lease and no default Runtime fall
   await writeExecutable(kimiBin, '#!/bin/sh\necho kimi 0.38.0\n');
   const zcodeBin = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
   await writeExecutable(zcodeBin, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
+  await writeZcodeBuiltinConfig(zcodeBin);
 
   const resolver = new RuntimeResolver({
     dataDir: join(root, 'resolver'),
@@ -299,8 +317,13 @@ test('Kimi and ZCode readiness produce no Host lease and no default Runtime fall
     },
     selectedPath: kimiBin,
   });
-  assert.equal(kimiResolved.lease, null);
-  assert.equal(kimiResolved.readinessIssue?.code, 'kimi_session_store_owner_missing');
+  // Kimi session data without a verifiable same-home owner used to be a fatal
+  // readinessIssue; since ADR-0080 it is advisory only, so the resolve leases
+  // the runtime and the CLI's own session verdict decides.
+  assert.equal(kimiResolved.readinessIssue, undefined);
+  assert.ok(kimiResolved.lease, 'kimi resolve must lease despite advisory store conditions');
+  assert.equal(kimiResolved.profile.path, kimiBin);
+  await kimiResolved.lease?.release();
 
   const zcode = OFFICIAL.find((item) => item.name === 'zcode')!;
   const zcodeResolved = await resolver.resolve({

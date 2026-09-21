@@ -531,7 +531,7 @@ printf 'claude 2.1.159\\n'
     schemaVersion: number;
     agents: Array<{ id: string; cliPath: string | null }>;
   };
-  assert.equal(persisted.schemaVersion, 5);
+  assert.equal(persisted.schemaVersion, 6);
   assert.equal(persisted.agents.find(candidate => candidate.id === agent.id)?.cliPath, newPath);
 });
 
@@ -2307,7 +2307,12 @@ test('Proxy defaults validate effort against the catalog resolved for the select
   assert.deepEqual(resolveCalls, [{
     id: 'claude',
     revision: 'claude-models',
-    config: { sessionConfig: {}, turnConfig: { model: 'opus' } },
+    // The resolve request carries the full effective defaults (triplet +
+    // options), not just the model, so dependent lists stay consistent.
+    config: {
+      sessionConfig: {},
+      turnConfig: { model: 'opus', effort: 'max', approval_mode: 'ask' },
+    },
   }]);
   assert.deepEqual(writes, [{ model: 'opus', thinking: 'max' }]);
 });

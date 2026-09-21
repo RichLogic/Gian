@@ -28,6 +28,29 @@ interface PendingRequest {
   reject: (reason: unknown) => void;
 }
 
+/** Rejection produced by ProtocolV2Client's own request timeout. The marker
+ *  distinguishes "the Proxy never answered" from a Proxy-reported domain
+ *  error that happens to share the RUNTIME_UNAVAILABLE code — the Side Chat
+ *  coordinator quarantines only on the former. */
+export function proxyRequestTimeoutError(
+  pluginId: string,
+  method: string,
+  timeoutMs: number,
+): ProxyProtocolError {
+  const error = new ProxyProtocolError(
+    'RUNTIME_UNAVAILABLE',
+    `${pluginId} Proxy did not answer ${method} within ${timeoutMs}ms.`,
+    false,
+  );
+  (error as { requestTimeout?: boolean }).requestTimeout = true;
+  return error;
+}
+
+export function isProxyRequestTimeout(error: unknown): boolean {
+  return error instanceof ProxyProtocolError
+    && (error as { requestTimeout?: boolean }).requestTimeout === true;
+}
+
 export function proxyChildEnvironment(
   inherited: NodeJS.ProcessEnv,
   override: Readonly<Record<string, string>> | undefined,
@@ -209,6 +232,7 @@ export class ProtocolV2Client {
       });
     });
     if (options?.timeoutMs === undefined) return promise;
+    const timeoutMs = options.timeoutMs;
     const timer = setTimeout(() => {
       const pending = this.pending.get(id);
       if (!pending) return;
@@ -218,12 +242,8 @@ export class ProtocolV2Client {
       // watermark below stays able to recognize it without any tombstone
       // that could overflow or expire.
       this.validator.forgetRequest(id);
-      pending.reject(new ProxyProtocolError(
-        'RUNTIME_UNAVAILABLE',
-        `${this.options.pluginId} Proxy did not answer ${method} within ${options.timeoutMs}ms.`,
-        false,
-      ));
-    }, options.timeoutMs);
+      pending.reject(proxyRequestTimeoutError(this.options.pluginId, method, timeoutMs));
+    }, timeoutMs);
     timer.unref?.();
     return promise.finally(() => clearTimeout(timer));
   }

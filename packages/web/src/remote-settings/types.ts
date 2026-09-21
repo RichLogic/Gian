@@ -197,6 +197,7 @@ export interface RemoteSettingsController {
   // Devices
   revokeDevice(deviceId: string): Promise<void>;
   setPublicUrl?(url: string): Promise<void>;
+  setHostName?(name: string): Promise<void>;
   loadAudit?(deviceId: string): Promise<void>;
   refresh?(): Promise<void>;
   dispose?(): void;

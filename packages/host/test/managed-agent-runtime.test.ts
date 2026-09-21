@@ -116,7 +116,7 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
     schemaVersion: number;
     agents: Array<Record<string, unknown>>;
   };
-  assert.equal(persisted.schemaVersion, 5);
+  assert.equal(persisted.schemaVersion, 6);
   assert.equal('cliPath' in persisted.agents[0]!, false);
   assert.deepEqual(persisted.agents.map(item => item.home), [first.home, second.home]);
 });

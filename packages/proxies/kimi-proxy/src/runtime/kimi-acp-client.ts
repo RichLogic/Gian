@@ -46,6 +46,63 @@ const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_MS = 3_000;
 
+/** Per-operation deadlines for session-scoped ACP RPCs. The kimi child is a
+ *  shared process: one wedged request must never park the serial session
+ *  queue or every other session behind it, so each RPC is bounded. Values are
+ *  deliberately generous for a healthy local process — they detect a wedge,
+ *  not slow work:
+ *  - controlMs (cancel/close): teardown must learn quickly whether the
+ *    runtime still answers. (`session/cancel` is an ACP notification, so its
+ *    deadline only bounds connection acquisition and the write; a cancel the
+ *    runtime never honors is caught by the service-level interrupt settle
+ *    watchdog.)
+ *  - sessionMs (new/fork/list/set_config_option): local metadata operations
+ *    with no model work involved.
+ *  - sessionLoadMs (load/resume): replays native history into the process,
+ *    which is real I/O and parse work on large sessions.
+ *  `session/prompt` stays unbounded on purpose: it resolves when the turn
+ *  ends. A turn the user interrupts but the runtime never ends is caught by
+ *  the service-level interrupt settle watchdog, which fences the runtime. */
+export interface KimiAcpRpcDeadlines {
+  controlMs: number;
+  sessionMs: number;
+  sessionLoadMs: number;
+}
+
+const DEFAULT_RPC_DEADLINES: KimiAcpRpcDeadlines = {
+  controlMs: 10_000,
+  sessionMs: 30_000,
+  sessionLoadMs: 120_000,
+};
+
+function normalizeRpcDeadlines(
+  overrides: Partial<KimiAcpRpcDeadlines> | undefined,
+): KimiAcpRpcDeadlines {
+  const deadlines = { ...DEFAULT_RPC_DEADLINES, ...overrides };
+  for (const [name, value] of Object.entries(deadlines)) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new TypeError(`Kimi ACP RPC deadline ${name} must be a positive finite number.`);
+    }
+  }
+  return deadlines;
+}
+
+/** A session-scoped ACP RPC did not answer before its deadline. `code` is
+ *  stable so upper layers can classify it (turn.failed code, retryable
+ *  RUNTIME_ERROR domain mapping). */
+export class KimiAcpRpcTimeoutError extends Error {
+  readonly code = 'RPC_TIMEOUT';
+  constructor(
+    readonly operation: string,
+    readonly deadlineMs: number,
+  ) {
+    super(
+      `Kimi ACP ${operation} did not answer within ${deadlineMs}ms; the shared runtime was fenced and restarts on the next request.`,
+    );
+    this.name = 'KimiAcpRpcTimeoutError';
+  }
+}
+
 export type KimiAcpPermissionHandler = (
   request: RequestPermissionRequest,
 ) => Promise<RequestPermissionResponse>;
@@ -70,6 +127,8 @@ export interface KimiAcpClientOptions {
   permissionHandler?: KimiAcpPermissionHandler;
   startupTimeoutMs?: number;
   gracefulStopMs?: number;
+  /** Test seam: per-operation session RPC deadlines. */
+  rpcDeadlines?: Partial<KimiAcpRpcDeadlines>;
   transportFactory?: KimiAcpTransportFactory;
   /** Test seam: deterministic process-group behavior for the terminal
    *  service (defaults to real POSIX process groups). */
@@ -193,6 +252,7 @@ function processTransportFactory(
 
 export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
   private readonly options: KimiAcpClientOptions;
+  private readonly deadlines: KimiAcpRpcDeadlines;
   private readonly transportFactory: KimiAcpTransportFactory;
   private readonly callbacks: Client;
   private permissionHandler: KimiAcpPermissionHandler | null;
@@ -215,6 +275,7 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
     super();
     validateAbsolutePath(options.binaryPath, 'binaryPath');
     this.options = options;
+    this.deadlines = normalizeRpcDeadlines(options.rpcDeadlines);
     this.terminals = new KimiTerminalService(options.terminalProcessGroupAdapter ?? {});
     this.permissionHandler = options.permissionHandler ?? null;
     this.transportFactory = options.transportFactory
@@ -442,10 +503,70 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
     return this.transport.connection;
   }
 
+  /** Bound one session-scoped RPC. On expiry the caller rejects with
+   *  KimiAcpRpcTimeoutError and the wedged runtime is retired so no later
+   *  request (and no queued session task) ever waits on it again. Only the
+   *  generation this RPC was dispatched to may be retired by its deadline —
+   *  a newer runtime that already replaced it is healthy by construction. */
+  private async withDeadline<T>(
+    operation: string,
+    deadlineMs: number,
+    rpc: (connection: ClientSideConnection) => Promise<T>,
+  ): Promise<T> {
+    const connection = await this.connection();
+    const transport = this.transport;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        rpc(connection),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            if (transport !== null && this.transport === transport) {
+              this.retireWedgedRuntime();
+            }
+            reject(new KimiAcpRpcTimeoutError(operation, deadlineMs));
+          }, deadlineMs);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** Retire the current runtime because it stopped answering: the wedged
+   *  transport is fenced (no new reverse terminal creates) and stopped, and
+   *  the exit handler's generation drain + runtimeStopped broadcast drive the
+   *  existing lazy-rebind recovery for every bound session. Called on RPC
+   *  deadline expiry and by the service when an accepted interrupt never
+   *  settles its turn. */
+  retireWedgedRuntime(): void {
+    const transport = this.transport;
+    if (transport === null) return;
+    this.transport = null;
+    this.initializeResponse = null;
+    this.startPromise = null;
+    this.capturedUpdates.clear();
+    // Mark expected BEFORE stop so the exit broadcast is classified as a
+    // proxy-initiated recovery, and fence the generation synchronously so no
+    // reverse terminal create can still attach to the wedged runtime.
+    this.expectedStops.add(transport);
+    this.terminals.fenceRuntime();
+    // stop() is bounded (stdin end → SIGTERM → SIGKILL); the exit handler
+    // owns the retired generation's terminal drain and broadcast.
+    void transport.stop().catch((error) => {
+      logAcpFailure('runtime/retire', error);
+    });
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     validateAbsolutePath(params.cwd, 'cwd');
     try {
-      const response = await (await this.connection()).newSession(params);
+      const response = await this.withDeadline(
+        'session/new',
+        this.deadlines.sessionMs,
+        (connection) => connection.newSession(params),
+      );
       this.terminals.bindSession(response.sessionId, params.cwd);
       return response;
     } catch (error) {
@@ -461,7 +582,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
       throw new Error('Kimi ACP does not advertise session/load.');
     }
     try {
-      const response = await (await this.connection()).loadSession(params);
+      const response = await this.withDeadline(
+        'session/load',
+        this.deadlines.sessionLoadMs,
+        (connection) => connection.loadSession(params),
+      );
       this.terminals.bindSession(params.sessionId, params.cwd);
       return response;
     } catch (error) {
@@ -472,7 +597,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
 
   async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
     try {
-      const response = await (await this.connection()).unstable_forkSession(params);
+      const response = await this.withDeadline(
+        'session/fork',
+        this.deadlines.sessionMs,
+        (connection) => connection.unstable_forkSession(params),
+      );
       this.terminals.bindSession(response.sessionId, params.cwd);
       return response;
     } catch (error) {
@@ -488,7 +617,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
       throw new Error('Kimi ACP does not advertise session/resume.');
     }
     try {
-      const response = await (await this.connection()).resumeSession(params);
+      const response = await this.withDeadline(
+        'session/resume',
+        this.deadlines.sessionLoadMs,
+        (connection) => connection.resumeSession(params),
+      );
       this.terminals.bindSession(params.sessionId, params.cwd);
       return response;
     } catch (error) {
@@ -503,7 +636,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
       throw new Error('Kimi ACP does not advertise session/list.');
     }
     try {
-      return await (await this.connection()).listSessions(params);
+      return await this.withDeadline(
+        'session/list',
+        this.deadlines.sessionMs,
+        (connection) => connection.listSessions(params),
+      );
     } catch (error) {
       logAcpFailure('session/list', error);
       throw error;
@@ -538,7 +675,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
 
   async cancel(sessionId: string): Promise<void> {
     try {
-      await (await this.connection()).cancel({ sessionId });
+      await this.withDeadline(
+        'session/cancel',
+        this.deadlines.controlMs,
+        (connection) => connection.cancel({ sessionId }),
+      );
     } catch (error) {
       logAcpFailure('session/cancel', error);
       throw error;
@@ -549,7 +690,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
     try {
-      return await (await this.connection()).setSessionConfigOption(params);
+      return await this.withDeadline(
+        'session/set_config_option',
+        this.deadlines.sessionMs,
+        (connection) => connection.setSessionConfigOption(params),
+      );
     } catch (error) {
       logAcpFailure('session/set_config_option', error);
       throw error;
@@ -564,7 +709,11 @@ export class KimiAcpClient extends EventEmitter<KimiAcpClientEvents> {
     try {
       // Binding deletion is owned by the permanent session drain (the close
       // flow in KimiProxyService), never by this RPC wrapper.
-      await (await this.connection()).closeSession(params);
+      await this.withDeadline(
+        'session/close',
+        this.deadlines.controlMs,
+        (connection) => connection.closeSession(params),
+      );
     } catch (error) {
       logAcpFailure('session/close', error);
       throw error;

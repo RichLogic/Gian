@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import {
   AUTH_PROTOCOL,
+  createRemoteHello,
   AUTH_SIGNED_AT_SKEW_MS,
   RELAY_PROTOCOL,
   CONTENT_WINDOW_CHUNKS,
@@ -263,6 +264,41 @@ async function openHostFrames(
   }
   return opened;
 }
+
+test('connector negotiates authenticated hello before commands and rejects disjoint versions', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    for (const incompatible of [false, true]) {
+      const crypto = await pairCrypto();
+      const transports = MemoryDuplexTransport.pair();
+      const replies: unknown[] = [];
+      transports.device.onMessage(frame => replies.push(frame));
+      let commands = 0;
+      let snapshotParts: boolean | undefined;
+      const connector = new RemoteConnector(transports.host, crypto.host, new RemoteReplayBuffer(), async (_device, _command, hooks) => {
+        commands += 1; snapshotParts = hooks?.snapshotParts; return { ok: true };
+      }, device);
+      const hello = { ...createRemoteHello(device.id, 'test'), capabilities: [] };
+      await sendDeviceFrame(transports.device, crypto.device, incompatible ? { ...hello, min_minor_version: 99, max_minor_version: 99 } : hello);
+      await waitUntil(() => replies.length > 0);
+      const opened = await openHostFrames(crypto.device, replies.splice(0));
+      assert.equal(opened[0]?.message.type, incompatible ? 'error' : 'hello.ok');
+      if (incompatible) {
+        assert.equal(connector.connected, false);
+        assert.equal(commands, 0);
+      } else {
+        const reply = opened[0]!.message as { host_generation?: string; connection_id?: string };
+        assert.equal(reply.host_generation, crypto.binding.hostGeneration);
+        assert.equal(reply.connection_id, crypto.binding.connectionId);
+        await sendDeviceFrame(transports.device, crypto.device, command('catalog.read', {}));
+        await waitUntil(() => commands === 1);
+        assert.equal(snapshotParts, false, 'unadvertised snapshot parts must remain disabled');
+      }
+      connector.close();
+    }
+  } finally { teardownRemoteHarness(context); }
+});
 
 test('connector heartbeat, generation restart, and exponential backoff stay local', async () => {
   const context = setupRemoteHarness();

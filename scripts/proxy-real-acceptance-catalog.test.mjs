@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   loadProxyRealAcceptanceCatalog,
+  resolveAcceptanceTargets,
   renderProxyRealAcceptanceHtml,
   validateProxyRealAcceptanceCatalog,
 } from './proxy-real-acceptance-catalog.mjs';
@@ -15,6 +16,20 @@ import {
   reasoningExpectedFor,
   verifyWorkspaceToolOutcome,
 } from './run-proxy-real-acceptance.mjs';
+
+test('scenario templates follow the selected source version without overwriting explicit pins or claiming execution', () => {
+  const template = { providers: { kimi: { displayName: 'Kimi' } }, scenarios: [] };
+  const first = resolveAcceptanceTargets(template, [{ id: 'kimi', pluginVersion: '0.3.1' }]);
+  const next = resolveAcceptanceTargets(template, [{ id: 'kimi', pluginVersion: '0.3.2' }]);
+  assert.equal(first.providers.kimi.pluginVersion, '0.3.1');
+  assert.equal(next.providers.kimi.pluginVersion, '0.3.2');
+  assert.equal(template.providers.kimi.pluginVersion, undefined);
+  assert.equal(next.status, undefined);
+  const pinned = resolveAcceptanceTargets({
+    providers: { kimi: { pluginVersion: '99.0.0' } },
+  }, [{ id: 'kimi', pluginVersion: '0.3.2' }]);
+  assert.equal(pinned.providers.kimi.pluginVersion, '99.0.0');
+});
 
 test('real Proxy catalog covers every request and notification schema', async () => {
   const catalog = await loadProxyRealAcceptanceCatalog();

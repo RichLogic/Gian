@@ -9,6 +9,10 @@ export function assertExecutionAllowed(kind, env = process.env) {
     if (!hosted && env.GIAN_ALLOW_DESKTOP_E2E !== '1') {
       throw new Error('Desktop execution requires explicit user permission for this run (GIAN_ALLOW_DESKTOP_E2E=1).');
     }
+  } else if (kind === 'verification') {
+    if (!hosted && env.GIAN_ALLOW_LOCAL_VERIFICATION !== '1') {
+      throw new Error('Local tests, typechecks and builds require an Owner-selected run (GIAN_ALLOW_LOCAL_VERIFICATION=1). Plan the scope first or use CI; do not set this flag without permission.');
+    }
   } else throw new Error(`Unknown execution policy: ${kind}`);
 }
 

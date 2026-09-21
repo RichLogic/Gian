@@ -1,0 +1,496 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "ai.deepseek.harness",
+  "currentVersion": "0.3.1",
+  "entries": [
+    {
+      "version": "0.3.1",
+      "firstPublishedAt": "2026-09-17T00:57:06Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.3.1",
+          "publishedAt": "2026-09-17T00:57:06Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.3.1/gian-proxy-dsh-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5c465b4afb5beed72f6800e7045502200af094c212196fb5f90996ee76fece4d",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.3.1/gian-proxy-dsh-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "a9d3002a976a1faa23d51602c51956809b5705f2a5fdd29eda6384d0a4a579fd",
+            "size": 123077
+          },
+          "runtimeDeclaration": {
+            "id": "deepseek-harness",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.3",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        },
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-dsh-v0.3.1",
+          "publishedAt": "2026-09-20T09:48:24Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.1/gian-proxy-dsh-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5c465b4afb5beed72f6800e7045502200af094c212196fb5f90996ee76fece4d",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.1/gian-proxy-dsh-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "c670bffe82496a56b15d6c84d10767987064346f21dfad584d3f58e96c8b4aae",
+            "size": 144728
+          },
+          "runtimeDeclaration": {
+            "id": "deepseek-harness",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.3",
+              "basis": "bundled-package-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "受管 Runtime 标识采用 deepseek-harness，配合内容寻址目录布局。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/9683495bfcc8980a3b48886b88d30e24b5f0df9e"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "准备并校验 gian profile 后再启动 DSH；JavaScript 入口由 Node 启动。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-dsh-v0.3.1/packages/proxies/dsh-proxy/src/runtime/profile.ts"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "2026-09-20 新仓库分发自带 Bridge 0.1.3，并优先使用包内 Bridge。该分发归档与旧仓库同版本按各自摘要识别，不假定字节相同。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.0",
+      "firstPublishedAt": "2026-09-16T03:41:20Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.3.0",
+          "publishedAt": "2026-09-16T03:41:20Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.3.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.3.0/gian-proxy-dsh-0.3.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "6526a5c6f3eb50d9170b1840c347f16b1b9e60015984f84e7d65ed7958d9f4a7",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.3.0/gian-proxy-dsh-0.3.0-darwin-arm64.tar.gz",
+            "sha256": "378f07b3753a09c937977727d654a8861f2c48accadaf5accecb5fb4bcc7d340",
+            "size": 123038
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.3",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "提供 Proxy-owned runtime.install.plan v1，使受管 Runtime 安装配方随 Proxy 交付。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/593ca856393a48aaabfbcfa49657f28c268e57b1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.1.7",
+      "firstPublishedAt": "2026-09-15T06:09:34Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.7",
+          "publishedAt": "2026-09-15T06:09:34Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.7",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.7/gian-proxy-dsh-0.1.7-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "e0de33058cc4cf5dd0fb956d675b3e56ed014b508265d02901173a0079d4813f",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.7/gian-proxy-dsh-0.1.7-darwin-arm64.tar.gz",
+            "sha256": "2d05a148cd387794a7987aacbf6543cd225fc197aff0bd9f7d78c83b0ce4693c",
+            "size": 121069
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.3",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "发布新的补丁身份供受管安装使用，避免重写既有不可变制品。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/45b222b7ae789b1f92ae6424090a8b6bd11b6545"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.1.6",
+      "firstPublishedAt": "2026-09-13T09:17:12Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.6",
+          "publishedAt": "2026-09-13T09:17:12Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.6/gian-proxy-dsh-0.1.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "b4ab150b05066133f8babf6c0f2dda1b8ab827c0827009ad03652774a24d3a4c",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.6/gian-proxy-dsh-0.1.6-darwin-arm64.tar.gz",
+            "sha256": "d19107bd280708cbc91e81ca3180dd6ba44ef1fb1521d8c337950ff983fa997a",
+            "size": 121070
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.3",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.1 <3.0 调整为 >=2.2 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.5/gian-proxy-dsh-0.1.5-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.6/gian-proxy-dsh-0.1.6-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 3 调整为 Schema 4。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.5/gian-proxy-dsh-0.1.5-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.6/gian-proxy-dsh-0.1.6-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.1.5",
+      "firstPublishedAt": "2026-09-02T05:39:38Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.5",
+          "publishedAt": "2026-09-02T05:39:38Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.5/gian-proxy-dsh-0.1.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "7bbca2e05902b4e67e70424fb702b93dc9fc883816e98d994521a6cfa8f312a3",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.5/gian-proxy-dsh-0.1.5-darwin-arm64.tar.gz",
+            "sha256": "2dacfd4e3535aec316ecd7bc440b6ce5ae646da608329c45b252770fbd1b4c36",
+            "size": 111111
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.2",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.1.4",
+      "firstPublishedAt": "2026-09-01T10:18:41Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.4",
+          "publishedAt": "2026-09-01T10:18:41Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.4",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.4/gian-proxy-dsh-0.1.4-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "eb7ffb8f375f2d1c815594ee95ce6c3fa8e8970e69d7e855fb8dc64325544100",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.4/gian-proxy-dsh-0.1.4-darwin-arm64.tar.gz",
+            "sha256": "3873dc8042b20e439c35a1c45c30113398e52e39f4e1fbda1f6ba7d0ae59b931",
+            "size": 24064
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.1-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.1",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "更新 DSH Provider 路由适配，声明对应 Runtime 0.1.1-rc.2。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/de9e3b6363968eea35b4969933aa91ec1db17c7d"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.1.3",
+      "firstPublishedAt": "2026-08-28T08:43:41Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.3",
+          "publishedAt": "2026-08-28T08:43:41Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.3",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.3/gian-proxy-dsh-0.1.3-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "2049b426a440431f75ee4d9c33439c3bbd36ae2e14800e7dd0eea3d09a032e2e",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.3/gian-proxy-dsh-0.1.3-darwin-arm64.tar.gz",
+            "sha256": "fa76eff12fa994aee3378ea123fa2b36128d63b3298934be74930192fbbe5d2c",
+            "size": 22745
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.0-rc.7"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.0",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.0 <3.0 调整为 >=2.1 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.1/gian-proxy-dsh-0.1.1-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.3/gian-proxy-dsh-0.1.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 2 调整为 Schema 3。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.1/gian-proxy-dsh-0.1.1-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.3/gian-proxy-dsh-0.1.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.1.1",
+      "firstPublishedAt": "2026-08-24T09:36:37Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.1",
+          "publishedAt": "2026-08-24T09:36:37Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.1/gian-proxy-dsh-0.1.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "612e18c99d2cfbf776665b27781bcfb2fae90fb7f5c3e1e4d7f3a8dc68a0c1b8",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.1/gian-proxy-dsh-0.1.1-darwin-arm64.tar.gz",
+            "sha256": "1a2d03476135d6d94e6d884ad9ea247a3c4b1126e8b777417cf143a4bf62f2e5",
+            "size": 12425
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.0-rc.7"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.0",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "firstPublishedAt": "2026-08-23T04:04:31Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-dsh-v0.1.0",
+          "publishedAt": "2026-08-23T04:04:31Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.0/gian-proxy-dsh-0.1.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "7b79bd3855c3f4bdd674d0a0f72a22e7da77405184439d6c9caee014e8ce9fe1",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-dsh-v0.1.0/gian-proxy-dsh-0.1.0-darwin-arm64.tar.gz",
+            "sha256": "3393e0cb6b642d0d3c51b246c05733af409e0a90ede38b37b577220e8be2ed73",
+            "size": 12332
+          },
+          "runtimeDeclaration": {
+            "id": "dsh",
+            "versions": [
+              "0.1.0-rc.7"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.0",
+              "basis": "public-tag-source"
+            }
+          ],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "保留的公开记录中的首次独立 Proxy 发行。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/tag/proxy-dsh-v0.1.0"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    }
+  ],
+  "withdrawnVersions": [
+    {
+      "version": "0.4.0",
+      "withdrawnOn": "2026-09-20",
+      "reason": "统一升版已撤回，不是可安装版本，也不得重打该标签冒充新发行。",
+      "evidence": "https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md"
+    }
+  ]
+}

@@ -1,0 +1,505 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "kimi",
+  "currentVersion": "0.3.2",
+  "entries": [
+    {
+      "version": "0.3.2",
+      "firstPublishedAt": "2026-09-20T09:48:27Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-kimi-v0.3.2",
+          "publishedAt": "2026-09-20T09:48:27Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.3.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.3.2/gian-proxy-kimi-0.3.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "e1a4ecf6d131661717101bc8a0ab48e6b4fb89f9007a357cad02fdabdcc8ebf9",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.3.2/gian-proxy-kimi-0.3.2-darwin-arm64.tar.gz",
+            "sha256": "3bd41c66f0e8f26f5520bbf6da1c2fc7430262818df5b245a9dc2181cc9c5923",
+            "size": 181614
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.41.0",
+              "2.0.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "为 Session 级 ACP 请求增加有界等待，并处理失效的原生 attach 绑定。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.3.2/packages/proxies/kimi-proxy/src/runtime/kimi-acp-client.ts"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "不再以旧 session-store 版本下限直接阻断会话；恢复失败必须保持可解释状态，不声称所有旧历史都兼容。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.3.2/packages/proxies/kimi-proxy/src/runtime/session-store.ts"
+          ]
+        },
+        {
+          "category": "fixed",
+          "text": "不把遗留 role 字段带入新的 Turn 配置选项。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.3.2/packages/proxies/kimi-proxy/src/protocol/v2-adapter.ts"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "Manifest 声明 0.41.0、2.0.0；Catalog 1.7.0 实际选择 2.0.0。兼容声明不等于当前安装版本。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/catalog-v1.7.0"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "2026-09-20 从 Gian-Proxies 分发；这是来源/制品记录，不是另一个 Proxy 版本。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.3.2"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.1",
+      "firstPublishedAt": "2026-09-17T00:56:47Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.3.1",
+          "publishedAt": "2026-09-17T00:56:47Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.3.1/gian-proxy-kimi-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "12d884c14c4ab4e35c5aa25c0cedbafd1e33824b2ca1e3742d45c67bce1ef89a",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.3.1/gian-proxy-kimi-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "931a3a405f72aa2ab3dd158ae5456e7b08e9a35a80968a4a36c6fd6c5b61a30d",
+            "size": 179635
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.41.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "修正 CLI 0.41 用量读取与上下文计量路径，避免只依赖旧 /status 文本。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/9683495bfcc8980a3b48886b88d30e24b5f0df9e"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.0",
+      "firstPublishedAt": "2026-09-16T03:41:22Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.3.0",
+          "publishedAt": "2026-09-16T03:41:22Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.3.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.3.0/gian-proxy-kimi-0.3.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "d36d1d8a6c6fffad7216bfd1c5f2ff14e6ca25c4de3cc6dc7382ba78499f8757",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.3.0/gian-proxy-kimi-0.3.0-darwin-arm64.tar.gz",
+            "sha256": "8ae96e39af0b0ef3b0fcc97a881d8efaa17fc15b6b38161b11b215a5ca09cb85",
+            "size": 179415
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.41.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "提供 Proxy-owned runtime.install.plan v1，使受管 Runtime 安装配方随 Proxy 交付。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/593ca856393a48aaabfbcfa49657f28c268e57b1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.2.10",
+      "firstPublishedAt": "2026-09-13T09:24:28Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.10",
+          "publishedAt": "2026-09-13T09:24:28Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.10",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.10/gian-proxy-kimi-0.2.10-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "570475991e35d57857772f3ce533e2e9a5e96f235584c0bd28661afde764004f",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.10/gian-proxy-kimi-0.2.10-darwin-arm64.tar.gz",
+            "sha256": "1f7d31dd67e1e3dd39809ecc526d6983c947fe2ee34f18ee4e8d5d32aa1dabfe",
+            "size": 177534
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.41.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "在终端退出后继续排空最后的输出，避免丢失尾部内容。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/2e76e40342846c977c23bae74246ee4bba78a37c"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.1 <3.0 调整为 >=2.2 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.7/gian-proxy-kimi-0.2.7-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.10/gian-proxy-kimi-0.2.10-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 3 调整为 Schema 4。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.7/gian-proxy-kimi-0.2.7-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.10/gian-proxy-kimi-0.2.10-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.2.7",
+      "firstPublishedAt": "2026-09-02T05:32:33Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.7",
+          "publishedAt": "2026-09-02T05:32:33Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.7",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.7/gian-proxy-kimi-0.2.7-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "7b18a74450c35455c5399df0b510620c1bf6f6543865e6016447f06aece2d86a",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.7/gian-proxy-kimi-0.2.7-darwin-arm64.tar.gz",
+            "sha256": "c5e8da8a8afbf67efb35f6b55a3e65c4c5ccbea7e2f1816cbdcb898a0bc55c1d",
+            "size": 156284
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.38.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.2.6",
+      "firstPublishedAt": "2026-09-01T07:22:30Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.6",
+          "publishedAt": "2026-09-01T07:22:30Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.6/gian-proxy-kimi-0.2.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "9be5a19d1ccf5c125ac6277d09d9e653fa660526165ab0865f64d3c981740bb4",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.6/gian-proxy-kimi-0.2.6-darwin-arm64.tar.gz",
+            "sha256": "b15e3177f3d3a5d9e42eedcc94bacf99aa61195df6c9ab636f388ed672ee3510",
+            "size": 155928
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.38.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.2.3",
+      "firstPublishedAt": "2026-08-28T08:43:44Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.3",
+          "publishedAt": "2026-08-28T08:43:44Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.3",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.3/gian-proxy-kimi-0.2.3-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "4856606695d3903113a618de31135772a3d52a92a58bd444889670e433470214",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.3/gian-proxy-kimi-0.2.3-darwin-arm64.tar.gz",
+            "sha256": "9ddf9a684056ea656480fd81058b17afb2bf2894be9a54c23c74f3c41a472bae",
+            "size": 148156
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.31.1"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.0 <3.0 调整为 >=2.1 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.2/gian-proxy-kimi-0.2.2-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.3/gian-proxy-kimi-0.2.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 2 调整为 Schema 3。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.2/gian-proxy-kimi-0.2.2-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.3/gian-proxy-kimi-0.2.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.2.2",
+      "firstPublishedAt": "2026-08-25T08:08:32Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.2",
+          "publishedAt": "2026-08-25T08:08:32Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.2/gian-proxy-kimi-0.2.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "81e91953e5d66b8e782b5d831d42650617f04cab457844e7729b4147a46604f9",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.2/gian-proxy-kimi-0.2.2-darwin-arm64.tar.gz",
+            "sha256": "6a89e764b9cf50a471e169ab5c307a9c60bda1cf1757c6820a51f0dd97dc59a8",
+            "size": 129350
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.31.1"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.2.1",
+      "firstPublishedAt": "2026-08-24T09:36:37Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.1",
+          "publishedAt": "2026-08-24T09:36:37Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.1/gian-proxy-kimi-0.2.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "a2b6c04e28896b626ed3404133f170bf6c231d236a8d130398dd5fddb7a8d300",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.1/gian-proxy-kimi-0.2.1-darwin-arm64.tar.gz",
+            "sha256": "f9e3dd418392c88e67ae581fa3af047c19410560680b5c07ae2706fe90108467",
+            "size": 118049
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.31.1"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.2.0",
+      "firstPublishedAt": "2026-08-23T04:12:30Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.2.0",
+          "publishedAt": "2026-08-23T04:12:30Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.2.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.0/gian-proxy-kimi-0.2.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "b1b9d7390c25136b39ff14dd84e462567c285c8a837c441a6cf95babace26ff6",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.0/gian-proxy-kimi-0.2.0-darwin-arm64.tar.gz",
+            "sha256": "903654db71163860a97a6709468aaf08df5eedfa4bce9c795f4998869d8f8394",
+            "size": 116851
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "0.31.1"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=1.0 <2.0 调整为 >=2.0 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.1.0/gian-proxy-kimi-0.1.0-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.2.0/gian-proxy-kimi-0.2.0-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "firstPublishedAt": "2026-08-12T09:07:10Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-kimi-v0.1.0",
+          "publishedAt": "2026-08-12T09:07:10Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.1.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.1.0/gian-proxy-kimi-0.1.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "bf24c441a078f93ff76024848ae1044aa121b0cab588c359ede53cad80011ddd",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-kimi-v0.1.0/gian-proxy-kimi-0.1.0-darwin-arm64.tar.gz",
+            "sha256": "e934059009a556a65e42af2daafe41e83b9d4dd4917f97a47cbb22537c698dd5",
+            "size": 117690
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [],
+            "basis": "unrecorded"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=1.0 <2.0",
+          "manifestSchema": 2,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "保留的公开记录中的首次独立 Proxy 发行。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/tag/proxy-kimi-v0.1.0"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "此版本公开 Manifest 未记录 CLI 版本，不能反向套用当前 CLI 版本。"
+      ]
+    }
+  ],
+  "withdrawnVersions": [
+    {
+      "version": "0.4.0",
+      "withdrawnOn": "2026-09-20",
+      "reason": "统一升版已撤回，不是可安装版本，也不得重打该标签冒充新发行。",
+      "evidence": "https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md"
+    }
+  ]
+}

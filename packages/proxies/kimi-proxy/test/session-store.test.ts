@@ -15,14 +15,6 @@ import {
   KimiSessionStoreGuard,
 } from '../src/runtime/session-store.js';
 
-function hasCode(code: string) {
-  return (error: unknown): boolean => {
-    assert.ok(error instanceof Error);
-    assert.equal((error as Error & { code?: string }).code, code);
-    return true;
-  };
-}
-
 async function populatedKimiHome(root: string): Promise<string> {
   const home = join(root, 'kimi-home');
   await mkdir(join(home, 'sessions', 'wd_fixture', 'session_fixture'), { recursive: true });
@@ -40,15 +32,17 @@ test('Kimi version ordering follows SemVer precedence', () => {
   assert.equal(compareKimiVersions('0.31.1+build.2', '0.31.1+build.1'), 0);
 });
 
-test('activation records a monotonic Kimi session-store floor and blocks downgrade', async (t) => {
+test('activation records a monotonic Kimi session-store floor and reports downgrade without blocking', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-kimi-proxy-floor-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const guard = new KimiSessionStoreGuard(join(root, 'kimi-home'));
 
-  await guard.assertCompatible('0.31.1');
+  assert.deepEqual(await guard.evaluateCompatibility('0.31.1'), []);
   await guard.recordActivation('0.31.1');
-  await assert.rejects(guard.assertCompatible('0.30.0'), hasCode('DATA_VERSION_INCOMPATIBLE'));
-  await guard.assertCompatible('0.32.0');
+  const downgrade = await guard.evaluateCompatibility('0.30.0');
+  assert.equal(downgrade.length, 1);
+  assert.equal(downgrade[0]?.kind, 'KIMI_STORE_DOWNGRADE');
+  assert.deepEqual(await guard.evaluateCompatibility('0.32.0'), []);
   await Promise.all([
     guard.recordActivation('0.31.1'),
     guard.recordActivation('0.32.0'),
@@ -59,28 +53,34 @@ test('activation records a monotonic Kimi session-store floor and blocks downgra
   );
 });
 
-test('existing Kimi sessions require a known owner version before first activation', async (t) => {
+test('existing Kimi sessions report a missing owner version without blocking', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-kimi-proxy-bootstrap-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = await populatedKimiHome(root);
   const guard = new KimiSessionStoreGuard(home);
-  await assert.rejects(guard.assertCompatible('0.31.1'), hasCode('DATA_VERSION_INCOMPATIBLE'));
-  await guard.assertCompatible('0.31.1', '0.31.1');
-  await assert.rejects(guard.assertCompatible('0.30.0', '0.31.1'), hasCode('DATA_VERSION_INCOMPATIBLE'));
+  const ownerMissing = await guard.evaluateCompatibility('0.31.1');
+  assert.equal(ownerMissing.length, 1);
+  assert.equal(ownerMissing[0]?.kind, 'KIMI_STORE_OWNER_MISSING');
+  assert.deepEqual(await guard.evaluateCompatibility('0.31.1', '0.31.1'), []);
+  const downgrade = await guard.evaluateCompatibility('0.30.0', '0.31.1');
+  assert.equal(downgrade[0]?.kind, 'KIMI_STORE_DOWNGRADE');
 });
 
-test('unknown Kimi compatibility schemas and versions fail closed', async (t) => {
+test('unknown Kimi compatibility schemas and versions are reported without blocking', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-kimi-proxy-schema-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'kimi-home');
   await mkdir(join(home, '.gian-session-store-compat', 'v2'), { recursive: true });
   const guard = new KimiSessionStoreGuard(home);
-  await assert.rejects(guard.assertCompatible('0.31.1'), hasCode('DATA_VERSION_INCOMPATIBLE'));
+  const unknownSchema = await guard.evaluateCompatibility('0.31.1');
+  assert.equal(unknownSchema.length, 1);
+  assert.equal(unknownSchema[0]?.kind, 'KIMI_STORE_UNKNOWN_SCHEMA');
 
   await rm(join(home, '.gian-session-store-compat'), { recursive: true, force: true });
   await mkdir(join(home, '.gian-session-store-compat', 'v1'), { recursive: true });
   await writeFile(join(home, '.gian-session-store-compat', 'v1', 'future-format'), '');
-  await assert.rejects(guard.assertCompatible('0.31.1'), hasCode('DATA_VERSION_INCOMPATIBLE'));
+  const unknownVersion = await guard.evaluateCompatibility('0.31.1');
+  assert.equal(unknownVersion[0]?.kind, 'KIMI_STORE_UNKNOWN_SCHEMA');
   assert.equal(new KimiDataVersionError('KIMI_STORE_INCOMPATIBLE', 'x').name, 'KimiDataVersionError');
 });
 
@@ -129,12 +129,12 @@ test('existing store probe-ready and activation use the same official owner', as
   process.env.KIMI_CODE_HOME = home;
 
   const probed = await probeKimiRuntime(official);
-  assert.equal(probed.readinessIssue, undefined);
+  assert.equal(probed.version, '0.38.0');
   await recordSelectedKimiActivation(official);
   assert.deepEqual(await readdir(join(home, '.gian-session-store-compat', 'v1')), ['0.38.0']);
 });
 
-test('alternate newer and older official owners follow the shared store rule', async (t) => {
+test('alternate newer and older official owners: downgrade is advisory, the floor stays monotonic', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-kimi-alt-owner-'));
   const previousHome = process.env.HOME;
   const previousKimiHome = process.env.KIMI_CODE_HOME;
@@ -161,20 +161,26 @@ test('alternate newer and older official owners follow the shared store rule', a
 
   resetKimiActivationMemoForTests();
   const newerProbe = await probeKimiRuntime(newer);
-  assert.equal(newerProbe.readinessIssue, undefined);
+  assert.equal(newerProbe.version, '0.39.0');
   await recordSelectedKimiActivation(newer);
   assert.deepEqual(await readdir(join(home, '.gian-session-store-compat', 'v1')), ['0.39.0']);
 
+  // An older binary is never blocked anymore (ADR-0080): activation proceeds
+  // and records its marker; the floor stays at the highest observed version.
   resetKimiActivationMemoForTests();
   const olderProbe = await probeKimiRuntime(older);
-  assert.equal(olderProbe.readinessIssue?.code, 'kimi_session_store_downgrade_blocked');
-  await assert.rejects(
-    () => recordSelectedKimiActivation(older),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_DOWNGRADE',
+  assert.equal(olderProbe.version, '0.37.0');
+  await recordSelectedKimiActivation(older);
+  assert.deepEqual(
+    (await readdir(join(home, '.gian-session-store-compat', 'v1'))).sort(),
+    ['0.37.0', '0.39.0'],
   );
+  const guard = new KimiSessionStoreGuard(home);
+  const conditions = await guard.evaluateCompatibility('0.36.0');
+  assert.equal(conditions[0]?.kind, 'KIMI_STORE_DOWNGRADE');
 });
 
-test('corrupt metadata and write failure stay fail-closed and memoize rejection', async (t) => {
+test('corrupt metadata and floor write failure are advisory and never block activation', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-kimi-fail-closed-'));
   const writeHome = join(root, 'write', 'kimi-home');
   const previousHome = process.env.HOME;
@@ -201,14 +207,8 @@ test('corrupt metadata and write failure stay fail-closed and memoize rejection'
   process.env.KIMI_CODE_HOME = corruptHome;
   resetKimiActivationMemoForTests();
   const corruptProbe = await probeKimiRuntime(corruptBin);
-  assert.equal(corruptProbe.readinessIssue?.code, 'kimi_session_store_corrupt');
-  await assert.rejects(
-    () => recordSelectedKimiActivation(corruptBin),
-    (error: unknown) => (
-      error instanceof KimiDataVersionError
-      && (error.kind === 'KIMI_STORE_UNKNOWN_SCHEMA' || error.kind === 'KIMI_STORE_CORRUPT')
-    ),
-  );
+  assert.equal(corruptProbe.version, '0.38.0');
+  await recordSelectedKimiActivation(corruptBin);
 
   await populatedKimiHome(join(root, 'write'));
   await mkdir(join(writeHome, 'bin'), { recursive: true });
@@ -222,15 +222,12 @@ echo kimi 0.38.0
   process.env.KIMI_CODE_HOME = writeHome;
   resetKimiActivationMemoForTests();
   await chmod(writeHome, 0o555);
-  await assert.rejects(
-    () => recordSelectedKimiActivation(writeBin),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_ACTIVATION_WRITE_FAILED',
-  );
+  // The floor cannot be recorded in a read-only home, but activation still
+  // proceeds — and the successful activation is memoized, so the binary is
+  // not re-probed on the second call.
+  await recordSelectedKimiActivation(writeBin);
   const firstCount = Number((await readFile(countFile, 'utf8').catch(() => '0')).trim() || '0');
-  await assert.rejects(
-    () => recordSelectedKimiActivation(writeBin),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_ACTIVATION_WRITE_FAILED',
-  );
+  await recordSelectedKimiActivation(writeBin);
   const secondCount = Number((await readFile(countFile, 'utf8')).trim());
   assert.equal(secondCount, firstCount);
 });

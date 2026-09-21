@@ -20,6 +20,11 @@ export function requiresFullSuite(paths) {
   return paths.some(path => /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*|test\/|\.github\/|packages\/(shared|proxy-protocol|proxy-catalog-contract)\/|packages\/host\/migrations\/)/.test(path)
     || /^scripts\/(run-tests|test-catalog|run-affected-tests|test-selection|source-gate|run-verification)/.test(path));
 }
+export function sourcePolicyChecks(extraChecks = []) {
+  return [...new Set(['quality:test-catalog', 'quality:test-selection',
+    'quality:versions', 'quality:operations:strict', ...extraChecks])]
+    .filter(id => id !== 'typecheck' && id !== 'quality:traceability');
+}
 export function main(args = process.argv.slice(2)) {
   const [lane, base, mode] = args;
   if (!['policy', ...scopes].includes(lane)) throw new Error('Expected policy/unit/integration/system');
@@ -30,12 +35,11 @@ export function main(args = process.argv.slice(2)) {
   const entries = full ? loadValidatedCatalog().entries.filter(entry => scopes.includes(entry.scope)) : plan.runnableTests;
   assertHeadlessTests(entries);
   function run(command, argv) {
-    const result = spawnSync(command, argv, { cwd: root, stdio: 'inherit', env: { ...process.env, TRACEABILITY_BASE: base } });
+    const result = spawnSync(command, argv, { cwd: root, stdio: 'inherit', env: process.env });
     if (result.error || result.status !== 0) throw result.error ?? new Error(`${command} failed: ${result.status}`);
   }
   if (lane === 'policy') {
-    const checks = new Set(['quality:test-catalog', 'quality:test-selection', 'quality:versions', 'quality:operations:strict', 'quality:traceability', ...plan.checks.map(check => check.id)]);
-    checks.delete('typecheck');
+    const checks = sourcePolicyChecks(plan.checks.map(check => check.id));
     for (const check of checks) run('pnpm', [check]);
   } else {
     const selected = entries.filter(entry => entry.scope === lane);

@@ -95,6 +95,11 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
     return String(response.ticket);
   }
 
+  async renameHost(name: string): Promise<void> {
+    if (!this.accessToken) throw new RemoteProtocolError('AUTH_REQUIRED', 'Host connector is not logged in');
+    await this.request('/api/v1/host/profile', { protocol: AUTH_PROTOCOL, name }, this.accessToken);
+  }
+
   async createPairing(): Promise<{
     grant_id: string;
     code: string;

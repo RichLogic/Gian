@@ -15,7 +15,7 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
     } catch (error) {
       // Never echo tokens, credential-bearing URLs, or remote response bodies.
       const safe = ['invalid_url', 'already_enrolled', 'not_enrolled', 'identity_changed',
-        'pairing_busy', 'connection_cancelled', 'pairing_not_found'];
+        'pairing_busy', 'connection_cancelled', 'pairing_not_found', 'invalid_host_name'];
       const message = error instanceof Error && safe.includes(error.message)
         ? error.message : 'remote_action_failed';
       return context.json({ error: message }, 400);
@@ -39,6 +39,11 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
   app.post('/api/remote/disconnect', mutate(() => remote.disconnect()));
   app.post('/api/remote/reconnect', mutate(() => remote.reconnect()));
   app.post('/api/remote/disable', mutate(() => remote.disableRemote()));
+  app.post('/api/remote/host-name', mutate(async context => {
+    const input = await body(context);
+    if (typeof input.host_name !== 'string') throw new Error('invalid_host_name');
+    await remote.setHostName(input.host_name);
+  }));
   app.post('/api/remote/public-url', mutate(async context => {
     const input = await body(context);
     if (typeof input.public_url !== 'string') throw new Error('invalid_url');

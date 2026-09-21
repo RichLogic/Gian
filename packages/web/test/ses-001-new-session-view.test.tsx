@@ -889,6 +889,8 @@ describe('NewSessionView', () => {
       clipboardData: {
         items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
         getData: () => '',
+        types: ['text/plain'],
+        files: [],
       },
     });
     expect(screen.queryByTestId('new-session-screenshots')).toBeNull();
@@ -900,7 +902,7 @@ describe('NewSessionView', () => {
     await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
     const pasted = Array.from({ length: 10 }, (_, index) => `context ${index}`).join('\n');
     fireEvent.paste(screen.getByTestId('ns-message-input'), {
-      clipboardData: { items: [], getData: () => pasted },
+      clipboardData: { items: [], getData: () => pasted, types: ['text/plain'], files: [] },
     });
     expect(document.querySelector('.composer-inline-reference[data-reference-type="context"]'))
       .not.toBeNull();

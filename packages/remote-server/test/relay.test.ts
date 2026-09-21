@@ -552,6 +552,26 @@ function openRelaySocket(
   return { close: () => ws.close(), bound };
 }
 
+test('shutdown is idempotent and late Host socket close never touches the closed database', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'gian-remote-shutdown-'));
+  const handle = await createRemoteApp(createConfig({ dataDir, publicOrigin: 'https://remote.test', adminToken: 'test-only' }));
+  const listened = await listenRemoteApp(handle, 0);
+  const hostId = generateCanonicalId();
+  handle.services.db.prepare('INSERT INTO hosts(id, name, public_key_jwk, created_at) VALUES (?, ?, ?, ?)').run(hostId, 'test', '{}', Date.now());
+  handle.services.repos.createWsTicket({ role: 'host', hostId, ticket: 'shutdown-ticket' });
+  const host = openRelaySocket(listened.wsUrl, 'shutdown-ticket', () => undefined);
+  try {
+    await host.bound;
+    let lateExpire = 0;
+    handle.services.presence.expire = () => { lateExpire += 1; };
+    handle.shutdown();
+    assert.doesNotThrow(() => handle.shutdown());
+    host.close();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(lateExpire, 0);
+  } finally { host.close(); listened.close(); }
+});
+
 test('Host WS lifecycle broadcasts host.online and host.offline to devices', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'gian-remote-presence-'));
   const now = () => Date.UTC(2026, 8, 1);

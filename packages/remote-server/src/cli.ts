@@ -6,6 +6,7 @@ import { serve } from '@hono/node-server';
 
 import { createRemoteApp, type RemoteAppHandle } from './app.js';
 import { createConfig, type RemoteServerConfig } from './config.js';
+import { createEnrollmentFromEnv } from './enrollment-command.js';
 
 export interface RemoteServerListenOptions {
   host: string;
@@ -121,8 +122,21 @@ function parsePort(raw: string | undefined, fallback: number): number {
 }
 
 const invoked = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+export async function runCli(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (args.length === 0) { await main(env); return; }
+  if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) {
+    process.stdout.write('Usage: gian-remote-server [enrollment create [--label NAME]]\nRun enrollment create inside the running server container/service environment.\n');
+    return;
+  }
+  if (args[0] !== 'enrollment' || args[1] !== 'create'
+      || !(args.length === 2 || (args.length === 4 && args[2] === '--label'))) {
+    throw new Error('Usage: gian-remote-server enrollment create [--label NAME]');
+  }
+  const issued = await createEnrollmentFromEnv(env, args[3]);
+  process.stdout.write(`Server URL: ${issued.server_url}\nEnrollment token: ${issued.enrollment_token}\nExpires at: ${issued.expires_at}\nUse once in Gian > Settings > Remote before expiry.\n`);
+}
 if (invoked) {
-  void main().catch((error) => {
+  void runCli(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
   });

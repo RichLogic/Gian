@@ -162,9 +162,12 @@ export function buildAffectedPlan(changedFiles, stage = 'quick', inputs = loadSe
     const direct = entriesByPath.get(path);
     if (direct) {
       if (direct.scope === 'e2e') {
-        specials.set('test:e2e', {
-          id: 'test:e2e',
-          path: direct.path,
+        const dedicated = catalog.specialEntrypoints?.find(entry => entry.testPaths?.includes(path));
+        const id = dedicated?.id ?? 'test:e2e';
+        specials.set(id, {
+          ...dedicated,
+          id,
+          path: dedicated?.path ?? direct.path,
           reason: `Changed E2E spec: ${path}`,
         });
       } else {
@@ -180,7 +183,7 @@ export function buildAffectedPlan(changedFiles, stage = 'quick', inputs = loadSe
       for (const entry of entries) {
         if (TEST_SCOPES.has(entry.scope)) addReason(reasonsByPath, entry.path, `Unknown changed path fallback: ${path}`);
       }
-      for (const check of ['typecheck', 'quality:test-catalog', 'quality:traceability', 'quality:docs']) {
+      for (const check of ['typecheck', 'quality:test-catalog', 'quality:docs']) {
         addReason(checks, check, `Unknown changed path fallback: ${path}`);
       }
       continue;

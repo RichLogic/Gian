@@ -173,6 +173,16 @@ jobs:
           test -f "packages/desktop/release/Gian-${VERSION}-arm64.zip.blockmap"
           test -f packages/desktop/release/latest-mac.yml
           codesign --verify --deep --strict --verbose=2 packages/desktop/release/mac-arm64/Gian.app
+          # The bundled Node must carry the library-validation exception (managed JS
+          # runtimes load upstream-adhoc-signed native addons); the App must not.
+          NODE_ENTITLEMENTS="$(codesign -d --entitlements - --xml packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/runtime/node)"
+          echo "${NODE_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.disable-library-validation'
+          echo "${NODE_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.allow-jit'
+          APP_ENTITLEMENTS="$(codesign -d --entitlements - --xml packages/desktop/release/mac-arm64/Gian.app/Contents/MacOS/Gian)"
+          if echo "${APP_ENTITLEMENTS}" | grep -q 'com.apple.security.cs.disable-library-validation'; then
+            echo "Main executable unexpectedly carries disable-library-validation"
+            exit 1
+          fi
           xcrun stapler validate packages/desktop/release/mac-arm64/Gian.app
           spctl --assess --type execute --verbose=2 packages/desktop/release/mac-arm64/Gian.app
 

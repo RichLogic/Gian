@@ -1,0 +1,58 @@
+name: Publish Certified Proxies
+on:
+  workflow_dispatch:
+    inputs:
+      certification_run_id:
+        description: Successful Qualify Proxy Artifacts run with authorized Proxy tags
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: proxy-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'RichLogic/Gian-Proxies' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Authenticate the qualification run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          RUN=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")
+          test "$(jq -r .conclusion <<< "$RUN")" = success
+          test "$(jq -r .path <<< "$RUN")" = .github/workflows/qualify.yml
+          test "$(jq -r .event <<< "$RUN")" = workflow_dispatch
+          test "$(jq -r .head_repository.full_name <<< "$RUN")" = "$GITHUB_REPOSITORY"
+          echo "sha=$(jq -r .head_sha <<< "$RUN")" >> "$GITHUB_OUTPUT"
+          echo "attempt=$(jq -r .run_attempt <<< "$RUN")" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Download the exact qualified bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.certification_run_id }}
+          ARTIFACT: proxy-artifacts-${{ steps.source.outputs.sha }}-${{ steps.source.outputs.attempt }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir certification
+      - name: Publish without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CERTIFIED_SHA: ${{ steps.source.outputs.sha }}
+          CERTIFICATION_RUN_ID: ${{ inputs.certification_run_id }}
+          CERTIFICATION_RUN_ATTEMPT: ${{ steps.source.outputs.attempt }}
+        run: pnpm run publish

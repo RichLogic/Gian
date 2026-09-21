@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, statSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+test('adoption only reads the existing container and preserves volume, rollback configuration and secret permissions', t => {
+  const temp = mkdtempSync(join(tmpdir(), 'remote-adopt-'));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const bin = join(temp, 'bin'); mkdirSync(bin);
+  const oldConfig = join(temp, 'old-compose.json'); writeFileSync(oldConfig, '{}');
+  const image = `sha256:${'a'.repeat(64)}`; const revision = 'b'.repeat(40);
+  const info = { Image: image, State: { Health: { Status: 'healthy' } }, Config: { User: 'node', WorkingDir: '/app', Cmd: ['node', '/app/server/dist/src/cli.js'], Env: [`GIAN_REMOTE_BUILD_ID=${revision}`, 'GIAN_REMOTE_PUBLIC_ORIGIN=https://remote.example.com', 'GIAN_REMOTE_ADMIN_TOKEN=fixture_secret'], Labels: { 'com.docker.compose.project': 'current', 'com.docker.compose.service': 'remote', 'com.docker.compose.project.config_files': oldConfig } }, Mounts: [{ Destination: '/data', Type: 'volume', Name: 'current_remote-data' }], HostConfig: { PortBindings: { '8787/tcp': [{ HostIp: '127.0.0.1', HostPort: '8787' }] } } };
+  const config = { services: { remote: { image: 'old-tag', build: '.', environment: { GIAN_REMOTE_ADMIN_TOKEN: 'fixture_secret' } } } };
+  writeFileSync(join(bin, 'docker'), `#!${process.execPath}\nconst fs=require('fs'),a=process.argv.slice(2);fs.appendFileSync(process.env.CALL_LOG,JSON.stringify(a)+'\\n');if(a[0]==='inspect')console.log(${JSON.stringify(JSON.stringify([info]))});else if(a[0]==='compose')console.log(${JSON.stringify(JSON.stringify(config))});else if(a[0]==='exec')console.log('${'c'.repeat(64)}');else process.exit(1);`, { mode: 0o755 });
+  const tooling = join(temp, 'tooling'); mkdirSync(tooling);
+  for (const name of ['compose.yaml', 'deploy.sh', 'ssh-entrypoint.sh']) writeFileSync(join(tooling, name), 'fixture');
+  const script = join(dirname(fileURLToPath(import.meta.url)), '../scripts/prepare-existing.py');
+  const target = join(temp, 'adopted'); const log = join(temp, 'calls');
+  const args = [script, '--container', 'current-remote-1', '--directory', target, '--tooling', tooling];
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALL_LOG: log };
+  const result = spawnSync('python3', args, { env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).runningContainerChanged, false);
+  assert.ok(!result.stdout.includes('fixture_secret'));
+  assert.equal(readlinkSync(join(target, 'current')), `releases/${revision}`);
+  assert.equal(statSync(join(target, 'runtime.env')).mode & 0o777, 0o600);
+  assert.match(readFileSync(join(target, 'runtime.env'), 'utf8'), /fixture_secret/);
+  const rollback = JSON.parse(readFileSync(join(target, 'current/compose.yaml')));
+  assert.equal(rollback.services.remote.image, image);
+  assert.equal(rollback.services.remote.build, undefined);
+  assert.ok(readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse).every(a => ['inspect', 'compose', 'exec'].includes(a[0])));
+  assert.notEqual(spawnSync('python3', args, { env, encoding: 'utf8' }).status, 0);
+});

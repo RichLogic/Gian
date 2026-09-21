@@ -31,7 +31,6 @@ import {
 
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { KimiProxyService, parseKimiConversationUsage } from '../src/core/service.js';
-import { KimiDataVersionError } from '../src/runtime/session-store.js';
 import { KimiProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
 import { proxyNotificationSchema, replayEventSchemaUnion, resultSchemas } from '@gian/proxy-protocol';
 import {
@@ -3401,7 +3400,7 @@ function countingKimiService(nativeCalls: { newSession: number; loadSession: num
   return new KimiProxyService({ runtime });
 }
 
-test('Kimi activation rejects corrupt metadata before any native Session exists', async (t) => {
+test('Kimi activation ignores corrupt Gian metadata and proceeds to the native Session', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'gian-kimi-corrupt-'));
   const previousHome = process.env.HOME;
   const previousKimi = process.env.KIMI_CODE_HOME;
@@ -3416,23 +3415,17 @@ test('Kimi activation rejects corrupt metadata before any native Session exists'
   await writeFile(join(home, '.kimi-code', '.gian-session-store-compat', 'v2'), '');
   const nativeCalls = { newSession: 0, loadSession: 0 };
   const service = countingKimiService(nativeCalls);
-  await assert.rejects(
-    () => service.createSession({ cwd: '/workspace/corrupt' }),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_UNKNOWN_SCHEMA',
-  );
-  await assert.rejects(
-    () => service.createSession({
-      cwd: '/workspace/corrupt-load',
-      nativeSessionId: 'native-existing',
-      resumeMode: 'load',
-    }),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_UNKNOWN_SCHEMA',
-  );
-  assert.deepEqual(nativeCalls, { newSession: 0, loadSession: 0 });
+  await service.createSession({ cwd: '/workspace/corrupt' });
+  await service.createSession({
+    cwd: '/workspace/corrupt-load',
+    nativeSessionId: 'native-existing',
+    resumeMode: 'load',
+  });
+  assert.deepEqual(nativeCalls, { newSession: 1, loadSession: 1 });
   await service.close();
 });
 
-test('Kimi activation rejects a write failure before any native Session exists', async (t) => {
+test('Kimi activation proceeds when the session-store floor cannot be recorded', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'gian-kimi-writefail-'));
   const previousHome = process.env.HOME;
   const previousKimi = process.env.KIMI_CODE_HOME;
@@ -3449,15 +3442,12 @@ test('Kimi activation rejects a write failure before any native Session exists',
   await chmod(versionRoot, 0o555);
   const nativeCalls = { newSession: 0, loadSession: 0 };
   const service = countingKimiService(nativeCalls);
-  await assert.rejects(
-    () => service.createSession({ cwd: '/workspace/write-fail' }),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_ACTIVATION_WRITE_FAILED',
-  );
-  assert.equal(nativeCalls.newSession, 0);
+  await service.createSession({ cwd: '/workspace/write-fail' });
+  assert.equal(nativeCalls.newSession, 1);
   await service.close();
 });
 
-test('Kimi activation rejects a downgrade before any native Session exists', async (t) => {
+test('Kimi activation no longer blocks a downgrade; the CLI decides (ADR-0080)', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'gian-kimi-downgrade-'));
   const previousHome = process.env.HOME;
   const previousKimi = process.env.KIMI_CODE_HOME;
@@ -3473,11 +3463,8 @@ test('Kimi activation rejects a downgrade before any native Session exists', asy
   await writeFile(join(versionRoot, '9.9.9'), '');
   const nativeCalls = { newSession: 0, loadSession: 0 };
   const service = countingKimiService(nativeCalls);
-  await assert.rejects(
-    () => service.createSession({ cwd: '/workspace/downgrade' }),
-    (error: unknown) => error instanceof KimiDataVersionError && error.kind === 'KIMI_STORE_DOWNGRADE',
-  );
-  assert.equal(nativeCalls.newSession, 0);
+  await service.createSession({ cwd: '/workspace/downgrade' });
+  assert.equal(nativeCalls.newSession, 1);
   await service.close();
 });
 

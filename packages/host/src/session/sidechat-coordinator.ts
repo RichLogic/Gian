@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { requestViolation, type ProxyProtocolError, type SideChatSnapshot } from '@gian/proxy-protocol';
 import type {
+  ApprovalDecision,
   ConfigOption,
   ConfigValue,
   InputItem,
@@ -9,6 +10,7 @@ import type {
   SidechatCloseResult,
 } from '@gian/shared';
 import type { ProxyManager } from '../proxy/manager.js';
+import { isProxyRequestTimeout } from '../proxy/protocol-v2-client.js';
 import type { ProtocolV2SessionClient } from '../proxy/protocol-v2-session-client.js';
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import {
@@ -191,6 +193,11 @@ export class SidechatCoordinator {
 
   has(sidechatId: string): boolean {
     return this.store.get(sidechatId) !== null;
+  }
+
+  /** Owning parent session of a live or persisted Side Chat, when known. */
+  parentSessionIdOf(sidechatId: string): string | null {
+    return this.store.get(sidechatId)?.parentSessionId ?? null;
   }
 
   listPublic(): SideChatPublicSnapshot[] {
@@ -421,12 +428,17 @@ export class SidechatCoordinator {
       : this.persistTurnConfigSnapshot(sidechatId, turnConfig);
     if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
     this.store.appendUserInput(sidechatId, turnId, storedInput, contextItems, composerDocument);
-    await child.startTurn({
-      sessionId: sidechatId,
-      turnId,
-      input,
-      config: dispatchableTurnConfig(record),
-    });
+    try {
+      await child.startTurn({
+        sessionId: sidechatId,
+        turnId,
+        input,
+        config: dispatchableTurnConfig(record),
+      });
+    } catch (error) {
+      this.quarantineOnTimeout(sidechatId, error);
+      throw error;
+    }
   }
 
   setTurnConfigValue(sidechatId: string, optionId: string, value: ConfigValue): SideChatPublicSnapshot {
@@ -446,11 +458,55 @@ export class SidechatCoordinator {
   }
 
   async interruptTurn(sidechatId: string): Promise<void> {
-    await this.requireChildClient(sidechatId).interruptTurn();
+    try {
+      await this.requireChildClient(sidechatId).interruptTurn();
+    } catch (error) {
+      this.quarantineOnTimeout(sidechatId, error);
+      throw error;
+    }
   }
 
   async steerTurn(sidechatId: string, input: InputItem[]): Promise<void> {
-    await this.requireChildClient(sidechatId).steerTurn({ sessionId: sidechatId, input });
+    try {
+      await this.requireChildClient(sidechatId).steerTurn({ sessionId: sidechatId, input });
+    } catch (error) {
+      this.quarantineOnTimeout(sidechatId, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Answer a pending approval/question raised inside a Side Chat turn. Stays
+   * fully transient (SIDECHAT-001): the decision is derived from the stored
+   * `interaction.requested` event and forwarded to the bound child client —
+   * nothing touches the sessions/approvals/proxy_interactions tables.
+   */
+  async respondInteraction(
+    sidechatId: string,
+    interactionId: string,
+    decision: ApprovalDecision,
+    answers?: Record<string, string | boolean | string[]>,
+    nativeOptionId?: string,
+  ): Promise<void> {
+    const child = this.requireChildClient(sidechatId);
+    const record = this.store.get(sidechatId);
+    if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
+    const requested = findInteractionRequested(record.events, interactionId);
+    const actionId = resolveInteractionActionId(requested?.actionIds ?? null, decision, nativeOptionId);
+    const isDeny = decision === 'decline' || decision === 'keep_planning';
+    try {
+      await child.respondInteraction({
+        sessionId: sidechatId,
+        interactionId,
+        responseId: randomUUID(),
+        actionId,
+        values: isDeny ? {} : answers ?? {},
+        ...(requested?.turnId ? { turnId: requested.turnId } : {}),
+      });
+    } catch (error) {
+      this.quarantineOnTimeout(sidechatId, error);
+      throw error;
+    }
   }
 
   handleNotification(sidechatId: string, notification: unknown): void {
@@ -485,6 +541,15 @@ export class SidechatCoordinator {
     if (record) {
       this.broadcaster.broadcast({ type: 'sidechat:updated', sidechat: toPublicSidechat(record) });
     }
+  }
+
+  /** A timed-out sidechat-scoped RPC leaves the Proxy's pending interaction
+   *  (or turn) in an unknown state; quarantine just this Side Chat so the
+   *  failure is visible and isolated instead of a permanently pending
+   *  dispatch that retries pile onto. */
+  private quarantineOnTimeout(sidechatId: string, error: unknown): void {
+    if (!isProxyRequestTimeout(error)) return;
+    this.quarantine(sidechatId, error instanceof Error ? error : new Error(String(error)));
   }
 
   private bindRoute(sidechatId: string, client: ProtocolV2SessionClient): void {
@@ -622,6 +687,74 @@ function domainCode(error: unknown): string | undefined {
   }
   const protocol = error as ProxyProtocolError;
   return protocol?.code;
+}
+
+/** Latest `interaction.requested` event for one interactionId in the
+ *  transient event buffer, with the turn it belongs to and the action ids
+ *  the Proxy advertised for it. */
+function findInteractionRequested(
+  events: unknown[],
+  interactionId: string,
+): { turnId: string | null; actionIds: string[] } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || typeof event !== 'object') continue;
+    const notification = event as {
+      method?: unknown;
+      params?: { turnId?: unknown; data?: { interactionId?: unknown; actions?: unknown } };
+    };
+    if (notification.method !== 'interaction.requested') continue;
+    const data = notification.params?.data;
+    if (data?.interactionId !== interactionId) continue;
+    const actionIds = (Array.isArray(data.actions) ? data.actions : [])
+      .map((action) => (
+        action && typeof action === 'object' && typeof (action as { id?: unknown }).id === 'string'
+          ? (action as { id: string }).id
+          : null
+      ))
+      .filter((id): id is string => id !== null);
+    const turnId = notification.params?.turnId;
+    return { turnId: typeof turnId === 'string' ? turnId : null, actionIds };
+  }
+  return null;
+}
+
+const DENY_ACTION_KINDS = ['reject_once', 'reject_always', 'decline'] as const;
+const ALLOW_SESSION_ACTION_KINDS = ['allow_always', 'allow_session'] as const;
+const ALLOW_ACTION_KINDS = ['allow_once', 'allow_always', 'allow_session'] as const;
+
+/** Map a Gian approval decision to the wire actionId. A native option picked
+ *  in the UI is already a wire actionId; it is validated against the
+ *  advertised actions whenever the requested event is still in the transient
+ *  buffer (mirrors SessionManager's INVALID_APPROVAL_OPTION guard). Without
+ *  a native option, prefer an advertised action whose id is a known ACP
+ *  permission kind before falling back to the legacy literals — kimi relays
+ *  ACP optionIds and rejects a hardcoded 'decline' for exit-plan cards. */
+function resolveInteractionActionId(
+  actionIds: readonly string[] | null,
+  decision: ApprovalDecision,
+  nativeOptionId: string | undefined,
+): string {
+  if (nativeOptionId !== undefined) {
+    if (actionIds !== null && !actionIds.includes(nativeOptionId)) {
+      throw Object.assign(
+        new Error('Select one of the approval options supplied by the Agent.'),
+        { code: 'INVALID_APPROVAL_OPTION' },
+      );
+    }
+    return nativeOptionId;
+  }
+  const isDeny = decision === 'decline' || decision === 'keep_planning';
+  const preferred = isDeny
+    ? DENY_ACTION_KINDS
+    : decision === 'allow_session'
+      ? ALLOW_SESSION_ACTION_KINDS
+      : ALLOW_ACTION_KINDS;
+  const advertised = actionIds ?? [];
+  for (const kind of preferred) {
+    if (advertised.includes(kind)) return kind;
+  }
+  return isDeny ? 'decline' : decision === 'allow_session' ? 'allow_session' : 'allow_once';
 }
 
 function latestTurnId(events: unknown[]): string | null {

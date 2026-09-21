@@ -1,20 +1,20 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { MarkdownText, FileRefRehypeContext, FileLinkOpenContext, RelativeLinkOpenContext } from '../src/transcript/items.js';
+import { MarkdownText, FileRefRehypeContext, LinkBehaviorContext } from '../src/transcript/items.js';
+import type { LinkBehavior } from '../src/transcript/items.js';
 import { buildFileRefIndex, makeFileLinkifyRehype } from '../src/transcript/linkify-files.js';
 
 const index = buildFileRefIndex(['packages/web/src/App.tsx', 'README.md'], '/repo');
 const rehype = makeFileLinkifyRehype(index, rel => `/repo/${rel}`);
 
 function renderMd(text: string, onOpen = vi.fn(), onOpenRel: ((href: string) => void) | null = null) {
+  const behavior: LinkBehavior = { openFile: onOpen, openRelative: onOpenRel };
   const r = render(
-    <FileLinkOpenContext.Provider value={onOpen}>
-      <RelativeLinkOpenContext.Provider value={onOpenRel}>
-        <FileRefRehypeContext.Provider value={rehype}>
-          <MarkdownText>{text}</MarkdownText>
-        </FileRefRehypeContext.Provider>
-      </RelativeLinkOpenContext.Provider>
-    </FileLinkOpenContext.Provider>,
+    <LinkBehaviorContext.Provider value={behavior}>
+      <FileRefRehypeContext.Provider value={rehype}>
+        <MarkdownText>{text}</MarkdownText>
+      </FileRefRehypeContext.Provider>
+    </LinkBehaviorContext.Provider>,
   );
   return Object.assign(onOpen, { container: r.container });
 }
@@ -83,13 +83,12 @@ describe('MarkdownText file linkification', () => {
     expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', 12);
   });
 
-  it('swallows clicks on relative markdown links that do NOT resolve when no fallback handler is mounted', () => {
+  it('renders unresolved relative markdown links as inert spans (never a junk SPA navigation) when no fallback handler is mounted', () => {
     const onOpen = renderMd('[missing.md](./missing.md)');
-    const link = screen.getByText('missing.md');
-    expect(link.className).not.toContain('file-link');
-    // dispatchEvent returns false when the handler called preventDefault —
-    // i.e. the browser/Electron shell never sees a navigation to open.
-    expect(fireEvent.click(link)).toBe(false);
+    const span = screen.getByText('missing.md');
+    expect(span.tagName).toBe('SPAN');
+    expect(span.className).toContain('link-inert');
+    expect(span.getAttribute('title')).toContain('./missing.md');
     expect(onOpen).not.toHaveBeenCalled();
   });
 
@@ -97,17 +96,22 @@ describe('MarkdownText file linkification', () => {
     const onOpenRel = vi.fn();
     const onOpen = renderMd('[missing.md](./missing.md)', vi.fn(), onOpenRel);
     const link = screen.getByText('missing.md');
+    expect(link.tagName).toBe('A');
     expect(fireEvent.click(link)).toBe(false); // still no SPA navigation
     expect(onOpenRel).toHaveBeenCalledWith('./missing.md');
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it('leaves scheme URLs (https:, vscode:) as normal anchors', () => {
-    const onOpen = renderMd('[site](https://example.com) and [code](vscode://file/x.ts)');
+  it('leaves scheme URLs (https:, mailto:) as normal anchors; sanitized schemes degrade to text', () => {
+    const onOpen = renderMd('[site](https://example.com) and [mail](mailto:dev@example.com) and [code](vscode://file/x.ts)');
     const links = onOpen.container.querySelectorAll('a');
     expect(links).toHaveLength(2);
     expect(links[0]!.className).not.toContain('file-link');
     expect(links[1]!.className).not.toContain('file-link');
+    // react-markdown's default urlTransform blanks vscode: hrefs → the
+    // unified classifier treats them as unsafe and renders plain text.
+    expect(onOpen.container.querySelector('[data-link-kind="editor"]')).toBeNull();
+    expect(onOpen.container.textContent).toContain('code');
   });
 });
 

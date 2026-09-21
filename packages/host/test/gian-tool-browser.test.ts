@@ -24,6 +24,9 @@ test('local Browser capture approvals can be resolved only by Gian Web UI', asyn
   const resolved: unknown[] = [];
   const manager = {
     getSession() { return {}; },
+    sidechats: {
+      has() { return false; },
+    },
     approvals: {
       getPending() {
         return { sessionId: 'session-1', payload: { localOnly: true } };

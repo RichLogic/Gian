@@ -584,3 +584,42 @@ test('11. one protocol-faulted session does not prevent a fresh Proxy session', 
   expect(workspaceId).not.toBe('');
   await screenshot(page, '11-fresh-session-after-fault');
 });
+
+test('acceptance: Agent defaults survive reload and reach the next session request', async ({ page }) => {
+  await waitForAppReady(page);
+  const response = await page.request.get(`/api/agents/${encodeURIComponent(agentId)}?refresh=1`);
+  expect(response.ok()).toBe(true);
+  const agent = await response.json() as { name?: string; ready?: boolean };
+  expect(agent.ready).toBe(true);
+  agentName = agent.name ?? agentId;
+  await page.getByTestId('sb-nav-agents').click();
+  await page.getByTestId(`agent-row-${agentId}`).click();
+  const option = page.getByTestId('agent-default-option-workspace_mode');
+  await expect(option).toBeEnabled();
+  await option.selectOption('strict');
+  await expect.poll(async () => {
+    const persisted = await page.request.get(`/api/agents/${encodeURIComponent(agentId)}`);
+    const value = await persisted.json() as { defaults?: { options?: Record<string, unknown> } };
+    return value.defaults?.options?.workspace_mode;
+  }).toBe('strict');
+  await page.reload();
+  await expect(page.getByTestId('app-shell')).toHaveAttribute('data-connection', 'ready');
+  await page.getByTestId('sb-nav-agents').click();
+  // The selected detail may be restored by the page, otherwise open it.
+  if (!(await option.isVisible())) await page.getByTestId(`agent-row-${agentId}`).click();
+  await expect(option).toHaveValue('strict');
+  const knownSessions = new Set((await capturedRequests())
+    .filter(item => item.method === 'session.create').map(item => String(item.params?.sessionId)));
+  await switchToSessions(page);
+  await openNewSession(page);
+  await selectCertificationAgent(page);
+  await page.getByTestId('ns-title-input').fill('agent-defaults-acceptance');
+  await page.getByTestId('ns-message-input').fill('echo');
+  await page.getByTestId('ns-send').click();
+  await expect(page.getByText('Mock Proxy received: echo')).toBeVisible();
+  await expect.poll(async () => {
+    const created = (await capturedRequests()).find(item => item.method === 'session.create'
+      && !knownSessions.has(String(item.params?.sessionId)));
+    return (created?.params?.config as Record<string, unknown> | undefined)?.workspace_mode;
+  }).toBe('strict');
+});

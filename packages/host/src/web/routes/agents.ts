@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import type {
   AgentProxyDefaults,
+  ConfigOption,
   ConfigValue,
   Executor,
   LegacyExecutorId,
@@ -10,7 +11,7 @@ import type {
 } from '@gian/shared';
 import { executorIdForPluginId, isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
-import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError } from '../../agents/manager.js';
+import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError, mergeAgentProxyDefaults } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
 import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
 import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
@@ -235,20 +236,90 @@ function validateProxyDefaults(
       }
     }
   }
+  // Role-less option defaults. An offline/empty catalog accepts shape only;
+  // `null` deletes a key and is always allowed.
+  const catalogKnown = catalog.configOptions.length > 0;
+  for (const [id, value] of Object.entries(patch.options ?? {})) {
+    if (value === null || !catalogKnown) continue;
+    const option = catalog.configOptions.find(item => item.id === id);
+    if (!option) throw new Error(`option is not advertised by the Proxy: ${id}`);
+    if (option.role) {
+      throw new Error(`option ${id} is role-bearing; use the matching defaults field`);
+    }
+    if (option.choices && option.choices.length > 0) {
+      if (!option.choices.some(choice => Object.is(choice.value, value))) {
+        throw new Error(`option ${id} value is not advertised by the Proxy`);
+      }
+    } else if (option.control === 'boolean' && typeof value !== 'boolean') {
+      throw new Error(`option ${id} must be a boolean`);
+    } else if (option.control === 'number' && typeof value !== 'number') {
+      throw new Error(`option ${id} must be a number`);
+    } else if ((option.control === 'text' || option.control === 'select') && typeof value !== 'string') {
+      throw new Error(`option ${id} must be a string`);
+    }
+  }
 }
 
-function modelConfig(
+/** Map effective Agent defaults onto the catalog's own ids and bindings so
+ *  `catalog.resolve` can compute dependent choice lists (provider → models). */
+function configsFromDefaults(
   catalog: ProxyCatalog,
-  model: string,
+  defaults: AgentProxyDefaults,
 ): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
   const sessionConfig: Record<string, ConfigValue> = {};
   const turnConfig: Record<string, ConfigValue> = {};
-  const option = catalog.configOptions.find(item => item.role === 'model');
-  if (option && model) {
-    (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = model;
+  const assign = (option: ConfigOption, value: ConfigValue): void => {
+    (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = value;
+  };
+  for (const option of catalog.configOptions) {
+    if (option.role === 'model' && defaults.model) assign(option, defaults.model);
+    else if (option.role === 'effort' && defaults.thinking) assign(option, defaults.thinking);
+    else if ((option.role === 'approval_mode' || option.role === 'execution_mode') && defaults.mode) {
+      assign(option, defaults.mode);
+    } else if (!option.role) {
+      const value = defaults.options?.[option.id];
+      if (value !== undefined) assign(option, value);
+    }
   }
   return { sessionConfig, turnConfig };
 }
+
+/** A resolved catalog invalidates stored values that no longer appear in its
+ *  (dependent) choice lists. Fold those invalidations into the same atomic
+ *  patch — e.g. a provider change clears the stored model — while values the
+ *  caller explicitly patched stay theirs to get wrong (and get a 400). */
+function adoptResolvedInvalidations(
+  patch: Partial<AgentProxyDefaults>,
+  next: AgentProxyDefaults,
+  catalog: ProxyCatalog,
+): void {
+  const clearTriplet = (field: 'model' | 'thinking' | 'mode', role: string): void => {
+    if (patch[field] !== undefined) return;
+    const value = next[field];
+    if (!value) return;
+    const option = catalog.configOptions.find(item => item.role === role);
+    if (option?.choices?.length && !option.choices.some(choice => Object.is(choice.value, value))) {
+      patch[field] = '';
+      next[field] = '';
+    }
+  };
+  clearTriplet('model', 'model');
+  clearTriplet('thinking', 'effort');
+  clearTriplet('mode', 'approval_mode');
+  clearTriplet('mode', 'execution_mode');
+  for (const [id, value] of Object.entries(next.options ?? {})) {
+    if (patch.options?.[id] !== undefined) continue;
+    const option = catalog.configOptions.find(item => item.id === id);
+    // Unknown ids stay on disk (apply-time tolerance); known options whose
+    // value fell out of the resolved choices get deleted.
+    if (option?.choices?.length && !option.choices.some(choice => Object.is(choice.value, value))) {
+      patch.options = { ...(patch.options ?? {}), [id]: null };
+      delete next.options[id];
+    }
+  }
+}
+
+const PROXY_DEFAULT_OPTION_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 
 function normalizeDefaultsPatch(
   body: Record<string, unknown>,
@@ -260,6 +331,27 @@ function normalizeDefaultsPatch(
       return { error: `${key} must be a string` };
     }
     if (typeof value === 'string') patch[key] = value;
+  }
+  if (body.options !== undefined) {
+    if (!body.options || typeof body.options !== 'object' || Array.isArray(body.options)) {
+      return { error: 'options must be an object' };
+    }
+    const options: Record<string, ConfigValue> = {};
+    for (const [id, value] of Object.entries(body.options as Record<string, unknown>)) {
+      if (!PROXY_DEFAULT_OPTION_ID.test(id)) {
+        return { error: `options key is invalid: ${id}` };
+      }
+      if (
+        value !== null
+        && typeof value !== 'string'
+        && typeof value !== 'number'
+        && typeof value !== 'boolean'
+      ) {
+        return { error: `options.${id} must be a string, number, boolean, or null` };
+      }
+      options[id] = value;
+    }
+    patch.options = options;
   }
   return patch;
 }
@@ -653,11 +745,16 @@ export function registerAgentRoutes(
         if (!kind) {
           return c.json({ error: 'defaults require an official Agent' }, 400);
         }
-        const next = { ...current.defaults, ...defaultsPatch };
+        const next = mergeAgentProxyDefaults(current.defaults, defaultsPatch);
         const catalog = await options.capabilities(kind, id);
-        const validationCatalog = options.resolveDefaultsCatalog && next.model
-          ? await options.resolveDefaultsCatalog(kind, catalog, modelConfig(catalog, next.model), id)
-          : catalog;
+        const hasOptionDefaults = Object.keys(next.options ?? {}).length > 0;
+        const resolved = options.resolveDefaultsCatalog && (next.model || hasOptionDefaults)
+          ? await options.resolveDefaultsCatalog(kind, catalog, configsFromDefaults(catalog, next), id)
+          : null;
+        const validationCatalog = resolved ?? catalog;
+        if (resolved && 'resolvedDefaults' in resolved) {
+          adoptResolvedInvalidations(defaultsPatch, next, validationCatalog);
+        }
         validateProxyDefaults(kind, next, defaultsPatch, validationCatalog);
         patch.defaults = defaultsPatch;
       }

@@ -18,7 +18,13 @@ import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-prot
 import { planRuntimeInstallation } from '../runtime/install.js';
 import { ZcodeSharedService } from '../service.js';
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_VERSION } from '../identity.js';
-import { discoverZcodeRuntimes, probeZcodeRuntime } from '../runtime/discover.js';
+import {
+  builtinProviderConfigCandidates,
+  discoverZcodeRuntimes,
+  locateBuiltinProviderConfig,
+  probeZcodeRuntime,
+} from '../runtime/discover.js';
+import { resolve } from 'node:path';
 
 function selfTest(): void {
   // Verify the module graph loads and the wire constants are coherent.
@@ -58,6 +64,17 @@ async function main(): Promise<void> {
     throw new Error(`zcode-proxy expects plugin id ${PLUGIN_ID}, received ${process.env.GIAN_PLUGIN_ID}.`);
   }
   const dataDir = process.env.GIAN_PLUGIN_DATA_DIR ?? null;
+
+  // Pre-spawn diagnostic: a missing builtin provider config makes the inner
+  // app-server exit before answering anything, which otherwise surfaces as an
+  // opaque "app-server exited" loop. Warn once with the checked paths.
+  if (await locateBuiltinProviderConfig(resolve(runtimeBin)) === null) {
+    const [near, up] = builtinProviderConfigCandidates(resolve(runtimeBin));
+    process.stderr.write(
+      `[zcode-proxy:runtime] builtin provider config not found (checked ${near}, ${up}); `
+      + 'the ZCode app-server will exit at startup. See Gian-Dev #163.\n',
+    );
+  }
 
   const service = new ZcodeSharedService({
     runtimeBin,

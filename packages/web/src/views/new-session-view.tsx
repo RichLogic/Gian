@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
   ApprovalMode,
@@ -54,6 +54,10 @@ import {
 } from '../components/composer/capabilities.js';
 import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
+import {
+  fetchWorkingTreeFilesCached,
+  filterFileOptions,
+} from '../components/composer/capabilities.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import {
   CatalogOptionsMenu,
@@ -210,6 +214,7 @@ const EMPTY_COMPOSER_DOCUMENT: ComposerDocument = { version: 1, segments: [] };
 
 function newSessionContextLabel(item: MessageContextItem): string {
   if (item.type === 'folder') return item.name;
+  if (item.type === 'file') return item.name;
   if (item.type === 'browserElement') return item.name || item.selector;
   const preview = item.text.replace(/\s+/g, ' ').trim();
   return preview.slice(0, 80) || 'Pasted text';
@@ -257,6 +262,11 @@ function savedContextItems(value: unknown): MessageContextItem[] {
     const candidate = item as Record<string, unknown>;
     if (typeof candidate.id !== 'string') return [];
     if (candidate.type === 'folder') {
+      return typeof candidate.path === 'string' && typeof candidate.name === 'string'
+        ? [candidate as unknown as MessageContextItem]
+        : [];
+    }
+    if (candidate.type === 'file') {
       return typeof candidate.path === 'string' && typeof candidate.name === 'string'
         ? [candidate as unknown as MessageContextItem]
         : [];
@@ -432,6 +442,7 @@ export function NewSessionView({
   const [agentId, setAgentId] = useState<string | null>(requestedAgentId);
   const selectedAgent = agents?.find(agent => agent.id === agentId) ?? null;
   const executor = selectedAgent?.proxy ?? null;
+  const configuredDefaults = selectedAgent?.defaults;
   // Capability chip state holds only explicit per-draft choices. Catalog-backed
   // native executors use the same state now that their options are available
   // before session.create; configured Agent defaults remain display fallbacks.
@@ -620,6 +631,11 @@ export function NewSessionView({
         values[option.id] = mode;
       } else if (option.role === 'fast' && values[option.id] === undefined) {
         values[option.id] = serviceTier === 'fast';
+      } else if (!option.role && values[option.id] === undefined) {
+        // Agent option defaults (e.g. provider) must survive the resolve
+        // round-trip; the resolved Proxy default must not override them.
+        const configured = configuredDefaults?.options?.[option.id];
+        if (configured !== undefined) values[option.id] = configured;
       }
     }
     const configs = createConfigsFromCatalog(executor, catalog.configOptions, values);
@@ -675,7 +691,7 @@ export function NewSessionView({
       setCatalogResolveError(error instanceof Error ? error.message : String(error));
     });
     return () => { alive = false; };
-  }, [executor, catalogExecutor, catalog, catalogValues, model, effort, mode, serviceTier]);
+  }, [executor, catalogExecutor, catalog, catalogValues, model, effort, mode, serviceTier, configuredDefaults]);
 
   function currentDraft(workspaceId = selectedWs): NewSessionDraft {
     const referenceIds = newSessionReferenceIds(composerDocument);
@@ -735,6 +751,26 @@ export function NewSessionView({
   const currentScope = activeDraftScope();
   const currentScopeKey = currentScope ? `${currentScope.kind}:${currentScope.id}` : '';
   const selectedWorkspace = workspaces.find(w => w.id === selectedWs) ?? null;
+
+  // `@` file-reference popover: the future session runs in the workspace's
+  // primary checkout (`ws:<id>`), which is also the tree the Host confines
+  // `file` context items to once the session exists.
+  const selectedWorkspaceId = selectedWorkspace?.id ?? null;
+  const selectedWorkspacePath = selectedWorkspace?.path ?? null;
+  const fileMentionEnabled = selectedWorkspaceId !== null
+    && contextItems.length < MAX_MESSAGE_CONTEXT_ITEMS;
+  const handleFileQuery = useCallback(async (query: string) => {
+    if (!selectedWorkspaceId || !selectedWorkspacePath) return [];
+    const files = await fetchWorkingTreeFilesCached(`ws:${selectedWorkspaceId}`);
+    return filterFileOptions(files, query, selectedWorkspacePath);
+  }, [selectedWorkspaceId, selectedWorkspacePath]);
+  const handleFileReference = useCallback((file: { id: string; path: string; name: string }) => {
+    setContextItems(previous => {
+      if (previous.length >= MAX_MESSAGE_CONTEXT_ITEMS) return previous;
+      if (previous.some(item => item.id === file.id)) return previous;
+      return [...previous, { type: 'file', id: file.id, path: file.path, name: file.name }];
+    });
+  }, []);
 
   // The Desktop result is routed by its capture-time scope. A view that has
   // since switched Workspace ignores the event; that attachment remains in
@@ -801,7 +837,6 @@ export function NewSessionView({
   // (not-ready rows render disabled).
   const showAgentPicker = readyAgents.length !== 1;
   const cliExecutor = executor && usesCliCapabilitySurface(executor) ? executor : null;
-  const configuredDefaults = selectedAgent?.defaults;
   const catalogReady = catalog.configOptions.length > 0;
   const catalogModel = optionByRole(catalog.configOptions, 'model');
   const catalogEffort = optionByRole(catalog.configOptions, 'effort');
@@ -1017,6 +1052,9 @@ export function NewSessionView({
           values[option.id] = mode;
         } else if (option.role === 'fast' && values[option.id] === undefined) {
           values[option.id] = serviceTier === 'fast';
+        } else if (!option.role && values[option.id] === undefined) {
+          const configured = configuredDefaults?.options?.[option.id];
+          if (configured !== undefined) values[option.id] = configured;
         }
       }
     }
@@ -1510,6 +1548,9 @@ export function NewSessionView({
               onChange={handleDocumentChange}
               onKeyDown={handleMessageKeyDown}
               onPaste={handlePaste}
+              {...(fileMentionEnabled
+                ? { onFileQuery: handleFileQuery, onFileReference: handleFileReference }
+                : {})}
               placeholder={t('coding.new.message.placeholder')}
               onReferenceActivate={(id, _referenceType, _anchorEl) => {
                 // 2026-09-10 owner call: chips preview on hover/focus only —

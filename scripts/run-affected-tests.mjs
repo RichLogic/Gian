@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildAffectedPlan, checkSelectionMap } from './test-selection.mjs';
 import { sanitizedTestEnv } from './run-tests.mjs';
+import { withLocalVerification } from './local-verification.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -89,7 +90,10 @@ export function affectedExecutionPlan(plan) {
 }
 
 export function executeAffectedPlan(plan) {
-  const env = sanitizedTestEnv();
+  return withLocalVerification('affected verification', sourceEnv => runAffectedCommands(plan, sanitizedTestEnv(sourceEnv)));
+}
+
+function runAffectedCommands(plan, env) {
   for (const command of affectedExecutionPlan(plan)) {
     if (command.command === 'pnpm') {
       const invocation = pnpmInvocation(command.args);

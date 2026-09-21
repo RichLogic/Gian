@@ -36,6 +36,7 @@ import type {
   AgentProxyStatus,
   AgentProxyUpdateCheck,
   AgentHomeBinding,
+  ConfigValue,
   Executor,
   ProductExecutor,
   ProxyCatalogEntry,
@@ -146,10 +147,12 @@ interface AgentConfigFileV1 {
   proxyDefaults: Partial<Record<LegacyExecutorId, AgentProxyDefaults>>;
 }
 
-/** agents.json schema v5: Agents are user entities keyed by uuid with an
- *  open pluginId. Official kind catalog metadata is not persisted here. */
+/** agents.json schema v6: Agents are user entities keyed by uuid with an
+ *  open pluginId. Official kind catalog metadata is not persisted here.
+ *  v6 adds `defaults.options` (role-less catalog option ids); the v5 → v6
+ *  migration is data-neutral (`options: {}`). */
 interface AgentConfigFile {
-  schemaVersion: 5;
+  schemaVersion: 6;
   agents: UserAgent[];
 }
 
@@ -342,7 +345,7 @@ const AGENTS: Record<LegacyExecutorId, AgentDefinition> = {
 };
 
 function emptyConfig(): AgentConfigFile {
-  return { schemaVersion: 5, agents: [] };
+  return { schemaVersion: 6, agents: [] };
 }
 
 function officialKinds(...values: Array<ProductExecutor | null | undefined>): ProductExecutor[] {
@@ -365,7 +368,31 @@ function emptyConfigV1(): AgentConfigFileV1 {
 }
 
 function emptyProxyDefaults(): AgentProxyDefaults {
-  return { model: '', thinking: '', mode: '' };
+  return { model: '', thinking: '', mode: '', options: {} };
+}
+
+/** Role-less catalog option ids are opaque but bounded: they round-trip
+ *  through REST patches and Proxy catalogs, so keys stay identifier-like and
+ *  values stay JSON scalars. */
+const PROXY_DEFAULT_OPTION_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+const MAX_PROXY_DEFAULT_OPTIONS = 64;
+
+function normalizeProxyDefaultOptions(value: unknown): Record<string, ConfigValue> {
+  const record = objectRecord(value);
+  if (!record) return {};
+  const options: Record<string, ConfigValue> = {};
+  for (const [id, optionValue] of Object.entries(record)) {
+    if (Object.keys(options).length >= MAX_PROXY_DEFAULT_OPTIONS) break;
+    if (!PROXY_DEFAULT_OPTION_ID.test(id)) continue;
+    if (
+      typeof optionValue !== 'string'
+      && typeof optionValue !== 'number'
+      && typeof optionValue !== 'boolean'
+      && optionValue !== null
+    ) continue;
+    options[id] = optionValue;
+  }
+  return options;
 }
 
 function normalizeProxyDefaults(value: unknown): AgentProxyDefaults {
@@ -376,7 +403,34 @@ function normalizeProxyDefaults(value: unknown): AgentProxyDefaults {
     model: typeof record.model === 'string' ? record.model.trim() : '',
     thinking: typeof record.thinking === 'string' ? record.thinking.trim() : '',
     mode: typeof record.mode === 'string' ? record.mode.trim() : '',
+    options: normalizeProxyDefaultOptions(record.options),
   };
+}
+
+/** updateAgent patch semantics: triplet fields replace when present; `options`
+ *  merges per key, a `null` value deletes the key, and an absent `options`
+ *  leaves the stored map untouched. */
+export function mergeAgentProxyDefaults(
+  previous: AgentProxyDefaults,
+  patch: Partial<AgentProxyDefaults>,
+): AgentProxyDefaults {
+  const merged: AgentProxyDefaults = {
+    model: patch.model !== undefined ? patch.model : previous.model,
+    thinking: patch.thinking !== undefined ? patch.thinking : previous.thinking,
+    mode: patch.mode !== undefined ? patch.mode : previous.mode,
+    options: { ...(previous.options ?? {}) },
+  };
+  if (patch.options !== undefined) {
+    for (const [id, value] of Object.entries(patch.options)) {
+      if (value === null) delete merged.options[id];
+      else merged.options[id] = value;
+    }
+  }
+  return merged;
+}
+
+function copyProxyDefaults(defaults: AgentProxyDefaults): AgentProxyDefaults {
+  return { ...defaults, options: { ...(defaults.options ?? {}) } };
 }
 
 export function normalizeAgentName(value: unknown): string {
@@ -440,7 +494,7 @@ function persistableAgent(agent: UserAgent): UserAgent {
     proxy: agent.proxy,
     home: agent.home ? { ...agent.home } : null,
     cliPath: agent.cliPath,
-    defaults: { ...agent.defaults },
+    defaults: copyProxyDefaults(agent.defaults),
   };
 }
 
@@ -488,7 +542,7 @@ function parseConfigV2(parsed: { agents?: unknown }): AgentConfigFile {
     seenNames.add(nameKey);
     agents.push(agent);
   }
-  return { schemaVersion: 5, agents };
+  return { schemaVersion: 6, agents };
 }
 
 function parseConfigV1(parsed: Partial<AgentConfigFileV1>): AgentConfigFileV1 {
@@ -508,6 +562,7 @@ function parseConfig(raw: string): AgentConfigFile | AgentConfigFileV1 {
   const parsed = JSON.parse(raw) as { schemaVersion?: unknown };
   return parsed?.schemaVersion === 2 || parsed?.schemaVersion === 3
     || parsed?.schemaVersion === 4 || parsed?.schemaVersion === 5
+    || parsed?.schemaVersion === 6
     ? parseConfigV2(parsed as { agents?: unknown })
     : parseConfigV1(parsed as Partial<AgentConfigFileV1>);
 }
@@ -884,14 +939,14 @@ export class AgentManager {
     try {
       const raw = await readFile(manager.configPath, 'utf8');
       const source = JSON.parse(raw) as { schemaVersion?: unknown };
-      needsSave = source.schemaVersion !== 5;
+      needsSave = source.schemaVersion !== 6;
       persisted = parseConfig(raw);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
       persisted = emptyConfigV1();
     }
-    if (persisted.schemaVersion === 5) {
+    if (persisted.schemaVersion === 6) {
       manager.config = persisted;
       if (needsSave) await manager.saveConfig();
     } else {
@@ -921,8 +976,8 @@ export class AgentManager {
       agents.push(persistableAgent({ ...current, home }));
     }
     if (!changed) return;
-    await this.saveConfig({ schemaVersion: 5, agents });
-    this.config = { schemaVersion: 5, agents };
+    await this.saveConfig({ schemaVersion: 6, agents });
+    this.config = { schemaVersion: 6, agents };
   }
 
   /** One-time migration of a former Gian-managed DSH current path onto Agent.cliPath. */
@@ -944,8 +999,8 @@ export class AgentManager {
         : agent
     ));
     if (next.every((agent, index) => agent.cliPath === this.config.agents[index]?.cliPath)) return;
-    await this.saveConfig({ schemaVersion: 5, agents: next });
-    this.config = { schemaVersion: 5, agents: next };
+    await this.saveConfig({ schemaVersion: 6, agents: next });
+    this.config = { schemaVersion: 6, agents: next };
   }
 
   /** v1 → v2 migration. Each PRODUCT kind gets at most one default Agent,
@@ -988,7 +1043,7 @@ export class AgentManager {
         defaults,
       });
     }
-    return { schemaVersion: 5, agents };
+    return { schemaVersion: 6, agents };
   }
 
   private async hasInstalledProxy(id: ProductExecutor): Promise<boolean> {
@@ -1340,7 +1395,7 @@ export class AgentManager {
     const agent = isProductExecutor(id)
       ? this.config.agents.find(candidate => candidate.proxy === id)
       : undefined;
-    const defaults = { ...(agent?.defaults ?? emptyProxyDefaults()) };
+    const defaults = copyProxyDefaults(agent?.defaults ?? emptyProxyDefaults());
     return id === 'grok' ? migrateLegacyGrokProxyDefaults(defaults) : defaults;
   }
 
@@ -1349,7 +1404,7 @@ export class AgentManager {
   }
 
   // ------------------------------------------------------------------
-  // User Agents (agents.json schema v5)
+  // User Agents (agents.json schema v6)
   // ------------------------------------------------------------------
 
   listAgents(): UserAgent[] {
@@ -1360,7 +1415,7 @@ export class AgentManager {
       // active configuration. The path survives only in agents.json during
       // the bounded migration window.
       cliPath: this.options.managedProxies ? null : agent.cliPath,
-      defaults: { ...agent.defaults },
+      defaults: copyProxyDefaults(agent.defaults),
     }));
   }
 
@@ -1371,7 +1426,7 @@ export class AgentManager {
       ...agent,
       home: agent.home ? { ...agent.home } : null,
       cliPath: this.options.managedProxies ? null : agent.cliPath,
-      defaults: { ...agent.defaults },
+      defaults: copyProxyDefaults(agent.defaults),
     };
   }
 
@@ -1710,7 +1765,7 @@ export class AgentManager {
         defaults: normalizeProxyDefaults(input.defaults),
       };
       await this.commitConfig(
-        { schemaVersion: 5, agents: [...current.agents, persistableAgent(agent)] },
+        { schemaVersion: 6, agents: [...current.agents, persistableAgent(agent)] },
         [agent.id],
         officialKinds(proxy),
       );
@@ -1799,7 +1854,7 @@ export class AgentManager {
         home,
         cliPath,
         defaults: patch.defaults
-          ? normalizeProxyDefaults({ ...previous.defaults, ...patch.defaults })
+          ? normalizeProxyDefaults(mergeAgentProxyDefaults(previous.defaults, patch.defaults))
           : previous.defaults,
       });
       const agents = [...current.agents];
@@ -1808,7 +1863,7 @@ export class AgentManager {
       // every committed update invalidates both touched kinds — even a
       // write-through defaults rename.
       await this.commitConfig(
-        { schemaVersion: 5, agents },
+        { schemaVersion: 6, agents },
         [id],
         officialKinds(official),
       );
@@ -1834,7 +1889,7 @@ export class AgentManager {
     await this.withAgentConfigLock([], 'Agent delete', async current => {
       const agents = current.agents.filter(candidate => candidate.id !== id);
       if (agents.length === current.agents.length) throw new Error(`agent not found: ${id}`);
-      await this.commitConfig({ schemaVersion: 5, agents }, [id], officialKinds(existing.proxy));
+      await this.commitConfig({ schemaVersion: 6, agents }, [id], officialKinds(existing.proxy));
     });
   }
 
@@ -1911,7 +1966,7 @@ export class AgentManager {
             )
           ),
         cli,
-        plugin: { ...plugin, defaults: { ...agent.defaults } },
+        plugin: { ...plugin, defaults: copyProxyDefaults(agent.defaults) },
         runtimeProfile,
         skill: kind === 'codex'
           ? {
@@ -1967,7 +2022,7 @@ export class AgentManager {
             repairable: true,
           },
         },
-        plugin: { ...fallbackPlugin, defaults: { ...agent.defaults } },
+        plugin: { ...fallbackPlugin, defaults: copyProxyDefaults(agent.defaults) },
         runtimeProfile: null,
         skill: null,
         officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
@@ -2019,7 +2074,7 @@ export class AgentManager {
         version: active.proxy.pluginVersion,
         verifiedCliVersions: active.runtime ? [active.runtime.version] : [],
         source: 'github-release',
-        defaults: { ...agent.defaults },
+        defaults: copyProxyDefaults(agent.defaults),
         ...(!proxyReady ? { error: 'The active Proxy entry is missing.' } : {}),
       },
       runtimeProfile: profile,
@@ -2493,7 +2548,7 @@ export class AgentManager {
         path: null,
         version: null,
         source: null,
-        defaults: { ...agent.defaults },
+        defaults: copyProxyDefaults(agent.defaults),
       },
       runtimeProfile: null,
       officialInstallUrl: '',
@@ -2581,7 +2636,7 @@ export class AgentManager {
             path: launch.entryPath,
             version: launch.pluginVersion,
             source: pluginSource,
-            defaults: { ...agent.defaults },
+            defaults: copyProxyDefaults(agent.defaults),
           },
           runtimeProfile: { ...cached.profile, agentId: agent.id },
           officialInstallUrl: '',
@@ -2598,7 +2653,7 @@ export class AgentManager {
           path: launch.entryPath,
           version: launch.pluginVersion,
           source: pluginSource,
-          defaults: { ...agent.defaults },
+          defaults: copyProxyDefaults(agent.defaults),
         },
         runtimeProfile: probed.runtimeProfile,
         officialInstallUrl: '',
@@ -3494,8 +3549,8 @@ export class AgentManager {
       const parsed = parseConfig(await readFile(this.configPath, 'utf8'));
       // A v1 file can still appear here when an older Host wrote it after
       // this Host migrated in memory. Migrate it again on the fly; the next
-      // successful commit persists v5.
-      return parsed.schemaVersion === 5 ? parsed : await this.migrateV1(parsed);
+      // successful commit persists v6.
+      return parsed.schemaVersion === 6 ? parsed : await this.migrateV1(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyConfig();
       throw error;

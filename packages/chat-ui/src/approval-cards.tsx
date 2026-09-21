@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import type { ApprovalDecision } from '@gian/shared';
 import { useChatUiT } from './i18n.js';
 import { normalizeGfmTables } from './markdown-tables.js';
+import { LinkAnchor } from './links/LinkAnchor.js';
 import type { ApprovalItem, OnApprove } from './types.js';
 
 /**
@@ -316,7 +317,7 @@ export function ApprovalCard({
           ? (
             <div className="ap2-plan">
               <div className="approval-plan-md">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{planMarkdown}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: LinkAnchor as never }}>{planMarkdown}</ReactMarkdown>
               </div>
             </div>
           )

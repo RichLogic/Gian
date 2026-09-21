@@ -2,13 +2,15 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadValidatedCatalog } from './test-catalog.mjs';
+import { withLocalVerification, LOCAL_VERIFICATION_ALLOW, LOCAL_VERIFICATION_TOKEN, localNodeTestArgs, localVitestArgs } from './local-verification.mjs';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SUPPORTED_SCOPES = new Set(['unit', 'integration', 'system']);
 
 export function sanitizedTestEnv(source = process.env) {
   return Object.fromEntries(
-    Object.entries(source).filter(([key]) => !key.startsWith('GIAN_')),
+    Object.entries(source).filter(([key]) => !key.startsWith('GIAN_')
+      || key === LOCAL_VERIFICATION_ALLOW || key === LOCAL_VERIFICATION_TOKEN),
   );
 }
 
@@ -87,7 +89,7 @@ function entriesForRunner(entries, runner) {
 
 function runNodeTests(paths, env, extraArgs = [], cwd = rootDir) {
   if (paths.length === 0) return;
-  run(process.execPath, ['--test', ...extraArgs, ...paths], env, cwd);
+  run(process.execPath, ['--test', ...localNodeTestArgs(env), ...extraArgs, ...paths], env, cwd);
 }
 
 function distTestPath(path, packageRoot) {
@@ -136,7 +138,6 @@ function runnerSummary(entries, scopes) {
 }
 
 export function main(argv = process.argv.slice(2)) {
-  const env = sanitizedTestEnv();
   const { catalog, entries } = loadValidatedCatalog();
   const options = parseRunOptions(argv, catalog.defaultScopes);
   const selected = selectCatalogEntries(entries, options.scopes, options.files);
@@ -148,6 +149,10 @@ export function main(argv = process.argv.slice(2)) {
     return;
   }
 
+  return withLocalVerification('test runner', env => executeSelected(selected, options, sanitizedTestEnv(env)));
+}
+
+function executeSelected(selected, options, env) {
   const scriptPaths = entriesForRunner(selected, 'scripts-node');
   if (scriptsNeedProxyProtocol(scriptPaths) || scriptsNeedProxyCatalogContract(scriptPaths)) {
     runPnpm(['--filter', '@gian/proxy-protocol', 'build'], env);
@@ -215,19 +220,19 @@ export function main(argv = process.argv.slice(2)) {
   const webPaths = entriesForRunner(selected, 'web-vitest')
     .map(path => relative(join(rootDir, 'packages', 'web'), join(rootDir, path)));
   if (webPaths.length > 0) {
-    runPnpm(['exec', 'vitest', 'run', ...webPaths], env, join(rootDir, 'packages', 'web'));
+    runPnpm(['exec', 'vitest', 'run', ...localVitestArgs(env), ...webPaths], env, join(rootDir, 'packages', 'web'));
   }
 
   const chatUiPaths = entriesForRunner(selected, 'chat-ui-vitest')
     .map(path => relative(join(rootDir, 'packages', 'chat-ui'), join(rootDir, path)));
   if (chatUiPaths.length > 0) {
-    runPnpm(['exec', 'vitest', 'run', ...chatUiPaths], env, join(rootDir, 'packages', 'chat-ui'));
+    runPnpm(['exec', 'vitest', 'run', ...localVitestArgs(env), ...chatUiPaths], env, join(rootDir, 'packages', 'chat-ui'));
   }
 
   const remoteWebPaths = entriesForRunner(selected, 'remote-web-vitest')
     .map(path => relative(join(rootDir, 'packages', 'remote-web'), join(rootDir, path)));
   if (remoteWebPaths.length > 0) {
-    runPnpm(['exec', 'vitest', 'run', ...remoteWebPaths], env, join(rootDir, 'packages', 'remote-web'));
+    runPnpm(['exec', 'vitest', 'run', ...localVitestArgs(env), ...remoteWebPaths], env, join(rootDir, 'packages', 'remote-web'));
   }
 
   const protocolPaths = entriesForRunner(selected, 'proxy-protocol-node');

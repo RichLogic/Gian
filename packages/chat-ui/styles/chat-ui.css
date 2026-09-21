@@ -8,6 +8,11 @@
    coding.css → events.css → session.css → gian-v2.css → shell-v2.css.
    ============================================================ */
 
+/* KaTeX (math via remark-math + rehype-katex). Bundled by the app's Vite
+   build — fonts resolve from the katex package, no CDN. Must stay before all
+   rules so the @import remains valid CSS. */
+@import 'katex/dist/katex.min.css';
+
 /* ── from coding.css: transcript root + message bubbles ─────────────────── */
 
 .transcript {
@@ -110,6 +115,84 @@
   right: 6px;
   background: var(--surface-3);
 }
+
+/* Mermaid diagram block: tagged ```mermaid fences (and bare fences whose
+   first line is a diagram keyword) render as SVG. The .code-block wrapper is
+   kept so the copy button still copies the diagram source. The card stays
+   white in every theme because mermaid's neutral theme draws dark strokes. */
+.mermaid-block .mermaid-diagram {
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+  padding: 12px;
+  overflow-x: auto;
+  background: oklch(1 0 0);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+}
+.mermaid-block .mermaid-diagram svg { max-width: 100%; height: auto; }
+/* Fallback while mermaid loads or the source fails to parse (a diagram that
+   is still streaming in parses as incomplete): the raw block, styled like
+   any other fenced code block. */
+.mermaid-block pre.mermaid-source { margin: 0; }
+
+/* Syntax highlighting (rehype-highlight/lowlight, tagged languages only).
+   Token colors hand-tuned for the --surface-2 code background; the dark
+   variants ride the host's body[data-theme] switch (both Web and Remote Web
+   set it). GitHub-inspired palette, expressed in oklch. */
+.code-block .hljs { color: var(--text); }
+.code-block .hljs-comment,
+.code-block .hljs-quote { color: var(--text-3); font-style: italic; }
+.code-block .hljs-keyword,
+.code-block .hljs-selector-tag { color: oklch(0.55 0.17 22); }
+.code-block .hljs-string,
+.code-block .hljs-regexp,
+.code-block .hljs-addition { color: oklch(0.40 0.09 255); }
+.code-block .hljs-number,
+.code-block .hljs-literal,
+.code-block .hljs-attr,
+.code-block .hljs-attribute,
+.code-block .hljs-selector-class,
+.code-block .hljs-selector-attr { color: oklch(0.48 0.16 255); }
+.code-block .hljs-title,
+.code-block .hljs-name,
+.code-block .hljs-section,
+.code-block .hljs-selector-id { color: oklch(0.45 0.17 300); }
+.code-block .hljs-built_in,
+.code-block .hljs-builtin-name,
+.code-block .hljs-variable,
+.code-block .hljs-template-variable,
+.code-block .hljs-type,
+.code-block .hljs-symbol,
+.code-block .hljs-meta { color: oklch(0.55 0.14 55); }
+.code-block .hljs-deletion { color: oklch(0.52 0.17 25); }
+.code-block .hljs-emphasis { font-style: italic; }
+.code-block .hljs-strong { font-weight: 600; }
+body[data-theme="dark"] .code-block .hljs-keyword,
+body[data-theme="dark"] .code-block .hljs-selector-tag { color: oklch(0.72 0.15 30); }
+body[data-theme="dark"] .code-block .hljs-string,
+body[data-theme="dark"] .code-block .hljs-regexp,
+body[data-theme="dark"] .code-block .hljs-addition { color: oklch(0.83 0.08 225); }
+body[data-theme="dark"] .code-block .hljs-number,
+body[data-theme="dark"] .code-block .hljs-literal,
+body[data-theme="dark"] .code-block .hljs-attr,
+body[data-theme="dark"] .code-block .hljs-attribute,
+body[data-theme="dark"] .code-block .hljs-selector-class,
+body[data-theme="dark"] .code-block .hljs-selector-attr { color: oklch(0.78 0.10 240); }
+body[data-theme="dark"] .code-block .hljs-title,
+body[data-theme="dark"] .code-block .hljs-name,
+body[data-theme="dark"] .code-block .hljs-section,
+body[data-theme="dark"] .code-block .hljs-selector-id { color: oklch(0.78 0.12 310); }
+body[data-theme="dark"] .code-block .hljs-built_in,
+body[data-theme="dark"] .code-block .hljs-builtin-name,
+body[data-theme="dark"] .code-block .hljs-variable,
+body[data-theme="dark"] .code-block .hljs-template-variable,
+body[data-theme="dark"] .code-block .hljs-type,
+body[data-theme="dark"] .code-block .hljs-symbol,
+body[data-theme="dark"] .code-block .hljs-meta { color: oklch(0.78 0.13 65); }
+
+/* Display math can overflow a narrow bubble — scroll it like a code block. */
+.msg-text.md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .msg-text.md blockquote {
   border-left: 2px solid var(--surface-3);
   padding-left: 10px;
@@ -516,6 +599,28 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   cursor: pointer;
 }
 .file-link-auto:hover { text-decoration-style: solid; }
+
+/* Inline link-type icons (links/link-icons.tsx): a small glyph before the
+   link text signaling the link kind (web/file/editor/external). Fixed 12px
+   box with a slight negative vertical-align so it sits on the text baseline
+   without adding line height in dense prose. currentColor + reduced opacity
+   keeps it muted in both light and dark themes (no per-theme override
+   needed — the glyph inherits the link's own color). */
+.link-kind-icon {
+  width: 12px;
+  height: 12px;
+  vertical-align: -2px;
+  margin-right: 3px;
+  opacity: 0.55;
+}
+/* A link whose behavior is unavailable on this surface: styled like text,
+   non-interactive, the tooltip explains why (never a dead <a>). */
+.link-inert {
+  cursor: default;
+}
+.link-inert .link-kind-icon {
+  opacity: 0.4;
+}
 
 /* Tool args — key/value rows (parsed from JSON when possible), shown inside
  * an expanded tool row's .trow-detail. */
@@ -979,11 +1084,15 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   font-weight: 600;
 }
 /* Context chips read as @-mentions; the glyph lives in CSS so it never
- * pollutes text content, copy, or selection. */
+ * pollutes text content, copy, or selection. File-reference chips render a
+ * real file icon instead, so the '@' is suppressed. */
 .message-inline-reference[data-reference-type="context"]::before {
   content: '@';
   color: var(--text-3);
   font-weight: 600;
+}
+.message-inline-reference[data-reference-kind="file"]::before {
+  content: none;
 }
 .mir-glyph svg { width: 11px; height: 11px; }
 .mir-label {

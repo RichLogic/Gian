@@ -58,6 +58,27 @@ describe('Settings › Remote — availability', () => {
 });
 
 describe('Settings › Remote — enrollment', () => {
+  it('explains how self-hosted users and administrators obtain an enrollment token', () => {
+    renderRemote(createRemoteSettingsFixture());
+    expect(screen.getByText('How do I get an enrollment token?')).toBeTruthy();
+    expect(screen.getByText('gian-remote-server enrollment create')).toBeTruthy();
+    expect(screen.getByText(/not the administrator key/)).toBeTruthy();
+  });
+
+  it('edits the remote computer name without re-enrollment', async () => {
+    const fixture = createRemoteSettingsFixture({ enrolled: true });
+    const rename = vi.fn(fixture.setHostName!);
+    fixture.setHostName = rename;
+    renderRemote(fixture);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+    const input = screen.getByRole('textbox', { name: 'Host remote name' });
+    fireEvent.change(input, { target: { value: '  Home Mac  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await screen.findByText('Home Mac');
+    expect(rename).toHaveBeenCalledWith('Home Mac');
+    expect(fixture.getState().enrollment.kind).toBe('connected');
+    expect(screen.queryByLabelText('Enrollment token')).toBeNull();
+  });
   it('enrolls: token is cleared from UI state immediately and never echoed', async () => {
     const fixture = createRemoteSettingsFixture();
     const enroll = vi.spyOn(fixture, 'enroll');
@@ -191,6 +212,43 @@ describe('Settings › Remote — pairing', () => {
     expect(screen.getByTestId('pairing-qr').querySelector('svg')).toBeTruthy();
     const countdown = screen.getByTestId('pairing-countdown').textContent ?? '';
     expect(countdown).toMatch(/^[45]:[0-5]\d$/);
+  });
+
+  it.each([false, true])('copies the exact QR invitation with a selectable fallback; clipboard failure=%s', async fail => {
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = fail ? vi.fn().mockRejectedValue(new Error('clipboard denied')) : vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const fixture = createRemoteSettingsFixture({ enrolled: true });
+    renderRemote(fixture);
+    try {
+      await createGrant(fixture);
+      const pairing = fixture.getState().pairing;
+      if (pairing.kind !== 'awaiting-claim') throw new Error('expected unclaimed invitation');
+      const link = screen.getByRole('textbox', { name: 'Pairing link' }) as HTMLInputElement;
+      expect(link.value).toBe(pairing.qrPayload);
+      expect(link.readOnly).toBe(true);
+      expect(new URL(link.value).hash).toContain('nonce=');
+      fireEvent.click(screen.getByRole('button', { name: 'Copy pairing link' }));
+      await screen.findByText(fail ? 'Could not copy. Select the link and copy it manually.' : 'Pairing link copied.');
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith(pairing.qrPayload);
+      expect(fixture.getState().pairing.kind).toBe('awaiting-claim');
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it.each(['claimed', 'expired', 'cancelled'] as const)('removes the copyable invitation once %s', async state => {
+    const fixture = createRemoteSettingsFixture({ enrolled: true });
+    renderRemote(fixture);
+    await createGrant(fixture);
+    expect(screen.getByRole('textbox', { name: 'Pairing link' })).toBeTruthy();
+    if (state === 'claimed') act(() => fixture.simulateClaim());
+    else if (state === 'expired') act(() => fixture.simulateExpire());
+    else fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Pairing link' })).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Copy pairing link' })).toBeNull();
   });
 
   it('claim shows the local confirmation with device metadata; Allow consumes the grant', async () => {

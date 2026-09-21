@@ -834,6 +834,13 @@ export class SessionManager {
     nativeOptionId?: string,
     resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
   ): Promise<void> {
+    if (this.sidechats.has(sessionId)) {
+      // Side Chats are transient (SIDECHAT-001): never look them up in the
+      // sessions table or persist proxy_interactions rows — route the answer
+      // through the coordinator's bound child client instead.
+      await this.sidechats.respondInteraction(sessionId, approvalId, decision, answers, nativeOptionId);
+      return;
+    }
     this.getSession(sessionId);
     const localApproval = this.approvals.getPending(approvalId);
     if (localApproval?.sessionId === sessionId && localApproval.payload?.['localOnly'] === true) {
@@ -1063,7 +1070,10 @@ export class SessionManager {
     configSnapshot: Record<string, unknown>;
   } | null> {
     if (this.sidechats.has(sessionId)) {
-      const normalizedContextItems = normalizeMessageContextItems(contextItems);
+      const normalizedContextItems = normalizeMessageContextItems(
+        contextItems,
+        { workingTreeRoot: this.sidechatTreeRoot(sessionId) },
+      );
       const normalizedDocument = normalizeMessageComposerDocument(
         composerDocument,
         items,
@@ -1090,7 +1100,10 @@ export class SessionManager {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
     const normalizedDocument = normalizeMessageComposerDocument(
       composerDocument,
       items,
@@ -1714,6 +1727,16 @@ export class SessionManager {
     return workspace?.path ?? null;
   }
 
+  /** Working-tree root confining `file` context items on a Side Chat send:
+   *  the parent session's tree. Null when the parent is unknown — file items
+   *  are then rejected at the Host boundary. */
+  private sidechatTreeRoot(sidechatId: string): string | null {
+    const parentId = this.sidechats.parentSessionIdOf(sidechatId);
+    if (!parentId) return null;
+    const parent = this.sessions.get(parentId);
+    return parent ? this.cwdForSession(parent) : null;
+  }
+
   // -------------------------------------------------------------------------
   // Queue facade (M1-E QueueManager + WS)
   // Track E may refactor; these wrappers exist so ws-handler has a stable
@@ -1761,7 +1784,10 @@ export class SessionManager {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
     const normalizedDocument = normalizeMessageComposerDocument(
       composerDocument,
       items,
@@ -1907,7 +1933,10 @@ export class SessionManager {
     composerDocument?: ComposerDocument,
   ): Promise<SteerReceipt> {
     if (this.sidechats.has(sessionId)) {
-      const normalizedContextItems = normalizeMessageContextItems(contextItems);
+      const normalizedContextItems = normalizeMessageContextItems(
+        contextItems,
+        { workingTreeRoot: this.sidechatTreeRoot(sessionId) },
+      );
       const normalizedDocument = normalizeMessageComposerDocument(
         composerDocument,
         items,
@@ -1922,7 +1951,10 @@ export class SessionManager {
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
     assertLocalFilesBelongToSession(sessionId, items);
-    const normalizedContextItems = normalizeMessageContextItems(contextItems);
+    const normalizedContextItems = normalizeMessageContextItems(
+      contextItems,
+      { workingTreeRoot: this.cwdForSession(session) },
+    );
     const normalizedDocument = normalizeMessageComposerDocument(
       composerDocument,
       items,

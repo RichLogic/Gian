@@ -213,7 +213,7 @@ export type PairingFailure =
 
 export type PairingState =
   | { kind: 'enter-code'; attemptsLeft: number }
-  | { kind: 'qr-confirm'; hostName: string; deviceName: string }
+  | { kind: 'qr-confirm'; hostName: string; deviceName: string; pairingUrl?: string }
   | { kind: 'waiting'; deviceName: string; expiresAt: number }
   | { kind: 'failed'; reason: PairingFailure; hostName?: string };
 
@@ -227,6 +227,9 @@ export type AuthState =
 // ---------------------------------------------------------------------------
 
 export interface RemoteUiState {
+  addingHost?: boolean;
+  connectionPhase?: 'auth' | 'relay' | 'sync';
+  connectionFailed?: boolean;
   auth: AuthState;
   connection: ConnectionState;
   hosts: RemoteHostEntry[];
@@ -284,6 +287,7 @@ export interface RemoteUiActions {
   // Host switching — state/cache are partitioned per Host by the controller.
   selectHost(hostId: string): void;
   restoreBrowserSession(): void;
+  startPairing(): void;
 
   // Navigation
   selectSession(sessionId: string): void;

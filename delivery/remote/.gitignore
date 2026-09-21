@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+output/
+coverage/
+.env
+runtime.env
+deploy.env
+*.sqlite*

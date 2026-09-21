@@ -13,7 +13,7 @@ import type {
   SessionNotification,
 } from '@agentclientprotocol/sdk';
 
-import { createAppError } from './errors.js';
+import { createAppError, KimiProxyError } from './errors.js';
 import { normalizeInputItems, toPromptBlocks } from './input.js';
 import type {
   ApprovalResponseParams,
@@ -44,7 +44,12 @@ interface ActiveTurn {
 interface ServiceOptions {
   runtime: KimiAcpClient;
   emitEvent?: ProxyEventSink;
+  /** Test seam: bound on how long an accepted interrupt may take to end the
+   *  native turn before the shared runtime is considered wedged. */
+  interruptSettleMs?: number;
 }
+
+const DEFAULT_INTERRUPT_SETTLE_MS = 10_000;
 
 function nonEmptyString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) {
@@ -339,6 +344,7 @@ export function parseKimiUsageUpdate(
 export class KimiProxyService {
   private readonly runtime: KimiAcpClient;
   private readonly customization: KimiCustomizationScanner;
+  private readonly interruptSettleMs: number;
   private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
   private readonly proxyIdByNativeId = new Map<string, string>();
@@ -357,6 +363,10 @@ export class KimiProxyService {
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
     this.emitEvent = options.emitEvent ?? (() => undefined);
+    this.interruptSettleMs = options.interruptSettleMs ?? DEFAULT_INTERRUPT_SETTLE_MS;
+    if (!Number.isFinite(this.interruptSettleMs) || this.interruptSettleMs <= 0) {
+      throw new TypeError('interruptSettleMs must be a positive finite number.');
+    }
     this.customization = new KimiCustomizationScanner();
     this.runtime.setPermissionHandler((request) => this.handlePermissionRequest(request));
     this.runtime.on('sessionUpdate', (notification) => {
@@ -553,7 +563,15 @@ export class KimiProxyService {
       configOptions: [],
       createdAt,
     });
-    this.addSession(session);
+    try {
+      this.addSession(session);
+    } catch (error) {
+      // Reconnect recovery: a native id left bound to a Proxy session whose
+      // shared runtime already died is provably stale — drop the dead binding
+      // once and retry the attach once. A live binding still fails closed.
+      if (!this.dropStaleNativeBinding(session.nativeSessionId, error)) throw error;
+      this.addSession(session);
+    }
     // session/load replays history during the RPC. Hold those updates until
     // load succeeds so the host can persist its row + replay transactionally.
     this.provisionalUpdates.set(session.id, []);
@@ -712,7 +730,24 @@ export class KimiProxyService {
       throw createAppError(500, 'SESSION_ERROR', `Interrupt cancel failed: ${describe(cancelError)}`);
     }
     lease.releaseForNextTurn();
+    this.watchInterruptSettle(session.id);
     return { ok: true, session: this.serializeSession(session) };
+  }
+
+  /** After an accepted interrupt the runtime must end the turn promptly:
+   *  `session/cancel` is an ACP notification, so its wire success says
+   *  nothing about the turn. If the turn never settles, the shared child is
+   *  wedged — fence it so the runtimeStopped broadcast fails the turn and
+   *  every session lazily rebinds to a fresh runtime. */
+  private watchInterruptSettle(sessionId: string): void {
+    const turnId = this.activeTurns.get(sessionId)?.turnId;
+    if (!turnId) return;
+    const timer = setTimeout(() => {
+      const active = this.activeTurns.get(sessionId);
+      if (!active || active.turnId !== turnId) return;
+      this.runtime.retireWedgedRuntime();
+    }, this.interruptSettleMs);
+    timer.unref();
   }
 
   async respondApproval(params: ApprovalResponseParams) {
@@ -1305,6 +1340,22 @@ export class KimiProxyService {
     }
     this.sessionsById.set(session.id, session);
     this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
+  }
+
+  /** True only when `error` is the native-attach conflict AND the existing
+   *  binding is provably stale: the owning Proxy session lost its shared
+   *  runtime (attached === false), so the binding points at a dead native
+   *  attachment. The stale record is dropped once for the caller's single
+   *  retry; a live binding (or one mid-turn) fails closed. */
+  private dropStaleNativeBinding(nativeSessionId: string, error: unknown): boolean {
+    if (!(error instanceof KimiProxyError) || error.code !== 'NATIVE_SESSION_ATTACHED') {
+      return false;
+    }
+    const ownerId = this.proxyIdByNativeId.get(nativeSessionId);
+    const owner = ownerId === undefined ? undefined : this.sessionsById.get(ownerId);
+    if (!owner || owner.attached || owner.activeTurnId !== null) return false;
+    this.removeSession(owner);
+    return true;
   }
 
   private removeSession(session: SessionRecord): void {

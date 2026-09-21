@@ -27,7 +27,7 @@ test('migrateLegacyGrokProxyDefaults moves effort-like mode into thinking', () =
     thinking: '',
     mode: 'high',
   });
-  assert.deepEqual(migrated, { model: 'grok-4', thinking: 'high', mode: 'default' });
+  assert.deepEqual(migrated, { model: 'grok-4', thinking: 'high', mode: 'default', options: {} });
 });
 
 test('migrateLegacyGrokProxyDefaults keeps existing thinking when resetting unknown mode', () => {
@@ -36,5 +36,20 @@ test('migrateLegacyGrokProxyDefaults keeps existing thinking when resetting unkn
     thinking: 'medium',
     mode: 'xhigh',
   });
-  assert.deepEqual(migrated, { model: 'grok-4', thinking: 'medium', mode: 'default' });
+  assert.deepEqual(migrated, { model: 'grok-4', thinking: 'medium', mode: 'default', options: {} });
+});
+
+test('migrateLegacyGrokProxyDefaults preserves role-less option defaults', () => {
+  const migrated = migrateLegacyGrokProxyDefaults({
+    model: 'grok-4',
+    thinking: '',
+    mode: 'high',
+    options: { provider: 'vendor-b' },
+  });
+  assert.deepEqual(migrated, {
+    model: 'grok-4',
+    thinking: 'high',
+    mode: 'default',
+    options: { provider: 'vendor-b' },
+  });
 });

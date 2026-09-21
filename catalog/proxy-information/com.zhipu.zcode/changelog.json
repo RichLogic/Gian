@@ -1,0 +1,288 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "com.zhipu.zcode",
+  "currentVersion": "0.3.2",
+  "entries": [
+    {
+      "version": "0.3.2",
+      "firstPublishedAt": "2026-09-20T09:48:30Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-zcode-v0.3.2",
+          "publishedAt": "2026-09-20T09:48:30Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.3.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.3.2/gian-proxy-zcode-0.3.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "a4224cbf80405556e97bad064544c233fe3731607408d61242f23b86794671a7",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.3.2/gian-proxy-zcode-0.3.2-darwin-arm64.tar.gz",
+            "sha256": "690dc709c967611bab9ff3d5f0135cd66f5fc3a37a03bfb8f8e882ac306507b7",
+            "size": 128038
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "缺少独立启动所需的内置 Provider 配置时，提前给出明确 readiness 诊断，而不是只暴露循环退出。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.3.2/packages/proxies/zcode-proxy/src/runtime/discover.ts"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "不代表 ZCode.app 3.12.3 的原生方法与独立 Provider 初始化问题已修复，也不保证恢复缺失模型。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.3.2/packages/proxies/zcode-proxy/src/runtime/discover.ts"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "2026-09-20 从 Gian-Proxies 分发；这是来源/制品记录，不是另一个 Proxy 版本。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.3.2"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.1",
+      "firstPublishedAt": "2026-09-17T00:57:02Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-zcode-v0.3.1",
+          "publishedAt": "2026-09-17T00:57:02Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.3.1/gian-proxy-zcode-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "62ef1e836a7b1a4ba909bcbee3caf8d3d606c90b620fec770561d1b9d71ec2d0",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.3.1/gian-proxy-zcode-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "e1834e44fba0e9b4c76d2ac695005eef4a65720aeb43b3f8da11ac13f0f75090",
+            "size": 123311
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "恢复官方 Z.ai 标识并同步资源摘要；外部 Runtime 仍要求对应的 App 构建。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/9683495bfcc8980a3b48886b88d30e24b5f0df9e"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.0",
+      "firstPublishedAt": "2026-09-16T03:41:28Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-zcode-v0.3.0",
+          "publishedAt": "2026-09-16T03:41:28Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.3.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.3.0/gian-proxy-zcode-0.3.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "2c6fc9c30cd2566d6eb96d0660b86899a08e048dfaa8aa23cc8ceef31e60aa58",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.3.0/gian-proxy-zcode-0.3.0-darwin-arm64.tar.gz",
+            "sha256": "3cbe5055d4333feb478fe8866d12ce3aef435c206c5b22d959595f839d828564",
+            "size": 123267
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "提供 Proxy-owned runtime.install.plan v1，使受管 Runtime 安装配方随 Proxy 交付。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/593ca856393a48aaabfbcfa49657f28c268e57b1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.1.2",
+      "firstPublishedAt": "2026-09-15T06:07:43Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-zcode-v0.1.2",
+          "publishedAt": "2026-09-15T06:07:43Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.1.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.2/gian-proxy-zcode-0.1.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5dd510aa9bf4f4d8c0ceed60ee31a3f3d27cf2be1e12224792bbbbc4f82ef9ef",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.2/gian-proxy-zcode-0.1.2-darwin-arm64.tar.gz",
+            "sha256": "585683b9ff2fa3cf5e57c0665edf2796d93f0f403b8bb6a9f966c3addad6aa71",
+            "size": 30181
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "发布新的补丁身份供受管安装使用，避免重写既有不可变制品。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/45b222b7ae789b1f92ae6424090a8b6bd11b6545"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.1.1",
+      "firstPublishedAt": "2026-09-13T09:32:18Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-zcode-v0.1.1",
+          "publishedAt": "2026-09-13T09:32:18Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.1.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.1/gian-proxy-zcode-0.1.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "41d15779e050f3cbb50d8066d1cb6cb38e735dbf7221a75094cc4c0e1a7b3c00",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.1/gian-proxy-zcode-0.1.1-darwin-arm64.tar.gz",
+            "sha256": "fe1f1c6ba28d128c26bde6f49923faa9857601d5517caa23c5951f70243babe9",
+            "size": 30184
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.1 <3.0 调整为 >=2.2 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.0/gian-proxy-zcode-0.1.0-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.1/gian-proxy-zcode-0.1.1-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 3 调整为 Schema 4。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.0/gian-proxy-zcode-0.1.0-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.1/gian-proxy-zcode-0.1.1-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "firstPublishedAt": "2026-09-01T07:22:19Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-zcode-v0.1.0",
+          "publishedAt": "2026-09-01T07:22:19Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.1.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.0/gian-proxy-zcode-0.1.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "261aa34310f4e19727575513cfaa9f0250105bac94c9870ef8c4e15ade7c793b",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.1.0/gian-proxy-zcode-0.1.0-darwin-arm64.tar.gz",
+            "sha256": "1706b6e2f46d126cc018056348199ec2d73ce403e47ccdb78b37586ba6ebdae8",
+            "size": 25265
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.5"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "保留的公开记录中的首次独立 Proxy 发行。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.1.0"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    }
+  ],
+  "withdrawnVersions": [
+    {
+      "version": "0.4.0",
+      "withdrawnOn": "2026-09-20",
+      "reason": "统一升版已撤回，不是可安装版本，也不得重打该标签冒充新发行。",
+      "evidence": "https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md"
+    }
+  ]
+}

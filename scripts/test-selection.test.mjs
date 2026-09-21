@@ -103,6 +103,15 @@ test('a directly changed deterministic test selects only itself', () => {
   assert.equal(plan.deferredTests.length, 0);
 });
 
+test('a deployed Remote browser spec stays outside deterministic and local app-shell execution', () => {
+  const plan = buildAffectedPlan(['test/e2e/specs/remote-deployed.spec.ts'], 'quick', inputs);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.deferredEntrypoints.length, 1);
+  assert.equal(plan.deferredEntrypoints[0].id, 'remote-deployed-ui');
+  assert.equal(plan.deferredEntrypoints[0].path, 'playwright.remote-acceptance.config.mjs');
+});
+
 test('shared contract changes expand to dependent modules and defer System in quick', () => {
   const plan = buildAffectedPlan(['packages/shared/src/model.ts'], 'quick', inputs);
   const runnableModules = new Set(plan.runnableTests.map(entry => entry.module));
@@ -144,7 +153,7 @@ test('merge stage executes selected System tests', () => {
 test('documentation-only changes select quality checks without product tests', () => {
   const plan = buildAffectedPlan(['docs/quality/test-selection-plan.md'], 'quick', inputs);
   assert.equal(plan.runnableTests.length, 0);
-  assert.deepEqual(plan.checks.map(check => check.id), ['quality:traceability', 'quality:docs']);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
 });
 
 test('design-only changes select quality checks without product tests', () => {
@@ -159,7 +168,31 @@ test('design-only changes select quality checks without product tests', () => {
   assert.equal(plan.fallbackFull, false);
   assert.equal(plan.runnableTests.length, 0);
   assert.equal(plan.deferredTests.length, 0);
-  assert.deepEqual(plan.checks.map(check => check.id), ['quality:traceability', 'quality:docs']);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('root Markdown notes and README do not trigger deterministic fallback', () => {
+  const plan = buildAffectedPlan(['README.md', 'PLAN-local-task.md', 'PROMPT-review.md'], 'quick', inputs);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.equal(plan.deferredTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
+});
+
+test('root documentation cannot hide a new unmapped source file in the same diff', () => {
+  const plan = buildAffectedPlan(['PLAN-local-task.md', 'new-runtime.mjs'], 'quick', inputs);
+  assert.equal(plan.fallbackFull, true);
+  assert.ok(plan.runnableTests.length > 0);
+});
+
+test('archived matrix and checker snapshots never become runnable tests', () => {
+  const plan = buildAffectedPlan([
+    'docs/archive/quality/traceability-2026-09-19.md.txt',
+    'docs/archive/quality/check-traceability-2026-09-19.test.mjs.txt',
+  ], 'quick', inputs);
+  assert.equal(plan.fallbackFull, false);
+  assert.equal(plan.runnableTests.length, 0);
+  assert.deepEqual(plan.checks.map(check => check.id), ['quality:docs']);
 });
 
 test('Web changes include the strict UI operation gate', () => {

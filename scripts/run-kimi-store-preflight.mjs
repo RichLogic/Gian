@@ -44,7 +44,9 @@ export async function runKimiStorePreflight(options = {}) {
   const sessionDataPresent = await guard.hasSessionData();
   // This command always probes the official binary inside the same data root,
   // so its version is the only safe bootstrap when Gian has no prior marker.
-  await guard.assertCompatible(version, version);
+  // Since ADR-0082 the guard is advisory: conditions are reported, not thrown.
+  const conditions = (await guard.evaluateCompatibility(version, version))
+    .map((condition) => condition.kind);
 
   return {
     protocolOnly: true,
@@ -54,7 +56,8 @@ export async function runKimiStorePreflight(options = {}) {
     binaryPath,
     candidateVersion: version,
     sessionDataPresent,
-    compatible: true,
+    conditions,
+    compatible: conditions.length === 0,
   };
 }
 

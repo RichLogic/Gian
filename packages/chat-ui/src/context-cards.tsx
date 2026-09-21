@@ -22,15 +22,15 @@ export function ContextCards({
     <div className={`context-cards${className ? ` ${className}` : ''}`}>
       {items.map(item => {
         const open = expanded.has(item.id);
-        const expandable = item.type !== 'folder';
-        const label = item.type === 'folder'
+        const expandable = item.type !== 'folder' && item.type !== 'file';
+        const label = item.type === 'folder' || item.type === 'file'
           ? item.name
           : item.type === 'browserElement'
             ? t('composer.context.browserElement')
             : item.origin === 'selection'
               ? t('composer.context.quote')
               : t('composer.context.pastedText');
-        const meta = item.type === 'folder'
+        const meta = item.type === 'folder' || item.type === 'file'
           ? item.path
           : item.type === 'browserElement'
             ? item.selector
@@ -47,6 +47,11 @@ export function ContextCards({
                 <svg viewBox="0 0 16 16" fill="none">
                   <path d="M1.75 4.25h4l1.2 1.5h7.3v7.5H1.75z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                   <path d="M1.75 5.75v-3h4l1.2 1.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                </svg>
+              ) : item.type === 'file' ? (
+                <svg viewBox="0 0 16 16" fill="none">
+                  <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
                 </svg>
               ) : item.type === 'browserElement' ? (
                 <svg viewBox="0 0 16 16" fill="none">

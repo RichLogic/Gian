@@ -27,7 +27,8 @@ export function assertSourceCertificate(certificate, run, manifest) {
     || certificate.repository !== 'RichLogic/Gian-Dev' || certificate.sha !== run.head_sha
     || String(certificate.runId) !== String(run.id) || run.conclusion !== 'success'
     || String(certificate.runAttempt) !== String(run.run_attempt)
-    || run.head_branch !== 'main' || run.event === 'pull_request'
+    || !/^release\/[0-9]+\.[0-9]+\.[0-9]+$/.test(run.head_branch ?? '')
+    || !['push', 'workflow_dispatch'].includes(run.event)
     || run.path !== '.github/workflows/ci.yml'
     || run.repository?.full_name !== certificate.repository) throw new Error('Untrusted/incomplete source certificate');
   if (JSON.stringify(certificate.manifest) !== JSON.stringify(manifest)) throw new Error('Curated source differs from certified GianDev tree');

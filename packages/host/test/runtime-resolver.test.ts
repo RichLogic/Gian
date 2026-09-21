@@ -784,6 +784,31 @@ test('fingerprint uses one global budget and rejects unauthorized configHome', a
   assert.match(digest, /^[0-9a-f]{64}$/);
 });
 
+test('fingerprint wraps a vanished content root in a typed RUNTIME_ROOT_MISSING error', async (t) => {
+  const root = await tempRoot(t);
+  const missing = join(root, 'bin', 'gone');
+  await assert.rejects(
+    () => hostRuntimeFingerprint({
+      selectedPath: missing,
+      configHome: null,
+      contentRoots: [{ path: missing, mode: 'file' }],
+      homeDir: root,
+    }),
+    (error: unknown) => error instanceof RuntimeFingerprintError
+      && error.code === 'RUNTIME_ROOT_MISSING'
+      && !('syscall' in error),
+  );
+});
+
+test('resolve with a vanished selected Runtime path fails with the typed missing-root code', { timeout: 20_000 }, async (t) => {
+  const { root, entry } = await writeFixture(t, runtimeFixtureSource());
+  const gone = join(root, 'bin', 'deleted-cli');
+  await assert.rejects(
+    () => resolverFor(root).resolve(externalInput(entry, gone)),
+    (error: unknown) => error instanceof RuntimeResolverError && error.code === 'RUNTIME_ROOT_MISSING',
+  );
+});
+
 test('readinessIssue and Manifest identity mismatch produce no lease', { timeout: 20_000 }, async (t) => {
   const ready = await writeFixture(t, runtimeFixtureSource({ mode: 'readiness' }));
   const cli = join(ready.root, 'bin', 'fixture-cli');

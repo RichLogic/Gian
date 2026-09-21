@@ -2,6 +2,7 @@
   "version": 1,
   "discoveryRoots": [
     "scripts",
+    "catalog/proxy-information",
     "packages/host/test",
     "packages/web/test",
     "packages/desktop/test",
@@ -37,6 +38,16 @@
     "system"
   ],
   "groups": [
+    {
+      "id": "proxy-information-projection",
+      "patterns": ["catalog/proxy-information/project.test.mjs"],
+      "module": "scripts",
+      "scope": "integration",
+      "purposes": ["regression", "contract"],
+      "sideEffects": ["temporary-filesystem"],
+      "platforms": ["any"],
+      "runner": "scripts-node"
+    },
     {
       "id": "host-unit",
       "patterns": [
@@ -656,7 +667,8 @@
       "id": "kimi-proxy-integration",
       "patterns": [
         "packages/proxies/kimi-proxy/test/service.test.ts",
-        "packages/proxies/kimi-proxy/test/session-store.test.ts"
+        "packages/proxies/kimi-proxy/test/session-store.test.ts",
+        "packages/proxies/kimi-proxy/test/rpc-deadline.test.ts"
       ],
       "module": "kimi-proxy",
       "scope": "integration",
@@ -806,6 +818,7 @@
         "scripts/dev.test.mjs",
         "scripts/delivery-policy.test.mjs",
         "scripts/fixture-atomic-json.test.mjs",
+        "scripts/node-entitlements.test.mjs",
         "scripts/quality-lock.test.mjs"
       ],
       "module": "scripts",
@@ -851,6 +864,11 @@
     {
       "id": "scripts-system",
       "patterns": [
+        "scripts/remote-delivery.test.mjs",
+        "scripts/remote-protocol-package.test.mjs",
+        "scripts/proxy-protocol-package.test.mjs",
+        "scripts/proxies-delivery.test.mjs",
+        "scripts/remote-deployment-system.test.mjs",
         "scripts/build-proxy-artifacts.test.mjs",
         "scripts/check-traceability.test.mjs",
         "scripts/check-ui-operations.test.mjs",
@@ -883,6 +901,7 @@
         "e2e/specs/*.spec.ts",
         "test/e2e/specs/*.spec.ts"
       ],
+      "exclude": ["test/e2e/specs/remote-deployed.spec.ts"],
       "module": "e2e",
       "scope": "e2e",
       "purposes": [
@@ -900,6 +919,16 @@
       "platforms": [
         "any"
       ],
+      "runner": "playwright"
+    },
+    {
+      "id": "remote-deployed-e2e",
+      "patterns": ["test/e2e/specs/remote-deployed.spec.ts"],
+      "module": "e2e",
+      "scope": "e2e",
+      "purposes": ["regression", "smoke"],
+      "sideEffects": ["browser", "network", "temporary-filesystem"],
+      "platforms": ["any"],
       "runner": "playwright"
     },
     {
@@ -924,6 +953,8 @@
     {
       "id": "dsh-proxy-unit",
       "patterns": [
+        "packages/proxies/dsh-proxy/test/bridge-launch.test.ts",
+        "packages/proxies/dsh-proxy/test/profile.test.ts",
         "packages/proxies/dsh-proxy/test/contract.test.ts",
         "packages/proxies/dsh-proxy/test/host-validator.test.ts",
         "packages/proxies/dsh-proxy/test/idempotency-replay.test.ts",
@@ -967,11 +998,12 @@
       "id": "zcode-proxy-unit",
       "patterns": [
         "packages/proxies/zcode-proxy/test/catalog.test.ts",
-        "packages/proxies/zcode-proxy/test/lifecycle.test.ts",
+        "packages/proxies/zcode-proxy/test/customization.test.ts",
         "packages/proxies/zcode-proxy/test/interaction-replay.test.ts",
-        "packages/proxies/zcode-proxy/test/validator.test.ts",
+        "packages/proxies/zcode-proxy/test/lifecycle.test.ts",
+        "packages/proxies/zcode-proxy/test/runtime-discover.test.ts",
         "packages/proxies/zcode-proxy/test/transport.test.ts",
-        "packages/proxies/zcode-proxy/test/customization.test.ts"
+        "packages/proxies/zcode-proxy/test/validator.test.ts"
       ],
       "module": "zcode-proxy",
       "scope": "unit",
@@ -1087,6 +1119,14 @@
     }
   ],
   "specialEntrypoints": [
+    {
+      "id": "remote-deployed-ui",
+      "path": "playwright.remote-acceptance.config.mjs",
+      "testPaths": ["test/e2e/specs/remote-deployed.spec.ts"],
+      "scope": "e2e",
+      "purposes": ["regression", "smoke"],
+      "sideEffects": ["browser", "network", "temporary-filesystem"]
+    },
     {
       "id": "dsh-bridge-runtime-canary",
       "path": "scripts/run-dsh-bridge-canary.mjs",

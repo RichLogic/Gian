@@ -132,7 +132,26 @@ function requireStringArray(value, label) {
 }
 
 export async function loadProxyRealAcceptanceCatalog(path = defaultCatalogPath) {
-  return JSON.parse(await readFile(path, 'utf8'));
+  return resolveAcceptanceTargets(JSON.parse(await readFile(path, 'utf8')));
+}
+
+// The checked-in file defines scenarios, not a certificate for a past release.
+// Resolve omitted target versions from the source being tested. Explicit pins
+// remain intact so validation still rejects a mismatched requested target.
+export function resolveAcceptanceTargets(catalog, definitions = proxyDefinitions) {
+  const providers = requireRecord(catalog.providers, 'providers');
+  return {
+    ...catalog,
+    providers: Object.fromEntries(Object.entries(providers).map(([id, value]) => {
+      const provider = requireRecord(value, `providers.${id}`);
+      const definition = definitions.find(candidate => candidate.id === id);
+      return [id, {
+        ...provider,
+        pluginVersion: provider.pluginVersion === undefined
+          ? definition?.pluginVersion : provider.pluginVersion,
+      }];
+    })),
+  };
 }
 
 export function validateProxyRealAcceptanceCatalog(catalog) {

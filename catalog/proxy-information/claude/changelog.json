@@ -1,0 +1,432 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "claude",
+  "currentVersion": "0.3.1",
+  "entries": [
+    {
+      "version": "0.3.1",
+      "firstPublishedAt": "2026-09-17T00:56:19Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.3.1",
+          "publishedAt": "2026-09-17T00:56:19Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.3.1/gian-proxy-claude-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "2fbb362ebb193591d2c1f98dbcf47580dce3f5e6d180ef35e73c6ac9618f0b1f",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.3.1/gian-proxy-claude-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "aabb7c311d49b278d6908256537dfff7eaf8f9e2a14ae02d98170997ad4e1be3",
+            "size": 512809
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        },
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.1",
+          "publishedAt": "2026-09-20T09:48:17Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.1/gian-proxy-claude-0.3.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "2fbb362ebb193591d2c1f98dbcf47580dce3f5e6d180ef35e73c6ac9618f0b1f",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.1/gian-proxy-claude-0.3.1-darwin-arm64.tar.gz",
+            "sha256": "b261608bf9e4cfe2829d86a72b8879e9ea6217cef78094ae0634898d4d009075",
+            "size": 513099
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "对齐 Proxy 包、Manifest 与内嵌自检的版本身份；CLI 兼容声明仍为 2.1.159。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/c9b037a72c881eefa2ec2474a2591b1c142de563"
+          ]
+        },
+        {
+          "category": "attention",
+          "text": "2026-09-20 从 Gian-Proxies 分发；这是来源/制品记录，不是另一个 Proxy 版本。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.0",
+      "firstPublishedAt": "2026-09-16T03:41:14Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.3.0",
+          "publishedAt": "2026-09-16T03:41:14Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.3.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.3.0/gian-proxy-claude-0.3.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5e67c00c8384d250986d1fe77015f8bb997dce6d97d2e8db234b2a8ce6013ecc",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.3.0/gian-proxy-claude-0.3.0-darwin-arm64.tar.gz",
+            "sha256": "8d45bd9feb5ccb5270df2105e99c8b48681006bc113ce617b9a20760ef8f231e",
+            "size": 512781
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "提供 Proxy-owned runtime.install.plan v1，使受管 Runtime 安装配方随 Proxy 交付。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/593ca856393a48aaabfbcfa49657f28c268e57b1"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.2.5",
+      "firstPublishedAt": "2026-09-15T06:09:32Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.2.5",
+          "publishedAt": "2026-09-15T06:09:32Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.2.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.5/gian-proxy-claude-0.2.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "001b759ade0f9a5bfe3181aeb1e8cedd15a9d759a85f2e5aed13904bfb627b57",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.5/gian-proxy-claude-0.2.5-darwin-arm64.tar.gz",
+            "sha256": "6c1c3fe5440a41bfb46b3677dd00c59b2b31cbc15f09097380dee780ee108c83",
+            "size": 510914
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "发布新的补丁身份供受管安装使用，避免重写既有不可变制品。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/commit/45b222b7ae789b1f92ae6424090a8b6bd11b6545"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.2.4",
+      "firstPublishedAt": "2026-09-13T09:17:22Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.2.4",
+          "publishedAt": "2026-09-13T09:17:22Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.2.4",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.4/gian-proxy-claude-0.2.4-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "97aa83c41d699d9287f635316a5f21d53c63587fd9395bd2f1f955d39abf38e6",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.4/gian-proxy-claude-0.2.4-darwin-arm64.tar.gz",
+            "sha256": "cbecd64e77a661d3fd9a6233fda898ff972cd9a9bb65571aaf8978403fe82b5b",
+            "size": 510915
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.1 <3.0 调整为 >=2.2 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.4/gian-proxy-claude-0.2.4-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 3 调整为 Schema 4。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.4/gian-proxy-claude-0.2.4-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.2.3",
+      "firstPublishedAt": "2026-08-28T08:43:43Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.2.3",
+          "publishedAt": "2026-08-28T08:43:43Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.2.3",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "c6f378987e1398f16bf31d35426e43e2fb1b2924bbd4ed93703aeff4039c756a",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz",
+            "sha256": "ae27cd8a61b5b353c99641b93cab0457e05c2a6b184320857a516fc9468217b9",
+            "size": 490529
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.1 <3.0",
+          "manifestSchema": 3,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=2.0 <3.0 调整为 >=2.1 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.2/gian-proxy-claude-0.2.2-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "Manifest 从 Schema 2 调整为 Schema 3。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.2/gian-proxy-claude-0.2.2-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.3/gian-proxy-claude-0.2.3-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。"
+      ]
+    },
+    {
+      "version": "0.2.2",
+      "firstPublishedAt": "2026-08-25T08:08:22Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.2.2",
+          "publishedAt": "2026-08-25T08:08:22Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.2.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.2/gian-proxy-claude-0.2.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "7c4579f9020fb92c6eb4e8b78604232ffc9159b79ea5a7b98b35d106dbb3c1de",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.2/gian-proxy-claude-0.2.2-darwin-arm64.tar.gz",
+            "sha256": "7b8b15c8b823c88f177bb22ab7018b14b60dc65c45c65cbb9d09090f3ba49e29",
+            "size": 410686
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "session"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.2.0",
+      "firstPublishedAt": "2026-08-23T04:13:08Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.2.0",
+          "publishedAt": "2026-08-23T04:13:08Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.2.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.0/gian-proxy-claude-0.2.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "99f68045ac027eda993d5bc1eb1173af5f34f9c949bd321a6aca0e7c99d2efc4",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.0/gian-proxy-claude-0.2.0-darwin-arm64.tar.gz",
+            "sha256": "76f3c318252840f651b1143739acae5747e2efd0e0abfc45b8f524b590b1deb9",
+            "size": 349632
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.0 <3.0",
+          "manifestSchema": 2,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Manifest 声明的协议范围由 >=1.0 <2.0 调整为 >=2.0 <3.0。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.1.1/gian-proxy-claude-0.1.1-darwin-arm64.tar.gz.manifest.json",
+            "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.2.0/gian-proxy-claude-0.2.0-darwin-arm64.tar.gz.manifest.json"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.1.1",
+      "firstPublishedAt": "2026-08-14T14:12:59Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.1.1",
+          "publishedAt": "2026-08-14T14:12:59Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.1.1",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.1.1/gian-proxy-claude-0.1.1-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "b460fb309a4b70e8602517def8eb00d09f12c2c7537d059d5ff58397d046e79c",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.1.1/gian-proxy-claude-0.1.1-darwin-arm64.tar.gz",
+            "sha256": "4448312ce527c363f3500a16fed9c3151acee017df984bb367553c80d945bcb2",
+            "size": 397715
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.159"
+            ],
+            "basis": "recommended-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=1.0 <2.0",
+          "manifestSchema": 2,
+          "processScope": "session"
+        }
+      ],
+      "changes": [],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "该历史 Runtime 值来自 recommendedCliVersion，只能显示为推荐声明，不代表完整组合认证。"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "firstPublishedAt": "2026-08-12T09:07:19Z",
+      "evidenceCoverage": "metadata-only",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian",
+          "tag": "proxy-claude-v0.1.0",
+          "publishedAt": "2026-08-12T09:07:19Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.1.0",
+          "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.1.0/gian-proxy-claude-0.1.0-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "aa0c0fba2ad7609662cb2006fb05059488c21ee711f68aa4e0d25b1c51d379ec",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian/releases/download/proxy-claude-v0.1.0/gian-proxy-claude-0.1.0-darwin-arm64.tar.gz",
+            "sha256": "03621a5a1a855025eb22623a986f80caab9bf04aa73aa8586ee60ff3d3eea0fe",
+            "size": 395760
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [],
+            "basis": "unrecorded"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=1.0 <2.0",
+          "manifestSchema": 2,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "保留的公开记录中的首次独立 Proxy 发行。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian/releases/tag/proxy-claude-v0.1.0"
+          ]
+        }
+      ],
+      "unknowns": [
+        "原 Release 未提供可独立归因的完整用户变更说明；本记录只列已证实的发行/Manifest 事实，不把整仓库 compare 内容当作此 Proxy 的新增或修复。",
+        "此版本公开 Manifest 未记录 CLI 版本，不能反向套用当前 CLI 版本。"
+      ]
+    }
+  ],
+  "withdrawnVersions": [
+    {
+      "version": "0.4.0",
+      "withdrawnOn": "2026-09-20",
+      "reason": "统一升版已撤回，不是可安装版本，也不得重打该标签冒充新发行。",
+      "evidence": "https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md"
+    }
+  ]
+}

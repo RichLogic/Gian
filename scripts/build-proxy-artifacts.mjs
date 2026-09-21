@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   readFile,
   readdir,
@@ -83,6 +84,7 @@ export async function discoverProxyDefinitions(repoRoot = root) {
       packageName: packageMetadata.name,
       pluginVersion: packageMetadata.version,
       sourceEntry: join(proxiesDir, directory, packageMetadata.main),
+      bundlePackages: release.bundlePackages ?? [],
       shipping: release.shipping,
       realAcceptance: release.realAcceptance,
       displayName: manifest.displayName,
@@ -250,6 +252,18 @@ export async function main(argv = process.argv.slice(2)) {
     try {
       await buildProxyBundle(definition.sourceEntry, proxyEntry);
       await chmod(proxyEntry, 0o755);
+      for (const companion of definition.bundlePackages) {
+        if (!/^[a-z][a-z0-9-]+$/.test(companion.directory ?? '')
+          || !canonicalRelativePath(companion.path)
+          || !Array.isArray(companion.files) || companion.files.length === 0) {
+          throw new Error('Invalid bundled package metadata');
+        }
+        for (const file of companion.files) {
+          if (!canonicalRelativePath(file)) throw new Error('Invalid bundled package file');
+          await cp(join(root, 'packages/proxies', companion.directory, file),
+            join(packageDir, companion.path, file), { recursive: true, errorOnExist: true, force: false });
+        }
+      }
       const references = [
         ...Object.values(manifest.branding?.logo ?? {}).filter(Boolean),
         ...(manifest.skills ?? []),

@@ -1,0 +1,9 @@
+.git
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+output
+coverage
+runtime.env
+deploy.env
+.env

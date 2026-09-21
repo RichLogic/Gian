@@ -17,6 +17,30 @@
   },
   "rules": [
     {
+      "id": "proxy-information-projection",
+      "patterns": ["catalog/proxy-information/**"],
+      "modules": ["scripts", "proxy-catalog-contract"],
+      "scopes": ["integration", "unit"],
+      "checks": ["quality:test-catalog"],
+      "reason": "Authored Proxy tutorials and histories project to signed v1-compatible Catalog documents."
+    },
+    {
+      "id": "proxy-protocol-delivery",
+      "patterns": ["delivery/proxies/**", "scripts/export-proxies.mjs", "scripts/proxies-delivery.test.mjs", "scripts/proxy-protocol-package.mjs", "scripts/proxy-protocol-package.test.mjs", "scripts/import-proxy-protocol.mjs", "scripts/fixtures/proxy-protocol-consumer.mts", ".github/workflows/proxy-protocol-release.yml"],
+      "modules": ["proxy-protocol", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Public Proxy Protocol delivery binds the standalone consumer to immutable public package bytes."
+    },
+    {
+      "id": "remote-delivery",
+      "patterns": ["delivery/remote/**", "scripts/export-remote.mjs", "scripts/remote-delivery.test.mjs", "scripts/remote-deployment-system.test.mjs", "scripts/remote-protocol-package.mjs", "scripts/remote-protocol-package.test.mjs", "scripts/import-remote-protocol.mjs"],
+      "modules": ["remote-protocol", "remote-server", "remote-web", "chat-ui", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Remote export and delivery changes affect its independent build, artifact integrity and deployment boundary."
+    },
+    {
       "id": "root-test-infrastructure",
       "patterns": [
         "package.json",
@@ -26,10 +50,16 @@
         "test/*.json",
         "test/e2e/**",
         "playwright.config.ts",
+        "playwright.remote-acceptance.config.mjs",
+        "scripts/run-giandev-acceptance.mjs",
         "scripts/run-tests.mjs",
         "scripts/test-catalog.mjs",
         "scripts/run-affected-tests.mjs",
         "scripts/test-selection.mjs",
+        "scripts/local-verification.mjs",
+        "scripts/execution-policy.mjs",
+        "scripts/run-verification.mjs",
+        "scripts/typecheck.mjs",
         ".github/workflows/*.yml"
       ],
       "modules": [
@@ -64,7 +94,6 @@
         "quality:test-catalog",
         "quality:test-selection",
         "quality:functional-evidence",
-        "quality:traceability",
         "quality:docs",
         "quality:operations:strict",
         "quality:versions"
@@ -74,6 +103,8 @@
     {
       "id": "quality-docs",
       "patterns": [
+        "*.md",
+        "docs/archive/**",
         "docs/**/*.md",
         ".agents/skills/**",
         "AGENTS.md",
@@ -82,6 +113,7 @@
         "design/**"
       ],
       "optionalPatterns": [
+        "docs/archive/**",
         "docs/**/*.md",
         ".agents/skills/**",
         "AGENTS.md",
@@ -92,10 +124,9 @@
       "modules": [],
       "scopes": [],
       "checks": [
-        "quality:traceability",
         "quality:docs"
       ],
-      "reason": "Quality, project documentation, and design review assets must retain valid links and traceability."
+      "reason": "Documentation and historical snapshots need valid active links, not product regression or a manual ledger."
     },
     {
       "id": "scripts",
@@ -320,7 +351,6 @@
       ],
       "checks": [
         "typecheck",
-        "quality:traceability",
         "quality:docs"
       ],
       "reason": "Gian Tool contracts cross shared validation, role/direct-ownership authorization, Host domain orchestration, private transports, Session-scoped Host Service injection, worktree view context, and the Codex runtime adapter."
@@ -381,8 +411,7 @@
         "system"
       ],
       "checks": [
-        "typecheck",
-        "quality:traceability"
+        "typecheck"
       ],
       "reason": "Side Chat and Session Fork contracts cross protocol schemas, Host transient persistence, and Fake Proxy subprocess evidence."
     },
@@ -655,8 +684,7 @@
         "integration"
       ],
       "checks": [
-        "typecheck",
-        "quality:traceability"
+        "typecheck"
       ],
       "reason": "Conversation-bound schedules cross the shared contract, the Host schedule state machine, Session fork/send surfaces, the Gian Tool boundary, and migration 069."
     },
@@ -714,7 +742,6 @@
       ],
       "checks": [
         "typecheck",
-        "quality:traceability",
         "quality:docs"
       ],
       "reason": "Remote Web V1 Host identity, Queue revision, closed facade, and outbound connector share protocol types without copying schemas."
@@ -798,7 +825,6 @@
       ],
       "checks": [
         "typecheck",
-        "quality:traceability",
         "quality:docs"
       ],
       "reason": "Production Settings and QR pairing cross the local Host, Remote Server, and browser authorization boundary.",

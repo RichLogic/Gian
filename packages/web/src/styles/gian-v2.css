@@ -993,6 +993,46 @@
   overflow-wrap: anywhere;
 }
 .composer-rich-paragraph { margin: 0; min-height: 20px; }
+/* Markdown blocks inside the composer input — deliberately restrained so a
+ * heading or list still reads as a chat draft, not a document. */
+.composer-md-h { margin: 3px 0 1px; font-weight: 600; line-height: 1.4; }
+.composer-md-h1 { font-size: 16px; }
+.composer-md-h2 { font-size: 15px; }
+.composer-md-h3 { font-size: 14px; }
+.composer-md-h4,
+.composer-md-h5,
+.composer-md-h6 { font-size: 13px; }
+.composer-md-ul,
+.composer-md-ol { margin: 2px 0; padding-left: 22px; }
+.composer-md-li { margin: 0; }
+.composer-md-li-nested { list-style: none; }
+.composer-md-quote {
+  margin: 2px 0;
+  padding: 1px 0 1px 8px;
+  border-left: 2px solid var(--hairline);
+  color: var(--text-2);
+}
+.composer-md-codeblock {
+  display: block;
+  margin: 3px 0;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  font: var(--fz-12)/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+.composer-md-inline-code {
+  padding: 0 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+.composer-md-bold { font-weight: 600; }
+.composer-md-italic { font-style: italic; }
+.composer-md-link { color: var(--accent-text); text-decoration: underline; }
 .composer-rich-placeholder {
   position: absolute;
   inset: 10px 12px auto;
@@ -1048,11 +1088,15 @@
   font-weight: 600;
 }
 /* Context chips read as @-mentions; the glyph lives in CSS so it never
- * pollutes text content, copy, or selection. */
+ * pollutes text content, copy, or selection. File-reference chips carry a
+ * real file icon instead (rendered by the node), so the '@' is suppressed. */
 .composer-inline-reference[data-reference-type="context"]::before {
   content: '@';
   color: var(--text-3);
   font-weight: 600;
+}
+.composer-inline-reference[data-reference-kind="file"]::before {
+  content: none;
 }
 .cir-glyph svg { width: 11px; height: 11px; }
 .cir-label {

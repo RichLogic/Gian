@@ -11,6 +11,7 @@ import type { AccentName, RemoteHostEntry, ThemeName } from '../controller/types
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
+import { hostDisplayName } from '../host-selection.js';
 
 const THEMES: ThemeName[] = ['light', 'warm', 'dark'];
 const ACCENTS: Array<{ id: AccentName; swatch: string }> = [
@@ -32,7 +33,7 @@ function HostRow({ host }: { host: RemoteHostEntry }) {
       <span className={`rw-host-dot${host.online ? '' : ' off'}`} aria-hidden="true" />
       <span className="rw-dev-body">
         <span className="rw-dev-name">
-          {host.name}
+          {hostDisplayName(host, state.hosts)}
           {isCurrent && <span className="rw-dev-badge">{t('settings.host.current')}</span>}
         </span>
         <span className="rw-dev-meta">
@@ -120,6 +121,9 @@ export function SettingsBody() {
 
       <div className="rw-set-sec">
         <span className="rw-set-label">{t('settings.hosts')}</span>
+        <button type="button" className="btn sm secondary" onClick={() => actions.startPairing()}>
+          {t('host.add')}
+        </button>
         {state.hosts.map((host) => (
           <HostRow key={host.id} host={host} />
         ))}

@@ -4,6 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { planAcceptance } from './run-giandev-acceptance.mjs';
+
+test('scoped acceptance rejects unknown groups and does not expand a selected group', () => {
+  assert.throws(() => planAcceptance([]), /Select at least/);
+  assert.throws(() => planAcceptance(['all']), /Unknown acceptance/);
+  assert.throws(() => planAcceptance(['__proto__']), /Unknown acceptance/);
+  const files = planAcceptance(['agent-defaults', 'agent-defaults']);
+  assert.equal(new Set(files).size, files.length);
+  assert.ok(files.includes('packages/web/test/agents-view.test.tsx'));
+  assert.equal(files.some(path => path.includes('/kimi-proxy/')), false);
+  assert.equal(files.some(path => path.includes('/e2e/')), false);
+});
 import {
   affectedExecutionPlan,
   discoverChangedFiles,

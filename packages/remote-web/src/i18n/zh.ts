@@ -21,6 +21,11 @@ export const ZH: Messages = {
   'pair.qr.desc':
     '配对后这台设备可以远程查看和操作该 Host 上的对话。点确认后仍需在 Mac 上的 Gian 中允许这台设备，随时可以撤销。',
   'pair.qr.confirm': '确认配对',
+  'pair.qr.browserHint': '想在 Safari 或其他浏览器中使用？请先转到该浏览器，或复制下方配对链接后打开，再确认配对。配对仅对确认时使用的浏览器生效。',
+  'pair.qr.link': '配对链接',
+  'pair.qr.copyLink': '复制配对链接',
+  'pair.qr.linkCopied': '配对链接已复制。',
+  'pair.qr.copyFailed': '复制失败，请选中链接手动复制。',
 
   'pair.wait.title': '已发送配对请求',
   'pair.wait.body': '等待 Gian 确认 · 请在 Mac 上的 Gian 中允许这台设备',
@@ -53,6 +58,13 @@ export const ZH: Messages = {
   'shell.menu': '对话列表',
 
   'host.selector.label': '切换 Host',
+  'host.select': '选择电脑',
+  'host.selectHint': '从上方菜单选择已配对的电脑，或添加另一台电脑。',
+  'host.add': '添加电脑',
+  'conn.phase.auth': '正在向 Remote Server 验证此浏览器…',
+  'conn.phase.relay': '正在连接电脑并建立加密通道…',
+  'conn.phase.sync': '正在等待电脑同步会话…',
+  'conn.failedHint': '此阶段连接失败，正在自动重试；你也可以从上方切换或添加电脑。',
   'host.status.online': '在线',
   'host.status.offline': '离线',
   'host.status.reconnecting': '重连中',

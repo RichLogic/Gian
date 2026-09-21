@@ -155,6 +155,23 @@ describe('projectSideChatSnapshot', () => {
     expect(items).toEqual([]);
   });
 
+  it('rebuilds completed text and reasoning from a compacted Host snapshot without delta events', () => {
+    const completed = snapshot({
+      events: [
+        notify('turn.started', {}),
+        notify('content.completed', { contentId: 'thought', kind: 'reasoning', content: 'check context' }),
+        notify('content.completed', { contentId: 'answer', kind: 'text', format: 'plain', content: 'SIDECHAT_OK' }),
+        notify('turn.completed', { stopReason: 'completed' }),
+      ],
+    });
+    const reloaded = JSON.parse(JSON.stringify(completed)) as SideChatInfo;
+    const items = projectSideChatSnapshot(reloaded, 'kimi', OPTIONS);
+    expect(items.filter(item => item.kind === 'assistant')).toHaveLength(1);
+    expect(items.find(item => item.kind === 'assistant')).toMatchObject({ text: 'SIDECHAT_OK', turn: 1 });
+    expect(items.find(item => item.kind === 'reasoning')).toMatchObject({ text: 'check context', turn: 1 });
+    expect(projectSideChatSnapshot(reloaded, 'kimi', OPTIONS)).toEqual(items);
+  });
+
   it('marks a crash-interrupted uncertain turn as failed/interrupted (§10.5.3) — but not one that terminated', () => {
     const uncertain = projectSideChatSnapshot(snapshot({
       uncertain_turn_id: 'pt-1',

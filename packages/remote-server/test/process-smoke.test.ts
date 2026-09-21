@@ -61,6 +61,19 @@ test('built remote server CLI includes migrations, listens, and shuts down on SI
     assert.equal(health.status, 200);
     const body = await health.json() as { ok?: boolean };
     assert.equal(body.ok, true);
+    const enrollment = spawnSync(process.execPath, [join(packageRoot, 'dist', 'src', 'cli.js'),
+      'enrollment', 'create', '--label', 'CLI smoke Mac'], {
+      cwd: packageRoot, encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, GIAN_REMOTE_ADMIN_TOKEN: 'cli-smoke-admin',
+        GIAN_REMOTE_PUBLIC_ORIGIN: 'https://remote.test', GIAN_REMOTE_HOST: '127.0.0.1',
+        GIAN_REMOTE_PORT: new URL(url).port },
+    });
+    assert.equal(enrollment.status, 0, enrollment.stderr);
+    assert.match(enrollment.stdout, /Server URL: https:\/\/remote.test/);
+    assert.match(enrollment.stdout, /Enrollment token: [-_a-zA-Z0-9]+/);
+    assert.match(enrollment.stdout, /Expires at:/);
+    assert.doesNotMatch(enrollment.stdout + enrollment.stderr, /cli-smoke-admin/);
+    assert.equal(child.exitCode, null, 'issuing enrollment must not stop the running server');
     const page = await fetch(`${url}/`);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /remote/);

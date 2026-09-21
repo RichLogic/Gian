@@ -398,6 +398,7 @@ export class GianToolService {
             model: agent.defaults.model || null,
             thinking: agent.defaults.thinking || null,
             mode: agent.defaults.mode || null,
+            option_defaults: { ...(agent.defaults.options ?? {}) },
           },
           models: [],
           modes: [],
@@ -421,6 +422,7 @@ export class GianToolService {
           model: agent.defaults.model || null,
           thinking: agent.defaults.thinking || null,
           mode: agent.defaults.mode || null,
+          option_defaults: { ...(agent.defaults.options ?? {}) },
         },
         models: configChoices(options, 'model').map(choice => ({
           ...choice,
@@ -1009,7 +1011,7 @@ export class GianToolService {
       id: agent.id,
       name: agent.name,
       proxy: agent.proxy,
-      defaults: { ...agent.defaults },
+      defaults: { ...agent.defaults, options: { ...(agent.defaults.options ?? {}) } },
     };
   }
 

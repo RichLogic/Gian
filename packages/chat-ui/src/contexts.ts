@@ -9,12 +9,6 @@ import { createContext } from 'react';
 import type { MessageAttachment } from '@gian/shared';
 import type { DiffItem } from './types.js';
 
-/** Routes ordinary web links (http/https) — e.g. to an in-app browser
- *  surface. Null: links open in a new tab via the plain anchor. */
-export const BrowserLinkOpenContext = createContext<
-  ((url: string) => void) | null
->(null);
-
 /** Detail requests a chat-ui component can ask the host app to open in its
  *  own detail surface (Gian Web: panel 2). The app may widen this union with
  *  its own kinds; chat-ui only ever emits these. */
@@ -41,23 +35,9 @@ export const ChatPanelOpenContext = createContext<
 >(null);
 
 /**
- * File-link clicks. The host app decides what "open" means (an in-app preview
- * surface, typically). The package never constructs an absolute-path or
- * editor-scheme opener itself: when null, a file link renders inert — clicks
- * are prevented so the SPA never navigates to a synthesized URL.
+ * File-link and web-link behavior now travels through the unified
+ * `LinkBehaviorContext` (see `links/LinkBehaviorContext.tsx`).
  */
-export const FileLinkOpenContext = createContext<
-  ((path: string, line?: number) => void) | null
->(null);
-
-/**
- * Optional href factory for file links (right-click → Copy Link Address,
- * status-bar preview). The host app owns any scheme it emits (Gian Web maps
- * to its editor scheme); the package itself never synthesizes one.
- */
-export const FileLinkHrefContext = createContext<
-  ((path: string, line?: number) => string) | null
->(null);
 
 /** Opens an image in the host app's lightbox. Null: thumbnails keep their
  *  plain `href` (new tab) behavior. */
@@ -88,15 +68,6 @@ export interface PlanOpenPayload {
 }
 export const PlanOpenContext = createContext<
   ((payload: PlanOpenPayload) => void) | null
->(null);
-
-/**
- * Click-time fallback for relative-path markdown links that the render-time
- * linkify pass did NOT resolve. Null: clicks are swallowed so the SPA never
- * navigates to a junk relative URL.
- */
-export const RelativeLinkOpenContext = createContext<
-  ((href: string) => void) | null
 >(null);
 
 /**

@@ -68,6 +68,35 @@ async function setup() {
   };
 }
 
+test('remote rename propagates through Settings to Server without replacing enrollment', async () => {
+  const context = await setup();
+  try {
+    const original = context.host.app.remote.enrollment.current()!;
+    await context.controller.setHostName?.('Home Mac');
+    const saved = context.host.app.remote.enrollment.current()!;
+    assert.equal(saved.hostId, original.hostId);
+    assert.deepEqual(saved.hostPublicKey, original.hostPublicKey);
+    assert.equal(saved.hostName, 'Home Mac');
+    assert.equal(context.server.handle.services.repos.getHost(saved.hostId)!.name, 'Home Mac');
+    const bad = await context.host.fetch('/api/remote/host-name', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ host_name: ' ' }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(context.host.app.remote.enrollment.current()!.hostName, 'Home Mac');
+  } finally { await context.close(); }
+});
+
+test('failed Server rename leaves the persisted local name unchanged', async t => {
+  const context = await setup();
+  try {
+    const original = context.host.app.remote.enrollment.current()!.hostName;
+    t.mock.method(HttpRemoteServerAuthClient.prototype, 'renameHost', async () => { throw new Error('offline'); });
+    await context.controller.setHostName?.('Unsaved name');
+    assert.equal(context.host.app.remote.enrollment.current()!.hostName, original);
+    assert.equal(context.controller.getState().error, 'operation_failed');
+  } finally { await context.close(); }
+});
+
 for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter pairs a real Remote Web browser by ${pairingMode} through Server + Host`, async () => {
   const context = await setup();
   const { controller, host, listener } = context;
@@ -111,6 +140,13 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
     assert.equal(controller.getState().pairing.kind, 'consumed');
     assert.equal(controller.getState().devices.length, 1);
     assert.equal(controller.getState().devices[0].activeConnections, 1);
+    if (pairingMode === 'qr') {
+      const hostId = host.app.remote.enrollment.current()!.hostId;
+      await controller.setHostName?.('Renamed Home Mac');
+      await until(() => browser!.state.hosts.find(entry => entry.id === hostId)?.name === 'Renamed Home Mac');
+      assert.equal(host.app.remote.enrollment.current()!.hostId, hostId);
+      assert.equal(controller.getState().devices.length, 1);
+    }
   } finally { browser?.close(); await context.close(); }
 });
 

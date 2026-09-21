@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withLocalVerification, LOCAL_VERIFICATION_ALLOW, LOCAL_VERIFICATION_TOKEN } from './local-verification.mjs';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -72,17 +73,24 @@ export function verificationCommand(task, args) {
   return { command: command[0], args: [...command[1], ...args] };
 }
 
-export function main(argv = process.argv.slice(2), root = rootDir) {
+export function main(argv = process.argv.slice(2), root = rootDir, sourceEnv = process.env) {
   const [task, ...args] = argv;
   const command = verificationCommand(task, args);
+  return withLocalVerification(task, env => executeVerification(task, args, root, command, env), sourceEnv);
+}
+
+function executeVerification(task, args, root, command, sourceEnv) {
   let snapshot;
-  const env = { ...process.env };
+  const env = { ...sourceEnv };
   try {
     if (needsVerificationIsolation(root)) {
       snapshot = createVerificationSnapshot(root, join(root, '.gian-runtime', 'verification'));
       console.log(`[verification] GianDev stays running; isolated checkout: ${snapshot.checkout}`);
       // Verification must not inherit a live Gian/Provider runtime credential.
-      for (const key of Object.keys(env)) if (key.startsWith('GIAN_')) delete env[key];
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIAN_') && key !== LOCAL_VERIFICATION_ALLOW && key !== LOCAL_VERIFICATION_TOKEN
+          && !(task === 'verify:preview' && key === 'GIAN_ALLOW_DESKTOP_E2E')) delete env[key];
+      }
       const installed = spawnSync('pnpm', ['install', '--offline', '--frozen-lockfile'], {
         cwd: snapshot.checkout, env: { ...env, CI: 'true' }, stdio: 'inherit',
       });

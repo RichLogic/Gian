@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   AgentProxyDefaults,
+  ConfigOption,
   ConfigValue,
   UserAgentStatus,
 } from '@gian/shared';
@@ -10,6 +11,8 @@ import { AgentLogo } from '../components/AgentLogo.js';
 import {
   catalogFromCapabilities,
   executorSettingsFromCapabilities,
+  optionEnabled,
+  optionVisible,
 } from '../components/composer/capabilities.js';
 import { agentIdEntityKey } from '../operations/agents.js';
 import { usePendingOperations } from '../operations/use-operations.js';
@@ -46,7 +49,7 @@ export function AgentDetailPanel({
   const [name, setName] = useState(agent.name);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [resolvedCapabilities, setResolvedCapabilities] = useState<unknown>(null);
-  const [resolvedModel, setResolvedModel] = useState('');
+  const [resolvedSignature, setResolvedSignature] = useState('');
   const [resolvingDefaults, setResolvingDefaults] = useState(false);
   const resolveSequence = useRef(0);
   const [capabilityError, setCapabilityError] = useState(false);
@@ -58,7 +61,7 @@ export function AgentDetailPanel({
     resolveSequence.current += 1;
     setCapabilities(null);
     setResolvedCapabilities(null);
-    setResolvedModel('');
+    setResolvedSignature('');
     setResolvingDefaults(false);
     setCapabilityError(false);
     if (!kind || agent.plugin.state !== 'ready') return () => { alive = false; };
@@ -86,6 +89,12 @@ export function AgentDetailPanel({
   const { models, thinkingLevels: catalogThinking, modes } =
     executorSettingsFromCapabilities(kind, settingsCapabilities);
   const baseCatalog = catalogFromCapabilities(capabilities);
+  const effectiveCatalog = catalogFromCapabilities(settingsCapabilities);
+  // Role-less select options (e.g. provider) persist as per-Agent defaults in
+  // `defaults.options`; the Proxy stays the owner of resolution/validation.
+  const extraOptions = effectiveCatalog.configOptions.filter(option => (
+    !option.role && option.control === 'select' && (option.choices?.length ?? 0) > 0
+  ));
   // Effort vs Thinking label follows the Proxy's advertised option role,
   // not a hardcoded Provider branch.
   const thinkingLabelKey = baseCatalog.configOptions.some(option => option.role === 'effort')
@@ -106,95 +115,181 @@ export function AgentDetailPanel({
     ? defaults.mode
     : modes.find(mode => mode.isDefault)?.id ?? modes[0]?.id ?? '';
 
-  function configWithModel(
-    model: string,
+  /** Effective defaults after a patch: triplet replaces, options merge per
+   *  key with `null` deleting. Mirrors the Host merge semantics. */
+  function mergedDefaults(patch: Partial<AgentProxyDefaults>): AgentProxyDefaults {
+    const next: AgentProxyDefaults = {
+      model: patch.model ?? defaults.model,
+      thinking: patch.thinking ?? defaults.thinking,
+      mode: patch.mode ?? defaults.mode,
+      options: { ...(defaults.options ?? {}) },
+    };
+    if (patch.options !== undefined) {
+      for (const [id, value] of Object.entries(patch.options)) {
+        if (value === null) delete next.options[id];
+        else next.options[id] = value;
+      }
+    }
+    return next;
+  }
+
+  /** Mirror of the Host `configsFromDefaults`: map effective defaults onto
+   *  the base catalog's ids and bindings for `catalog.resolve`. */
+  function configsFromDefaults(
+    value: AgentProxyDefaults,
   ): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
     const sessionConfig: Record<string, ConfigValue> = {};
     const turnConfig: Record<string, ConfigValue> = {};
-    const option = baseCatalog.configOptions.find(candidate => candidate.role === 'model');
-    if (option && model) {
-      (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = model;
+    const assign = (option: ConfigOption, optionValue: ConfigValue): void => {
+      (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = optionValue;
+    };
+    for (const option of baseCatalog.configOptions) {
+      if (option.role === 'model' && value.model) assign(option, value.model);
+      else if (option.role === 'effort' && value.thinking) assign(option, value.thinking);
+      else if ((option.role === 'approval_mode' || option.role === 'execution_mode') && value.mode) {
+        assign(option, value.mode);
+      } else if (!option.role) {
+        const optionValue = value.options?.[option.id];
+        if (optionValue !== undefined) assign(option, optionValue);
+      }
     }
     return { sessionConfig, turnConfig };
   }
 
-  async function changeDefaultModel(model: string): Promise<void> {
+  const defaultsConfig = configsFromDefaults(defaults);
+  const defaultsSignature = JSON.stringify(defaultsConfig);
+  // Condition inputs for visibleWhen/enabledWhen: explicit defaults beat the
+  // Proxy's defaultValue for every advertised option.
+  const conditionValues: Record<string, ConfigValue> = {};
+  for (const option of effectiveCatalog.configOptions) {
+    if (option.defaultValue !== null && option.defaultValue !== undefined) {
+      conditionValues[option.id] = option.defaultValue;
+    }
+  }
+  Object.assign(conditionValues, defaultsConfig.sessionConfig, defaultsConfig.turnConfig);
+
+  /** One atomic defaults patch for any triplet field or role-less option.
+   *  Resolves the full effective config against the Proxy first so dependent
+   *  choices (provider → models) clear stale defaults in the same write. */
+  async function changeDefaultOption(
+    patch: Partial<AgentProxyDefaults>,
+    { writeAlways = true }: { writeAlways?: boolean } = {},
+  ): Promise<void> {
     if (!kind) return;
-    const modelOption = baseCatalog.configOptions.find(option => option.role === 'model');
-    const canResolve = !!model
-      && !!modelOption
-      && !!baseCatalog.catalogRevision
-      && baseCatalog.resolveAdvertised;
+    const next = mergedDefaults(patch);
+    const config = configsFromDefaults(next);
+    const canResolve = !!baseCatalog.catalogRevision
+      && !!baseCatalog.resolveAdvertised
+      && (Object.keys(config.sessionConfig).length > 0 || Object.keys(config.turnConfig).length > 0);
     if (!canResolve) {
       setResolvedCapabilities(null);
-      setResolvedModel('');
-      const nextModel = models.find(candidate => candidate.model === model)
-        ?? models.find(candidate => candidate.isDefault)
-        ?? models[0];
-      const supported = nextModel
-        ? ('supportedEfforts' in nextModel
-            ? nextModel.supportedEfforts
-            : nextModel.supportedThinking).filter((level): level is string => (
-              typeof level === 'string' && level.length > 0
-            ))
-        : [];
-      await onSetDefaults({
-        model,
-        ...(defaults.thinking && !supported.includes(defaults.thinking)
-          ? { thinking: '' }
-          : {}),
-      });
+      setResolvedSignature('');
+      if (patch.model !== undefined) {
+        const nextModel = models.find(candidate => candidate.model === patch.model)
+          ?? models.find(candidate => candidate.isDefault)
+          ?? models[0];
+        const supported = nextModel
+          ? ('supportedEfforts' in nextModel
+              ? nextModel.supportedEfforts
+              : nextModel.supportedThinking).filter((level): level is string => (
+                typeof level === 'string' && level.length > 0
+              ))
+          : [];
+        await onSetDefaults({
+          ...patch,
+          ...(defaults.thinking && !supported.includes(defaults.thinking)
+            ? { thinking: '' }
+            : {}),
+        });
+      } else if (writeAlways || Object.keys(patch).length > 0) {
+        await onSetDefaults(patch);
+      }
       return;
     }
 
     const sequence = ++resolveSequence.current;
     setResolvingDefaults(true);
     try {
-      const config = configWithModel(model);
       const resolved = await loadResolvedProxyCatalog(kind, {
         catalogRevision: baseCatalog.catalogRevision!,
         ...config,
       }, agent.id);
       if (resolveSequence.current !== sequence) return;
       setResolvedCapabilities(resolved);
-      setResolvedModel(model);
-      const resolvedThinking = executorSettingsFromCapabilities(kind, resolved).thinkingLevels;
-      await onSetDefaults({
-        model,
-        ...(defaults.thinking && !resolvedThinking.includes(defaults.thinking)
-          ? { thinking: '' }
-          : {}),
-      });
+      setResolvedSignature(JSON.stringify(config));
+      const resolvedCatalog = catalogFromCapabilities(resolved);
+      const resolvedSettings = executorSettingsFromCapabilities(kind, resolved);
+      const atomic: Partial<AgentProxyDefaults> = {
+        ...patch,
+        ...(patch.options ? { options: { ...patch.options } } : {}),
+      };
+      if (
+        next.model
+        && resolvedSettings.models.length > 0
+        && !resolvedSettings.models.some(model => model.model === next.model)
+      ) {
+        atomic.model = '';
+      }
+      if (
+        next.thinking
+        && resolvedSettings.thinkingLevels.length > 0
+        && !resolvedSettings.thinkingLevels.includes(next.thinking)
+      ) {
+        atomic.thinking = '';
+      }
+      if (
+        next.mode
+        && resolvedSettings.modes.length > 0
+        && !resolvedSettings.modes.some(mode => mode.id === next.mode)
+      ) {
+        atomic.mode = '';
+      }
+      for (const [id, value] of Object.entries(next.options)) {
+        const option = resolvedCatalog.configOptions.find(candidate => candidate.id === id);
+        // Unknown ids stay on disk; known options whose value fell out of the
+        // resolved choices get deleted in the same patch.
+        if (option?.choices?.length && !option.choices.some(choice => Object.is(choice.value, value))) {
+          atomic.options = { ...(atomic.options ?? {}), [id]: null };
+        }
+      }
+      if (writeAlways || Object.keys(atomic).length > 0) await onSetDefaults(atomic);
     } catch {
       if (resolveSequence.current !== sequence) return;
       setResolvedCapabilities(null);
-      setResolvedModel('');
-      await onSetDefaults({ model, ...(defaults.thinking ? { thinking: '' } : {}) });
+      setResolvedSignature('');
+      if (writeAlways) {
+        await onSetDefaults({
+          ...patch,
+          ...(patch.model !== undefined && defaults.thinking ? { thinking: '' } : {}),
+        });
+      }
     } finally {
       if (resolveSequence.current === sequence) setResolvingDefaults(false);
     }
   }
 
+  // Re-resolve whenever the effective defaults signature changes so dependent
+  // selects (thinking/models per model or provider) render the Proxy's own
+  // choices; stale stored defaults are cleared by the same reconciliation.
   useEffect(() => {
     if (
       !capabilities
-      || !defaults.model
       || !!resolvedCapabilities
-      || resolvedModel === defaults.model
       || !baseCatalog.resolveAdvertised
       || !baseCatalog.catalogRevision
-      || !baseCatalog.configOptions.some(option => (
-        option.role === 'model' && option.choices?.some(choice => String(choice.value) === defaults.model)
-      ))
+      || defaultsSignature === resolvedSignature
+      || (Object.keys(defaultsConfig.sessionConfig).length === 0
+        && Object.keys(defaultsConfig.turnConfig).length === 0)
     ) {
       return;
     }
-    void changeDefaultModel(defaults.model);
+    void changeDefaultOption({}, { writeAlways: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capabilities, defaults.model]);
+  }, [capabilities, defaultsSignature]);
 
   const defaultsEditable = !!kind && agent.ready
-    && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0 || capabilityError);
+    && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0
+      || extraOptions.length > 0 || capabilityError);
   const externalHome = agent.home === null;
 
   return (
@@ -279,7 +374,7 @@ export function AgentDetailPanel({
                       disabled={busy || resolvingDefaults || !capabilities}
                       onChange={event => {
                         const model = event.target.value;
-                        void changeDefaultModel(model);
+                        void changeDefaultOption({ model });
                       }}
                     >
                       <option value="">{t('settings.executors.proxyDefault')}</option>
@@ -326,6 +421,36 @@ export function AgentDetailPanel({
                     )}
                   </label>
                 )}
+                {extraOptions.map(option => {
+                  if (!optionVisible(option, conditionValues)) return null;
+                  const current = defaults.options?.[option.id];
+                  return (
+                    <label className="exec-default" key={option.id}>
+                      <span className="lbl">{option.displayName}</span>
+                      <select
+                        className="select mono"
+                        data-testid={`agent-default-option-${option.id}`}
+                        value={current === undefined || current === null ? '' : String(current)}
+                        disabled={busy || resolvingDefaults || !capabilities
+                          || !optionEnabled(option, conditionValues)}
+                        onChange={event => {
+                          const value = event.target.value;
+                          // Empty means the Proxy default: delete the stored key.
+                          void changeDefaultOption({
+                            options: { [option.id]: value === '' ? null : value },
+                          });
+                        }}
+                      >
+                        <option value="">{t('settings.executors.proxyDefault')}</option>
+                        {(option.choices ?? []).map(choice => (
+                          <option key={String(choice.value)} value={String(choice.value)}>
+                            {choice.displayName}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
               </div>
             ) : !kind ? (
               <p className="exec-note">{t('agents.detail.defaultsReadonly')}</p>

@@ -165,6 +165,7 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
     reconnect: () => mutate('/reconnect'),
     disableRemote: () => mutate('/disable'),
     setPublicUrl: url => mutate('/public-url', { public_url: url }),
+    setHostName: name => mutate('/host-name', { host_name: name }),
     confirmServerIdentityChange: expected => mutate('/enrollment/confirm-identity',
       { expected_fingerprint: expected ?? snapshot?.pending_identity_fingerprint }),
     rejectServerIdentityChange: () => mutate('/enrollment/reject-identity'),

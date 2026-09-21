@@ -847,6 +847,62 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
 .cmp-slash-row[data-source="project"] .cmp-slash-cmd { color: var(--accent-text, var(--accent)); }
 .cmp-slash-row[data-source="user"] .cmp-slash-cmd { color: var(--ok); }
 
+/* `@` file-reference typeahead (rendered inside the Lexical #typeahead-menu
+ * anchor, which the plugin positions at the caret). */
+.cmp-file-pop {
+  min-width: 280px;
+  max-width: 420px;
+  background: var(--surface-2);
+  border-radius: var(--r-2);
+  box-shadow: 0 0 0 1px var(--hairline), 0 4px 16px oklch(0 0 0 / 0.15);
+  overflow-y: auto;
+  /* ~7.5 rows + the hint footer — the 8th row peeks to signal scrollability */
+  max-height: 288px;
+  animation: slash-in 100ms var(--ease);
+}
+.cmp-file-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0; background: transparent;
+  text-align: left; cursor: pointer;
+  transition: background 60ms;
+}
+.cmp-file-row:hover,
+.cmp-file-row.active { background: var(--surface-3); }
+.cmp-file-icon {
+  display: inline-flex; align-items: center; flex: none;
+  color: var(--text-3);
+}
+.cmp-file-icon svg { width: 13px; height: 13px; }
+.cmp-file-name {
+  font-size: 12px; font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  flex: none;
+  max-width: 55%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.cmp-file-name strong { font-weight: 700; color: var(--accent-text); }
+.cmp-file-path {
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.cmp-file-empty {
+  padding: 9px 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.cmp-file-hint {
+  padding: 4px 10px 6px;
+  font-size: 10px;
+  color: var(--text-3);
+  opacity: 0.5;
+  border-top: 1px solid var(--hairline);
+}
+
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;

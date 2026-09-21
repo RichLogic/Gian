@@ -217,7 +217,18 @@ async function fingerprintRoot(
   allowSelectedLauncherSymlink: boolean,
   budget: FingerprintBudget,
 ): Promise<string[]> {
-  const info = await lstat(root.path);
+  let info: Stats;
+  try {
+    info = await lstat(root.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new RuntimeFingerprintError(
+        'RUNTIME_ROOT_MISSING',
+        `Runtime content root is missing: ${root.path}`,
+      );
+    }
+    throw error;
+  }
   if (info.isSocket() || info.isFIFO() || info.isCharacterDevice() || info.isBlockDevice()) {
     throw new RuntimeFingerprintError(
       'RUNTIME_ROOT_INVALID',

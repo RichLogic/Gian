@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
+import { hostDisplayName } from '../host-selection.js';
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
@@ -67,8 +68,8 @@ export function HostSelector() {
         onClick={() => setOpen((v) => !v)}
       >
         <span className={`rw-host-dot${online ? '' : ' off'}`} aria-hidden="true" />
-        <span className="rw-host-current">{current?.name ?? '—'}</span>
-        <HostStatusText online={online} reconnecting={reconnecting} />
+        <span className="rw-host-current">{current ? hostDisplayName(current, state.hosts) : t('host.select')}</span>
+        {current && <HostStatusText online={online} reconnecting={reconnecting} />}
         <Icon name="caret-down" size={10} />
       </button>
       {open && (
@@ -88,7 +89,7 @@ export function HostSelector() {
             >
               <span className={`rw-host-dot${host.online ? '' : ' off'}`} aria-hidden="true" />
               <span className="rw-host-name">
-                {host.name}
+                {hostDisplayName(host, state.hosts)}
                 <small>
                   {host.online
                     ? `${t('host.row.sessions', { count: host.sessionCount })} · ${t('host.status.online')}`
@@ -98,6 +99,10 @@ export function HostSelector() {
               {host.id === state.currentHostId && <span className="rw-host-check" aria-hidden="true">✓</span>}
             </button>
           ))}
+          <button type="button" role="menuitem" className="rw-host-row"
+            onClick={() => { setOpen(false); actions.startPairing(); }}>
+            {t('host.add')}
+          </button>
         </div>
       )}
     </div>

@@ -203,6 +203,36 @@ function mergeContentDelta(previous: unknown, incoming: unknown): unknown {
   };
 }
 
+// A completion marker may omit content; preserve the compacted stream before replacing it.
+function withCompletedContent(events: unknown[], incoming: unknown, identity: string): unknown {
+  const record = eventRecord(incoming);
+  const params = nestedRecord(record.params);
+  const data = nestedRecord(params.data);
+  if (typeof data.content === 'string') return incoming;
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const previous = events[index];
+    if (eventIdentity(previous) !== identity) continue;
+    const previousData = nestedRecord(nestedRecord(eventRecord(previous).params).data);
+    if (previousData.kind !== data.kind) continue;
+    const method = eventMethod(previous);
+    const content = method === 'content.delta' ? previousData.delta
+      : method === 'content.completed' ? previousData.content : undefined;
+    if (typeof content !== 'string') continue;
+    return {
+      ...record,
+      params: {
+        ...params,
+        data: {
+          ...data,
+          content: method === 'content.delta' ? content.slice(0, MAX_COMPACTED_CONTENT_CHARS) : content,
+        },
+      },
+    };
+  }
+  return incoming;
+}
+
 function appendCompactedEvent(events: unknown[], incoming: unknown): unknown[] {
   const method = eventMethod(incoming);
   const identity = eventIdentity(incoming);
@@ -229,6 +259,9 @@ function appendCompactedEvent(events: unknown[], incoming: unknown): unknown[] {
   }
 
   if (REPLACEABLE_EVENT_METHODS.has(method)) {
+    const replacement = method === 'content.completed'
+      ? withCompletedContent(events, incoming, identity)
+      : incoming;
     const next = events.filter((event) => {
       if (eventIdentity(event) !== identity) return true;
       const existingMethod = eventMethod(event);
@@ -236,7 +269,7 @@ function appendCompactedEvent(events: unknown[], incoming: unknown): unknown[] {
         ? existingMethod !== 'content.delta' && existingMethod !== 'content.completed'
         : existingMethod !== method;
     });
-    return [...next, incoming].slice(-MAX_TRANSIENT_EVENTS);
+    return [...next, replacement].slice(-MAX_TRANSIENT_EVENTS);
   }
 
   return [...events, incoming].slice(-MAX_TRANSIENT_EVENTS);

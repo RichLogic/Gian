@@ -59,6 +59,10 @@ export class RemoteEnrollmentStore {
     this.db.prepare('UPDATE remote_enrollments SET public_url = ?').run(url);
   }
 
+  setHostName(name: string): void {
+    this.db.prepare('UPDATE remote_enrollments SET host_name = ?').run(name);
+  }
+
   clear(): void {
     this.db.prepare('DELETE FROM remote_enrollments').run();
   }

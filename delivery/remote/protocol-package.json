@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "@gian/remote-protocol",
+  "repository": "RichLogic/Gian",
+  "version": "1.0.0",
+  "tag": "remote-protocol-v1.0.0",
+  "filename": "gian-remote-protocol-1.0.0.tgz",
+  "url": "https://github.com/RichLogic/Gian/releases/download/remote-protocol-v1.0.0/gian-remote-protocol-1.0.0.tgz",
+  "sourceCommit": "239537f48f3770c401ffa070f55b175ed7a968ae",
+  "size": 56827,
+  "sha256": "52efd8efe8dcc0518ad621314131a931cd1bf5ebe3e45a748f8303a27b303df4",
+  "integrity": "sha512-h/5hsfl3Q+UvTB1RdY5WKHQt5kvScFQ8hx/1uwYb47AnUaOA9WzfFUyRiEWRSfqxbSkBf5+RNSUOiKJtLM+QiA==",
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

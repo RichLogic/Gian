@@ -7,6 +7,26 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.2] - 2026-09-21
+
+### Added
+
+- Chat Markdown now renders Mermaid diagrams, mathematical expressions, and
+  syntax-highlighted code blocks.
+- The composer supports basic Markdown editing and `@` file references, with
+  referenced file content included in the conversation context.
+
+### Changed
+
+- Unified link handling and link-type icons across chat surfaces. Web links
+  open in Gian's Browser workspace when using the desktop App.
+
+### Fixed
+
+- Sidechat replies and reasoning remain visible after streaming completes and
+  when the conversation is reopened, including Providers that finish content
+  with a completion marker instead of repeating the full text.
+
 ## [0.6.1] - 2026-09-16
 
 ### Changed

@@ -25,7 +25,7 @@ import type { PluginArtifactNetwork, PluginInstallCoordinate } from '../src/plug
 import { ProxyManager } from '../src/proxy/manager.js';
 import { officialRuntimeIdentity } from '../src/proxy/legacy-launch.js';
 import { QueueManager } from '../src/queue/index.js';
-import { RuntimeResolver } from '../src/runtime/resolver.js';
+import { RuntimeResolver, RuntimeResolverError } from '../src/runtime/resolver.js';
 import type { RuntimeLease } from '../src/runtime/types.js';
 import { SessionBindingPlanner } from '../src/session/binding-planner.js';
 import { SessionManager, type SessionAgentResolver } from '../src/session/manager.js';
@@ -872,6 +872,95 @@ test('exact Runtime accepts launchable drift, rejects identity drift, and releas
   const lease = await prepared.acquireLease();
   await lease?.release();
   await prepared.releaseUnusedLease();
+});
+
+test('exact Runtime with a vanished stored path re-resolves the current generation and re-mints', async () => {
+  const entry = '/tmp/proxy.mjs';
+  const digest = '6'.repeat(64);
+  const stored = openProfile('agent-missing', '/tmp/fixture-runtime-old');
+  const binding: SessionProxyBinding = {
+    schemaVersion: 1,
+    pluginId: parseProxyPluginId('io.gian.fixture'),
+    pluginVersion: '1.0.0',
+    manifestSha256: digest,
+    protocolVersion: '2.2',
+    processScope: 'session',
+    runtimeProfile: stored,
+  };
+  const rediscovered = openProfile('agent-missing', '/tmp/fixture-runtime');
+  const resolveCalls: Array<string | null> = [];
+  let released = 0;
+  const planner = new SessionBindingPlanner({
+    resolveCurrent: async () => null,
+    resolveExact: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
+    runtimeResolver: {
+      resolve: async (input: { agentId: string; selectedPath: string | null }) => {
+        resolveCalls.push(input.selectedPath);
+        if (input.selectedPath !== null) {
+          throw new RuntimeResolverError(
+            'RUNTIME_ROOT_MISSING',
+            `Runtime content root is missing: ${input.selectedPath}`,
+          );
+        }
+        return {
+          profile: rediscovered,
+          lease: {
+            binaryPath: rediscovered.path ?? '/tmp/fixture-runtime',
+            version: rediscovered.version ?? '1.0.0',
+            source: 'override' as const,
+            env: Object.freeze({}),
+            release: async () => { released += 1; },
+          },
+        };
+      },
+    } as unknown as RuntimeResolver,
+  });
+
+  const prepared = await planner.prepareExact(binding);
+  assert.deepEqual(
+    resolveCalls,
+    ['/tmp/fixture-runtime-old', null],
+    'a vanished stored path must fall back to discovering the current generation',
+  );
+  assert.ok(prepared.remintedBinding, 'a rediscovered generation must re-mint the stored binding');
+  assert.deepEqual(prepared.sessionBinding, { ...binding, runtimeProfile: rediscovered });
+  assert.deepEqual(prepared.remintedBinding, prepared.sessionBinding);
+  assert.deepEqual(prepared.launchBinding.runtimeProfile, { identity: rediscovered.id });
+  const lease = await prepared.acquireLease();
+  assert.equal(lease?.binaryPath, '/tmp/fixture-runtime');
+  await lease?.release();
+  await prepared.releaseUnusedLease();
+});
+
+test('exact Runtime rediscovery failure still surfaces instead of resurrecting a dead path', async () => {
+  const entry = '/tmp/proxy.mjs';
+  const digest = '4'.repeat(64);
+  const stored = openProfile('agent-gone', '/tmp/fixture-runtime-old');
+  const binding: SessionProxyBinding = {
+    schemaVersion: 1,
+    pluginId: parseProxyPluginId('io.gian.fixture'),
+    pluginVersion: '1.0.0',
+    manifestSha256: digest,
+    protocolVersion: '2.2',
+    processScope: 'session',
+    runtimeProfile: stored,
+  };
+  const planner = new SessionBindingPlanner({
+    resolveCurrent: async () => null,
+    resolveExact: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
+    runtimeResolver: {
+      resolve: async (input: { selectedPath: string | null }) => {
+        throw new RuntimeResolverError(
+          input.selectedPath === null ? 'RUNTIME_NOT_INSTALLED' : 'RUNTIME_ROOT_MISSING',
+          input.selectedPath === null ? 'No usable Runtime candidate is available.' : 'missing',
+        );
+      },
+    } as unknown as RuntimeResolver,
+  });
+  await assert.rejects(
+    () => planner.prepareExact(binding),
+    (error: unknown) => error instanceof RuntimeResolverError && error.code === 'RUNTIME_NOT_INSTALLED',
+  );
 });
 
 test('Runtime upgrade on resume re-mints and persists the exact binding', async (t) => {

@@ -10,6 +10,7 @@ import {
 import type { ReferenceAnchor } from './reference-popover.js';
 import { formatBytes, isNativeImageMime } from './utils.js';
 import { useChatUiT } from './i18n.js';
+import { LinkifiedText } from './links/linkify-text.js';
 
 export interface InlineReferenceAttachment {
   name: string;
@@ -21,6 +22,7 @@ export interface InlineReferenceAttachment {
 function contextTitle(item: MessageContextItem | undefined, fallback: string): string {
   if (!item) return fallback;
   if (item.type === 'folder') return item.path;
+  if (item.type === 'file') return item.path;
   if (item.type === 'browserElement') {
     return [item.name, item.selector, item.pageUrl].filter(Boolean).join(' - ');
   }
@@ -67,9 +69,12 @@ export function InlineReferenceDocument({
   return (
     <span className={className ? `inline-reference-document ${className}` : 'inline-reference-document'}>
       {document.segments.map((segment, index) => {
-        if (segment.type === 'text') return <span key={index}>{segment.text}</span>;
+        if (segment.type === 'text') return <span key={index}><LinkifiedText text={segment.text} /></span>;
         if (segment.referenceType === 'context') {
           const contextItem = contextItems.find(item => item.id === segment.id);
+          const fileGlyph = (
+            <span className="mir-glyph" aria-hidden="true">{REFERENCE_ICONS.file}</span>
+          );
           if (!contextItem) {
             return (
               <span
@@ -77,8 +82,10 @@ export function InlineReferenceDocument({
                 className="message-inline-reference"
                 data-reference-id={segment.id}
                 data-reference-type="context"
+                {...(segment.kind === 'file' ? { 'data-reference-kind': 'file' } : {})}
                 title={segment.label}
               >
+                {segment.kind === 'file' && fileGlyph}
                 <span className="mir-label">{segment.label}</span>
               </span>
             );
@@ -90,6 +97,7 @@ export function InlineReferenceDocument({
               className="message-inline-reference"
               data-reference-id={segment.id}
               data-reference-type="context"
+              {...(contextItem.type === 'file' ? { 'data-reference-kind': 'file' } : {})}
               title={contextTitle(contextItem, segment.label)}
               onMouseEnter={event => {
                 const el = event.currentTarget;
@@ -104,6 +112,7 @@ export function InlineReferenceDocument({
               }}
               onBlur={() => hover.scheduleClose(() => setPreview(null))}
             >
+              {contextItem.type === 'file' && fileGlyph}
               <span className="mir-label">{segment.label}</span>
             </button>
           );

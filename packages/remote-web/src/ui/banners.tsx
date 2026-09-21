@@ -10,6 +10,7 @@ import { mutationsEnabled } from '../controller/types.js';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions } from './controller-context.js';
 import { Icon } from './icons.js';
+import { HostSelector } from './host-selector.js';
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
@@ -121,6 +122,7 @@ export function DeviceRevokedPage() {
   return (
     <div className="rw-pair" data-conn="device_revoked">
       <div className="rw-pair-card">
+        <HostSelector />
         <span className="rw-fail-ico">
           <Icon name="warning" size={15} />
         </span>

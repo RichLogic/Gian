@@ -1,4 +1,4 @@
-import type { Executor, ProductExecutor } from './model.js';
+import type { ConfigValue, Executor, ProductExecutor } from './model.js';
 import type { ProxyPluginId } from './plugin-id.js';
 import type { OpenRuntimeProfile } from './session-proxy-binding.js';
 import type { AgentHomeBinding } from './managed-runtime.js';
@@ -10,6 +10,10 @@ export interface AgentProxyDefaults {
   thinking: string;
   /** Empty means the Proxy's default session mode. */
   mode: string;
+  /** ids of role-less catalog options (e.g. `provider`). Role-bearing options
+   *  stay in the triplet above; ids absent from the current catalog are
+   *  preserved on disk but skipped at apply time. */
+  options: Record<string, ConfigValue>;
 }
 
 /** Stable user-Agent primary key (uuid). Agents live in `agents.json`
@@ -165,5 +169,6 @@ export function migrateLegacyGrokProxyDefaults(
     model: defaults.model,
     thinking: defaults.thinking || (effortLike ? defaults.mode : ''),
     mode: 'default',
+    options: { ...(defaults.options ?? {}) },
   };
 }

@@ -8,8 +8,7 @@
 import { useMemo } from 'react';
 import {
   ChatPanelOpenContext,
-  FileLinkHrefContext,
-  FileLinkOpenContext,
+  LinkBehaviorContext,
   MessageAttachmentOpenContext,
   Transcript,
   renderChatItem,
@@ -18,6 +17,7 @@ import type { TranscriptItem } from '@gian/chat-ui';
 import type { RemoteSession } from '@gian/remote-protocol';
 import { mutationsEnabled } from '../controller/types.js';
 import { useT } from '../i18n/index.js';
+import { createRemoteLinkBehavior } from '../links/link-behavior.js';
 import { ConnectionBanner, UnknownOutcomeBanner } from './banners.js';
 import { Composer } from './composer.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
@@ -65,6 +65,15 @@ export function ChatPage({ session }: { session: RemoteSession }) {
       interaction => interaction.id === interactionId && interaction.session_id === session.id,
     ));
 
+  const linkBehavior = useMemo(
+    () =>
+      createRemoteLinkBehavior({
+        openFile: path =>
+          actions.openFile({ id: path, sessionId: session.id, label: path.split('/').pop() ?? path }),
+      }),
+    [actions, session.id],
+  );
+
   return (
     <div className={`rw-chat-root${stale ? ' rw-stale' : ''}`}>
       <ConnectionBanner connection={state.connection} />
@@ -77,46 +86,40 @@ export function ChatPage({ session }: { session: RemoteSession }) {
               {t('chat.history.loading')}
             </div>
           )}
-          <FileLinkOpenContext.Provider
-            value={(path) =>
-              actions.openFile({ id: path, sessionId: session.id, label: path.split('/').pop() ?? path })
-            }
-          >
-            <FileLinkHrefContext.Provider value={null}>
-              <MessageAttachmentOpenContext.Provider
-                value={(attachment) => actions.openFile({
-                  id: attachment.url,
-                  sessionId: session.id,
-                  label: attachment.name,
-                })}
-              >
-                <ChatPanelOpenContext.Provider value={null}>
-                  <Transcript
-                    items={items}
-                    pending={streaming}
-                    hydrated={transcript?.hydrated ?? false}
-                    hasOlder={transcript?.hasOlder ?? false}
-                    loadingOlder={transcript?.loadingOlder ?? false}
-                    historyError={transcript?.historyError}
-                    onLoadOlder={() => actions.loadOlderTranscript(session.id)}
-                    onRetryHistory={() => actions.retryTranscript(session.id)}
-                    onApprove={interactionResponder((interactionId, actionId, values) => {
-                      if (!online || responding.has(interactionId)) return;
-                      actions.respondToInteraction(interactionId, actionId, values);
-                    })}
-                    renderItem={(item, ctx) =>
-                      renderChatItem(item, {
-                        ...ctx,
-                        // `responding` renders the card disabled with the
-                        // resolving affordance until the canonical result lands.
-                        isApprovalResolving: (approvalId) => responding.has(approvalId),
-                      })
-                    }
-                  />
-                </ChatPanelOpenContext.Provider>
-              </MessageAttachmentOpenContext.Provider>
-            </FileLinkHrefContext.Provider>
-          </FileLinkOpenContext.Provider>
+          <LinkBehaviorContext.Provider value={linkBehavior}>
+            <MessageAttachmentOpenContext.Provider
+              value={(attachment) => actions.openFile({
+                id: attachment.url,
+                sessionId: session.id,
+                label: attachment.name,
+              })}
+            >
+              <ChatPanelOpenContext.Provider value={null}>
+                <Transcript
+                  items={items}
+                  pending={streaming}
+                  hydrated={transcript?.hydrated ?? false}
+                  hasOlder={transcript?.hasOlder ?? false}
+                  loadingOlder={transcript?.loadingOlder ?? false}
+                  historyError={transcript?.historyError}
+                  onLoadOlder={() => actions.loadOlderTranscript(session.id)}
+                  onRetryHistory={() => actions.retryTranscript(session.id)}
+                  onApprove={interactionResponder((interactionId, actionId, values) => {
+                    if (!online || responding.has(interactionId)) return;
+                    actions.respondToInteraction(interactionId, actionId, values);
+                  })}
+                  renderItem={(item, ctx) =>
+                    renderChatItem(item, {
+                      ...ctx,
+                      // `responding` renders the card disabled with the
+                      // resolving affordance until the canonical result lands.
+                      isApprovalResolving: (approvalId) => responding.has(approvalId),
+                    })
+                  }
+                />
+              </ChatPanelOpenContext.Provider>
+            </MessageAttachmentOpenContext.Provider>
+          </LinkBehaviorContext.Provider>
           {sessionInteractionErrors.map(([interactionId, message]) => (
             <div key={interactionId} className="session-banner rw-danger" role="alert">
               {t('interaction.respondFailed')}: {message}

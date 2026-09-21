@@ -17,7 +17,8 @@ import {
   WebSearchRow,
 } from '../src/items.js';
 import { EventLine, eventDetailText } from '../src/event-lines.js';
-import { ChatPanelOpenContext, DiffOpenContext, FileLinkOpenContext } from '../src/contexts.js';
+import { ChatPanelOpenContext, DiffOpenContext } from '../src/contexts.js';
+import { LinkBehaviorContext } from '../src/links/LinkBehaviorContext.js';
 import type { AgentSpawnItem, AutoNoticeItem, CommandItem, DiffItem, ReasoningItem, ToolItem } from '../src/types.js';
 
 function tool(overrides: Partial<ToolItem> = {}): ToolItem {
@@ -135,9 +136,9 @@ describe('file/search rows', () => {
   it('FileReadCard renders path + line range as a file link', () => {
     const open = vi.fn();
     const { container } = render(
-      <FileLinkOpenContext.Provider value={open}>
+      <LinkBehaviorContext.Provider value={{ openFile: open }}>
         <FileReadCard item={{ kind: 'file-read', id: 'fr-1', path: '/w/a.ts', startLine: 40, endLine: 120, ts: 1, turn: 1 }} />
-      </FileLinkOpenContext.Provider>,
+      </LinkBehaviorContext.Provider>,
     );
     const link = container.querySelector('.trow-subject a.file-link')!;
     expect(link.textContent).toBe('/w/a.ts :40–120');

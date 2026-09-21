@@ -3,10 +3,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import type { ProxyNotification } from '@gian/proxy-protocol';
-import { ProtocolV2Client } from '../src/proxy/protocol-v2-client.js';
+import { ProxyProtocolError, type ProxyNotification } from '@gian/proxy-protocol';
+import {
+  isProxyRequestTimeout,
+  ProtocolV2Client,
+  proxyRequestTimeoutError,
+} from '../src/proxy/protocol-v2-client.js';
 import {
   normalizeProtocolCatalog,
+  PROXY_SESSION_RPC_TIMEOUT_MS,
+  PROXY_SIDECHAT_RPC_TIMEOUT_MS,
   ProtocolV2SessionClient,
 } from '../src/proxy/protocol-v2-session-client.js';
 
@@ -417,4 +423,143 @@ test('timeoutMs must be a finite positive number', async (t) => {
     /did not answer session.get within 100ms/,
   );
   await client.shutdown().catch(() => undefined);
+});
+
+test('isProxyRequestTimeout marks only client-side timeout rejections', async (t) => {
+  // Pure round-trip of the marker used by the Side Chat coordinator's
+  // quarantine guard: a Proxy-reported RUNTIME_UNAVAILABLE domain error must
+  // never be mistaken for a client-side deadline.
+  assert.equal(isProxyRequestTimeout(proxyRequestTimeoutError('io.gian.kimi', 'turn.start', 30_000)), true);
+  assert.equal(
+    isProxyRequestTimeout(new ProxyProtocolError('RUNTIME_UNAVAILABLE', '[RUNTIME_UNAVAILABLE] wedged', false)),
+    false,
+  );
+  assert.equal(isProxyRequestTimeout(new Error('did not answer')), false);
+
+  const source = `
+import { createInterface } from 'node:readline';
+const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of input) {
+  const request = JSON.parse(line);
+  if (request.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+      protocol: { name: 'gian.proxy', version: '2.0' },
+      plugin: { id: 'io.gian.fixture', name: 'Fixture', version: '7.4.2' },
+      process: { scope: 'shared' },
+      capabilities: { 'customization.list': 1 },
+    } }) + '\\n');
+  } else if (request.method === 'customization.list') {
+    setTimeout(() => {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+        kind: request.params.kind, status: 'ok', completeness: 'configured',
+        observedAt: '2026-09-17T00:00:00.000Z', items: [], truncated: false, diagnostics: [],
+      } }) + '\\n');
+    }, 300);
+  } else if (request.method === 'session.get') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: {
+      code: -32002, message: 'SESSION_NOT_FOUND',
+      data: { domainCode: 'SESSION_NOT_FOUND', retryable: false, details: {} },
+    } }) + '\\n');
+  } else if (request.method === 'shutdown') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
+    break;
+  }
+}
+`;
+  const client = await fixtureClient(t, source);
+  t.after(() => { client.forceKill(); });
+  await client.initialize();
+  const timeoutError = await client.request(
+    'customization.list',
+    { kind: 'skill' },
+    { timeoutMs: 30 },
+  ).then(() => null, (error: unknown) => error);
+  assert.match((timeoutError as Error).message, /did not answer/);
+  assert.equal(isProxyRequestTimeout(timeoutError), true);
+  const domainError = await client.request('session.get', { sessionId: 'x' }).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  assert.match((domainError as Error).message, /SESSION_NOT_FOUND/);
+  assert.equal(isProxyRequestTimeout(domainError), false);
+  await client.shutdown().catch(() => undefined);
+});
+
+test('session/turn/sidechat RPCs carry bounded deadlines', async () => {
+  // Unit-level wiring proof: every session/sidechat control RPC passes the
+  // production deadline to the bounded client request. The client-side
+  // timeout mechanics themselves (settle, late-response watermark) are
+  // covered by the fixture-based tests above.
+  const calls: Array<{ method: string; options?: { timeoutMs?: number } }> = [];
+  const sessionSnapshot = {
+    id: 'session-1',
+    streamId: 'stream-1',
+    state: 'idle',
+    createdAt: '2026-09-17T00:00:00.000Z',
+    updatedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const sidechatSnapshot = {
+    id: 'sc-1',
+    parentSessionId: 'session-1',
+    streamId: 'stream-sc-1',
+    state: 'idle',
+    resumeRef: { id: 'ref-1' },
+    anchor: { type: 'empty' },
+    sessionConfig: {},
+    createdAt: '2026-09-17T00:00:00.000Z',
+    updatedAt: '2026-09-17T00:00:00.000Z',
+  };
+  const results: Record<string, unknown> = {
+    'session.create': { session: sessionSnapshot },
+    'sidechat.create': { sidechat: sidechatSnapshot },
+    'sidechat.resume': { sidechat: sidechatSnapshot },
+    'sidechat.close': { ok: true, sidechatId: 'sc-1', providerDataDeleted: true },
+  };
+  const host = {
+    pluginId: 'io.gian.fixture',
+    executor: 'kimi' as const,
+    initialize: async () => ({ capabilities: {} }),
+    catalog: async () => ({
+      catalogRevision: 'rev-1',
+      input: [{ type: 'text' }],
+      configOptions: [],
+      slashCommands: [],
+    }),
+    request: async (method: string, _params: unknown, options?: { timeoutMs?: number }) => {
+      calls.push({ method, options });
+      return results[method] ?? {};
+    },
+    createSessionClient: (sessionId: string) => (
+      new ProtocolV2SessionClient(host as never, sessionId)
+    ),
+  };
+  const session = new ProtocolV2SessionClient(host as never, 'session-1');
+  await session.createSession({ cwd: '/tmp/project' });
+  await session.startTurn({
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    input: [{ type: 'text', text: 'hi' }],
+    config: {},
+  });
+  await session.interruptTurn();
+  await session.respondInteraction({
+    sessionId: 'session-1',
+    interactionId: 'int-1',
+    responseId: 'resp-1',
+    actionId: 'allow_once',
+    values: {},
+  });
+  await session.createSidechat({ sidechatId: 'sc-1' });
+  await session.resumeSidechat({ sidechatId: 'sc-1', resumeRef: { id: 'ref-1' } });
+  await session.closeSidechat({ sidechatId: 'sc-1', resumeRef: { id: 'ref-1' } });
+
+  const deadlineFor = (method: string) => calls.filter((call) => call.method === method)
+    .map((call) => call.options?.timeoutMs);
+  assert.deepEqual(deadlineFor('session.create'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('turn.start'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('turn.interrupt'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('interaction.respond'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('sidechat.create'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('sidechat.resume'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('sidechat.close'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
 });

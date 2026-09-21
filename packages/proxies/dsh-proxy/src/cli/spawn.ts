@@ -10,40 +10,10 @@ import { planRuntimeInstallation } from '../runtime/install.js';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
 import { BridgeClient, BridgeClientError } from '../runtime/bridge-client.js';
 import { discoverDshRuntimes, probeDshRuntime } from '../runtime/discover.js';
+import { ensureGianProfile } from '../runtime/profile.js';
+import { parseArgs } from './bridge-launch.js';
 
 const PLUGIN_VERSION = '0.3.1';
-
-function bridgeArgs(argv: string[], explicit: string | undefined): string[] {
-  const configured = process.env.GIAN_DSH_HOST_ARGS;
-  if (configured !== undefined) {
-    const parsed = JSON.parse(configured) as unknown;
-    if (!Array.isArray(parsed) || !parsed.every((arg) => typeof arg === 'string')) {
-      throw new Error('GIAN_DSH_HOST_ARGS must be a JSON array of strings.');
-    }
-    return parsed;
-  }
-  const extraArgs = argv.filter((arg) => arg.startsWith('--') === false);
-  // The protocol client passes the DSH profile launcher via GIAN_RUNTIME_BIN.
-  // An explicit test bridge is already a bridge/1.0 stdio entry; the real DSH
-  // launcher always needs `--profile gian` so the bridge bundle mounts on
-  // stdout (plan §3.4: shared Host running profile "gian").
-  return explicit !== undefined
-    ? extraArgs
-    : ['--profile', 'gian', ...extraArgs];
-}
-
-function parseArgs(argv: string[]): { bridgeCommand: string; args: string[] } {
-  const explicit = argv.find((arg) => arg.startsWith('--bridge='))?.slice('--bridge='.length);
-  const command = process.env.GIAN_DSH_HOST_ENTRY
-    ?? explicit
-    ?? process.env.GIAN_RUNTIME_BIN
-    ?? process.env.DSH_HOST_ENTRY
-    ?? null;
-  if (!command) {
-    throw new Error('dsh-proxy requires GIAN_DSH_HOST_ENTRY (or --bridge=<path>) to the DSH host entry.');
-  }
-  return { bridgeCommand: command, args: bridgeArgs(argv, explicit) };
-}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -69,6 +39,14 @@ async function main(): Promise<void> {
     return;
   }
   const options = parseArgs(argv);
+  if (options.managedProfile) {
+    const profile = await ensureGianProfile();
+    if (profile.actions.length > 0) {
+      process.stderr.write(
+        `[dsh-proxy] gian profile ${profile.actions.join(', ')} at ${profile.profileDir}\n`,
+      );
+    }
+  }
   const bridge = new BridgeClient({ command: options.bridgeCommand, args: options.args });
   await bridge.start();
 

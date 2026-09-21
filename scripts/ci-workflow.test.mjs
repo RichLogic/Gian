@@ -15,6 +15,9 @@ const proxyUiNavigationUrl = new URL('../test/e2e/fixtures/navigation.ts', impor
 const desktopPackageUrl = new URL('../packages/desktop/package.json', import.meta.url);
 const privateCheckout = existsSync(new URL('../AGENTS.md', import.meta.url));
 const privateOnly = { skip: privateCheckout ? false : 'curated public source omits private CI/E2E inputs' };
+const versionBranches = "branches: ['release/[0-9]+.[0-9]+.[0-9]+']";
+const versionJobGuard = "if: startsWith(github.ref, 'refs/heads/release/')";
+const versionStepGuard = String.raw`run: '[[ "$GITHUB_REF" =~ ^refs/heads/release/[0-9]+\.[0-9]+\.[0-9]+$ ]]'`;
 
 test('hosted workflows pin every source, release, and audit gate to Node 24', async () => {
   const [workflow, releaseWorkflow, securityWorkflow, proxyCertification, proxyRelease] = await Promise.all([
@@ -37,8 +40,8 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
   }
 
   if (privateCheckout) {
-    assert.match(workflow, /\n  pull_request:\n/);
-    assert.match(workflow, /branches: \[main,/);
+    assert.doesNotMatch(workflow, /\n  pull_request:\n/);
+    assert.ok(workflow.includes(versionBranches));
     assert.match(workflow, /fetch-depth: 0/);
     assert.match(workflow, /lane: \[policy, typecheck, build, unit, integration, system\]/);
     assert.match(workflow, /node scripts\/source-gate.mjs/);
@@ -47,10 +50,29 @@ test('hosted workflows pin every source, release, and audit gate to Node 24', as
   }
 });
 
-test('nightly and manual CI run isolated E2E and retain failure artifacts', privateOnly, async () => {
+test('development CI is automatic only for version branches with no default-branch schedules', privateOnly, async () => {
+  for (const name of ['ci', 'security-audit', 'remote']) {
+    const source = await readFile(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
+    assert.ok(source.includes(`\n  push:\n    ${versionBranches}`), name);
+    assert.doesNotMatch(source, /\n  pull_request(?:_target)?:/, name);
+  }
+  for (const name of ['ci', 'security-audit', 'remote', 'nightly-e2e', 'giandev-acceptance']) {
+    const source = await readFile(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /\n  schedule:|refs\/heads\/main/, name);
+    assert.ok(source.includes(versionJobGuard), name);
+    assert.ok(source.includes(versionStepGuard), name);
+    const guardedJobs = source.split(versionJobGuard).length - 1;
+    assert.equal(source.split(versionStepGuard).length - 1, guardedJobs, name);
+    if (['nightly-e2e', 'giandev-acceptance'].includes(name)) {
+      assert.doesNotMatch(source, /\n  (?:push|pull_request(?:_target)?):/, name);
+    }
+  }
+});
+
+test('manual version E2E retains isolated journeys and failure artifacts', privateOnly, async () => {
   const workflow = await readFile(new URL('../.github/workflows/nightly-e2e.yml', import.meta.url), 'utf8');
 
-  assert.match(workflow, /\n  schedule:\n/);
+  assert.doesNotMatch(workflow, /\n  schedule:\n/);
   assert.match(workflow, /\n  workflow_dispatch:\n/);
   assert.match(workflow, /command: \['test:e2e', 'test:e2e:proxy-mock'\]/);
   assert.match(workflow, /fail-fast: false/);
@@ -58,6 +80,32 @@ test('nightly and manual CI run isolated E2E and retain failure artifacts', priv
   assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*?if: always\(\)/);
   assert.match(workflow, /playwright-report\//);
   assert.match(workflow, /test-results\//);
+});
+
+test('Dev packages follow successful same-repository version CI without crossing version concurrency', privateOnly, async () => {
+  const workflow = await readFile(new URL('../.github/workflows/dev-package.yml', import.meta.url), 'utf8');
+  assert.ok(workflow.includes(versionBranches));
+  assert.match(workflow, /workflows: \[CI\]/);
+  assert.match(workflow, /types: \[completed\]/);
+  assert.doesNotMatch(workflow, /\n  (?:push|pull_request|schedule):/);
+  for (const required of [
+    "github.repository == 'RichLogic/Gian-Dev'",
+    "github.event.workflow_run.conclusion == 'success'",
+    "(github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')",
+    "startsWith(github.event.workflow_run.head_branch, 'release/')",
+    'github.event.workflow_run.head_repository.full_name == github.repository',
+    'group: gian-dev-package-${{ github.event.workflow_run.head_branch }}',
+    'SOURCE_BRANCH: ${{ github.event.workflow_run.head_branch }}',
+    String.raw`run: '[[ "$SOURCE_BRANCH" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]'`,
+    'ref: ${{ github.event.workflow_run.head_sha }}',
+    'persist-credentials: false',
+    'name: source-certificate-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.run_attempt }}',
+    'c.sha!==process.env.GIAN_BUILD_SHA',
+    'String(c.runId)!==process.env.GIAN_SOURCE_RUN_ID',
+    'String(c.runAttempt)!==process.env.GIAN_SOURCE_RUN_ATTEMPT',
+    'c.status!=="PASS"',
+    'c.repository!==process.env.GITHUB_REPOSITORY',
+  ]) assert.ok(workflow.includes(required), required);
 });
 
 test('public certification fixtures retain their navigation contracts', async () => {
@@ -182,6 +230,8 @@ test('release and desktop packaging fail closed before expensive builds', async 
   assert.match(releaseWorkflow, /security delete-keychain/);
   assert.match(releaseWorkflow, /make:mac:release/);
   assert.match(releaseWorkflow, /codesign --verify --deep --strict/);
+  assert.match(releaseWorkflow, /runtime\/node\)"\n\s*echo "\$\{NODE_ENTITLEMENTS\}" \| grep -q 'com\.apple\.security\.cs\.disable-library-validation'/);
+  assert.match(releaseWorkflow, /Contents\/MacOS\/Gian\)"[\s\S]{0,200}?unexpectedly carries disable-library-validation/);
   assert.match(releaseWorkflow, /xcrun stapler validate/);
   assert.match(releaseWorkflow, /spctl --assess --type execute/);
   assert.match(releaseWorkflow, /Gian-\$\{VERSION\}-arm64\.dmg\.blockmap/);

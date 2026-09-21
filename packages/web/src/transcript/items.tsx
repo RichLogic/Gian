@@ -53,18 +53,17 @@ export {
 // context objects live in @gian/chat-ui so local and remote consumers share
 // one identity.
 export {
-  BrowserLinkOpenContext,
   ChatPanelOpenContext,
   DiffOpenContext,
-  FileLinkHrefContext,
-  FileLinkOpenContext,
   FileRefRehypeContext,
   ImageZoomContext,
+  LinkBehaviorContext,
+  LinkPolicyContext,
   PlanOpenContext,
-  RelativeLinkOpenContext,
   ScheduleOpenContext,
+  useLinkBehavior,
 } from '@gian/chat-ui';
-export type { PlanOpenPayload } from '@gian/chat-ui';
+export type { LinkBehavior, PlanOpenPayload } from '@gian/chat-ui';
 
 /** User bubble with the web send-echo lifecycle wired in. */
 export function UserMessage({ item }: { item: MsgItem }) {

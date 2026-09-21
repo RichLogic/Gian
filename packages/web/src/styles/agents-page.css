@@ -301,7 +301,6 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
 }
 .proxy-doc-part + .proxy-doc-part { margin-top: 14px; }
 .catalog-doc { font-size: var(--fz-12); }
-.catalog-doc-plainlink { color: var(--text-2); }
 .catalog-doc-img-placeholder { color: var(--text-3); font-style: italic; }
 .p2 .ag-runtime { display: flex; flex-direction: column; gap: 8px; }
 .p2 .ag-runtime-actions { display: flex; flex-wrap: wrap; gap: 6px; }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
 import test from 'node:test';
-import type { UserAgentStatus } from '@gian/shared';
+import type { ConfigValue, ProxyCatalog, UserAgentStatus } from '@gian/shared';
 import { AgentManager } from '../src/agents/manager.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
 import { developmentEntries, testResolver } from './runtime-test-harness.js';
@@ -15,6 +15,41 @@ async function executable(path: string, version: string): Promise<void> {
   await chmod(path, 0o755);
 }
 
+/** A dsh-like catalog: role-bearing model option plus a role-less provider
+ *  select whose resolved model choices depend on the provider value. */
+const DSH_LIKE_CATALOG: ProxyCatalog = {
+  catalogRevision: 'dsh-test',
+  input: [{ type: 'text' }],
+  configOptions: [
+    {
+      id: 'provider',
+      displayName: 'Provider',
+      binding: 'turn',
+      control: 'select',
+      required: false,
+      defaultValue: 'deepseek-official',
+      choices: [
+        { value: 'deepseek-official', displayName: 'DeepSeek' },
+        { value: 'vendor-b', displayName: 'Vendor B' },
+      ],
+    },
+    {
+      id: 'model',
+      displayName: 'Model',
+      binding: 'turn',
+      role: 'model',
+      control: 'select',
+      required: true,
+      defaultValue: 'deepseek-chat',
+      choices: [
+        { value: 'deepseek-chat', displayName: 'DeepSeek Chat' },
+        { value: 'deepseek-reasoner', displayName: 'DeepSeek Reasoner' },
+      ],
+    },
+  ],
+  slashCommands: [],
+};
+
 async function makeApp(
   t: test.TestContext,
   environmentCliPaths?: Record<string, string>,
@@ -23,6 +58,16 @@ async function makeApp(
     | { kind: 'canceled' }
     | { kind: 'error'; error: string }
   >,
+  catalog: ProxyCatalog = {
+    catalogRevision: 'test',
+    input: [{ type: 'text' }],
+    configOptions: [],
+    slashCommands: [],
+  },
+  resolveDefaultsCatalog?: (
+    catalog: ProxyCatalog,
+    config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
+  ) => Promise<ProxyCatalog>,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -51,12 +96,10 @@ async function makeApp(
   registerAgentRoutes(app, {
     agents,
     closeProxy: async () => undefined,
-    capabilities: async () => ({
-      catalogRevision: 'test',
-      input: [{ type: 'text' }],
-      configOptions: [],
-      slashCommands: [],
-    }),
+    capabilities: async () => catalog,
+    ...(resolveDefaultsCatalog
+      ? { resolveDefaultsCatalog: async (_kind, base, config) => resolveDefaultsCatalog(base, config) }
+      : {}),
     ...(pickHome ? { pickHome } : {}),
   });
   return { app, agents, root, bins };
@@ -310,4 +353,129 @@ test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t 
     agents: unknown[];
   };
   assert.equal(persisted.agents.length, 0);
+});
+
+test('PATCH /api/agents/:id accepts role-less option defaults, deletes on null', async t => {
+  const { app, agents, bins } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'DSH', proxy: 'dsh', cliPath: bins.dsh }),
+  });
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { options: { provider: 'vendor-b' } } }),
+  });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(agents.getAgent(agent.id).defaults.options, { provider: 'vendor-b' });
+
+  const deleted = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { options: { provider: null } } }),
+  });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(agents.getAgent(agent.id).defaults.options, {});
+});
+
+test('PATCH /api/agents/:id rejects malformed or unadvertised option defaults', async t => {
+  const { app, agents, bins } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'DSH', proxy: 'dsh', cliPath: bins.dsh }),
+  });
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  const patch = (defaults: unknown) => app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults }),
+  });
+
+  assert.equal((await patch({ options: ['provider'] })).status, 400);
+  assert.equal((await patch({ options: { provider: { nested: true } } })).status, 400);
+  assert.equal((await patch({ options: { 'bad key': 'x' } })).status, 400);
+  // Unknown option id in a known catalog.
+  assert.equal((await patch({ options: { nope: 'x' } })).status, 400);
+  // Role-bearing ids stay in the triplet.
+  assert.equal((await patch({ options: { model: 'deepseek-chat' } })).status, 400);
+  // Value outside the advertised choices.
+  assert.equal((await patch({ options: { provider: 'vendor-c' } })).status, 400);
+  assert.deepEqual(agents.getAgent(agent.id).defaults.options, {});
+});
+
+test('PATCH /api/agents/:id adopts resolved dependent invalidations into the same patch', async t => {
+  const resolvedCatalog: ProxyCatalog = {
+    ...DSH_LIKE_CATALOG,
+    configOptions: DSH_LIKE_CATALOG.configOptions.map(option => (
+      option.id === 'model'
+        ? { ...option, choices: [{ value: 'vendor-b-model', displayName: 'Vendor B Model' }] }
+        : option
+    )),
+  };
+  const { app, agents, bins } = await makeApp(
+    t,
+    undefined,
+    undefined,
+    DSH_LIKE_CATALOG,
+    async catalog => ({
+      ...resolvedCatalog,
+      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
+    }),
+  );
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'DSH',
+      proxy: 'dsh',
+      cliPath: bins.dsh,
+      defaults: { model: 'deepseek-chat', options: { provider: 'deepseek-official' } },
+    }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  assert.equal(agents.getAgent(agent.id).defaults.model, 'deepseek-chat');
+
+  // Switching the provider invalidates the stored model; the Host clears it
+  // in the same atomic patch instead of rejecting the provider change.
+  const switched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { options: { provider: 'vendor-b' } } }),
+  });
+  assert.equal(switched.status, 200);
+  const defaults = agents.getAgent(agent.id).defaults;
+  assert.deepEqual(defaults.options, { provider: 'vendor-b' });
+  assert.equal(defaults.model, '');
+
+  // An explicitly patched invalid value still 400s — only untouched defaults
+  // are auto-cleared.
+  const invalid = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { model: 'deepseek-chat' } }),
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(agents.getAgent(agent.id).defaults.model, '');
+});
+
+test('PATCH /api/agents/:id accepts option defaults shape-only on an empty catalog', async t => {
+  const { app, agents, bins } = await makeApp(t);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'DSH', proxy: 'dsh', cliPath: bins.dsh }),
+  });
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { options: { provider: 'offline-value' } } }),
+  });
+  assert.equal(patched.status, 200);
+  assert.deepEqual(agents.getAgent(agent.id).defaults.options, { provider: 'offline-value' });
 });

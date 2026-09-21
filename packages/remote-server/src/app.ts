@@ -17,6 +17,7 @@ import {
   hostCreatePairingRequestSchema,
   hostEnrollmentClaimRequestSchema,
   hostHeartbeatRequestSchema,
+  hostUpdateProfileRequestSchema,
   hostRevokeDeviceRequestSchema,
   parseClosed,
   pairingClaimRequestSchema,
@@ -134,6 +135,7 @@ function authenticateRefreshCookie(input: {
 }
 
 export async function createRemoteApp(config: RemoteServerConfig): Promise<RemoteAppHandle> {
+  let shuttingDown = false;
   const db = openRemoteDatabase(config.dataDir);
   const repos = new RemoteRepositories(db, config.now);
   const tokens = new TokenStore(config.now);
@@ -181,6 +183,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
   })));
 
   app.post('/api/v1/admin/host-enrollments', async (context) => {
+    context.header('Cache-Control', 'no-store');
     const admin = bearer(context.req.header('authorization'));
     if (!admin || !hashesEqual(hashSecret(admin), hashSecret(config.adminToken))) {
       return context.json(jsonError('AUTH_REQUIRED'), 401);
@@ -698,6 +701,14 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     return context.json({ protocol: AUTH_PROTOCOL, hosts: hostsForFamily(family) });
   });
 
+  app.post('/api/v1/host/profile', async (context) => {
+    const hostAuth = requireHost(context);
+    if (!hostAuth) return context.json(jsonError('AUTH_REQUIRED'), 401);
+    const body = parseClosed(hostUpdateProfileRequestSchema, await context.req.json());
+    repos.renameHost(hostAuth.hostId, body.name);
+    return context.json({ protocol: AUTH_PROTOCOL, host_id: hostAuth.hostId, name: body.name });
+  });
+
   app.post('/api/v1/host/heartbeat', async (context) => {
     const hostAuth = requireHost(context);
     if (!hostAuth) return context.json(jsonError('AUTH_REQUIRED'), 401);
@@ -724,6 +735,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   app.get('/ws', upgradeWebSocket(() => ({
     onMessage(event, ws) {
+      if (shuttingDown) { ws.close(1001, 'server_shutdown'); return; }
       try {
         const raw = typeof event.data === 'string' ? event.data : event.data.toString();
         const parsed = JSON.parse(raw) as { type?: string };
@@ -828,6 +840,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       }
     },
     onClose(_event, ws) {
+      if (shuttingDown) return;
       const socketState = ws as unknown as {
         __remoteConnectionId?: string;
         __remoteRole?: string;
@@ -877,6 +890,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     services: { ...services, finalizeDeviceRevoke } satisfies RemoteAppServices,
     injectWebSocket,
     shutdown() {
+      if (shuttingDown) return;
+      shuttingDown = true;
       relay.restart();
       db.close();
     },

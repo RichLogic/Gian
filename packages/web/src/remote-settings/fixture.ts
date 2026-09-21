@@ -202,6 +202,12 @@ export function createRemoteSettingsFixture(
       });
     },
 
+    async setHostName(name) {
+      const current = state.enrollment;
+      if (current.kind !== 'connected') return;
+      emit({ ...state, enrollment: { ...current, info: { ...current.info, hostRemoteName: name.trim() } } });
+    },
+
     async confirmServerIdentityChange() {
       if (state.enrollment.kind !== 'identity-changed') return;
       const changed = state.enrollment;
@@ -232,7 +238,7 @@ export function createRemoteSettingsFixture(
       emit({ ...state, pairing: { kind: 'creating' } });
       await Promise.resolve();
       const code = fixtureShortCode(() => Math.random());
-      const qrPayload = `${info.serverUrl.replace(/\/$/, '')}/pair?nonce=fixture-${code.replace('-', '')}`;
+      const qrPayload = `${(info.publicUrl ?? info.serverUrl).replace(/\/$/, '')}/#nonce=fixture-grant-${code.replace('-', '')}`;
       emit({
         ...state,
         pairing: {

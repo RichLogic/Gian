@@ -13,6 +13,7 @@ import type { PairingFailure, PairingState } from '../controller/types.js';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
+import { HostSelector } from './host-selector.js';
 
 const CODE_LENGTH = 8;
 
@@ -83,6 +84,7 @@ function CodeInput({ onSubmit }: { onSubmit: (code: string) => void }) {
 function EnterCodePage() {
   const t = useT();
   const actions = useRemoteActions();
+  const state = useRemoteState();
   return (
     <div className="rw-pair">
       <div className="rw-pair-card">
@@ -92,6 +94,9 @@ function EnterCodePage() {
         <p className="rw-pair-desc">{t('pair.code.desc')}</p>
         <span className="rw-pair-hint">{t('pair.code.qrHint')}</span>
         <TrustNote />
+        {state.addingHost && <button type="button" className="btn sm ghost" onClick={() => actions.cancelPairing()}>
+          {t('common.cancel')}
+        </button>}
       </div>
     </div>
   );
@@ -100,11 +105,37 @@ function EnterCodePage() {
 function QrConfirmPage({ pairing }: { pairing: Extract<PairingState, { kind: 'qr-confirm' }> }) {
   const t = useT();
   const actions = useRemoteActions();
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  useEffect(() => setCopyState('idle'), [pairing.pairingUrl]);
+  async function copyLink() {
+    if (!pairing.pairingUrl) return;
+    try {
+      await navigator.clipboard.writeText(pairing.pairingUrl);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  }
   return (
     <div className="rw-pair">
       <div className="rw-pair-card">
         <Brand />
         <span className="rw-pair-title">{t('pair.qr.title')}</span>
+        {pairing.pairingUrl && <>
+          <p className="rw-pair-desc">{t('pair.qr.browserHint')}</p>
+          <div className="rw-pair-field">
+            <label htmlFor="pair-invitation-link">{t('pair.qr.link')}</label>
+            <input id="pair-invitation-link" className="rw-input" type="text" readOnly
+              value={pairing.pairingUrl} onFocus={event => event.currentTarget.select()} />
+          </div>
+          <button type="button" className="btn sm secondary" onClick={() => void copyLink()}>
+            {t('pair.qr.copyLink')}
+          </button>
+          <span className="rw-pair-hint" role="status">
+            {copyState === 'copied' && t('pair.qr.linkCopied')}
+            {copyState === 'failed' && t('pair.qr.copyFailed')}
+          </span>
+        </>}
         <div className="rw-pair-field">
           <label>{t('pair.qr.hostLabel')}</label>
           <span className="rw-pair-input">{pairing.hostName}</span>
@@ -121,6 +152,9 @@ function QrConfirmPage({ pairing }: { pairing: Extract<PairingState, { kind: 'qr
         <p className="rw-pair-desc">{t('pair.qr.desc')}</p>
         <button type="button" className="btn sm primary rw-pair-submit" onClick={() => actions.confirmQrPairing()}>
           {t('pair.qr.confirm')}
+        </button>
+        <button type="button" className="btn sm ghost" onClick={() => actions.cancelPairing()}>
+          {t('common.cancel')}
         </button>
         <TrustNote />
       </div>
@@ -176,10 +210,12 @@ const FAILURE_META: Record<
 function FailurePage({ pairing }: { pairing: Extract<PairingState, { kind: 'failed' }> }) {
   const t = useT();
   const actions = useRemoteActions();
+  const state = useRemoteState();
   const meta = FAILURE_META[pairing.reason];
   return (
     <div className="rw-pair">
       <div className="rw-pair-card" data-pair-failure={pairing.reason}>
+        {state.hosts.length > 0 && <HostSelector />}
         <span className={`rw-fail-ico${pairing.reason === 'cancelled' || pairing.reason === 'expired' ? ' warn' : ''}`}>
           <Icon name={meta.icon} size={15} />
         </span>
@@ -196,6 +232,9 @@ function FailurePage({ pairing }: { pairing: Extract<PairingState, { kind: 'fail
         >
           {t(meta.actionKey)}
         </button>
+        {state.addingHost && <button type="button" className="btn sm ghost" onClick={() => actions.cancelPairing()}>
+          {t('common.cancel')}
+        </button>}
       </div>
     </div>
   );
