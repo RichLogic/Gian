@@ -41,14 +41,23 @@ export function isSensitiveRemoteKey(key: string): boolean {
   return normalized.split('_').some((segment) => SENSITIVE_SEGMENTS.has(segment));
 }
 
-export function redactRemoteText(input: string): string {
+/** Conversation content is not a log: length alone does not identify a secret. */
+export function redactRemoteConversationText(input: string): string {
   return input
     .replace(/(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+/gi, `$1${REDACTED}`)
     .replace(/(Cookie\s*:\s*)[^\r\n]+/gi, `$1${REDACTED}`)
     .replace(/((?:refresh|access|enrollment|connector)[_-]?token\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, `$1${REDACTED}`)
     .replace(/((?:pairing[_-]?code|grant[_-]?nonce|ws[_-]?ticket|ciphertext)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, `$1${REDACTED}`)
-    .replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, REDACTED)
-    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, REDACTED);
+    .replace(/((?:api[_-]?key|password|passwd|client[_-]?secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, `$1${REDACTED}`)
+    .replace(/(["'](?:access_token|refresh_token|enrollment_token|connector_token|pairing_code|grant_nonce|ws_ticket|ciphertext|api_key|password|passwd|secret|private_key)["']\s*:\s*["'])(.*?)(["'])/gi, `$1${REDACTED}$3`)
+    .replace(/\b(?:github_pat_|gh[pousr]_|sk-ant-|sk-|xox[baprs]-)[A-Za-z0-9_-]{8,}\b/g, REDACTED)
+    .replace(/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z]+ )?PRIVATE KEY-----/g, REDACTED);
+}
+
+export function redactRemoteText(input: string): string {
+  return redactRemoteConversationText(input)
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, REDACTED)
+    .replace(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/g, REDACTED);
 }
 
 export function redactRemoteValue(value: unknown): unknown {

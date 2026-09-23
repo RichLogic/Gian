@@ -9,6 +9,7 @@ import {
 } from './constants.js';
 import { RemoteProtocolError } from './errors.js';
 import { canonicalJson, utf8ByteLength } from './serialize.js';
+import { githubAccountIdSchema } from './account.js';
 import {
   base64UrlSchema,
   boundedStringSchema,
@@ -61,6 +62,7 @@ export const relayNoticeSchema = z.strictObject({
   platform: nameSchema.optional(),
   user_agent: boundedStringSchema.optional(),
   device_name: nameSchema.optional(),
+  account_id: githubAccountIdSchema.optional(),
   signed_at: unixMsSchema.optional(),
   signature: boundedStringSchema.optional(),
 });

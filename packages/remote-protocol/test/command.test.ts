@@ -17,7 +17,12 @@ import {
 
 test('RemoteMethod registry is closed and exhaustive', () => {
   assert.deepEqual([...REMOTE_METHOD_LIST], [
+    'execution.create',
+    'execution.list',
+    'execution.sync',
     'catalog.read',
+    'catalog.agent',
+    'execution.configure',
     'state.refresh',
     'session.subscribe',
     'session.page',
@@ -32,6 +37,10 @@ test('RemoteMethod registry is closed and exhaustive', () => {
     'queue.send_now',
     'interaction.respond',
     'file.preview',
+    'file.resolve',
+    'file.tree',
+    'file.list',
+    'git.read',
     'proxy.logo',
   ]);
   assert.throws(() => parseRemoteMethodParams('session.send', { session_id: generateCanonicalId() }));

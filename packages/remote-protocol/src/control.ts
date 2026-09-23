@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { remoteAgentCatalogSchema, remoteConfigMapSchema, remoteConfigValueSchema, remoteConfigOptionSchema } from './catalog.js';
 
 import {
   ATTENTION_KINDS,
@@ -111,6 +112,7 @@ export const remoteTextItemSchema = z.strictObject({
 });
 
 export const remoteInputItemSchema = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('compiled_text'), attachment_id: canonicalIdSchema }),
   remoteTextItemSchema,
   remoteAttachmentHandleSchema,
 ]);
@@ -162,6 +164,9 @@ export const remoteSessionSchema = z.strictObject({
   thinking: nameSchema.nullable().optional(),
   service_tier: nameSchema.nullable().optional(),
   approval_mode: nameSchema.nullable().optional(),
+  context_tokens_used: nonNegativeSafeIntegerSchema.nullable().optional(),
+  context_window_tokens: nonNegativeSafeIntegerSchema.nullable().optional(),
+  context_usage_updated_at: boundedStringSchema.nullable().optional(),
   status: z.enum(SESSION_STATUSES),
   unread: z.boolean().optional(),
   queue: z.strictObject({
@@ -213,6 +218,7 @@ export const remoteAttentionSchema = z.strictObject({
 
 export const remoteFileRefSchema = z.strictObject({
   id: canonicalIdSchema,
+  reference: z.string().min(1).max(4096).optional(),
   session_id: canonicalIdSchema,
   name: nameSchema,
   mime: nameSchema,
@@ -315,14 +321,14 @@ export const sessionUpdateParamsSchema = z.strictObject({
   session_id: canonicalIdSchema,
   session_revision: boundedStringSchema,
   name: nameSchema.optional(),
-  model: nameSchema.optional(),
-  thinking: nameSchema.optional(),
+  model: nameSchema.nullable().optional(),
+  thinking: nameSchema.nullable().optional(),
   service_tier: z.enum(['standard', 'fast']).optional(),
-  approval_mode: nameSchema.optional(),
+  approval_mode: nameSchema.nullable().optional(),
 });
 export const sessionSendParamsSchema = z.strictObject({
   session_id: canonicalIdSchema,
-  text: boundedStringSchema,
+  text: z.string().max(64 * 1024),
   busy: z.enum(['queue', 'fail', 'steer']).optional(),
   items: z.array(remoteInputItemSchema).max(32).optional(),
   context_items: z.array(remoteContextItemSchema).max(32).optional(),
@@ -369,6 +375,15 @@ export const proxyLogoParamsSchema = z.strictObject({
 });
 
 export const REMOTE_METHOD_PARAMS = {
+  'execution.create': sessionCreateParamsSchema.omit({ task_id: true }).extend({ approval_mode: nameSchema.optional(),
+    session_config: remoteConfigMapSchema.optional(), turn_config: remoteConfigMapSchema.optional() }),
+  'execution.configure': z.strictObject({ session_id: canonicalIdSchema, session_revision: boundedStringSchema,
+    option_id: nameSchema, value: remoteConfigValueSchema, binding: z.enum(['session', 'turn']) }),
+  'catalog.agent': z.strictObject({ agent_id: canonicalIdSchema, catalog_revision: nameSchema.optional(),
+    session_config: remoteConfigMapSchema.optional(), turn_config: remoteConfigMapSchema.optional() }),
+  'execution.list': z.strictObject({ after: canonicalIdSchema.optional() }),
+  'execution.sync': z.strictObject({ session_id: canonicalIdSchema, after: nonNegativeSafeIntegerSchema,
+    stream_id: canonicalIdSchema.optional() }),
   'catalog.read': catalogReadParamsSchema,
   'state.refresh': stateRefreshParamsSchema,
   'session.subscribe': sessionSubscribeParamsSchema,
@@ -384,6 +399,19 @@ export const REMOTE_METHOD_PARAMS = {
   'queue.send_now': queueSendNowParamsSchema,
   'interaction.respond': interactionRespondParamsSchema,
   'file.preview': filePreviewParamsSchema,
+  'file.resolve': z.strictObject({ session_id: canonicalIdSchema, reference: z.string().min(1).max(4096) }),
+  'file.tree': z.strictObject({ session_id: canonicalIdSchema, directory: z.string().max(4096),
+    after: z.string().max(256).optional() }),
+  'file.list': z.strictObject({ session_id: canonicalIdSchema, after: z.string().max(4096).optional() }),
+  'git.read': z.strictObject({ session_id: canonicalIdSchema,
+    operation: z.enum(['changed', 'diff', 'branches', 'commits', 'history', 'history_commit', 'history_diff', 'history_reachability']),
+    reference: z.string().max(4096).optional(), scope: z.enum(['all', 'staged', 'unstaged', 'commit', 'branch', 'lastturn']).optional(),
+    sha: z.string().regex(/^[0-9a-f]{7,40}$/i).optional(), base: z.string().max(256).optional(),
+    turn: positiveSafeIntegerSchema.optional(), root: z.string().max(4096).optional(),
+    cursor: z.string().max(4096).optional(), query: z.string().max(1024).optional(),
+    ref: z.string().max(256).optional(), author: z.string().max(256).optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }),
   'proxy.logo': proxyLogoParamsSchema,
 } as const;
 
@@ -464,6 +492,7 @@ export const transcriptItemSchema = z.discriminatedUnion('kind', [
     ...transcriptItemBaseSchema,
     kind: z.literal('user'),
     text: boundedStringSchema,
+    delivery_id: canonicalIdSchema.optional(),
     attachments: z.array(remoteFileRefSchema).max(32).optional(),
   }),
   z.strictObject({
@@ -552,7 +581,49 @@ export const stateSnapshotPendingSchema = z.strictObject({
 
 export const stateRefreshResultSchema = z.union([remoteStateSnapshotSchema, stateSnapshotPendingSchema]);
 
+export const executionSessionSchema = remoteSessionSchema.extend({
+  worktree_root: boundedStringSchema,
+  session_config: remoteConfigMapSchema,
+  turn_config: remoteConfigMapSchema,
+  turn_config_options: z.array(remoteConfigOptionSchema).max(128).optional(),
+  context_tokens_used: nonNegativeSafeIntegerSchema.nullable(),
+  context_window_tokens: nonNegativeSafeIntegerSchema.nullable(),
+  context_usage_updated_at: boundedStringSchema.nullable(),
+  conversation_input_tokens: nonNegativeSafeIntegerSchema.nullable(),
+  conversation_output_tokens: nonNegativeSafeIntegerSchema.nullable(),
+  conversation_cached_input_tokens: nonNegativeSafeIntegerSchema.nullable(),
+  conversation_total_tokens: nonNegativeSafeIntegerSchema.nullable(),
+  conversation_usage_complete: z.boolean(),
+});
+
+export const executionHistoryEntrySchema = z.union([
+  z.strictObject({ sequence: positiveSafeIntegerSchema, interaction: remoteInteractionSchema, turn: nonNegativeSafeIntegerSchema }),
+  z.strictObject({ sequence: positiveSafeIntegerSchema, item: transcriptItemSchema }),
+  z.strictObject({ sequence: positiveSafeIntegerSchema, resolution: z.strictObject({
+    interaction_id: canonicalIdSchema, decision: z.enum(['allow_once', 'allow_session', 'decline']),
+    auto: z.boolean(), turn: nonNegativeSafeIntegerSchema, ts: unixMsSchema,
+    answers: z.record(z.string().min(1).max(256), z.union([z.string().max(4000), z.array(z.string().max(4000)).max(16)]))
+      .refine(value => Object.keys(value).length <= 16).optional(),
+  }) }),
+]);
+export type ExecutionHistoryEntry = z.infer<typeof executionHistoryEntrySchema>;
+export const executionSyncResultSchema = z.strictObject({
+  stream_id: canonicalIdSchema,
+  cursor: nonNegativeSafeIntegerSchema,
+  has_more: z.boolean(),
+  session: executionSessionSchema,
+  events: z.array(executionHistoryEntrySchema).max(128),
+  interactions: z.array(remoteInteractionSchema).max(MAX_ARRAY_ITEMS),
+});
+export type ExecutionSyncResult = z.infer<typeof executionSyncResultSchema>;
+export type ExecutionSession = z.infer<typeof executionSessionSchema>;
+
 export const REMOTE_METHOD_RESULTS = {
+  'execution.create': executionSessionSchema,
+  'execution.configure': executionSessionSchema,
+  'catalog.agent': remoteAgentCatalogSchema,
+  'execution.list': z.strictObject({ sessions: z.array(executionSessionSchema).max(100), has_more: z.boolean() }),
+  'execution.sync': executionSyncResultSchema,
   'catalog.read': catalogReadResultSchema,
   'state.refresh': stateRefreshResultSchema,
   'session.subscribe': z.strictObject({
@@ -571,6 +642,9 @@ export const REMOTE_METHOD_RESULTS = {
   'session.send': z.strictObject({
     session: remoteSessionSchema,
     delivery_id: canonicalIdSchema.optional(),
+    delivery_state: z.enum(['started', 'queued', 'steered', 'completed', 'error', 'stopped', 'cancelled', 'unknown']).optional(),
+    queue_id: canonicalIdSchema.optional(),
+    turn_number: positiveSafeIntegerSchema.optional(),
   }),
   'session.stop': sessionStopResultSchema,
   'queue.update': queueReplacementResultSchema,
@@ -578,6 +652,8 @@ export const REMOTE_METHOD_RESULTS = {
   'queue.clear': queueReplacementResultSchema,
   'queue.send_now': z.strictObject({
     mode: z.enum(['noop', 'started', 'steered']),
+    affected: z.array(z.strictObject({ queue_id: canonicalIdSchema, state: z.enum(['started', 'steered']),
+      turn_number: positiveSafeIntegerSchema })).max(MAX_QUEUE_ENTRIES).optional(),
     queue: z.array(remoteQueueEntrySchema).max(MAX_QUEUE_ENTRIES),
     queue_revision: boundedStringSchema,
   }),
@@ -587,6 +663,11 @@ export const REMOTE_METHOD_RESULTS = {
     resolved: z.literal(true),
   }),
   'file.preview': filePreviewResultSchema,
+  'file.resolve': remoteFileRefSchema,
+  'file.tree': z.strictObject({ entries: z.array(z.strictObject({ name: nameSchema,
+    reference: boundedStringSchema, kind: z.enum(['file', 'directory']) })).max(200), has_more: z.boolean() }),
+  'file.list': z.strictObject({ references: z.array(z.string().max(4096)).max(200), has_more: z.boolean() }),
+  'git.read': z.strictObject({ result_json: z.string().max(192 * 1024) }),
   'proxy.logo': proxyLogoResultSchema,
 } as const;
 

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { AUTH_PROTOCOL } from './constants.js';
 import { canonicalJson } from './serialize.js';
+import { githubAccountIdSchema } from './account.js';
 import {
   authProtocolSchema,
   boundedStringSchema,
@@ -28,6 +29,7 @@ export const authRequestBase = {
 export const adminCreateEnrollmentRequestSchema = z.strictObject({
   ...authRequestBase,
   label: nameSchema.optional(),
+  github_account_id: githubAccountIdSchema.optional(),
 });
 
 export const adminCreateEnrollmentResultSchema = z.strictObject({

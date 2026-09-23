@@ -1,7 +1,30 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { redactRemoteText, redactRemoteValue } from '../src/index.js';
+import { redactRemoteText, redactRemoteValue, redactRemoteConversationText } from '../src/index.js';
+
+test('conversation projection preserves ordinary long identifiers and formatting without weakening log redaction', () => {
+  const marker = 'REMOTE_AB_12345678-1234-4123-8123-123456789abc';
+  const text = `Result: ${marker}\n  { "build": "${'abcdef0123456789'.repeat(4)}" }\nABCD-EFGH\n`;
+  assert.equal(redactRemoteConversationText(text), text);
+  assert.equal(redactRemoteText(marker), '[REDACTED]', 'log boundary stays conservative');
+});
+
+test('conversation projection still redacts explicitly identified credentials', () => {
+  const text = [
+    'Authorization: Bearer private-credential',
+    'Cookie: session=private-cookie',
+    'pairing_code=ABCD-EFGH',
+    'access_token=private-access',
+    '{ "api_key": "private-api-value" }',
+    'password=private-password',
+    'ghp_privatecredential12345',
+    '-----BEGIN PRIVATE KEY-----\nprivate-key-bytes\n-----END PRIVATE KEY-----',
+  ].join('\n');
+  const safe = redactRemoteConversationText(text);
+  assert.doesNotMatch(safe, /private-|privatecredential|ABCD-EFGH/);
+  assert.match(safe, /\[REDACTED\]/);
+});
 
 test('redaction removes tokens, cookies, codes, ciphertext, and auth headers', () => {
   const text = [

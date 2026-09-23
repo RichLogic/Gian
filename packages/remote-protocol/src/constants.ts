@@ -10,10 +10,16 @@ export const WIRE_FEATURES = [
   'wire.snapshot_parts',
   'wire.content_resume',
   'wire.transcript_page',
+  'wire.execution_v1',
 ] as const;
 
 export const REMOTE_METHODS = [
+  'execution.create',
+  'execution.list',
+  'execution.sync',
   'catalog.read',
+  'catalog.agent',
+  'execution.configure',
   'state.refresh',
   'session.subscribe',
   'session.page',
@@ -28,6 +34,10 @@ export const REMOTE_METHODS = [
   'queue.send_now',
   'interaction.respond',
   'file.preview',
+  'file.resolve',
+  'file.tree',
+  'file.list',
+  'git.read',
   'proxy.logo',
 ] as const;
 
@@ -134,7 +144,7 @@ export const MAX_SESSION_PAGE_TURNS = 10;
 export const MIN_SESSION_PAGE_TURNS = 1;
 export const COMMAND_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 export const COMMAND_TIMESTAMP_SKEW_MS = 1000;
-export const ENROLLMENT_TTL_MS = 10 * 60 * 1000;
+export const ENROLLMENT_TTL_MS = 5 * 60 * 1000;
 export const PAIRING_TTL_MS = 5 * 60 * 1000;
 export const PAIRING_MAX_FAILURES = 5;
 export const PAIRING_CODE_LENGTH = 8;

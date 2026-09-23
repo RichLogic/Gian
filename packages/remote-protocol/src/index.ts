@@ -1,4 +1,7 @@
 export * from './auth.js';
+export * from './account.js';
+export * from './execution.js';
+export * from './catalog.js';
 export * from './ciphertext-pacer.js';
 export * from './constants.js';
 export * from './control.js';
@@ -9,3 +12,9 @@ export * from './relay.js';
 export * from './serialize.js';
 export * from './validation.js';
 export * from './negotiation.js';
+export * from './client/serial-queue.js';
+export * from './client/handshake.js';
+export * from './client/crypto-session.js';
+export * from './client/relay-client.js';
+export * from './client/attachment-upload.js';
+export * from './client/download-transfer.js';
