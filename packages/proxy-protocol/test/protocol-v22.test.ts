@@ -11,6 +11,7 @@ import {
   ProxyProtocolError,
   SUPPORTED_PROTOCOL_VERSIONS,
   parseProxyRequest,
+  resultSchemas,
   runtimeDiscoverResultSchema,
   runtimeProbeResultSchema,
 } from '../src/index.js';
@@ -312,6 +313,33 @@ test('gian.proxy/2.2 Catalog follows 2.1 specialCatalogs rules', () => {
     (error: unknown) => error instanceof ProxyProtocolError
       && error.message.includes('legacy role field'),
   );
+});
+
+test('catalog slash commands accept optional disabled/customizationId and reject malformed ids', () => {
+  const catalog = (slashCommands: unknown[]) => ({
+    ...specialCatalog(),
+    slashCommands,
+  });
+  const base = {
+    name: '/review',
+    description: 'Review',
+    source: 'user',
+    argHints: [],
+  };
+  assert.equal(resultSchemas['catalog.list'].safeParse(catalog([base])).success, true);
+  assert.equal(resultSchemas['catalog.list'].safeParse(catalog([
+    { ...base, disabled: true },
+  ])).success, true);
+  assert.equal(resultSchemas['catalog.list'].safeParse(catalog([
+    { ...base, customizationId: 'ci1_0123456789abcdef0123456789abcdef' },
+  ])).success, true);
+  // Strict object: unrelated extra keys stay rejected.
+  assert.equal(resultSchemas['catalog.list'].safeParse(catalog([
+    { ...base, filePath: '/tmp/x.md' },
+  ])).success, false);
+  assert.equal(resultSchemas['catalog.list'].safeParse(catalog([
+    { ...base, customizationId: 'not-a-stable-id' },
+  ])).success, false);
 });
 
 test('runtime.discover and runtime.probe schemas reject malformed values', () => {

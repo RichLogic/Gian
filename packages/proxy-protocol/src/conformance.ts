@@ -61,6 +61,15 @@ interface AdvertisedConfigOption {
   enabledWhen?: ReadonlyArray<{ optionId: string; oneOf: ConfigValue[] }>;
 }
 
+interface ResolvedTurnOptions {
+  sessionId?: string;
+  streamId?: string;
+  sessionConfig: Record<string, ConfigValue>;
+  modelId: string;
+  model: ConfigValue;
+  options: Map<string, AdvertisedConfigOption>;
+}
+
 interface InteractionState {
   actions: Set<string>;
   inputs: ReadonlyArray<{
@@ -106,6 +115,7 @@ interface SessionState {
   acceptedTurns: Set<string>;
   activeTurns: Map<string, TurnState>;
   configOptions: Map<string, AdvertisedConfigOption>;
+  resolvedTurnOptions?: ResolvedTurnOptions[];
   liveEvents: Map<string, string>;
   respondFingerprints: Map<string, string>;
   parentSessionId?: string;
@@ -428,6 +438,7 @@ export class HostProtocolValidator {
   private initialized = false;
   private negotiated: InitializeResult | null = null;
   private readonly catalogConfigOptions = new Map<string, AdvertisedConfigOption>();
+  private readonly resolvedTurnOptions: ResolvedTurnOptions[] = [];
   private readonly catalogActions = new Map<CatalogActionId, NormalizedCatalogAction>();
   private readonly resumeRefOwners = new Map<string, string>();
   private readonly processLiveEvents = new Map<string, string>();
@@ -564,7 +575,7 @@ export class HostProtocolValidator {
       }
     } else if (request.method === 'turn.start') {
       this.assertConfigSnapshot(
-        this.sessionConfigOptions(request.params.sessionId, request.params.streamId),
+        this.configOptionsForTurn(request.params),
         request.params.config,
         'turn',
         this.sessions.get(request.params.sessionId)?.sessionConfig ?? {},
@@ -690,9 +701,14 @@ export class HostProtocolValidator {
         configOptions: this.mergeCatalogWithTurnOptions(session.turnConfigOptions),
       });
     } else if (pending.method === 'catalog.list') {
-      this.catalogConfigOptions.clear();
       const catalog = result.data as CatalogResult;
       this.assertCatalogShape(catalog);
+      const next = catalog.configOptions.map(option => [option.id, advertisedOption(option)]);
+      if (canonicalJson([...this.catalogConfigOptions]) !== canonicalJson(next)) {
+        this.resolvedTurnOptions.length = 0;
+        for (const session of this.sessions.values()) session.resolvedTurnOptions = undefined;
+      }
+      this.catalogConfigOptions.clear();
       for (const option of catalog.configOptions) {
         this.catalogConfigOptions.set(option.id, advertisedOption(option));
       }
@@ -701,6 +717,27 @@ export class HostProtocolValidator {
       const catalog = result.data as CatalogResult;
       this.assertCatalogShape(catalog);
       this.assertCatalogActions(normalizeCatalogActions(catalog.actions));
+      const params = pending.params as {
+        sessionId?: string; streamId?: string;
+        sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue>;
+      };
+      const modelId = catalog.specialCatalogs?.model
+        ?? catalog.configOptions.find(option => option.role === 'model')?.id;
+      const model = modelId ? params.turnConfig[modelId] : undefined;
+      if (modelId && model !== undefined) {
+        // Resolution advertises a draft for this model, not a mutation of the
+        // active Session. Preserve both the original snapshot and model-bound
+        // drafts so resolving/cancelling another model cannot break a send.
+        const snapshots = params.sessionId && params.streamId
+          ? (this.sessionState(params.sessionId, params.streamId).resolvedTurnOptions ??= [])
+          : this.resolvedTurnOptions;
+        snapshots.push({
+          ...(params.sessionId ? { sessionId: params.sessionId, streamId: params.streamId } : {}),
+          sessionConfig: { ...params.sessionConfig }, modelId, model,
+          options: new Map(catalog.configOptions.map(option => [option.id, advertisedOption(option)])),
+        });
+        if (snapshots.length > 16) snapshots.shift();
+      }
     } else if (pending.method === 'sidechat.create') {
       this.acceptSidechatCreate(pending.params, result.data);
     } else if (pending.method === 'sidechat.resume') {
@@ -780,6 +817,21 @@ export class HostProtocolValidator {
       }
     }
     return merged;
+  }
+
+  private configOptionsForTurn(params: TurnStartParams): ReadonlyMap<string, AdvertisedConfigOption> {
+    const current = this.sessionConfigOptions(params.sessionId, params.streamId);
+    const session = this.sessions.get(params.sessionId);
+    const sessionConfig = session?.sessionConfig ?? {};
+    const resolved = [
+      ...(session?.resolvedTurnOptions ?? []).slice().reverse(),
+      ...this.resolvedTurnOptions.slice().reverse(),
+    ].find(snapshot => (
+      (!snapshot.sessionId || (snapshot.sessionId === params.sessionId && snapshot.streamId === params.streamId))
+      && Object.is(params.config[snapshot.modelId], snapshot.model)
+      && Object.entries(snapshot.sessionConfig).every(([id, value]) => Object.is(sessionConfig[id], value))
+    ));
+    return resolved?.options ?? current;
   }
 
   private assertConfigSnapshot(

@@ -390,6 +390,10 @@ const slashCommandSchema = z.strictObject({
   description: z.string(),
   source: z.enum(['builtin', 'user', 'project']),
   argHints: z.array(slashArgHintSchema),
+  // Additive optional fields: proxies that predate them omit both, and the
+  // strict object still validates their payloads.
+  disabled: z.boolean().optional(),
+  customizationId: z.string().regex(/^ci1_[a-f0-9]+$/).optional(),
 });
 
 export const catalogActionDescriptorSchema = z.strictObject({

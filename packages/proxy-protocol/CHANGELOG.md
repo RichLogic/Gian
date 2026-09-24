@@ -1,5 +1,14 @@
 # Proxy Protocol Changelog
 
+## 1.0.1
+
+- Validate model-dependent Turn options against Session-scoped resolved Catalog
+  drafts without replacing active configuration or leaking drafts across Sessions.
+- Preserve resolved options across unrelated Catalog refreshes and invalidate
+  them when the advertised configuration changes.
+- Includes additive slash-command inventory metadata from the current consumer
+  contract. Supported wire versions remain unchanged.
+
 ## 1.0.0
 
 - First independently distributed JavaScript/TypeScript package from public Gian.

@@ -318,6 +318,58 @@ test('catalog.resolve on an ordinary Session checks stream identity', () => {
   );
 });
 
+test('resolved model options validate turns without replacing the active model snapshot', () => {
+  const host = validator({ 'catalog.resolve': 1 });
+  const option = (id: string, values: string[]) => ({
+    id, role: id === 'model' ? 'model' : 'effort', displayName: id, binding: 'turn',
+    control: 'select', required: false, defaultValue: values[0],
+    choices: values.map(value => ({ value, displayName: value })),
+  });
+  const base = [option('model', ['k3', 'k2.7']), option('thinking', ['low', 'high', 'max'])];
+  listCatalog(host, undefined, base);
+  attach(host);
+  host.registerRequest(rpc({ id: 'resolve-k27', method: 'catalog.resolve', params: {
+    catalogRevision: 'cat-1', sessionId: 's_1', streamId: 'stream-1',
+    sessionConfig: {}, turnConfig: { model: 'k2.7' },
+  } }));
+  host.acceptLine(JSON.stringify(rpc({ id: 'resolve-k27', result: {
+    catalogRevision: 'cat-k27', input: [{ type: 'text' }], slashCommands: [],
+    configOptions: [base[0], option('thinking', ['off', 'on'])],
+    resolvedDefaults: { sessionConfig: {}, turnConfig: { thinking: 'off' } },
+  } })));
+  const turn = (id: string, model: string, thinking: string) => rpc({
+    id, method: 'turn.start', params: {
+      sessionId: 's_1', streamId: 'stream-1', turnId: id,
+      input: [{ type: 'text', text: 'test' }], config: { model, thinking },
+    },
+  });
+  assert.doesNotThrow(() => host.registerRequest(turn('k27-off', 'k2.7', 'off')));
+  host.forgetRequest('k27-off');
+  assert.throws(() => host.registerRequest(turn('k27-high', 'k2.7', 'high')), /not advertised/);
+  assert.doesNotThrow(() => host.registerRequest(turn('k3-high', 'k3', 'high')));
+  host.forgetRequest('k3-high');
+  assert.throws(() => host.registerRequest(turn('k3-off', 'k3', 'off')), /not advertised/);
+  host.registerRequest(rpc({ id: 'create-other', method: 'session.create', params: {
+    sessionId: 's_2', workspace: { cwd: '/tmp/other', roots: ['/tmp/other'] }, config: {},
+  } }));
+  host.acceptLine(JSON.stringify(rpc({ id: 'create-other', result: { session: {
+    id: 's_2', streamId: 'stream-2', state: 'idle', sessionConfig: {},
+    createdAt: timestamp, updatedAt: timestamp,
+  } } })));
+  const foreign = turn('foreign-off', 'k2.7', 'off');
+  foreign.params.sessionId = 's_2';
+  foreign.params.streamId = 'stream-2';
+  assert.throws(() => host.registerRequest(foreign), /not advertised/,
+    'Session-specific resolution must not authorize another Session');
+  // Refreshing unchanged config (e.g. slash commands) must not discard the draft.
+  listCatalog(host, undefined, base);
+  assert.doesNotThrow(() => host.registerRequest(turn('same-catalog', 'k2.7', 'off')));
+  host.forgetRequest('same-catalog');
+  // A changed configuration advertisement invalidates old resolution evidence.
+  listCatalog(host, undefined, [option('model', ['k3']), base[1]!]);
+  assert.throws(() => host.registerRequest(turn('stale-off', 'k2.7', 'off')), /not advertised/);
+});
+
 test('sidechat.resume rejects a Side Chat parent', () => {
   const host = validator({ sidechat: 1 });
   listCatalog(host, [{ id: 'sidechat.create', supported: true }]);
