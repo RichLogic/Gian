@@ -75,6 +75,7 @@ export interface HostData {
   catalogRevision?: string;
   catalog?: RemoteCatalog | null;
   catalogInvalidated?: boolean;
+  logos?: RemoteUiState['logos'];
   snapshotReceivedAt?: number | null;
   transcripts?: Record<string, TranscriptItem[]>;
   transcriptsStreaming?: Record<string, boolean>;
@@ -393,6 +394,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
     catalogRevision: initial.catalogRevision ?? '',
     catalog: initial.catalog ?? null,
     catalogInvalidated: initial.catalogInvalidated ?? false,
+    logos: initial.logos ?? {},
     snapshotReceivedAt: scenario.snapshotReceivedAt !== undefined
       ? scenario.snapshotReceivedAt
       : initial.snapshotReceivedAt ?? null,
@@ -664,6 +666,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
         catalogRevision: data.catalogRevision ?? '',
         catalog: data.catalog ?? null,
         catalogInvalidated: data.catalogInvalidated ?? false,
+        logos: data.logos ?? {},
         snapshotReceivedAt: data.snapshotReceivedAt ?? null,
         transcripts: transcriptsOf(data),
         drafts: {},

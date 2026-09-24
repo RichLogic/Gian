@@ -9,8 +9,11 @@ import { deleteTaskCascade } from '../../task/delete-cascade.js';
 import type { TaskManager, UpdateTaskInput } from '../../task/manager.js';
 import { updateTaskWithSessionArchive } from '../../task/update-with-session-archive.js';
 import type { WsBroadcaster } from '../ws-broadcast.js';
+import type { RemoteControllerHub } from '../../remote/controller-hub.js';
+import { randomUUID } from 'node:crypto';
 
 interface TaskRouteDependencies {
+  remoteController?: RemoteControllerHub;
   tasks: TaskManager;
   sessions: SessionManager;
   broadcaster: WsBroadcaster;
@@ -22,7 +25,7 @@ function errorMessage(error: unknown): string {
 
 export function registerTaskRoutes(
   app: Hono,
-  { tasks, sessions, broadcaster }: TaskRouteDependencies,
+  { tasks, sessions, broadcaster, remoteController }: TaskRouteDependencies,
 ): void {
   app.get('/api/tasks', c => c.json(tasks.listTasks()));
 
@@ -98,6 +101,11 @@ export function registerTaskRoutes(
     if (!tasks.getTask(id)) return c.json({ error: 'task not found' }, 404);
     const body = await c.req.json<{
       workspace_id?: string;
+      remote_environment_id?: string;
+      remote_session_id?: string;
+      session_config?: Record<string, import('@gian/shared').ConfigValue>;
+      turn_config?: Record<string, import('@gian/shared').ConfigValue>;
+      request_id?: string;
       agent_id?: string;
       name?: string;
       model?: string | null;
@@ -112,6 +120,17 @@ export function registerTaskRoutes(
       return c.json({ error: 'agent_id required' }, 400);
     }
     try {
+      if (body.remote_environment_id) {
+        if (!remoteController) throw new Error('remote execution unavailable');
+        const session = body.remote_session_id ? await remoteController.takeOver(body.remote_environment_id, body.remote_session_id, id)
+          : await remoteController.create({ environment_id: body.remote_environment_id,
+          workspace_id: body.workspace_id, agent_id: body.agent_id, task_id: id, name: body.name,
+          model: body.model, thinking_effort: body.thinking_effort, service_tier: body.service_tier,
+          approval_mode: body.approval_mode, session_config: body.session_config,
+          turn_config: body.turn_config }, body.request_id ?? randomUUID());
+        broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
+        return c.json({ session });
+      }
       const session = await sessions.createSession({
         workspace_id: body.workspace_id,
         agent_id: body.agent_id,

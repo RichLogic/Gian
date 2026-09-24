@@ -12,6 +12,7 @@ import {
   type CatalogIndexV1,
 } from './schemas.js';
 import { verifyCatalogAssetManifestWithPinnedKeys } from './verify.js';
+import { readCatalogLocalizations } from './localization.js';
 
 export interface CatalogBundleFiles {
   get(path: string): Buffer | undefined;
@@ -95,5 +96,6 @@ export function verifyCatalogBundleFiles(input: {
   if (input.expectedSourceId && index.sourceId !== input.expectedSourceId) {
     throw new Error(`Catalog sourceId ${index.sourceId} is not ${input.expectedSourceId}.`);
   }
+  readCatalogLocalizations(files, index);
   return index;
 }

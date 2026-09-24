@@ -184,7 +184,7 @@ interface CordisDefaultModel {
 type AnyContext = {
   [key: string]: unknown;
   get?: (name: string) => unknown;
-  on?: (name: string, listener: (...args: unknown[]) => unknown) => () => boolean;
+  on?: (name: string, listener: (...args: unknown[]) => unknown, options?: { global?: boolean }) => () => boolean;
   agents?: CordisAgentRegistry;
   llm?: CordisLlmRuntime;
   appExit?: (code: number) => void;
@@ -345,6 +345,10 @@ export class CordisDshHost implements BridgeHost {
   private readonly byNativeId = new Map<string, CordisSessionRecord>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly offSessionEvent: (() => boolean) | null;
+  private readonly offAssistantStream: (() => boolean) | null;
+  private readonly assistantStreams = new Map<string, {
+    attemptId: string; revision: number; turn: number; step: number; index: number;
+  }>();
   private readonly offCatalogChanged: (() => boolean) | null;
   private catalogChangedAt = Date.now();
   private catalogGeneration = 0;
@@ -363,6 +367,9 @@ export class CordisDshHost implements BridgeHost {
       ? ctx.on('session/event', (session, event) => {
           this.handleSessionEvent(session, event);
         })
+      : null;
+    this.offAssistantStream = typeof ctx.on === 'function'
+      ? ctx.on('agent/assistant-stream', payload => { this.handleAssistantStream(payload); }, { global: true })
       : null;
     this.offCatalogChanged = typeof ctx.on === 'function'
       ? ctx.on('llm/adapters-updated', () => {
@@ -869,6 +876,7 @@ export class CordisDshHost implements BridgeHost {
     await record.handle.agent.whenIdle();
     await record.handle.dispose();
     this.sessions.delete(record.id);
+    this.assistantStreams.delete(record.id);
     this.byNativeId.delete(record.nativeId);
     this.emit({
       method: 'agent.status',
@@ -971,6 +979,55 @@ export class CordisDshHost implements BridgeHost {
     }
   }
 
+  private handleAssistantStream(value: unknown): void {
+    if (this.disposed || !value || typeof value !== 'object') return;
+    const payload = value as { agent?: CordisAgent; frame?: Record<string, unknown> };
+    const nativeId = payload.agent?.session?.id;
+    const record = nativeId ? this.byNativeId.get(nativeId) : undefined;
+    const frame = payload.frame;
+    // Ignore child Agents, foreign Sessions and late frames from replaced handles.
+    if (!record || record.handle.agent !== payload.agent || !frame
+      || typeof frame.attemptId !== 'string' || !Number.isSafeInteger(frame.revision)) return;
+    if (frame.type === 'start') {
+      if (!Number.isSafeInteger(frame.turn) || !Number.isSafeInteger(frame.step)) return;
+      const previous = this.assistantStreams.get(record.id);
+      if (previous && (frame.revision as number) <= previous.revision) return;
+      this.assistantStreams.set(record.id, {
+        attemptId: frame.attemptId, revision: frame.revision as number,
+        turn: frame.turn as number, step: frame.step as number, index: -1,
+      });
+      return;
+    }
+    const stream = this.assistantStreams.get(record.id);
+    if (!stream || stream.attemptId !== frame.attemptId || (frame.revision as number) <= stream.revision) return;
+    if (frame.type === 'end') {
+      // Retain the revision fence until Session close so a replayed old start
+      // cannot revive the completed attempt.
+      stream.index = Number.MAX_SAFE_INTEGER;
+      stream.revision = frame.revision as number;
+      return;
+    }
+    if (frame.type !== 'chunk' || !Number.isSafeInteger(frame.index)
+      || (frame.index as number) <= stream.index || !frame.chunk || typeof frame.chunk !== 'object') return;
+    stream.index = frame.index as number;
+    stream.revision = frame.revision as number;
+    const chunk = frame.chunk as Record<string, unknown>;
+    if ((chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') || typeof chunk.text !== 'string') return;
+    // DSH 0.1.5 moved chunks off the durable session/event bus. Preserve their
+    // attempt/index identity rather than inventing a durable native sequence.
+    this.emit({ method: 'session.event', params: {
+      sessionId: record.id, type: 'assistant/chunk',
+      data: {
+        turn: stream.turn, step: stream.step,
+        liveAttemptId: stream.attemptId, liveChunkIndex: stream.index,
+        chunk: {
+          type: chunk.type, text: chunk.text,
+          ...(Number.isSafeInteger(chunk.index) ? { index: chunk.index as number } : {}),
+        },
+      },
+    } });
+  }
+
   private handleSessionEvent(session: unknown, event: unknown): void {
     if (this.disposed) return;
     const sessionId = typeof session === 'object' && session !== null
@@ -1023,6 +1080,8 @@ export class CordisDshHost implements BridgeHost {
     if (this.disposed) return;
     this.disposed = true;
     this.offSessionEvent?.();
+    this.offAssistantStream?.();
+    this.assistantStreams.clear();
     this.offCatalogChanged?.();
     this.byNativeId.clear();
     const records = [...this.sessions.values()];

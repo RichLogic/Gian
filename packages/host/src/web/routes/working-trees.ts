@@ -193,7 +193,19 @@ export function registerWorkingTreeRoutes(
     createdAt: string;
     completedAt: string | null;
   };
-  type LastTurnFile = ChangedFile & { diff?: string; hasStats: boolean };
+  type LastTurnFile = ChangedFile & {
+    diff?: string;
+    hasStats: boolean;
+    /** Absolute root the change was produced under when it is NOT the viewed
+     *  tree (the turn ran in another worktree). Null for in-tree files and
+     *  for unmappable entries whose source root is unknown. */
+    root: string | null;
+    /** True only when the path is mappable into the viewed tree. The
+     *  git/filesystem fallbacks (fillLineCounts, computeFileDiff) run
+     *  exclusively for local entries; cross-tree entries are served from the
+     *  persisted event payload alone. */
+    local: boolean;
+  };
 
   function resolveLastTurnTarget(
     wt: { path: string; workspace_id: string; session_id: string | null },
@@ -281,33 +293,76 @@ export function registerWorkingTreeRoutes(
       .sort((a, b) => b.length - a.length);
   }
 
-  async function normalizeLastTurnPath(
-    targetRoot: string,
+  function relativeWithin(root: string, path: string): string | null {
+    const rel = relative(root, path).replaceAll('\\', '/');
+    return rel && rel !== '..' && !rel.startsWith('../') ? rel : null;
+  }
+
+  /**
+   * Attribute one persisted last-turn file to the tree the turn actually ran
+   * in — never silently to the viewed tree. The recorded event root
+   * (FileChangeData.cwd, the session's launch root) is authoritative for new
+   * events; old events fall back to the viewed-tree / source-tree heuristics.
+   *
+   * Returns the viewed-tree-relative path for local files, or the
+   * source-root-relative path for cross-tree files (`root` set). Files that
+   * cannot be mapped into any known tree are still returned — under their
+   * cleaned absolute path — so a persisted patch/stats payload is never
+   * silently dropped; only the git/filesystem fallbacks stay limited to the
+   * viewed tree (`local`).
+   */
+  async function resolveLastTurnPath(
+    viewedRoot: string,
     rawPath: string,
+    eventRoot: string | null,
     trackedPaths: string[],
-  ): Promise<string | null> {
+  ): Promise<{ path: string; root: string | null; local: boolean } | null> {
     const path = cleanEventPath(rawPath);
+    if (!path) return null;
+
     if (!isAbsolute(path)) {
-      return path && path !== '..' && !path.startsWith('../') ? path : null;
+      if (path === '..' || path.startsWith('../')) return null;
+      // Relative event paths were produced under the runtime's cwd. When the
+      // turn recorded a root outside the viewed tree, attributing the path
+      // to the viewed tree would mislabel another tree's file.
+      if (eventRoot && eventRoot !== viewedRoot) return { path, root: eventRoot, local: false };
+      return { path, root: null, local: true };
     }
 
-    const targetRelative = relative(targetRoot, path).replaceAll('\\', '/');
-    if (targetRelative && targetRelative !== '..' && !targetRelative.startsWith('../')) {
-      return targetRelative;
+    // The recorded producing root wins when it explains the path.
+    if (eventRoot) {
+      const rel = relativeWithin(eventRoot, path);
+      if (rel) {
+        const local = eventRoot === viewedRoot;
+        return { path: rel, root: local ? null : eventRoot, local };
+      }
     }
 
+    const viewed = relativeWithin(viewedRoot, path);
+    if (viewed) return { path: viewed, root: null, local: true };
+
+    // Old events carry no root: derive the source root from the source
+    // checkout while it still exists on disk.
     const sourceRoot = (await gitText(dirname(path), ['rev-parse', '--show-toplevel'])).trim();
     if (sourceRoot) {
-      const sourceRelative = relative(sourceRoot, path).replaceAll('\\', '/');
-      if (sourceRelative && sourceRelative !== '..' && !sourceRelative.startsWith('../')) {
-        return sourceRelative;
+      const rel = relativeWithin(sourceRoot, path);
+      if (rel) {
+        const local = sourceRoot === viewedRoot;
+        return { path: rel, root: local ? null : sourceRoot, local };
       }
     }
 
     // The task worktree may already have been removed. Match only paths Git
     // knows in the viewed repository, choosing the longest suffix so an
     // absolute provider path cannot become an arbitrary filesystem lookup.
-    return trackedPaths.find(candidate => path === candidate || path.endsWith(`/${candidate}`)) ?? null;
+    const suffix = trackedPaths.find(candidate => path === candidate || path.endsWith(`/${candidate}`));
+    if (suffix) return { path: suffix, root: null, local: true };
+
+    // Unmappable (source tree deleted or outside every known root): keep the
+    // file under its cleaned absolute path, attributed to the recorded root
+    // when one exists. Its persisted patch and stats are served without any
+    // filesystem or git access.
+    return { path, root: eventRoot, local: false };
   }
 
   async function loadLastTurnFiles(cwd: string, target: LastTurnTarget): Promise<LastTurnFile[]> {
@@ -319,29 +374,39 @@ export function registerWorkingTreeRoutes(
        ORDER BY created_at, id`,
     ).all(target.turnId) as Array<{ data: string }>;
     const trackedPaths = await lastTurnTrackedPaths(cwd);
-    const byPath = new Map<string, LastTurnFile>();
+    // Keyed by root + path so the same relative path produced under two
+    // different roots in one turn survives as two entries.
+    const byKey = new Map<string, LastTurnFile>();
 
     for (const row of rows) {
       try {
         const parsed = JSON.parse(row.data) as {
+          cwd?: string;
           files?: Array<{ path?: string; kind?: string; added?: number; removed?: number }>;
           diff?: string;
           display?: {
             data?: {
+              cwd?: string;
               files?: Array<{ path?: string; kind?: string; added?: number; removed?: number }>;
               diff?: string;
             };
           };
         };
         const data = parsed.display?.data ?? parsed;
+        const eventRoot = typeof data.cwd === 'string' && isAbsolute(data.cwd) ? data.cwd : null;
         const files = data.files ?? [];
         const chunks = typeof data.diff === 'string' ? splitUnifiedDiff(data.diff) : [];
         for (let index = 0; index < files.length; index++) {
           const file = files[index]!;
           if (!file.path) continue;
-          const path = await normalizeLastTurnPath(cwd, file.path, trackedPaths);
-          if (!path || !(await resolveWithinWorkspace(cwd, path))) continue;
-          const previous = byPath.get(path);
+          const resolved = await resolveLastTurnPath(cwd, file.path, eventRoot, trackedPaths);
+          if (!resolved) continue;
+          // resolveWithinWorkspace gates only the viewed-tree git/readFile
+          // fallbacks. Cross-tree entries never touch the filesystem — their
+          // patch and stats come from the persisted payload.
+          if (resolved.local && !(await resolveWithinWorkspace(cwd, resolved.path))) continue;
+          const key = `${resolved.root ?? ''}\n${resolved.path}`;
+          const previous = byKey.get(key);
           const hasStats = typeof file.added === 'number' || typeof file.removed === 'number';
           const matchingChunk = chunks.length === files.length
             ? chunks[index]
@@ -349,14 +414,16 @@ export function registerWorkingTreeRoutes(
           const kind = file.kind === 'create' || file.kind === 'delete' || file.kind === 'rename'
             ? file.kind
             : 'update';
-          byPath.set(path, {
-            path,
+          byKey.set(key, {
+            path: resolved.path,
             kind,
             staged: false,
             added: typeof file.added === 'number' ? file.added : previous?.added ?? 0,
             removed: typeof file.removed === 'number' ? file.removed : previous?.removed ?? 0,
-            diff: matchingChunk ? rebaseUnifiedDiff(matchingChunk, path) : previous?.diff,
+            diff: matchingChunk ? rebaseUnifiedDiff(matchingChunk, resolved.path) : previous?.diff,
             hasStats: hasStats || previous?.hasStats === true,
+            root: resolved.root,
+            local: resolved.local,
           });
         }
       } catch {
@@ -364,7 +431,7 @@ export function registerWorkingTreeRoutes(
         // valid files from the same turn.
       }
     }
-    return [...byPath.values()];
+    return [...byKey.values()];
   }
 
   function shiftedIso(value: string, deltaMs: number): string {
@@ -766,13 +833,15 @@ export function registerWorkingTreeRoutes(
     if (!rel) return c.json({ error: 'path required' }, 400);
     const wt = await resolveWorkingTree(id);
     if (!wt) return c.json({ error: 'working tree not found' }, 404);
-    const resolved = await resolveWithinWorkspace(wt.path, rel);
-    if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
-    void resolved;
     const scope = parseScope(c.req.query('scope'));
     const sha = parseCommitSha(c.req.query('sha'));
     const base = scope === 'branch' ? parseBaseRef(c.req.query('base')) : null;
     if (scope === 'lastturn') {
+      // Last-turn entries may live outside the viewed tree (the turn ran in
+      // another worktree); they serve their persisted patch verbatim and
+      // never touch the viewed tree's git/filesystem, so the workspace gate
+      // below stays with the git-backed scopes. `root` disambiguates entries
+      // whose relative path appears under more than one producing root.
       const target = resolveLastTurnTarget(
         wt,
         c.req.query('session'),
@@ -780,14 +849,22 @@ export function registerWorkingTreeRoutes(
       );
       if (!target) return c.json({ diff: '' });
       const files = await loadLastTurnFiles(wt.path, target);
-      const snapshot = files.find(file => file.path === rel);
+      const rootParam = c.req.query('root');
+      const snapshot = rootParam
+        ? files.find(file => file.path === rel && file.root === rootParam)
+        : files.find(file => file.path === rel && file.local)
+            ?? files.find(file => file.path === rel);
       if (!snapshot) return c.json({ diff: '' });
       if (snapshot.diff) return c.json({ diff: snapshot.diff });
+      if (!snapshot.local) return c.json({ diff: '' });
       const range = await lastTurnGitRange(wt.path, target);
       return c.json({
         diff: await computeFileDiff(wt.path, rel, scope, wt, sha, base, range),
       });
     }
+    const resolved = await resolveWithinWorkspace(wt.path, rel);
+    if (!resolved) return c.json({ error: 'path escapes working tree' }, 400);
+    void resolved;
     return c.json({ diff: await computeFileDiff(wt.path, rel, scope, wt, sha, base) });
   });
 
@@ -848,7 +925,11 @@ export function registerWorkingTreeRoutes(
   //                session's base_branch / repo default) + untracked.
   //   - lastturn = the persisted file-change projection for one exact turn;
   //                raw event patches survive local commits, with Git used
-  //                only to fill provider-omitted counts/content.
+  //                only to fill provider-omitted counts/content. Files the
+  //                turn produced under a DIFFERENT root (a mid-session
+  //                `git worktree add`) are still listed — attributed to their
+  //                recorded/inferred source root (`root` + `external`),
+  //                served from the persisted payload without viewed-tree I/O.
   app.get('/api/working_trees/:id/changed', async c => {
     const id = c.req.param('id');
     const wt = await resolveWorkingTree(id);
@@ -864,9 +945,11 @@ export function registerWorkingTreeRoutes(
       if (!target) return c.json([]);
       const files = await loadLastTurnFiles(wt.path, target);
       const range = await lastTurnGitRange(wt.path, target);
+      // The numstat/disk fallbacks read the VIEWED tree only; cross-tree
+      // entries keep their event-payload stats untouched.
       await fillLineCounts(
         wt.path,
-        files.filter(file => !file.hasStats),
+        files.filter(file => !file.hasStats && file.local),
         ['diff', '--numstat', ...range],
       );
       return c.json(files.map(file => ({
@@ -875,6 +958,8 @@ export function registerWorkingTreeRoutes(
         staged: file.staged,
         added: file.added,
         removed: file.removed,
+        ...(file.root !== null ? { root: file.root } : {}),
+        ...(!file.local ? { external: true } : {}),
       })));
     }
 

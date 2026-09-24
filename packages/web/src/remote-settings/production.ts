@@ -1,9 +1,18 @@
 import type { RemoteSettingsSnapshot, RemoteSettingsPairing, RemoteSettingsAuditEntry } from '@gian/shared';
 import type { RemoteSettingsController, RemoteSettingsState, RemotePairingState, RemoteAuditEntry } from './types.js';
+import { authorizeRemoteAccount } from '../auth/github-authorization.js';
 
 export interface RemoteSettingsOptions {
   fetchFn?: typeof fetch;
   pollIntervalMs?: number;
+  authorizeAccount?: (serverUrl: string, signal: AbortSignal) => Promise<void>;
+}
+
+const ACTION_ERRORS = new Set([
+  'remote_auth_required', 'enrollment_rejected', 'remote_unavailable', 'invalid_url', 'invalid_host_name',
+]);
+class RemoteSettingsActionError extends Error {
+  constructor(readonly category: string) { super(category); }
 }
 
 const initialState = (): RemoteSettingsState => ({
@@ -56,6 +65,7 @@ export function projectRemoteSettings(snapshot: RemoteSettingsSnapshot): RemoteS
       : { kind: 'connected', info, link: snapshot.connection };
   return {
     enrollment, pairing: projectPairing(snapshot.pairing), audit: {},
+    account: snapshot.account,
     devices: snapshot.devices.map(device => ({
       id: device.id, name: device.name, platform: device.platform,
       createdAt: Date.parse(device.created_at), lastSeenAt: time(device.last_seen_at),
@@ -102,7 +112,12 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
         headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
         cache: 'no-store', signal: abort.signal,
       });
-      if (!response.ok) throw new Error('request_failed');
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: unknown } | null;
+        const category = typeof body?.error === 'string' && ACTION_ERRORS.has(body.error)
+          ? body.error : 'operation_failed';
+        throw new RemoteSettingsActionError(category);
+      }
       return await response.json();
     } finally { clearTimeout(timeout); requests.delete(abort); }
   };
@@ -128,20 +143,31 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
       timer = setTimeout(() => { void tick(generation); }, options.pollIntervalMs ?? 1500);
     }
   };
-  const mutate = async (path: string, data: unknown = {}, transient?: Partial<RemoteSettingsState>) => {
+  const mutate = async (path: string, data: unknown = {}, transient?: Partial<RemoteSettingsState>, authorizeUrl?: string) => {
     if (disposed || state.busy || !snapshot || state.error === 'load_failed') return;
     ++mutations;
     ++reads; // Any read started before this action must not overwrite its result.
     emit({ ...state, ...transient, busy: true, error: null });
+    const authorization = authorizeUrl ? new AbortController() : null;
+    if (authorization) requests.add(authorization);
     try {
+      if (authorization && authorizeUrl) {
+        if (options.authorizeAccount) await options.authorizeAccount(authorizeUrl, authorization.signal);
+        else await authorizeRemoteAccount(authorizeUrl, 'host', { fetchFn, signal: authorization.signal });
+        if (disposed || authorization.signal.aborted) throw new Error('cancelled');
+      }
       await request(path, data);
       await refresh();
-    } catch {
+    } catch (error) {
+      if (disposed) return;
       // The request might have committed before the connection failed; recover
       // canonical state, never automatically replay a mutation.
       await refresh();
-      emit({ ...state, error: state.error === 'load_failed' ? 'load_failed' : 'operation_failed' });
+      emit({ ...state, error: state.error === 'load_failed' ? 'load_failed'
+        : error instanceof Error && error.message === 'cancelled' ? null
+        : error instanceof RemoteSettingsActionError ? error.category : 'operation_failed' });
     } finally {
+      if (authorization) requests.delete(authorization);
       const pairing = state.pairing.kind === 'claimed' ? { ...state.pairing, decision: 'idle' as const } : state.pairing;
       emit({ ...state, pairing, busy: false });
     }
@@ -159,10 +185,16 @@ export function createRemoteSettingsController(options: RemoteSettingsOptions = 
       };
     },
     refresh,
-    enroll: input => mutate('/enroll', { server_url: input.serverUrl, enrollment_token: input.enrollmentToken },
-      { enrollment: { kind: 'connecting', serverUrl: input.serverUrl } }),
+    startAccountLogin: serverUrl => mutate('/account/start', { server_url: serverUrl }),
+    pollAccountLogin: () => mutate('/account/poll'),
+    enroll: input => mutate('/enroll', {
+      server_url: input.serverUrl,
+      enrollment_token: input.enrollmentToken,
+      ...(input.hostName ? { host_name: input.hostName } : {}),
+    },
+      { enrollment: { kind: 'connecting', serverUrl: input.serverUrl } }, input.serverUrl),
     disconnect: () => mutate('/disconnect'),
-    reconnect: () => mutate('/reconnect'),
+    reconnect: () => mutate('/reconnect', {}, undefined, snapshot?.server_url ?? undefined),
     disableRemote: () => mutate('/disable'),
     setPublicUrl: url => mutate('/public-url', { public_url: url }),
     setHostName: name => mutate('/host-name', { host_name: name }),

@@ -26,7 +26,7 @@ import type { z } from 'zod';
  *  exports no alias for it). */
 export type RemoteCatalog = z.infer<typeof catalogReadResultSchema>;
 
-export type ThemeName = 'light' | 'warm' | 'dark';
+export type ThemeName = 'light' | 'warm' | 'dark' | 'system';
 export type AccentName = 'rose' | 'azure' | 'moss' | 'plum';
 
 // ---------------------------------------------------------------------------
@@ -227,6 +227,10 @@ export type AuthState =
 // ---------------------------------------------------------------------------
 
 export interface RemoteUiState {
+  account?: {
+    status: 'signed_out' | 'pending' | 'signed_in' | 'error';
+    login?: string; userCode?: string; expiresAt?: number; intervalSeconds?: number;
+  };
   addingHost?: boolean;
   connectionPhase?: 'auth' | 'relay' | 'sync';
   connectionFailed?: boolean;
@@ -249,6 +253,9 @@ export interface RemoteUiState {
   catalog: RemoteCatalog | null;
   /** Set when the Host invalidated the catalog after our last read. */
   catalogInvalidated: boolean;
+  /** Proxy branding logos as data URLs, keyed by proxy name, fetched lazily
+   *  via `proxy.logo`. Missing entries render the text fallback. */
+  logos: Record<string, { light?: string; dark?: string }>;
   snapshotReceivedAt: number | null;
 
   view: MainView;
@@ -284,6 +291,8 @@ export interface CreateSessionInput {
 }
 
 export interface RemoteUiActions {
+  startGitHubLogin?(): void;
+  pollGitHubLogin?(): void;
   // Host switching — state/cache are partitioned per Host by the controller.
   selectHost(hostId: string): void;
   restoreBrowserSession(): void;

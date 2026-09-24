@@ -162,7 +162,7 @@ export function registerSessionRoutes(app: Hono, db: Db, sessions: SessionManage
       const pageSizeRaw = c.req.query('turns');
       const pageSize = pageSizeRaw && /^\d+$/.test(pageSizeRaw) ? Number(pageSizeRaw) : undefined;
       try {
-        ensureEventPageRebuilt(db, id, before, pageSize, c.req.query('rebuild') === '1');
+        if (!sessions.getSession(id).remote_execution) ensureEventPageRebuilt(db, id, before, pageSize, c.req.query('rebuild') === '1');
       } catch (error) {
         console.warn(`[gian] failed to rebuild events for session ${id}:`, error);
       }

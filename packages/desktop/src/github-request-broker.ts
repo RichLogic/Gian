@@ -15,6 +15,7 @@ export interface GitHubReleaseMetadataBrokerOptions {
   socketPath: string;
   allowedRepository: string;
   allowedCatalogRepository?: string;
+  allowedArtifactRepositories?: readonly string[];
   fetchReleaseMetadata(
     request: GitHubReleaseMetadataRequest,
     signal: AbortSignal,
@@ -32,11 +33,14 @@ export function resolveGitHubReleaseBrokerSocketPath(
 
 export class GitHubReleaseMetadataBroker {
   private server: Server | null = null;
-  private readonly allowedRepository: string;
+  private readonly allowedRepositories: ReadonlySet<string>;
   private readonly allowedCatalogRepository: string | null;
 
   constructor(private readonly options: GitHubReleaseMetadataBrokerOptions) {
-    this.allowedRepository = normalizeRepository(options.allowedRepository);
+    this.allowedRepositories = new Set([
+      normalizeRepository(options.allowedRepository),
+      ...(options.allowedArtifactRepositories ?? []).map(normalizeRepository),
+    ]);
     this.allowedCatalogRepository = options.allowedCatalogRepository
       ? normalizeRepository(options.allowedCatalogRepository)
       : null;
@@ -94,7 +98,7 @@ export class GitHubReleaseMetadataBroker {
       const value = await readJsonBody(request);
       const releaseRequest = parseReleaseRequest(
         value,
-        this.allowedRepository,
+        this.allowedRepositories,
         this.allowedCatalogRepository,
       );
       if (!releaseRequest) {
@@ -180,7 +184,7 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 
 function parseReleaseRequest(
   value: unknown,
-  allowedRepository: string,
+  allowedRepositories: ReadonlySet<string>,
   allowedCatalogRepository: string | null,
 ): GitHubReleaseMetadataRequest | null {
   if (!value || typeof value !== 'object') return null;
@@ -230,7 +234,8 @@ function parseReleaseRequest(
       asset: candidate.asset,
     };
   }
-  if (candidate.repository !== allowedRepository) return null;
+  if (typeof candidate.repository !== 'string' || !allowedRepositories.has(candidate.repository)) return null;
+  const repository = candidate.repository;
   if (
     candidate.operation === 'release-asset'
     && typeof candidate.tag === 'string'
@@ -246,14 +251,14 @@ function parseReleaseRequest(
     && !candidate.asset.split('/').some(part => part === '' || part === '.' || part === '..')
   ) {
     return {
-      repository: allowedRepository,
+      repository,
       operation: 'release-asset',
       tag: candidate.tag,
       asset: candidate.asset,
     };
   }
   if (candidate.operation === 'list' && candidate.tag === undefined) {
-    return { repository: allowedRepository };
+    return { repository };
   }
   if (
     candidate.operation === 'tag'
@@ -262,7 +267,7 @@ function parseReleaseRequest(
     && candidate.tag.length <= 255
     && !/[\u0000-\u001f\u007f]/.test(candidate.tag)
   ) {
-    return { repository: allowedRepository, tag: candidate.tag };
+    return { repository, tag: candidate.tag };
   }
   return null;
 }

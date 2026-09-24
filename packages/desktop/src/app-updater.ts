@@ -103,6 +103,8 @@ export interface AppUpdateControllerOptions {
   checkIntervalMs?: number;
   scheduler?: AppUpdaterScheduler;
   logger?: AppUpdateLogger;
+  /** Release non-closable windows before the native updater closes all windows. */
+  beforeInstall?: () => void;
 }
 
 export interface AppUpdateRuntime {
@@ -217,6 +219,7 @@ export class AppUpdateController {
   private readonly checkIntervalMs: number;
   private readonly scheduler: AppUpdaterScheduler;
   private readonly logger: AppUpdateLogger;
+  private readonly beforeInstall: () => void;
   private readonly listeners = new Set<AppUpdateStateListener>();
   private state: AppUpdateState;
   private started = false;
@@ -224,6 +227,8 @@ export class AppUpdateController {
   private intervalTimer: unknown = null;
   private activeCheck: Promise<AppUpdateState> | null = null;
   private activeTrigger: AppUpdateTrigger | null = null;
+  private activeInstall: Promise<boolean> | null = null;
+  private resolveInstall: ((quitting: boolean) => void) | null = null;
 
   constructor(options: AppUpdateControllerOptions) {
     this.updater = options.updater;
@@ -234,6 +239,7 @@ export class AppUpdateController {
       ?? DEFAULT_UPDATE_CHECK_INTERVAL_MS;
     this.scheduler = options.scheduler ?? defaultScheduler;
     this.logger = options.logger ?? noOpLogger;
+    this.beforeInstall = options.beforeInstall ?? (() => undefined);
 
     if (!Number.isFinite(this.startupDelayMs) || this.startupDelayMs < 0) {
       throw new RangeError('startupDelayMs must be a finite non-negative number');
@@ -334,22 +340,34 @@ export class AppUpdateController {
     return { trigger, state: await operation };
   }
 
-  /** Installs only after electron-updater has confirmed a complete download. */
-  install(): boolean {
-    if (!this.enabled || this.state.status !== 'downloaded') return false;
+  /**
+   * Native macOS staging is asynchronous. Accepting quitAndInstall is not
+   * success: keep the replacement pending until will-quit or an updater error.
+   */
+  install(): Promise<boolean> {
+    if (this.activeInstall) return this.activeInstall;
+    if (!this.enabled || this.state.status !== 'downloaded') return Promise.resolve(false);
+    const operation = new Promise<boolean>(resolve => { this.resolveInstall = resolve; });
+    this.activeInstall = operation;
     try {
+      this.beforeInstall();
       this.updater.quitAndInstall(false, true);
-      return true;
     } catch (error) {
-      this.transition({
-        status: 'error',
-        trigger: 'manual',
-        update: this.state.update,
-        progress: this.state.progress,
-        error: sanitizeUpdateError(error),
-      });
-      return false;
+      this.markError(error);
     }
+    return operation;
+  }
+
+  /** Called by main only when Electron reaches will-quit. */
+  confirmInstallQuit(): void {
+    this.finishInstall(true);
+  }
+
+  private finishInstall(quitting: boolean): void {
+    const resolve = this.resolveInstall;
+    this.resolveInstall = null;
+    this.activeInstall = null;
+    resolve?.(quitting);
   }
 
   private bindUpdaterEvents(): void {
@@ -485,11 +503,12 @@ export class AppUpdateController {
     this.logger.warn(`[desktop-updater] ${safeError}`);
     this.transition({
       status: 'error',
-      trigger: this.eventTrigger(),
+      trigger: this.activeInstall ? 'manual' : this.eventTrigger(),
       update: this.state.update,
       progress: this.state.progress,
       error: safeError,
     });
+    this.finishInstall(false);
   }
 
   private checkingState(): AppUpdateState {

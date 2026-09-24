@@ -5,6 +5,9 @@ import { createHash } from 'node:crypto';
 
 import {
   AUTH_PROTOCOL,
+  ACCOUNT_PROTOCOL,
+  remoteAccountChallengePayload,
+  type AccountLoginStarted,
   exportPublicJwk,
   generateCanonicalId,
   generateP256SigningKeyPair,
@@ -21,7 +24,8 @@ export interface TestClock {
   now: number;
   tick(ms: number): void;
 }
-export function createTestClock(start = Date.UTC(2026, 8, 1)): TestClock {
+const controllerAccounts = new WeakMap<(path: string, init?: RequestInit) => Promise<Response>, { token: string; installationId: string }>();
+export function createTestClock(start = Date.now()): TestClock {
   return {
     now: start,
     tick(ms) {
@@ -52,6 +56,16 @@ export async function makeRemoteTestApp(options: {
     publicOrigin,
     allowedOrigins: [publicOrigin],
     adminToken: 'admin-test-token',
+    githubClientId: 'test-github-client',
+    enrollmentGithubIds: ['42'],
+    githubFetch: async url => {
+      if (String(url).endsWith('/login/device/code')) return Response.json({
+        device_code: 'test-device-code', user_code: 'TEST-CODE',
+        verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5,
+      });
+      if (String(url).endsWith('/login/oauth/access_token')) return Response.json({ access_token: 'test-oauth-token', token_type: 'bearer' });
+      return Response.json({ id: 42, login: 'test-account', type: 'User' });
+    },
     staticDir: options.staticDir,
     now: () => clock.now,
     logger: createLogger({
@@ -71,6 +85,50 @@ export async function makeRemoteTestApp(options: {
   return { handle, clock, logs, dataDir, publicOrigin, fetch };
 }
 
+export async function authorizeAccount(
+  fetch: (path: string, init?: RequestInit) => Promise<Response>,
+  keys: CryptoKeyPair,
+  role: 'host' | 'controller',
+) {
+  return authorizeSigningAccount(fetch, role, await exportPublicJwk(keys.publicKey),
+    bytes => signBytes(keys.privateKey, bytes));
+}
+
+export async function authorizeSigningAccount(
+  fetch: (path: string, init?: RequestInit) => Promise<Response>,
+  role: 'host' | 'controller',
+  publicKey: { kty: 'EC'; crv: 'P-256'; x: string; y: string },
+  sign: (bytes: Uint8Array) => Promise<string>,
+) {
+  const started = await (await fetch('/api/v1/account/start', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ protocol: ACCOUNT_PROTOCOL, peer: {
+      role, installation_id: generateCanonicalId(), public_key: publicKey,
+    } }),
+  })).json() as AccountLoginStarted;
+  const signature = await sign(new TextEncoder().encode(remoteAccountChallengePayload(started.challenge)));
+  const result = await (await fetch('/api/v1/account/poll', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ protocol: ACCOUNT_PROTOCOL, login_id: started.login_id, signature }),
+  })).json() as { status: string; account_token: string; installation_id: string; account: { id: string; login: string }; expires_at: number };
+  if (result.status !== 'authorized') throw new Error('fixture account authorization failed');
+  return { token: result.account_token, installationId: result.installation_id,
+    accountId: result.account.id, accountLogin: result.account.login, expiresAt: result.expires_at,
+    serverFingerprint: started.challenge.server_identity_fingerprint };
+}
+
+export async function withControllerAccount(fetch: (path: string, init?: RequestInit) => Promise<Response>) {
+  const account = controllerAccounts.get(fetch) ?? await authorizeAccount(fetch, await generateP256SigningKeyPair(), 'controller');
+  controllerAccounts.set(fetch, account);
+  const wrapped = (path: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers);
+    if (path === '/api/v1/pairings/claim' && !headers.has('x-gian-account-token')) headers.set('x-gian-account-token', account.token);
+    return fetch(path, { ...init, headers });
+  };
+  controllerAccounts.set(wrapped, account);
+  return wrapped;
+}
+
 export async function signChallenge(privateKey: CryptoKey, challengeId: string): Promise<string> {
   return signBytes(privateKey, new TextEncoder().encode(challengeId));
 }
@@ -78,6 +136,7 @@ export async function signChallenge(privateKey: CryptoKey, challengeId: string):
 export async function enrollHost(fetch: (path: string, init?: RequestInit) => Promise<Response>) {
   const keys = await generateP256SigningKeyPair();
   const publicKey = await exportPublicJwk(keys.publicKey);
+  const account = await authorizeAccount(fetch, keys, 'host');
   const created = await (await fetch('/api/v1/admin/host-enrollments', {
     method: 'POST',
     headers: {
@@ -88,7 +147,7 @@ export async function enrollHost(fetch: (path: string, init?: RequestInit) => Pr
   })).json() as { enrollment_token: string };
   const claimed = await (await fetch('/api/v1/host-enrollments/claim', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-gian-account-token': account.token },
     body: JSON.stringify({
       protocol: AUTH_PROTOCOL,
       enrollment_token: created.enrollment_token,
@@ -118,6 +177,8 @@ export async function enrollHost(fetch: (path: string, init?: RequestInit) => Pr
     hostId: claimed.host_id,
     accessToken: login.connector_access_token,
     refreshSecret: login.refresh_secret,
+    accountToken: account.token,
+    accountPeerId: account.installationId,
   };
 }
 
@@ -130,6 +191,8 @@ export async function pairDevice(
   const keys = existing?.keys ?? await generateP256SigningKeyPair();
   const publicKey = await exportPublicJwk(keys.publicKey);
   const browserId = existing?.browserId ?? generateCanonicalId();
+  const account = controllerAccounts.get(fetch) ?? await authorizeAccount(fetch, keys, 'controller');
+  controllerAccounts.set(fetch, account);
   const created = await (await fetch('/api/v1/host/pairings', {
     method: 'POST',
     headers: {
@@ -140,7 +203,7 @@ export async function pairDevice(
   })).json() as { code: string; grant_nonce: string };
   const claimed = await (await fetch('/api/v1/pairings/claim', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-gian-account-token': account.token },
     body: JSON.stringify({
       protocol: AUTH_PROTOCOL,
       browser_installation_id: browserId,
@@ -196,6 +259,8 @@ export async function pairDevice(
     cookies: login.headers.getSetCookie(),
     code: created.code,
     pairingId: claimed.pairing_id,
+    accountToken: account.token,
+    accountPeerId: account.installationId,
   };
 }
 

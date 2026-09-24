@@ -1,10 +1,10 @@
 {
   "name": "@gian/runtime-deepseek-harness",
-  "version": "0.1.1-rc.2",
+  "version": "0.1.5-rc.3",
   "private": true,
   "description": "Locked npm dependency graph used to assemble Gian's managed DeepSeek Harness Runtime",
   "license": "MIT",
   "dependencies": {
-    "@deepseek-ai/dsh": "0.1.1-rc.2"
+    "@deepseek-ai/dsh": "0.1.5-rc.3"
   }
 }

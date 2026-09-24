@@ -11,9 +11,11 @@ import {
   type FileContextItem,
   type InputItem,
   type MessageContextItem,
+  type SessionContextItem,
 } from '@gian/shared';
 
 const MAX_CONTEXT_ITEM_ID_LENGTH = 128;
+const MAX_SESSION_CONTEXT_TITLE_CHARS = 200;
 
 /**
  * Compile caps for `file` context items. A referenced file is inlined into the
@@ -28,6 +30,36 @@ const MAX_CONTEXT_ITEM_ID_LENGTH = 128;
 export const MAX_FILE_CONTEXT_BYTES = 100 * 1024;
 export const MAX_FILE_CONTEXT_LINES = 2000;
 export const FILE_CONTEXT_TRUNCATED_MARKER = '[truncated]';
+
+/**
+ * Compile caps for `session` context items — the same budget as `file`. The
+ * referenced conversation is inlined as `User:`/`Assistant:` text blocks,
+ * keeping the MOST RECENT messages that fit (a conversation's tail carries
+ * its current state; the earliest messages are omitted first). When content
+ * is omitted the body starts with a `[truncated]` marker line and the
+ * metadata head carries `truncated: true` plus `omittedMessages`. A session
+ * the Host can no longer resolve (deleted, or no transcript) degrades to the
+ * generic item embed — it never fails the send.
+ */
+export const MAX_SESSION_CONTEXT_BYTES = 100 * 1024;
+export const MAX_SESSION_CONTEXT_LINES = 2000;
+export const SESSION_CONTEXT_TRUNCATED_MARKER = '[truncated]';
+
+/** One ordered conversation message in a referenced session's transcript. */
+export interface SessionTranscriptEntry {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** Transcript source for the session-reference compile, provided by the
+ *  SessionManager (which owns the history store). Returns null when the
+ *  session is unknown or has no conversation text. */
+export interface SessionTranscriptSlice {
+  title: string;
+  entries: SessionTranscriptEntry[];
+}
+
+export type SessionReferenceResolver = (sessionId: string) => SessionTranscriptSlice | null;
 
 function requireId(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CONTEXT_ITEM_ID_LENGTH) {
@@ -145,9 +177,90 @@ function compileFileReferencePayload(item: FileContextItem): string | null {
   return `${JSON.stringify(metadata)}\n${body}${truncated ? `\n${FILE_CONTEXT_TRUNCATED_MARKER}` : ''}`;
 }
 
+/** Hard-truncate one transcript block to the remaining byte/line budget. The
+ *  cut keeps the block's head (role line + leading text). */
+function truncateTranscriptBlock(block: string, maxBytes: number, maxLines: number): string {
+  let lines = block.split('\n');
+  if (lines.length > maxLines) lines = lines.slice(0, Math.max(1, maxLines));
+  let text = lines.join('\n');
+  if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+    // Binary-search the longest prefix whose UTF-8 encoding fits; slicing in
+    // UTF-16 code units can leave a lone surrogate at the cut point.
+    let lo = 0;
+    let hi = text.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= maxBytes) lo = mid;
+      else hi = mid - 1;
+    }
+    text = text.slice(0, lo).replace(/[\uD800-\uDBFF]$/, '');
+  }
+  return text;
+}
+
+/**
+ * Inline payload for a `session` context item: a one-line metadata JSON head
+ * (session id + title + included message count + truncation flags) followed
+ * by the transcript slice as `User:`/`Assistant:` blocks. Keeps the most
+ * recent messages that fit the caps. Returns null when the session cannot
+ * contribute a transcript (unknown, deleted, or no conversation text) — the
+ * caller then degrades to the generic item embed.
+ */
+function compileSessionReferencePayload(
+  item: SessionContextItem,
+  resolve: SessionReferenceResolver | undefined,
+): string | null {
+  if (!resolve) return null;
+  let slice: SessionTranscriptSlice | null = null;
+  try {
+    slice = resolve(item.sessionId);
+  } catch {
+    slice = null;
+  }
+  if (!slice || slice.entries.length === 0) return null;
+
+  const blocks = slice.entries.map(entry => `${entry.role === 'user' ? 'User' : 'Assistant'}:\n${entry.text}`);
+  const kept: string[] = [];
+  let remainingBytes = MAX_SESSION_CONTEXT_BYTES;
+  let remainingLines = MAX_SESSION_CONTEXT_LINES;
+  let truncated = false;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index]!;
+    const blockBytes = Buffer.byteLength(block, 'utf8') + (kept.length > 0 ? 2 : 0);
+    const blockLines = block.split('\n').length;
+    if (blockBytes <= remainingBytes && blockLines <= remainingLines) {
+      kept.unshift(block);
+      remainingBytes -= blockBytes;
+      remainingLines -= blockLines;
+      continue;
+    }
+    // A single oversized newest message still contributes its head; anything
+    // older than the first non-fitting block is omitted entirely.
+    if (kept.length === 0) {
+      kept.unshift(truncateTranscriptBlock(block, MAX_SESSION_CONTEXT_BYTES, MAX_SESSION_CONTEXT_LINES));
+    }
+    truncated = true;
+    break;
+  }
+  const omittedMessages = blocks.length - kept.length;
+  if (omittedMessages > 0) truncated = true;
+  const metadata = {
+    type: 'session',
+    id: item.id,
+    sessionId: item.sessionId,
+    title: slice.title,
+    ...(item.workspaceName ? { workspaceName: item.workspaceName } : {}),
+    messages: kept.length,
+    ...(truncated ? { truncated: true, omittedMessages } : {}),
+  };
+  const body = kept.join('\n\n');
+  return `${JSON.stringify(metadata)}\n${truncated ? `${SESSION_CONTEXT_TRUNCATED_MARKER}\n` : ''}${body}`;
+}
+
 function compileOrderedDocument(
   document: ComposerDocument,
   contextItems: MessageContextItem[],
+  resolveSession?: SessionReferenceResolver,
 ): string {
   const contexts = new Map(contextItems.map(item => [item.id, item]));
   const attachmentIndexes = new Map<string, number>();
@@ -164,7 +277,9 @@ function compileOrderedDocument(
     const item = contexts.get(segment.id);
     const payload = item?.type === 'file'
       ? compileFileReferencePayload(item) ?? JSON.stringify(item, null, 2)
-      : JSON.stringify(item, null, 2);
+      : item?.type === 'session'
+        ? compileSessionReferencePayload(item, resolveSession) ?? JSON.stringify(item, null, 2)
+        : JSON.stringify(item, null, 2);
     return `\n<GianReference label=${JSON.stringify(segment.label)}>\n${payload}\n</GianReference>\n`;
   }).join('');
   return [
@@ -288,6 +403,25 @@ export function normalizeMessageContextItems(
       if (!capture) throw new Error('browser element context is invalid');
       return { type: 'browserElement', id, ...capture };
     }
+    if (item.type === 'session') {
+      if (typeof item.sessionId !== 'string' || item.sessionId.length === 0 || item.sessionId.length > MAX_CONTEXT_ITEM_ID_LENGTH) {
+        throw new Error('session context requires a sessionId string of at most 128 characters');
+      }
+      if (typeof item.title !== 'string' || !item.title.trim()) {
+        throw new Error('session context requires a non-empty title');
+      }
+      const title = item.title.replace(/\s+/g, ' ').trim().slice(0, MAX_SESSION_CONTEXT_TITLE_CHARS);
+      const workspaceName = typeof item.workspaceName === 'string'
+        ? item.workspaceName.replace(/\s+/g, ' ').trim().slice(0, MAX_SESSION_CONTEXT_TITLE_CHARS)
+        : '';
+      return {
+        type: 'session',
+        id,
+        sessionId: item.sessionId,
+        title,
+        ...(workspaceName ? { workspaceName } : {}),
+      };
+    }
     throw new Error(`unsupported context item type: ${String(item.type)}`);
   });
 }
@@ -296,18 +430,22 @@ export function normalizeMessageContextItems(
  * Compile Gian-owned context cards into the Provider-neutral text item. The
  * original structured items remain in the canonical user_message event; only
  * this compiled form crosses the existing Proxy InputItem boundary.
+ * `resolveSession` supplies referenced-conversation transcripts; without it
+ * (or when it returns null) a session reference degrades to the generic item
+ * embed.
  */
 export function compileContextIntoInput(
   text: string,
   items: InputItem[] | undefined,
   contextItems: MessageContextItem[],
   document?: ComposerDocument,
+  resolveSession?: SessionReferenceResolver,
 ): InputItem[] {
   if (!document && contextItems.length === 0) {
     return items && items.length > 0 ? items : [{ type: 'text', text }];
   }
   const compiledText = document
-    ? compileOrderedDocument(document, contextItems)
+    ? compileOrderedDocument(document, contextItems, resolveSession)
     : [
         ATTACHED_CONTEXT_PREFIX,
         JSON.stringify(contextItems, null, 2),
@@ -350,17 +488,19 @@ function parseJsonString(token: string): string | null {
   }
 }
 
-/** Recover the context item from a file reference's inline payload: a one-line
- *  metadata JSON head followed by raw file content (which is not valid JSON as
- *  a whole). Returns the parsed head when it looks like a file item. */
-function fileReferenceHead(payload: string): unknown | null {
+/** Recover the context item from a file or session reference's inline
+ *  payload: a one-line metadata JSON head followed by raw content (which is
+ *  not valid JSON as a whole). Returns the parsed head when it looks like a
+ *  file or session item. */
+function inlineReferenceHead(payload: string): unknown | null {
   const newline = payload.indexOf('\n');
   const head = newline === -1 ? payload : payload.slice(0, newline);
   try {
     const value: unknown = JSON.parse(head);
     if (
       !!value && typeof value === 'object' && !Array.isArray(value)
-      && (value as { type?: unknown }).type === 'file'
+      && ((value as { type?: unknown }).type === 'file'
+        || (value as { type?: unknown }).type === 'session')
       && typeof (value as { id?: unknown }).id === 'string'
     ) {
       return value;
@@ -392,8 +532,8 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
     if (match[1] !== undefined) {
       // Context reference: recover the embedded item JSON. A pasted text can
       // itself contain the closing tag, so accept the first closing position
-      // whose payload parses as JSON — or, for file references with inlined
-      // content, whose metadata head parses.
+      // whose payload parses as JSON — or, for file/session references with
+      // inlined content, whose metadata head parses.
       const contentStart = match.index + match[0].length;
       let item: unknown;
       let contentEnd = -1;
@@ -407,7 +547,7 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
           contentEnd = closeIndex + REFERENCE_CLOSE.length;
           break;
         } catch {
-          const head = fileReferenceHead(payload);
+          const head = inlineReferenceHead(payload);
           if (head !== null) {
             item = head;
             contentEnd = closeIndex + REFERENCE_CLOSE.length;
@@ -423,7 +563,10 @@ function decompileOrderedDocument(body: string): DecompiledMessageContext | null
         seenContextIds.add(id);
         rawItems.push(item);
       }
-      const kind = (item as { type?: unknown })?.type === 'file' ? 'file' as const : undefined;
+      const itemType = (item as { type?: unknown })?.type;
+      const kind = itemType === 'file' ? 'file' as const
+        : itemType === 'session' ? 'session' as const
+        : undefined;
       segments.push({ type: 'reference', id, referenceType: 'context', label, ...(kind ? { kind } : {}) });
       cursor = contentEnd;
       COMPILED_MARKER.lastIndex = contentEnd;

@@ -52,6 +52,7 @@ import {
   parseProxyPluginId,
   pluginIdForExecutorId,
   PRODUCT_EXECUTORS,
+  OFFICIAL_PROXY_REPOSITORY,
   productExecutorForPluginId,
   resolvePluginIdInput,
 } from '@gian/shared';
@@ -492,6 +493,7 @@ function persistableAgent(agent: UserAgent): UserAgent {
     name: agent.name,
     pluginId: agent.pluginId,
     proxy: agent.proxy,
+    ...(agent.enabled !== undefined ? { enabled: agent.enabled } : {}),
     home: agent.home ? { ...agent.home } : null,
     cliPath: agent.cliPath,
     defaults: copyProxyDefaults(agent.defaults),
@@ -523,6 +525,7 @@ function normalizeUserAgent(value: unknown): UserAgent | null {
     name,
     pluginId,
     proxy: productExecutorForPluginId(pluginId),
+    ...(typeof record['enabled'] === 'boolean' ? { enabled: record['enabled'] } : {}),
     home,
     cliPath,
     defaults: normalizeProxyDefaults(record['defaults']),
@@ -918,7 +921,7 @@ export class AgentManager {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.releaseVersion = safeReleaseValue(options.releaseVersion, 'release version');
     this.releaseRepository = normalizeRepository(
-      options.releaseRepository ?? 'RichLogic/Gian',
+      options.releaseRepository ?? (options.independentProxyReleases ? OFFICIAL_PROXY_REPOSITORY : 'RichLogic/Gian'),
     );
   }
 
@@ -1783,6 +1786,7 @@ export class AgentManager {
     pluginId?: string;
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
+    enabled?: boolean;
   }): Promise<UserAgent> {
     const existing = this.getAgent(id);
     if (patch.pluginId !== undefined) {
@@ -1856,6 +1860,7 @@ export class AgentManager {
         defaults: patch.defaults
           ? normalizeProxyDefaults(mergeAgentProxyDefaults(previous.defaults, patch.defaults))
           : previous.defaults,
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       });
       const agents = [...current.agents];
       agents[index] = agent;

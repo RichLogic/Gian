@@ -14,10 +14,11 @@ import type {
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_TERMINAL_PREFERENCES,
+  FRAME_OPACITY_DEFAULT,
+  FRAME_OPACITY_MIN,
   KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
   MIN_CHAT_FONT_SIZE,
-  THEME_DEFAULT_ACCENT,
 } from '@gian/shared';
 import {
   MAX_ZOOM_PERCENT,
@@ -69,6 +70,7 @@ import {
   ToolSettingsPage,
 } from './SettingsPreferencePages.js';
 import { SettingsStepper } from './SettingsStepper.js';
+import { SettingsTranslation } from '../translation/SettingsTranslation.js';
 
 const OPEN_CATEGORIES: Array<{ key: OpenFileCategory; labelKey: string }> = [
   { key: 'code', labelKey: 'settings.openapps.code' },
@@ -84,6 +86,7 @@ export type NavKey =
   | 'keymap'
   | 'executors'
   | 'chat'
+  | 'translation'
   | 'files'
   | 'diffs'
   | 'history'
@@ -138,6 +141,7 @@ const NAV_GROUPS: Array<{
     items: [
       ['executors', 'settings.section.executor'],
       ['chat', 'settings.section.chat'],
+      ['translation', 'translation.title'],
     ],
   },
   {
@@ -283,6 +287,9 @@ function SettingsBodyInner({
   const dispatch = useOperationDispatch();
   const browserAvailable = !!desktopBridge()?.browser;
   const screenshotAvailable = !!desktopBridge()?.screenshot;
+  // Liquid-glass frame transparency is a macOS Desktop capability; the
+  // browser (no bridge) and other platforms keep the frame opaque.
+  const frameGlassCapable = desktopBridge()?.platform === 'darwin';
   const [screenshotState, setScreenshotState] = useState<GianScreenshotState | null>(null);
   const [screenshotPreferences, setScreenshotPreferences] =
     useState<GianScreenshotPreferences | null>(null);
@@ -415,14 +422,35 @@ function SettingsBodyInner({
                   value={config.theme}
                   onChange={e => {
                     const theme = e.target.value as SystemConfig['theme'];
-                    patch({ theme, accent: THEME_DEFAULT_ACCENT[theme] });
+                    // Accents are decoupled from themes: switching theme keeps
+                    // the current accent.
+                    patch({ theme });
                   }}
                 >
                   <option value="light">{t('settings.theme.light')}</option>
                   <option value="warm">{t('settings.theme.warm')}</option>
                   <option value="dark">{t('settings.theme.dark')}</option>
+                  <option value="system">{t('settings.theme.system')}</option>
                 </select>
               </dd>
+              {config.theme === 'system' && (
+                <>
+                  <dt>{t('settings.appearance.systemLight')}</dt>
+                  <dd>
+                    <select
+                      className="select"
+                      aria-label={t('settings.appearance.systemLight')}
+                      value={config.system_light_theme ?? 'warm'}
+                      onChange={e => patch({
+                        system_light_theme: e.target.value as 'light' | 'warm',
+                      })}
+                    >
+                      <option value="light">{t('settings.theme.light')}</option>
+                      <option value="warm">{t('settings.theme.warm')}</option>
+                    </select>
+                  </dd>
+                </>
+              )}
               <dt>{t('settings.appearance.accent')}</dt>
               <dd>
                 <div className="accent-row">
@@ -444,6 +472,26 @@ function SettingsBodyInner({
                     </button>
                   ))}
                 </div>
+              </dd>
+              <dt>{t('settings.appearance.frameOpacity')}</dt>
+              <dd>
+                <label className="switch" data-testid="frame-opacity-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={(config.frame_opacity ?? FRAME_OPACITY_DEFAULT) < FRAME_OPACITY_DEFAULT}
+                    disabled={!frameGlassCapable}
+                    onChange={e => patch({
+                      frame_opacity: e.target.checked
+                        ? FRAME_OPACITY_MIN
+                        : FRAME_OPACITY_DEFAULT,
+                    })}
+                  />
+                  <span>{t('settings.appearance.frameOpacity')}</span>
+                </label>
+                {!frameGlassCapable && (
+                  <p className="s2-help">{t('settings.appearance.frameOpacityMacOnly')}</p>
+                )}
               </dd>
               <dt>{t('settings.appearance.language')}</dt>
               <dd>
@@ -525,6 +573,10 @@ function SettingsBodyInner({
               </dd>
             </dl>
           </div>
+        </section>
+
+        <section id="settings-section-translation" data-settings-section="translation" className="s2-section" style={{ order: 5 }}>
+          <SettingsTranslation config={config} onPatch={patch} />
         </section>
 
         {/* ── Terminal ── */}

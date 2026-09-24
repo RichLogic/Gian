@@ -37,6 +37,7 @@ export interface CodexRuntime extends RuntimeEventSource {
   ensureStarted(): Promise<void>;
   /** Start a fresh thread using Codex's effective config. */
   startThread(options: {
+    textOnly?: boolean;
     cwd: string;
     model?: string | null;
     ephemeral?: boolean;

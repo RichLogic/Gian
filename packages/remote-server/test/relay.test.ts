@@ -17,13 +17,12 @@ import {
 } from '@gian/remote-protocol';
 
 import { createConfig } from '../src/config.js';
-import { createRemoteApp } from '../src/app.js';
 import { PresenceService } from '../src/presence/leases.js';
 import { ControlOutbox } from '../src/relay/outbox.js';
 import { RelayRouter, type RelayPeer } from '../src/relay/router.js';
 import { openRemoteDatabase } from '../src/storage/db.js';
 import { RemoteRepositories } from '../src/storage/repositories.js';
-import { listenRemoteApp } from './fixture.js';
+import { enrollHost, listenRemoteApp, makeRemoteTestApp, pairDevice } from './fixture.js';
 
 function ids() {
   return {
@@ -553,11 +552,9 @@ function openRelaySocket(
 }
 
 test('shutdown is idempotent and late Host socket close never touches the closed database', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'gian-remote-shutdown-'));
-  const handle = await createRemoteApp(createConfig({ dataDir, publicOrigin: 'https://remote.test', adminToken: 'test-only' }));
+  const { handle, fetch } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle, 0);
-  const hostId = generateCanonicalId();
-  handle.services.db.prepare('INSERT INTO hosts(id, name, public_key_jwk, created_at) VALUES (?, ?, ?, ?)').run(hostId, 'test', '{}', Date.now());
+  const { hostId } = await enrollHost(fetch);
   handle.services.repos.createWsTicket({ role: 'host', hostId, ticket: 'shutdown-ticket' });
   const host = openRelaySocket(listened.wsUrl, 'shutdown-ticket', () => undefined);
   try {
@@ -573,37 +570,20 @@ test('shutdown is idempotent and late Host socket close never touches the closed
 });
 
 test('Host WS lifecycle broadcasts host.online and host.offline to devices', async () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'gian-remote-presence-'));
-  const now = () => Date.UTC(2026, 8, 1);
-  const db = openRemoteDatabase(dataDir);
-  const config = createConfig({
-    dataDir,
-    publicOrigin: 'https://remote.test',
-    adminToken: 'admin-test-token',
-    now,
-  });
-  const handle = await createRemoteApp(config);
+  const { handle, fetch } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle, 0);
   try {
-    const hostId = generateCanonicalId();
-    const deviceId = generateCanonicalId();
-    db.prepare(`
-      INSERT INTO hosts(id, name, public_key_jwk, created_at) VALUES (?, ?, ?, ?)
-    `).run(hostId, 'test-host', '{}', now());
-    db.prepare('INSERT INTO browser_installations(id, created_at) VALUES (?, ?)').run('browser-1', now());
-    handle.services.repos.insertPairing({
-      id: deviceId,
-      browser_installation_id: 'browser-1',
-      host_id: hostId,
-      public_key_jwk: '{}',
-      platform: 'web',
-      user_agent: 'node-test',
-      created_at: now(),
-      crypto_connection_id: null,
-    });
+    const enrolled = await enrollHost(fetch);
+    const paired = await pairDevice(fetch, enrolled.accessToken, enrolled.hostId);
+    const hostId = enrolled.hostId;
     handle.services.presence.heartbeat(hostId);
-    const deviceTicket = 'device-ticket';
-    handle.services.repos.createWsTicket({ role: 'device', hostId, deviceId, ticket: deviceTicket });
+    const ticketResponse = await fetch('/api/v1/ws-tickets', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${paired.accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ protocol: 'gian.remote.auth/1', host_id: hostId }),
+    });
+    assert.equal(ticketResponse.status, 200);
+    const { ticket: deviceTicket } = await ticketResponse.json() as { ticket: string };
     const deviceNotices: string[] = [];
     const device = openRelaySocket(listened.wsUrl, deviceTicket, (parsed) => {
       deviceNotices.push(String(parsed.type));

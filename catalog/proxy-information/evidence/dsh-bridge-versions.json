@@ -43,5 +43,10 @@
     "tag": "proxy-dsh-v0.1.0",
     "version": "0.1.0",
     "evidence": "public-tag-source"
+  },
+  {
+    "tag": "proxy-dsh-v0.3.2",
+    "version": "0.1.4",
+    "evidence": "bundled-package-source"
   }
 ]

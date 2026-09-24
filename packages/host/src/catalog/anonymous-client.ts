@@ -112,6 +112,7 @@ export function createCatalogAnonymousNetwork(options: {
 
 function catalogTagSequence(item: unknown): number | null {
   if (!isRecord(item) || typeof item.tag_name !== 'string') return null;
+  if (item.draft === true || item.prerelease === true) return null;
   if (item.tag_name.length > 64) return null;
   return parseCatalogReleaseSequence(item.tag_name);
 }

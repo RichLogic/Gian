@@ -1,3 +1,6 @@
+import { loadConfig } from '../storage/config.js';
+import { compactHistoryEnvelopes } from './history-store.js';
+import { DEFAULT_TRANSLATION_PREFERENCES } from '@gian/shared';
 import type {
   ApprovalMode,
   AgentProxyDefaults,
@@ -33,6 +36,8 @@ import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
 import { SessionRepository } from './repository.js';
+import type { RemoteControllerHub } from '../remote/controller-hub.js';
+import { localRemoteTurnId } from '../remote/execution-journal.js';
 import { SessionHistoryStore, type EventHistoryPage } from './history-store.js';
 import { TraceEvidenceStore } from '../trace/evidence-store.js';
 import { projectTraceSnapshot } from '../trace/projector.js';
@@ -77,6 +82,7 @@ import {
   compileContextIntoInput,
   normalizeMessageComposerDocument,
   normalizeMessageContextItems,
+  type SessionTranscriptSlice,
 } from './context-items.js';
 export type { CreateSessionInput } from './lifecycle-service.js';
 
@@ -135,6 +141,30 @@ function configConditionsMatch(
  * without a current UI mapping remain available in DB/WS for diagnostics.
  */
 export class SessionManager {
+  private translations?: import('../translation/service.js').TranslationService;
+  setTranslationService(service: import('../translation/service.js').TranslationService): void {
+    this.translations = service;
+    this.remoteController?.setTranslationService(service, (id, turn) => { void this.translateCompletedTurn(id, turn); });
+  }
+  private remoteController: RemoteControllerHub | null = null;
+
+  setRemoteController(controller: RemoteControllerHub): void {
+    this.remoteController = controller;
+    if (this.translations) controller.setTranslationService(this.translations, (id, turn) => { void this.translateCompletedTurn(id, turn); });
+  }
+
+  remoteSnapshot(sessionId: string) { return this.remoteController?.owns(sessionId) ? this.remoteController.replicas.snapshot(sessionId) : null; }
+
+  async remoteCommand(sessionId: string, method: import('@gian/remote-protocol').RemoteMethod, params: Record<string, unknown>) {
+    if (!this.remoteController?.owns(sessionId)) throw new Error('remote Session required');
+    return this.remoteController.command(sessionId, method, params);
+  }
+
+  async sendRemoteForTool(sessionId: string, input: Parameters<RemoteControllerHub['sendForTool']>[1], requestId: string,
+    busy?: 'queue' | 'steer' | 'fail') {
+    if (!this.remoteController?.owns(sessionId)) throw new Error('remote Session required');
+    return this.remoteController.sendForTool(sessionId, input, requestId, busy);
+  }
   private sessions: SessionRepository;
   private history: SessionHistoryStore;
   private turns: TurnRuntime;
@@ -233,6 +263,7 @@ export class SessionManager {
             composerDocument,
           )
         ),
+        onTurnCompleted: (sessionId, turn) => { void this.translateCompletedTurn(sessionId, turn); },
         onInteractionResolved: (interactionId) => {
           this.interactionResponseIds.delete(interactionId);
         },
@@ -295,6 +326,7 @@ export class SessionManager {
   }
 
   async createSidechat(parentSessionId: string, sidechatId?: string): Promise<SideChatPublicSnapshot> {
+    if (this.remoteController?.owns(parentSessionId)) throw new Error('Side Chat is unavailable for remote execution');
     const parent = this.sessions.get(parentSessionId);
     await this.proxySessions.ensure(parent);
     await this.sidechats.recoverForParent(parentSessionId);
@@ -311,6 +343,7 @@ export class SessionManager {
   }
 
   async resumeSidechat(sidechatId: string, parentSessionId: string): Promise<SideChatPublicSnapshot> {
+    if (this.remoteController?.owns(parentSessionId)) throw new Error('Side Chat is unavailable for remote execution');
     const parent = this.sessions.get(parentSessionId);
     await this.proxySessions.ensure(parent);
     await this.sidechats.recoverForParent(parentSessionId);
@@ -610,6 +643,9 @@ export class SessionManager {
     }
     if (agentId !== undefined) {
       const { agent, cliPath } = this.agentResolver.agentRuntime(agentId);
+      if (agent.enabled === false) {
+        throw new Error(`agent is disabled: ${agentId}`);
+      }
       const matches = agentMatchesSessionKind(agent, executor);
       if (!matches) {
         throw new Error(`agent ${agentId} is a ${agent.proxy ?? agent.pluginId} Agent, not ${executor}`);
@@ -623,7 +659,8 @@ export class SessionManager {
         agent,
       };
     }
-    const candidates = this.agentResolver.agentsForKind(executor);
+    const candidates = this.agentResolver.agentsForKind(executor)
+      .filter(agent => agent.enabled !== false);
     if (candidates.length > 1 || (candidates.length === 0 && this.bindingPlanner)) {
       throw Object.assign(
         new Error(`choose an Agent for this ${executor} session`),
@@ -727,6 +764,12 @@ export class SessionManager {
   }
 
   async stopTurn(sessionId: string): Promise<void> {
+    const cancelledTranslation = this.translations?.cancelSession(sessionId);
+    if (cancelledTranslation && !this.hasRunningTurn(sessionId)) return;
+    if (this.remoteController?.owns(sessionId)) {
+      await this.remoteController.handleMessage({ type: 'session:stop', session_id: sessionId });
+      return;
+    }
     if (this.sidechats.has(sessionId)) {
       await this.sidechats.interruptTurn(sessionId);
       return;
@@ -807,6 +850,7 @@ export class SessionManager {
    * row without one can only be left by a Host/process restart.
    */
   settleLostRuntimeTurn(sessionId: string, turnId: string): boolean {
+    if (this.remoteController?.owns(sessionId)) return false;
     if (this.turns.has(sessionId)) return false;
     const persisted = this.db.prepare(
       `SELECT 1 FROM turns WHERE id = ? AND session_id = ? AND status = 'running'`,
@@ -834,6 +878,11 @@ export class SessionManager {
     nativeOptionId?: string,
     resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
   ): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) {
+      await this.remoteController.handleMessage({ type: 'approval:resolve', session_id: sessionId,
+        approval_id: approvalId, decision, answers, native_option_id: nativeOptionId });
+      return;
+    }
     if (this.sidechats.has(sessionId)) {
       // Side Chats are transient (SIDECHAT-001): never look them up in the
       // sessions table or persist proxy_interactions rows — route the answer
@@ -1064,12 +1113,31 @@ export class SessionManager {
     composerDocument?: ComposerDocument,
     turnConfig?: Record<string, ConfigValue>,
     scheduledTask?: ScheduledTaskOrigin,
+    translationId?: string,
   ): Promise<{
     turnId: string;
     turnNumber: number;
     configSnapshot: Record<string, unknown>;
   } | null> {
+    if (this.remoteController?.owns(sessionId)) {
+      assertLocalFilesBelongToSession(sessionId, items);
+      if (oneShotBypass || turnConfig || scheduledTask) throw new Error('remote send option is not supported');
+      await this.remoteController.handleMessage({ type: 'message:send', session_id: sessionId, text,
+        items, context_items: contextItems, composer_document: composerDocument, request_id: toolRequestId,
+        ...(translationId ? { translation_id: translationId } : {}) });
+      const snapshot = this.remoteController.replicas.snapshot(sessionId);
+      const latest = this.db.prepare('SELECT MAX(turn_number) AS number FROM turns WHERE session_id = ?')
+        .get(sessionId) as { number: number | null } | undefined;
+      const turnNumber = snapshot?.session.active_turn?.turn_number
+        ?? latest?.number;
+      if (typeof turnNumber !== 'number') throw new Error('remote send confirmed; turn metadata is not available yet');
+      const turnId = localRemoteTurnId(sessionId, turnNumber);
+      if (toolRequestId) this.db.prepare('UPDATE turns SET tool_request_id = ? WHERE id = ? AND tool_request_id IS NULL')
+        .run(toolRequestId, turnId);
+      return { turnId, turnNumber, configSnapshot: {} };
+    }
     if (this.sidechats.has(sessionId)) {
+      if (translationId && translationId !== 'original') throw new Error('Translated sending is not yet supported for Side Chat.');
       const normalizedContextItems = normalizeMessageContextItems(
         contextItems,
         { workingTreeRoot: this.sidechatTreeRoot(sessionId) },
@@ -1079,7 +1147,13 @@ export class SessionManager {
         items,
         normalizedContextItems,
       );
-      const sidechatItems = compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument);
+      const sidechatItems = compileContextIntoInput(
+        text,
+        items,
+        normalizedContextItems,
+        normalizedDocument,
+        this.resolveSessionTranscript,
+      );
       const storedInput = items && items.length > 0
         ? items
         : [{ type: 'text' as const, text }];
@@ -1099,6 +1173,18 @@ export class SessionManager {
     }
     const session = this.getSession(sessionId);
     assertSessionAcceptsInput(session);
+    const translation = translationId && translationId !== 'original' ? this.translations?.get(translationId)
+      : !translationId && text.trim() && !items?.some(item => item.type === 'skill') && this.translations?.enabled(sessionId)
+        ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
+          loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    if (translationId && translationId !== 'original' && (!translation || translation.sessionId !== sessionId || translation.purpose !== 'send'
+      || translation.sourceText !== text
+      || JSON.stringify(translation.sourceDocument ?? null) !== JSON.stringify(composerDocument ?? null))) {
+      throw new Error('Translation does not match the original message. Translate again before sending.');
+    }
+    if (translation && (items?.filter(item => item.type === 'text').length ?? 0) > 1) {
+      throw new Error('Translation requires one user text input.');
+    }
     assertLocalFilesBelongToSession(sessionId, items);
     const normalizedContextItems = normalizeMessageContextItems(
       contextItems,
@@ -1161,6 +1247,8 @@ export class SessionManager {
 
     const attachments = buildAttachmentsFromItems(sessionId, items);
     const userMessagePayload: Record<string, unknown> = { text };
+    if (toolRequestId) userMessagePayload.tool_request_id = toolRequestId;
+    if (translation) userMessagePayload.translation = translation;
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
     if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
     if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
@@ -1264,7 +1352,13 @@ export class SessionManager {
     this.turns.setConfig(sessionId, turnId, configSnapshot);
     const dispatchItems = translateItemsForExecutor(
       session.executor,
-      compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+      compileContextIntoInput(
+        translation?.text ?? text,
+        translation ? items?.map(item => item.type === 'text' ? { ...item, text: translation.text } : item) : items,
+        normalizedContextItems,
+        translation?.translatedDocument ?? normalizedDocument,
+        this.resolveSessionTranscript,
+      ),
     );
     try {
       const started = await client.startTurn({
@@ -1534,6 +1628,7 @@ export class SessionManager {
    * available_actions snapshot stale until the next mutating command.
    */
   async activateSession(sessionId: string): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) { await this.remoteController.sync(sessionId); return; }
     await this.proxySessions.ensure(this.getSession(sessionId));
   }
 
@@ -1696,6 +1791,7 @@ export class SessionManager {
    *     Otherwise the next bring-up re-applies it (see bringUpProxySession).
    */
   private async applyNativeSessionName(sessionId: string, name: string): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) return;
     const session = this.getSession(sessionId);
     const client = this.proxy.get(sessionId);
     if (client?.setName) {
@@ -1748,16 +1844,19 @@ export class SessionManager {
   }
 
   getQueueRevision(sessionId: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.replicas.snapshot(sessionId)?.session.queue.revision ?? '0';
     return this.queue.getRevision(sessionId);
   }
 
   getResourceRevision(sessionId: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.replicas.snapshot(sessionId)?.session.revision ?? '0';
     const row = this.db.prepare('SELECT resource_revision FROM sessions WHERE id = ?')
       .get(sessionId) as { resource_revision: number } | undefined;
     return String(row?.resource_revision ?? 0);
   }
 
   bumpResourceRevision(sessionId: string, expected?: string): string {
+    if (this.remoteController?.owns(sessionId)) return this.getResourceRevision(sessionId);
     return this.db.transaction(() => {
       const current = this.getResourceRevision(sessionId);
       if (expected !== undefined && expected !== current) {
@@ -1865,6 +1964,7 @@ export class SessionManager {
             entry.items,
             entry.contextItems,
             entry.composerDocument,
+            entry.toolRequestId,
           );
           this.deliveryLifecycle?.queueSteered(entry, receipt);
           affected.push({
@@ -1931,6 +2031,7 @@ export class SessionManager {
     items?: import('@gian/shared').InputItem[],
     contextItems?: MessageContextItem[],
     composerDocument?: ComposerDocument,
+    toolRequestId?: string,
   ): Promise<SteerReceipt> {
     if (this.sidechats.has(sessionId)) {
       const normalizedContextItems = normalizeMessageContextItems(
@@ -1944,7 +2045,13 @@ export class SessionManager {
       );
       await this.sidechats.steerTurn(
         sessionId,
-        compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+        compileContextIntoInput(
+          text,
+          items,
+          normalizedContextItems,
+          normalizedDocument,
+          this.resolveSessionTranscript,
+        ),
       );
       return { turnId: sessionId, turnNumber: 0 };
     }
@@ -1969,17 +2076,31 @@ export class SessionManager {
       throw new Error(`no active turn for session ${sessionId}; send a normal message instead`);
     }
     const proxySessionId = await this.proxySessions.ensure(session);
+    const translation = text.trim() && this.translations?.enabled(sessionId)
+      ? await this.translations.translate({ sessionId, requestId: randomUUID(), text, purpose: 'send', document: composerDocument },
+        loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES }) : undefined;
+    if (this.turns.get(sessionId)?.id !== active.id) {
+      throw new Error('The active turn ended while translating. Send the message as a new turn.');
+    }
 
     const dispatchItems = translateItemsForExecutor(
       session.executor,
-      compileContextIntoInput(text, items, normalizedContextItems, normalizedDocument),
+      compileContextIntoInput(
+        translation?.text ?? text,
+        translation ? items?.map(item => item.type === 'text' ? { ...item, text: translation.text } : item) : items,
+        normalizedContextItems,
+        translation?.translatedDocument ?? normalizedDocument,
+        this.resolveSessionTranscript,
+      ),
     );
     const attachments = buildAttachmentsFromItems(sessionId, items);
     const userMessagePayload: Record<string, unknown> = { text };
+    if (translation) userMessagePayload.translation = translation;
     if (attachments.length > 0) userMessagePayload.attachments = attachments;
     if (normalizedContextItems.length > 0) userMessagePayload.context_items = normalizedContextItems;
     if (normalizedDocument) userMessagePayload.composer_document = normalizedDocument;
 
+    if (toolRequestId) userMessagePayload.tool_request_id = toolRequestId;
     await client.steerTurn({ sessionId: proxySessionId, input: dispatchItems });
 
     try {
@@ -2015,6 +2136,7 @@ export class SessionManager {
   }
 
   getQueue(sessionId: string): import('../queue/manager.js').QueueEntry[] {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.queue(sessionId);
     return this.queue.list(sessionId);
   }
 
@@ -2072,6 +2194,10 @@ export class SessionManager {
   }
 
   getActiveTurn(sessionId: string): import('./turn-runtime.js').ActiveTurn | null {
+    if (this.remoteController?.owns(sessionId)) {
+      const active = this.remoteController.replicas.snapshot(sessionId)?.session.active_turn;
+      return active ? { id: localRemoteTurnId(sessionId, active.turn_number), number: active.turn_number } : null;
+    }
     return this.turns.get(sessionId) ?? null;
   }
 
@@ -2189,6 +2315,11 @@ export class SessionManager {
   }
 
   async archiveSession(sessionId: string, archived: boolean): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) {
+      this.db.prepare('UPDATE sessions SET archived = ? WHERE id = ?').run(archived ? 1 : 0, sessionId);
+      this.broadcastSessionUpdated(sessionId, { archived: archived ? 1 : 0 });
+      return;
+    }
     await this.lifecycle.archive(sessionId, archived);
   }
 
@@ -2252,6 +2383,12 @@ export class SessionManager {
   }
 
   async deleteSession(sessionId: string, confirmedSidechatIds?: string[]): Promise<void> {
+    if (this.remoteController?.owns(sessionId)) {
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+      this.sessions.forget(sessionId);
+      this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
+      return;
+    }
     if (this.sidechats.has(sessionId)) {
       throw requestViolation('SESSION_NOT_FOUND', `session not found: ${sessionId}`);
     }
@@ -2260,11 +2397,15 @@ export class SessionManager {
   }
 
   listEvents(sessionId: string): EventEnvelope[] {
+    if (this.remoteController?.owns(sessionId)) {
+      return this.remoteController.historyEvents(sessionId);
+    }
     this.assertOrdinarySession(sessionId);
     return this.history.listEvents(sessionId);
   }
 
   listEventPage(sessionId: string, beforeTurn: number | null, pageSize?: number): EventHistoryPage {
+    if (this.remoteController?.owns(sessionId)) return this.remoteController.historyPage(sessionId, beforeTurn, pageSize);
     this.assertOrdinarySession(sessionId);
     return this.history.listEventPage(sessionId, beforeTurn, pageSize);
   }
@@ -2365,6 +2506,29 @@ export class SessionManager {
     this.events.completeTurn(sessionId, status);
   }
 
+  private async translateCompletedTurn(sessionId: string, turn: number): Promise<void> {
+    const service = this.translations;
+    if (!service?.enabled(sessionId)) return;
+    const sourceId = `turn:${turn}`;
+    const key = `${sessionId}:${sourceId}`;
+    try {
+      const messages = compactHistoryEnvelopes(this.listEvents(sessionId))
+        .filter(event => event.turn === turn && event.display?.type === 'message');
+      const last = messages.filter(event => {
+        const data = event.display?.data as { role?: string; text?: string };
+        return data.role !== 'user' && !!data.text?.trim();
+      }).at(-1);
+      const text = (last?.display?.data as { text?: string } | undefined)?.text;
+      if (!text) return;
+      service.automatic.set(key, { pending: true });
+      await service.translate({ sessionId, requestId: randomUUID(), purpose: 'read', sourceId, text },
+        loadConfig(this.db).translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES });
+      service.automatic.delete(key);
+    } catch (error) {
+      service.automatic.set(key, { pending: false, error: error instanceof Error ? error.message : 'Translation failed' });
+    }
+  }
+
   private hasRunningTurn(sessionId: string): boolean {
     if (this.turns.has(sessionId)) return true;
     return !!this.db
@@ -2379,14 +2543,31 @@ export class SessionManager {
 
   /** Persist and broadcast one canonical user-message envelope. Both paths
    *  must share identity and time so live hydration can converge with history. */
+  /** Transcript resolver for `session` context items at compile time. Any
+   *  session known to this Host may be referenced — cross-workspace included,
+   *  since it is all the user's own data. Unknown/deleted sessions and
+   *  sessions without conversation text return null so the reference degrades
+   *  to a plain item note instead of failing the send. */
+  private resolveSessionTranscript = (referencedSessionId: string): SessionTranscriptSlice | null => {
+    const row = this.db
+      .prepare('SELECT name FROM sessions WHERE id = ?')
+      .get(referencedSessionId) as { name: string | null } | undefined;
+    if (!row) return null;
+    const entries = this.history.conversationMessages(referencedSessionId);
+    if (entries.length === 0) return null;
+    return {
+      title: row.name?.trim() || `session ${referencedSessionId.slice(0, 6)}`,
+      entries,
+    };
+  };
+
   private persistAndBroadcastUserMessage(
     sessionId: string,
     turnId: string,
     turnNumber: number,
     data: Record<string, unknown>,
     ts = Date.now(),
-  ): void {
-    const callId = randomUUID();
+  ): void {    const callId = randomUUID();
     this.history.appendEvent(
       sessionId,
       turnId,

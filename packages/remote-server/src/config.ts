@@ -31,6 +31,9 @@ export interface RemoteServerConfig {
   controlOutboxMaxFrames: number;
   controlOutboxMaxBytes: number;
   presenceLeaseMs: number;
+  githubClientId?: string;
+  githubFetch?: typeof fetch;
+  enrollmentGithubIds: string[];
 }
 
 export function createConfig(overrides: Partial<RemoteServerConfig> & Pick<RemoteServerConfig, 'dataDir' | 'publicOrigin' | 'adminToken'>): RemoteServerConfig {
@@ -53,5 +56,17 @@ export function createConfig(overrides: Partial<RemoteServerConfig> & Pick<Remot
     dataDir: overrides.dataDir,
     publicOrigin: overrides.publicOrigin,
     adminToken: overrides.adminToken,
+    githubClientId: overrides.githubClientId,
+    githubFetch: overrides.githubFetch,
+    enrollmentGithubIds: parseEnrollmentGithubIds((overrides.enrollmentGithubIds ?? []).join(',')),
   };
+}
+
+export function parseEnrollmentGithubIds(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  const ids = value.split(',').map(id => id.trim());
+  if (ids.some(id => !/^[1-9][0-9]{0,19}$/.test(id))) {
+    throw new Error('GIAN_REMOTE_ENROLLMENT_GITHUB_IDS must contain comma-separated GitHub numeric account IDs');
+  }
+  return [...new Set(ids)];
 }

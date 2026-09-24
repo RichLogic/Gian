@@ -29,7 +29,8 @@ export class MemoryCookieJar implements CookieJar {
 
 export interface RemoteHttpClient {
   request(path: string, body?: Record<string, unknown>, accessToken?: string): Promise<Record<string, unknown>>;
-  get(path: string): Promise<Record<string, unknown>>;
+  get(path: string, accessToken?: string): Promise<Record<string, unknown>>;
+  setAccountToken?(token: string | null): void;
   del(path: string, body?: Record<string, unknown>, accessToken?: string): Promise<Record<string, unknown>>;
   cookies: CookieJar;
 }
@@ -45,6 +46,7 @@ export function createRemoteHttpClient(input: {
   const cookies = input.cookies ?? new MemoryCookieJar();
   const base = input.baseUrl.endsWith('/') ? input.baseUrl : `${input.baseUrl}/`;
   const timeoutMs = input.timeoutMs ?? 10_000;
+  let accountToken: string | null = null;
 
   async function send(
     method: 'GET' | 'POST' | 'DELETE',
@@ -53,6 +55,7 @@ export function createRemoteHttpClient(input: {
     accessToken?: string,
   ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = { origin: input.origin };
+    if (accountToken) headers['x-gian-account-token'] = accountToken;
     if (method === 'POST' || method === 'DELETE') headers['content-type'] = 'application/json';
     const cookie = cookies.header();
     if (cookie) headers.cookie = cookie;
@@ -63,6 +66,7 @@ export function createRemoteHttpClient(input: {
     try {
       response = await fetchFn(new URL(path.replace(/^\//, ''), base).toString(), {
         method,
+        redirect: 'error',
         headers,
         body: method === 'GET' ? undefined : JSON.stringify({ protocol: AUTH_PROTOCOL, ...body }),
         credentials: 'include',
@@ -93,11 +97,12 @@ export function createRemoteHttpClient(input: {
 
   return {
     cookies,
+    setAccountToken(token) { accountToken = token; },
     request(path, body = { protocol: AUTH_PROTOCOL }, accessToken) {
       return send('POST', path, body, accessToken);
     },
-    get(path) {
-      return send('GET', path);
+    get(path, accessToken) {
+      return send('GET', path, undefined, accessToken);
     },
     del(path, body = { protocol: AUTH_PROTOCOL }, accessToken) {
       return send('DELETE', path, body, accessToken);

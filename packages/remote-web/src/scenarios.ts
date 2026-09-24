@@ -59,6 +59,27 @@ export const FIXTURE_SCENARIOS: Record<string, FixtureScenario> = {
     view: { kind: 'chat', sessionId: 's-2' },
   },
 
+  'wide-content': {
+    hostData: {
+      'host-home': {
+        workspaces: [{ id: 'ws-1', name: '~/Coding/Gian-Dev' }],
+        tasks: sampleTasks(),
+        sessions: [{ ...sampleSessions()[1]!, status: 'done' }],
+        transcripts: { 's-2': [{
+          kind: 'assistant', id: 'wide-layout', exec: 'claude', ts: base, turn: 1,
+          text: [
+            '| ' + Array.from({ length: 18 }, (_, i) => `Column ${i + 1}`).join(' | ') + ' |',
+            '| ' + Array.from({ length: 18 }, () => '---').join(' | ') + ' |',
+            '| ' + Array.from({ length: 18 }, (_, i) => `Value ${i + 1}`).join(' | ') + ' |',
+            '', '```javascript', `const value = "${'LongCode'.repeat(60)}";`, '```',
+          ].join('\n'),
+        }] },
+      },
+    },
+    view: { kind: 'chat', sessionId: 's-2' },
+    mobilePage: 'chat',
+  },
+
   /** F2: file open (ready) — wide shows the right panel, mid/narrow a page. */
   'file-ready': {
     mobilePage: 'file',

@@ -170,6 +170,11 @@ body[data-theme="light"] {
   --dsh: oklch(0.62 0.12 195);
 
   --bg:            oklch(0.955 0.004 280);
+  /* Row hover/selected wash on the frame: a relative lightening overlay (not
+     an opaque --surface slab) so it blends with the glass frame when
+     translucent, and reads ~--surface when opaque. */
+  --row-hover:      oklch(1.000 0.000 0 / 0.45);
+  --row-active:     oklch(1.000 0.000 0 / 0.70);
   --surface:       oklch(1.000 0.000 0);
   --surface-2:    oklch(0.970 0.003 280);
   --surface-3:    oklch(0.935 0.005 280);
@@ -213,6 +218,11 @@ body[data-theme="light"] {
   /* — ported from design/tokens.css — --border alias for mp-think / inline borders */
   --border: oklch(0.22 0.02 280 / 0.12);
 
+  /* Liquid-glass frame: theme-tinted translucent backdrop for the window
+   * frame (topbar/sidebar/gaps). Cards keep the opaque --bg/--surface.
+   * alpha = 100 − (100 − frame_opacity) × 1.1: glass on (20) paints 12%. */
+  --bg-frame: color-mix(in oklch, var(--bg) calc((100 - (100 - var(--frame-opacity)) * 1.1) * 1%), transparent);
+
   color-scheme: light;
 }
 
@@ -223,6 +233,8 @@ body[data-theme="warm"] {
   --dsh: oklch(0.62 0.12 195);
 
   --bg:            oklch(0.955 0.020 80);
+  --row-hover:      oklch(1.000 0.010 90 / 0.40);
+  --row-active:     oklch(1.000 0.010 90 / 0.65);
   --surface:       oklch(0.990 0.012 82);
   --surface-2:    oklch(0.965 0.018 80);
   --surface-3:    oklch(0.925 0.022 78);
@@ -265,6 +277,12 @@ body[data-theme="warm"] {
   /* — ported from design/tokens.css — */
   --border: oklch(0.30 0.04 55 / 0.14);
 
+  /* Liquid-glass frame: glass ON unifies with the light theme's frame
+   * (Owner 2026-09-24); the warm base only comes back as opacity approaches
+   * 100. mix = (frame_opacity − 20) × 1.25%: on (20) → 0% warm = pure
+   * unified glass, off (100) → 100% warm opaque. Cards keep --bg/--surface. */
+  --bg-frame: color-mix(in oklch, var(--bg) calc((var(--frame-opacity) - 20) * 1.25%), oklch(0.955 0.004 280 / 0.12));
+
   color-scheme: light;
 }
 
@@ -280,14 +298,18 @@ body[data-theme="dark"] {
   --dsh: oklch(0.62 0.12 195);
 
   --bg:            oklch(0.140 0.004 265);
+  --row-hover:      oklch(1.000 0.000 0 / 0.06);
+  --row-active:     oklch(1.000 0.000 0 / 0.11);
   --surface:       oklch(0.213 0.004 265);
   --surface-2:    oklch(0.269 0.006 271);
   --surface-3:    oklch(0.325 0.008 265);
   --surface-inset: oklch(0.175 0.004 265);
 
   --text:          oklch(0.910 0.004 271);
-  --text-2:        oklch(0.680 0.005 268);
-  --text-3:        oklch(0.550 0.005 268);
+  /* Glass-era bump (Owner 2026-09-23): muted glyphs/text vanished against
+     the translucent frame; 0.55 read as invisible over busy wallpaper. */
+  --text-2:        oklch(0.730 0.005 268);
+  --text-3:        oklch(0.630 0.005 268);
   --text-inv:      oklch(0.180 0.005 265);
 
   --hairline:      oklch(0.910 0.004 271 / 0.13);
@@ -322,6 +344,13 @@ body[data-theme="dark"] {
   /* — ported from design/tokens.css — */
   --border: oklch(0.910 0.004 271 / 0.14);
 
+  /* Liquid-glass frame: theme-tinted translucent backdrop for the window
+   * frame (topbar/sidebar/gaps). Cards keep the opaque --bg/--surface.
+   * alpha = 100 − (100 − frame_opacity) × 0.75: glass on (20) keeps 40% of
+   * the dark base — enough to stay dark over the 'sidebar' vibrancy
+   * material; off (100) is exactly opaque. */
+  --bg-frame: color-mix(in oklch, var(--bg) calc((100 - (100 - var(--frame-opacity)) * 0.75) * 1%), transparent);
+
   color-scheme: dark;
 }
 
@@ -334,10 +363,15 @@ body[data-density="roomy"]   { --rail-w: 300px; --topbar-h: 48px; --nav-w: 64px;
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
+  --frame-opacity: 100;
+  /* The frame's translucent tint is painted ONLY here. Nested chrome
+     (.app/.body/.topbar/.sidebar/.dock) stays transparent so the glass alpha
+     never stacks; only sticky overlays that must cover scrolling content may
+     paint var(--bg-frame) again (with backdrop-filter). */
   font-family: var(--font-sans);
   font-size: var(--fz-13);
   line-height: 1.5;
-  background: var(--bg);
+  background: var(--bg-frame);
   color: var(--text);
   overflow: hidden;
   font-feature-settings: "ss01", "cv11";

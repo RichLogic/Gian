@@ -7,3 +7,4 @@ export * from './compiler.js';
 export * from './bundle.js';
 export * from './official-source.js';
 export * from './catalog-markdown.js';
+export * from './localization.js';

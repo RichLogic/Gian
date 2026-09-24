@@ -8,9 +8,9 @@ import {
   ScheduleOpenContext,
 } from './contexts.js';
 import type { AgentSpawnItem, AutoNoticeItem, CommandItem, CompactionItem, DiffItem, FileReadItem, FileSearchItem, MsgItem, ReasoningItem, ToolItem, WebSearchItem } from './types.js';
+import type { MessageAttachment } from '@gian/shared';
 import { formatElapsed, formatTime, formatBytes, isNativeImageMime } from './utils.js';
 import { MarkdownText, FileLink } from './markdown.js';
-import { LinkifiedText } from './links/linkify-text.js';
 import { CopyButton } from './copy-button.js';
 import { Caret } from './approval-cards.js';
 import { ContextCards } from './context-cards.js';
@@ -348,6 +348,41 @@ function formatVal(v: unknown): string {
   return s.length > 120 ? s.slice(0, 120) + '…' : s;
 }
 
+/** Inline image preview with its per-message attachment number badge
+ *  (bottom-right; the lightbox stays clean). N is the 1-based position among
+ *  ALL of the message's attachments — the same N the compiled prompt's
+ *  [Attached resource N] and the image<N> chip labels use. */
+function ImageAttachmentPreview({
+  attachment,
+  number,
+  zoom,
+}: {
+  attachment: MessageAttachment;
+  number: number;
+  zoom: ((src: string, alt?: string) => void) | null;
+}) {
+  return (
+    <a
+      className={`msg-att${zoom ? ' zoomable' : ''}`}
+      href={attachment.url}
+      target="_blank"
+      rel="noreferrer"
+      title={attachment.name}
+      onClick={zoom ? (e) => {
+        // Plain left-click → in-app lightbox. Leave modified clicks
+        // (⌘/ctrl/shift/alt, middle button) to the browser so
+        // "open in new tab" still works via the underlying href.
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
+        zoom(attachment.url, attachment.name);
+      } : undefined}
+    >
+      <img src={attachment.url} alt={attachment.name} />
+      <span className="msg-att-num" aria-hidden="true">{number}</span>
+    </a>
+  );
+}
+
 // V2 Msg (design/gian-design-v2/js/components.jsx::Msg) renders just
 // `.msg > .msg-body > .msg-text + .msg-time` — no avatar, no author label.
 // User messages flow `row-reverse` so the bubble + time align right.
@@ -404,24 +439,12 @@ export function UserMessage({
                   </span>
                 </button>
               ) : isNativeImageMime(a.mime) ? (
-                <a
+                <ImageAttachmentPreview
                   key={`${a.url}-${i}`}
-                  className={`msg-att${zoom ? ' zoomable' : ''}`}
-                  href={a.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={a.name}
-                  onClick={zoom ? (e) => {
-                    // Plain left-click → in-app lightbox. Leave modified clicks
-                    // (⌘/ctrl/shift/alt, middle button) to the browser so
-                    // "open in new tab" still works via the underlying href.
-                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
-                    e.preventDefault();
-                    zoom(a.url, a.name);
-                  } : undefined}
-                >
-                  <img src={a.url} alt={a.name} />
-                </a>
+                  attachment={a}
+                  number={i + 1}
+                  zoom={zoom}
+                />
               ) : (
                 <a
                   key={`${a.url}-${i}`}
@@ -447,7 +470,7 @@ export function UserMessage({
         )}
         {(hasText || inlineDocument) && (
           <div
-            className="msg-text user-text"
+            className="msg-text user-text md user-md"
             data-transcript-selectable="true"
             data-transcript-source-id={transcriptItemIdentity(item)}
             data-transcript-source-kind="user"
@@ -465,7 +488,34 @@ export function UserMessage({
                 }}
               />
             ) : (
-              <LinkifiedText text={item.text} />
+              // The composer is a markdown editor: user text is the same
+              // literal markdown the transcript shows for assistants.
+              <MarkdownText>{item.text}</MarkdownText>
+            )}
+          </div>
+        )}
+        {item.translation && <div className="translation-block translation-sent">
+          <div className="translation-label">{t('translation.sentLabel')}</div>
+          <div className="translation-bubble md"><MarkdownText>{item.translation.text}</MarkdownText></div>
+        </div>}
+        {/* Composer-document messages render attachments as inline chips
+            inside the text; the classic .msg-attachments block above is
+            suppressed for them, so image attachments get their previews back
+            in a gallery below the text. Non-image attachments stay chips.
+            Skipped when the app serves attachments through a secure opener
+            (remote-web rewrites url to an opaque handle that <img> cannot
+            load) — the inline chips remain the only surface there. */}
+        {inlineDocument && !openAttachment && attachments.some(a => isNativeImageMime(a.mime)) && (
+          <div className="msg-attachments user-attachments">
+            {attachments.map((a, i) =>
+              isNativeImageMime(a.mime) ? (
+                <ImageAttachmentPreview
+                  key={`${a.url}-${i}`}
+                  attachment={a}
+                  number={i + 1}
+                  zoom={zoom}
+                />
+              ) : null,
             )}
           </div>
         )}
@@ -520,12 +570,14 @@ export function AssistantMessage({
   showFooter,
   copyable = false,
   footerActions,
+  translation,
 }: {
   item: MsgItem;
   hideAvatar?: boolean;
   showFooter?: boolean;
   copyable?: boolean;
   footerActions?: ReactNode;
+  translation?: ReactNode;
 }) {
   // V2 design: no author label, time sits below the message body. Timestamps
   // stay on the tail of each same-sender run, while message-level Copy and
@@ -549,6 +601,7 @@ export function AssistantMessage({
             {footerActions}
           </div>
         )}
+        {translation}
       </div>
     </div>
   );

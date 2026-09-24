@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "claude",
-  "currentVersion": "0.3.1",
+  "currentVersion": "0.3.2",
   "entries": [
+    {
+      "version": "0.3.2",
+      "firstPublishedAt": "2026-09-24T09:39:21Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.2",
+          "publishedAt": "2026-09-24T09:39:21Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.2/gian-proxy-claude-0.3.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "ee9ff410332f08c5115c135b5b926880b5a58e27fa78acd2d512cc39ad7ca78a",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.2/gian-proxy-claude-0.3.2-darwin-arm64.tar.gz",
+            "sha256": "9334eef71a82044ebd626de580316e820dae5ed175a94d2fc815ca0116ccbb7f",
+            "size": 513873
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.280"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "适配 Claude Code 2.1.280，保留 Fork 的继承轮次身份并修复 Side Chat 重复恢复。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.2",
+            "https://github.com/RichLogic/Gian-Proxies/blob/4740fab7dc3370cc812984519b5e9509bbcad2c0/CHANGELOG.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.1",
       "firstPublishedAt": "2026-09-17T00:56:19Z",

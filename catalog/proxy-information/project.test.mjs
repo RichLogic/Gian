@@ -12,7 +12,7 @@ const current = JSON.parse(readFileSync(join(root, 'evidence/current-combination
 const certified = current.plugins.map(p => ({ pluginId: p.id, version: p.version, runtime: p.combination.runtime }));
 
 test('authored histories remain complete and their Markdown projection matches', () => {
-  assert.deepEqual(validateReview(), { proxies: 5, versions: 46, distributions: 49, metadataOnly: 28 });
+  assert.deepEqual(validateReview(), { proxies: 5, versions: 50, distributions: 53, metadataOnly: 28 });
 });
 
 test('v1 tutorial concatenation preserves all nine chapters byte for byte', () => {
@@ -33,8 +33,16 @@ test('publication replaces only v1 documents and rejects mismatched certified ve
   try {
     cpSync(join(root, '../official-source'), target, { recursive: true });
     const before = new Map(current.plugins.map(p => [p.id, readFileSync(join(target, 'plugins', p.id, 'entry.json'), 'utf8')]));
-    projectInformation(target, certified);
+    const { localizations } = projectInformation(target, certified);
     for (const p of current.plugins) {
+      const en = localizations[p.id].en;
+      const zh = localizations[p.id]['zh-CN'];
+      assert.match(zh.tagline, /在 Gian 中/);
+      assert.doesNotMatch(en.tagline + Object.values(en.documents).join(''), /\p{Script=Han}/u);
+      assert.equal(en.documents.setup + en.documents.usage + en.documents.troubleshooting,
+        readFileSync(join(root, p.id, 'tutorial.en.md'), 'utf8'));
+      const history = JSON.parse(readFileSync(join(root, p.id, 'changelog.json'), 'utf8'));
+      for (const entry of history.entries) assert.ok(en.documents.overview.includes(`## ${entry.version}\n`));
       assert.equal(readFileSync(join(target, 'plugins', p.id, 'entry.json'), 'utf8'), before.get(p.id));
       assert.equal(readFileSync(join(target, 'plugins', p.id, 'overview.md'), 'utf8'),
         readFileSync(join(root, p.id, 'changelog.md'), 'utf8'));

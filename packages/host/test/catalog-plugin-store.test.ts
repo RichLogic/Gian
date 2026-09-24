@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { Hono } from 'hono';
 
@@ -16,7 +16,7 @@ import {
   SUPPORTED_PROTOCOL_VERSIONS,
   protocolRangeIncludes,
 } from '@gian/proxy-protocol';
-import { parseProxyPluginId, type OfficialCatalogSourcePolicy } from '@gian/shared';
+import { parseProxyPluginId, type ManagedRuntimeGeneration, type OfficialCatalogSourcePolicy } from '@gian/shared';
 
 import { AgentManager } from '../src/agents/manager.js';
 import { CatalogService, catalogProxyActions } from '../src/catalog/service.js';
@@ -29,6 +29,8 @@ import { offeredProtocolVersionsForInstall, offeredProtocolVersionsForRange } fr
 import { runProtectedProxyChild } from '../src/proxy/protected-handshake.js';
 import { PluginStore } from '../src/plugin-store/store.js';
 import { PluginStoreError, PluginVersionConflictError } from '../src/plugin-store/errors.js';
+import { ManagedRuntimeGenerationStore } from '../src/runtime/generation-store.js';
+import { ManagedRuntimeInstaller } from '../src/runtime/installer.js';
 import { MAX_PLUGIN_TOTAL_BYTES } from '../src/plugin-store/limits.js';
 import { extractGzipUstar } from '../src/plugin-store/safe-extract.js';
 import type { PluginArtifactNetwork, PluginInstallCoordinate } from '../src/plugin-store/types.js';
@@ -1656,4 +1658,302 @@ test('PluginStore exact launch create/turn/closes through the generic supervisor
   });
   await client.closeSession();
   await manager.dispose('from-store');
+});
+
+// ---------------------------------------------------------------------------
+// Integration uninstall (POST /api/proxies/:pluginId/uninstall)
+// ---------------------------------------------------------------------------
+
+async function installFixtureIntegration(t: test.TestContext) {
+  const root = await tempRoot(t);
+  const keys = makeSigningKeys();
+  const v1 = packageFiles('0.1.0');
+  const archive = createGzipUstar(v1.files);
+  const urls = artifactUrls('0.1.0');
+  const assets = new Map<string, Buffer>([
+    [`RichLogic/Gian:${urls.tag}:${urls.archive}`, archive],
+    [`RichLogic/Gian:${urls.tag}:${urls.manifest}`, v1.manifest],
+  ]);
+  const bundle = compileCatalog(1, '0.1.0', v1.manifest, archive, keys);
+  const policy = policyFor(keys);
+  const catalogStore = new CatalogStore({
+    rootDir: join(root, 'catalogs', 'gian-official'),
+    policy,
+  });
+  await catalogStore.open();
+  await catalogStore.ingest(bundle.files);
+  const plugins = new PluginStore({
+    dataDir: root,
+    pluginsDir: join(root, 'plugins'),
+    network: memoryNetwork(assets),
+    allowedArtifactRepositories: policy.artifactRepositories,
+    hostVersion: '0.1.0',
+    hostVersions: ['2.2', '2.1', '2.0'],
+  });
+  const service = new CatalogService({
+    store: catalogStore,
+    plugins,
+    policy,
+    hostVersions: ['2.2', '2.1', '2.0'],
+    platform: 'darwin-arm64',
+  });
+  await plugins.install(coordinate('0.1.0', v1.manifest, archive, 1));
+  return { root, plugins, service };
+}
+
+function fixtureGeneration(root: string): ManagedRuntimeGeneration {
+  return {
+    schemaVersion: 1,
+    generationId: 'fixture-1',
+    pluginId: 'io.gian.fixture',
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '0.1.0',
+      manifestSha256: '1'.repeat(64),
+      artifactSha256: '2'.repeat(64),
+      entryPath: join(root, 'plugins', 'io.gian.fixture', '0.1.0', 'proxy.mjs'),
+      processScope: 'session',
+      protocolRange: '>=2.2 <3.0',
+    },
+    runtime: {
+      runtimeId: 'fixture',
+      version: '0.1.0',
+      artifactSha256: '3'.repeat(64),
+      entryPath: join(root, 'runtimes', 'fixture', '0.1.0', 'bin', 'fixture'),
+      ownership: 'managed',
+    },
+    companions: [],
+    certificate: { id: 'fixture-0.1.0', sha256: '4'.repeat(64) },
+    state: 'staged',
+    installedAt: '2026-09-21T00:00:00.000Z',
+    activatedAt: null,
+  };
+}
+
+function fakeIntegrationAgents(
+  bound: Array<{ id: string; name: string; pluginId: string }>,
+  genStore?: ManagedRuntimeGenerationStore,
+) {
+  const deleted: string[] = [];
+  return {
+    deleted,
+    agents: {
+      listAgents: () => bound.filter(agent => !deleted.includes(agent.id)),
+      deleteAgent: async (id: string) => {
+        deleted.push(id);
+      },
+      managedRuntimeStatus: async (pluginId: string) => ({
+        pluginId,
+        active: genStore ? await genStore.active(pluginId) : null,
+        staged: genStore
+          ? (await genStore.list(pluginId)).filter(generation => generation.state === 'staged')
+          : [],
+      }),
+    } as never,
+  };
+}
+
+function uninstallApp(
+  agents: never,
+  options: {
+    service?: CatalogService;
+    plugins?: PluginStore;
+    installer?: ManagedRuntimeInstaller;
+    runningSessions?: (agentId: string) => number;
+  },
+) {
+  const app = new Hono();
+  registerAgentRoutes(app, {
+    agents,
+    closeProxy: async () => undefined,
+    capabilities: async () => ({
+      catalogRevision: 'test',
+      input: [{ type: 'text' }],
+      configOptions: [],
+      slashCommands: [],
+    }),
+    ...(options.service ? { catalogService: options.service } : {}),
+    ...(options.plugins ? { pluginStore: options.plugins } : {}),
+    ...(options.installer ? { runtimeInstaller: options.installer } : {}),
+    ...(options.runningSessions
+      ? { hasRunningSessionsForAgent: options.runningSessions }
+      : {}),
+  });
+  return app;
+}
+
+test('integration uninstall cascades Agents, Runtime generations, and the Proxy package', async (t) => {
+  const { root, plugins, service } = await installFixtureIntegration(t);
+  assert.equal((await service.get('io.gian.fixture'))?.installation.state, 'installed');
+
+  const genStore = new ManagedRuntimeGenerationStore(root);
+  await genStore.initialize();
+  const generation = fixtureGeneration(root);
+  await mkdir(dirname(generation.runtime!.entryPath), { recursive: true });
+  await writeFile(generation.runtime!.entryPath, '#!/bin/sh\nexit 0\n');
+  await genStore.stage(generation);
+  await genStore.activate('io.gian.fixture', generation.generationId);
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root,
+    store: genStore,
+    download: async () => {
+      throw new Error('unused');
+    },
+    probeVersion: async () => {
+      throw new Error('unused');
+    },
+  });
+
+  const fake = fakeIntegrationAgents([
+    { id: 'agent-1', name: 'Fixture One', pluginId: 'io.gian.fixture' },
+    { id: 'agent-2', name: 'Fixture Two', pluginId: 'io.gian.fixture' },
+    { id: 'agent-3', name: 'Other', pluginId: 'io.gian.other' },
+  ], genStore);
+  const app = uninstallApp(fake.agents, {
+    service,
+    plugins,
+    installer,
+    runningSessions: () => 0,
+  });
+
+  const response = await app.request('/api/proxies/io.gian.fixture/uninstall', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    receipt: { removedAgents: 2, removedRuntime: true, removedProxy: true },
+  });
+  assert.deepEqual([...fake.deleted].sort(), ['agent-1', 'agent-2']);
+
+  // The Catalog projection reads the PluginStore live: not-installed now.
+  const projection = await app.request('/api/proxies/io.gian.fixture');
+  assert.equal(projection.status, 200);
+  const projectionBody = await projection.json() as {
+    proxy: { installation: { state: string } };
+  };
+  assert.equal(projectionBody.proxy.installation.state, 'not_installed');
+  // The Runtime status route shows no active or staged generation.
+  const runtime = await app.request('/api/proxies/io.gian.fixture/runtime');
+  assert.equal(runtime.status, 200);
+  assert.deepEqual(await runtime.json(), {
+    pluginId: 'io.gian.fixture',
+    active: null,
+    staged: [],
+  });
+
+  // Idempotent: a second uninstall removes nothing.
+  const again = await app.request('/api/proxies/io.gian.fixture/uninstall', { method: 'POST' });
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), {
+    receipt: { removedAgents: 0, removedRuntime: false, removedProxy: false },
+  });
+});
+
+test('integration uninstall 409s on in-flight Sessions and changes nothing', async (t) => {
+  const { root, plugins, service } = await installFixtureIntegration(t);
+  const genStore = new ManagedRuntimeGenerationStore(root);
+  await genStore.initialize();
+  const generation = fixtureGeneration(root);
+  await mkdir(dirname(generation.runtime!.entryPath), { recursive: true });
+  await writeFile(generation.runtime!.entryPath, '#!/bin/sh\nexit 0\n');
+  await genStore.stage(generation);
+  await genStore.activate('io.gian.fixture', generation.generationId);
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root,
+    store: genStore,
+    download: async () => {
+      throw new Error('unused');
+    },
+    probeVersion: async () => {
+      throw new Error('unused');
+    },
+  });
+
+  const fake = fakeIntegrationAgents([
+    { id: 'agent-1', name: 'Fixture One', pluginId: 'io.gian.fixture' },
+    { id: 'agent-2', name: 'Fixture Two', pluginId: 'io.gian.fixture' },
+  ], genStore);
+  const app = uninstallApp(fake.agents, {
+    service,
+    plugins,
+    installer,
+    runningSessions: agentId => (agentId === 'agent-2' ? 3 : 0),
+  });
+
+  const response = await app.request('/api/proxies/io.gian.fixture/uninstall', { method: 'POST' });
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    error: 'Integration has sessions in progress',
+    code: 'INTEGRATION_HAS_RUNNING_SESSIONS',
+    conflicts: [{ agentId: 'agent-2', name: 'Fixture Two', runningSessions: 3 }],
+  });
+  // Nothing moved: Agents, Runtime generations, and the Proxy package all remain.
+  assert.deepEqual(fake.deleted, []);
+  assert.equal((await plugins.inspect('io.gian.fixture')).currentVersion, '0.1.0');
+  assert.equal((await genStore.active('io.gian.fixture'))?.generationId, generation.generationId);
+  assert.equal((await service.get('io.gian.fixture'))?.installation.state, 'installed');
+});
+
+test('integration uninstall without a managed Runtime only removes the Proxy package', async (t) => {
+  const { root, plugins, service } = await installFixtureIntegration(t);
+  const genStore = new ManagedRuntimeGenerationStore(root);
+  await genStore.initialize();
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root,
+    store: genStore,
+    download: async () => {
+      throw new Error('unused');
+    },
+    probeVersion: async () => {
+      throw new Error('unused');
+    },
+  });
+  const fake = fakeIntegrationAgents([
+    { id: 'agent-1', name: 'Fixture One', pluginId: 'io.gian.fixture' },
+  ], genStore);
+  const app = uninstallApp(fake.agents, {
+    service,
+    plugins,
+    installer,
+    runningSessions: () => 0,
+  });
+
+  const response = await app.request('/api/proxies/io.gian.fixture/uninstall', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    receipt: { removedAgents: 1, removedRuntime: false, removedProxy: true },
+  });
+  assert.equal((await service.get('io.gian.fixture'))?.installation.state, 'not_installed');
+});
+
+test('integration uninstall is idempotent on an absent Integration and validates the id', async (t) => {
+  const root = await tempRoot(t);
+  const plugins = new PluginStore({
+    dataDir: root,
+    pluginsDir: join(root, 'plugins'),
+    network: memoryNetwork(new Map()),
+    allowedArtifactRepositories: ['RichLogic/Gian'],
+    hostVersion: '0.1.0',
+  });
+  const genStore = new ManagedRuntimeGenerationStore(root);
+  await genStore.initialize();
+  const installer = new ManagedRuntimeInstaller({
+    dataDir: root,
+    store: genStore,
+    download: async () => {
+      throw new Error('unused');
+    },
+    probeVersion: async () => {
+      throw new Error('unused');
+    },
+  });
+  const fake = fakeIntegrationAgents([]);
+  const app = uninstallApp(fake.agents, { plugins, installer });
+
+  const response = await app.request('/api/proxies/io.gian.fixture/uninstall', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    receipt: { removedAgents: 0, removedRuntime: false, removedProxy: false },
+  });
+
+  const invalid = await app.request('/api/proxies/not%20an%20id/uninstall', { method: 'POST' });
+  assert.equal(invalid.status, 400);
 });

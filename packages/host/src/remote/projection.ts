@@ -5,6 +5,7 @@ import {
   MAX_FILE_PREVIEW_BYTES,
   generateCanonicalId,
   redactRemoteText,
+  redactRemoteConversationText,
   type RemoteAttention,
   type RemoteInteraction,
   type RemoteQueueEntry,
@@ -271,6 +272,9 @@ export class RemoteProjector {
       thinking: session.thinking_effort,
       service_tier: session.service_tier,
       approval_mode: session.approval_mode,
+      context_tokens_used: session.context_tokens_used ?? null,
+      context_window_tokens: session.context_window_tokens ?? null,
+      context_usage_updated_at: session.context_usage_updated_at ?? null,
       status: session.status,
       unread: session.unread === 1,
       queue: {
@@ -412,10 +416,16 @@ export class RemoteProjector {
     if ((event.event === 'user_message' || event.event === 'user.message')
         && typeof event.data.text === 'string') {
       const attachments = this.projectMessageAttachments(event, deviceId);
+      const delivery = (typeof event.data.tool_request_id === 'string'
+        ? this.deps.db.prepare('SELECT id FROM tool_deliveries WHERE request_id = ? AND session_id = ?')
+          .get(event.data.tool_request_id, event.session_id)
+        : this.deps.db.prepare(`SELECT d.id FROM turns t JOIN tool_deliveries d ON d.request_id = t.tool_request_id
+          WHERE t.session_id = ? AND t.turn_number = ? LIMIT 1`).get(event.session_id, turn)) as { id: string } | undefined;
       return {
         ...base('user'),
         kind: 'user',
-        text: remoteText(stripGianRolePrefix(stripManagerSystemPrefix(event.data.text))),
+        text: redactRemoteConversationText(stripGianRolePrefix(stripManagerSystemPrefix(event.data.text))).slice(0, 16_000),
+        ...(delivery ? { delivery_id: delivery.id } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
       };
     }
@@ -427,7 +437,7 @@ export class RemoteProjector {
         return {
           ...base('assistant'),
           kind: 'assistant',
-          text: remoteText(data.text),
+          text: redactRemoteConversationText(data.text).slice(0, 16_000),
           delta: data.delta === true,
         };
       }
@@ -567,6 +577,7 @@ export class RemoteProjector {
       const mime = remoteName(previewMimeForAttachment(filename));
       return [{
         id: record.id,
+        reference: 'attachment:' + filename,
         session_id: event.session_id,
         name: remoteName(attachment.name),
         mime,
@@ -632,6 +643,7 @@ export class RemoteProjector {
     deviceId?: string,
   ): NonNullable<RemoteQueueEntry['items']> {
     if (item.type === 'text' && 'text' in item && typeof item.text === 'string') {
+      if (item.text !== entry.text) return [];
       return [{ type: 'text', text: item.text }];
     }
     if ((item.type === 'localFile' || item.type === 'localImage') && 'path' in item && typeof item.path === 'string') {

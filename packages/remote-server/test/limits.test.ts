@@ -3,12 +3,13 @@ import { test } from 'node:test';
 
 import { AUTH_PROTOCOL, generateCanonicalId } from '@gian/remote-protocol';
 
-import { enrollHost, makeRemoteTestApp, pairDevice } from './fixture.js';
+import { enrollHost, makeRemoteTestApp, pairDevice, withControllerAccount } from './fixture.js';
 
 test('auth rate limit and per-host device cap isolate abuse', async () => {
-  const { fetch, handle } = await makeRemoteTestApp({
+  const { fetch: unauthenticatedFetch, handle } = await makeRemoteTestApp({
     config: { authRateLimitPerMinute: 3, maxDevicesPerHost: 1 },
   });
+  const fetch = await withControllerAccount(unauthenticatedFetch);
   const host = await enrollHost(fetch);
   await pairDevice(fetch, host.accessToken, host.hostId);
   const second = await (await fetch('/api/v1/host/pairings', {

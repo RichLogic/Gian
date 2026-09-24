@@ -1,0 +1,50 @@
+/* Auto-translate is a Fast-style text chip: accent wash + ring when on,
+   quiet text when off (Owner 2026-09-24 — no switch chrome here). */
+.translation-auto {
+  margin-left: auto; flex: 0 0 auto;
+  display: inline-flex; align-items: center;
+  padding: 3px 8px;
+  border: 0; border-radius: var(--r-2);
+  background: transparent;
+  font: 500 var(--fz-11)/1.2 var(--font-mono);
+  color: var(--text-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.translation-auto:hover { background: var(--row-hover); color: var(--text); }
+.translation-auto:disabled { opacity: 0.45; cursor: default; }
+.translation-auto.on,
+.translation-auto.on:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+/* A zero-width portal span can sit between the chip and the nav buttons,
+   so this must be a general-sibling override, not adjacent (+). */
+.translation-auto ~ .transcript-navbtns { margin-left: 0; flex-shrink: 0; }
+.translation-block { margin-top: 12px; min-width: 0; font-size: 0.9em; color: var(--text); }
+.translation-heading { display: flex; align-items: center; gap: 6px; }
+.translation-collapse { display: inline-flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--muted); padding: 4px 0; font: inherit; cursor: pointer; }
+.translation-label { color: var(--muted); margin-bottom: 6px; font-size: 12px; }
+.translation-bubble { border-left: 2px solid var(--hairline); padding: 8px 12px; overflow-wrap: anywhere; min-width: 0; }
+.translation-bubble pre { overflow: auto; max-width: 100%; }
+.translation-bubble > :first-child { margin-top: 0; }
+.translation-bubble > :last-child { margin-bottom: 0; }
+.translation-sent .translation-bubble { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; }
+.translation-action { width: 28px; height: 28px; padding: 0; flex: 0 0 28px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.translation-action > span { display: inline-flex; align-items: baseline; gap: 1px; font-size: 13px; }
+.translation-action > span > span { font-size: 10px; }
+.translation-action:hover { color: var(--text); background: var(--surface); }
+.translation-action:disabled { opacity: .5; cursor: default; }
+.translation-send-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; max-width: 852px; padding: 8px 16px; margin: 0 auto; font-size: 12px; }
+.translation-send-status > span { overflow-wrap: anywhere; flex: 1 1 180px; }
+.translation-error { color: var(--danger, #b94141); overflow-wrap: anywhere; font-size: 12px; }
+.translation-error button { margin-left: 8px; }
+.translation-settings select { width: 100%; min-width: 0; max-width: 100%; }
+.translation-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: min(60vh, 480px); overflow: auto; transform: translateX(-50%); padding: 12px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 30px #0002; }
+.translation-popover .translation-block { margin-top: 0; }
+.translation-close { float: right; width: 28px; height: 28px; border: 0; background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; }
+.transcript-selection-actions { max-width: calc(100vw - 24px); flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .translation-action, .translation-close { min-width: 36px; min-height: 36px; }
+}

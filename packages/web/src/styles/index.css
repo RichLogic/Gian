@@ -79,5 +79,5 @@ body,
 body {
   font-family: var(--font-sans);
   color: var(--text);
-  background: var(--bg);
+  background: var(--bg-frame);
 }

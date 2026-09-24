@@ -1,12 +1,15 @@
 /**
  * Mounts Gian Web's `LinkBehavior` (see links/link-behavior.ts) above a
  * transcript/markdown subtree. Replaces the former FileLinkHref /
- * FileLinkOpen / RelativeLinkOpen provider triple.
+ * FileLinkOpen / RelativeLinkOpen provider triple. Also mounts the
+ * `LinkPreviewContext` so web links unfurl on hover; Remote Web mounts
+ * neither and keeps plain anchors.
  */
 
 import { useMemo } from 'react';
-import { LinkBehaviorContext } from '@gian/chat-ui';
+import { LinkBehaviorContext, LinkPreviewContext } from '@gian/chat-ui';
 import { createWebLinkBehavior } from './link-behavior.js';
+import { createLinkPreviewClient } from './link-preview-client.js';
 
 export function LinkBehaviorProvider({
   openFileInSheet,
@@ -23,5 +26,10 @@ export function LinkBehaviorProvider({
     () => createWebLinkBehavior({ openFileInSheet, openRelativeFileHref, openUrlInBrowser }),
     [openFileInSheet, openRelativeFileHref, openUrlInBrowser],
   );
-  return <LinkBehaviorContext.Provider value={behavior}>{children}</LinkBehaviorContext.Provider>;
+  const preview = useMemo(() => createLinkPreviewClient(), []);
+  return (
+    <LinkBehaviorContext.Provider value={behavior}>
+      <LinkPreviewContext.Provider value={preview}>{children}</LinkPreviewContext.Provider>
+    </LinkBehaviorContext.Provider>
+  );
 }

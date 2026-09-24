@@ -100,6 +100,20 @@ describe('QUEUE-004: composer ⌘/Ctrl+Enter steer semantics', () => {
     vi.mocked(loadProxyCapabilities).mockReset().mockResolvedValue({});
   });
 
+  it('retains the complete draft while translation waits and after cancellation', async () => {
+    const user = userEvent.setup();
+    let cancel!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((_resolve, reject) => { cancel = reject; }));
+    renderComposer(makeSession('codex', { id: 'translation-cancelled-draft', status: 'done' }), { disabled: false, running: false, onSend });
+    typeInlineComposer(screen.getByRole('textbox'), 'keep this draft');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('textbox')).toHaveTextContent('keep this draft');
+    cancel(new Error('Translation cancelled'));
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveAttribute('contenteditable', 'true'));
+    expect(screen.getByRole('textbox')).toHaveTextContent('keep this draft');
+  });
+
   it('codex busy + draft + Ctrl+Enter steers the draft (no queue)', async () => {
     const user = userEvent.setup();
     const callbacks = renderComposer(makeSession('codex'));

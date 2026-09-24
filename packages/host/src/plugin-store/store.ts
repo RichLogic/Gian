@@ -251,6 +251,47 @@ export class PluginStore {
     await rm(directory, { recursive: true, force: false });
   }
 
+  /** Remove one installed plugin outright — every retained version plus the
+   *  `current` pointer — under the proxy-update claim. Returns false when the
+   *  plugin was not installed, so integration uninstall stays idempotent.
+   *  Reference/running-Session gates belong to the caller, which checks the
+   *  plugin's Agents and in-flight Sessions before invoking this. */
+  async removePlugin(pluginId: string): Promise<boolean> {
+    const id = parseProxyPluginId(pluginId);
+    const lease = await acquireAgentProxyUpdateLock(
+      this.options.updateLockDataDir ?? this.options.dataDir,
+      id,
+      `catalog-uninstall:${id}`,
+    );
+    let operationError: unknown;
+    try {
+      const root = this.pluginRoot(id);
+      try {
+        await lstat(root);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw error;
+      }
+      await rm(root, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      try {
+        await lease.release();
+      } catch (releaseError) {
+        if (operationError) {
+          throw new AggregateError(
+            [operationError, releaseError],
+            `${id} catalog uninstall failed and its update claim could not be released.`,
+          );
+        }
+        throw releaseError;
+      }
+    }
+  }
+
   async reportReferences(pluginId: string, pluginVersion: string): Promise<PluginVersionReferenceReport> {
     const id = parseProxyPluginId(pluginId);
     const installed = await this.inspect(id);

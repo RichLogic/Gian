@@ -3,6 +3,8 @@ import type { McpServer, SessionConfigOption, SessionNotification } from '@agent
 import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
 import { KimiProxyError } from '../core/errors.js';
 import { KimiProxyService } from '../core/service.js';
+import { normalizeThinkingOption } from '../core/thinking-options.js';
+import { KimiTurnIdentityStore } from '../core/turn-identities.js';
 import { discoverKimiRuntimes, probeKimiRuntime } from '../runtime/discover.js';
 import { KimiProtocolError, type DomainCode } from '../transport/protocol.js';
 
@@ -187,7 +189,6 @@ const CUSTOMIZATION_CAPABILITIES = {
 const CAPABILITIES = {
   'input.localFile': 1,
   'input.localImage': 1,
-  'session.rename': 1,
   'session.native.list': 1,
   'session.replay': 1,
   sidechat: 1,
@@ -335,6 +336,7 @@ function flatChoices(option: SessionConfigOption) {
 
 function catalogConfigOption(option: SessionConfigOption) {
   const role = configRole(option);
+  if (role === 'effort') option = normalizeThinkingOption(option);
   const choices = flatChoices(option).map((choice) => ({
     value: typeof choice.value === 'string' || typeof choice.value === 'boolean'
       ? choice.value
@@ -711,6 +713,7 @@ export class KimiProtocolV2Adapter {
   private readonly replayBySession = new Map<string, ReplayState>();
   private readonly replayPager = new ReplayPager();
   private readonly ledger = new TurnLedger();
+  private readonly turnIdentities = new KimiTurnIdentityStore();
   private readonly resumeStore = new OpaqueSidechatResumeStore();
   private readonly sidechats = new Map<string, SidechatRecord>();
   private readonly terminalTurns = new Set<string>();
@@ -1085,7 +1088,8 @@ export class KimiProtocolV2Adapter {
       if (option.type === 'select') {
         const choices = configRole(option) === 'effort' && modelCap && modelCap.supportedThinking.length > 0
           ? modelCap.supportedThinking
-          : flatChoices(option).map((choice) => choice.value);
+          : flatChoices(configRole(option) === 'effort' ? normalizeThinkingOption(option) : option)
+            .map((choice) => choice.value);
         if (!choices.some((choice) => Object.is(choice, value))) {
           throw new KimiProtocolError(
             'CONFIG_VALUE_INVALID',
@@ -1267,6 +1271,7 @@ export class KimiProtocolV2Adapter {
       resumeRefId: resumeRef.id,
       anchor,
       createFingerprint: fingerprint,
+      resumeFingerprint: JSON.stringify({ parentSessionId, resumeRefId: resumeRef.id }),
     };
     this.sidechats.set(sidechatId, sidechat);
     return { sidechat: this.serializeSidechat(session, sidechat, createdAt) };
@@ -1450,6 +1455,10 @@ export class KimiProtocolV2Adapter {
       turnCount: 0,
     };
     const streamId = stableId('replay', child.nativeSessionId);
+    const inheritedTurns = [...new Set(parent.events.map(event => event.sourceTurnId))];
+    inheritedTurns.forEach((sourceTurnId, index) => {
+      this.turnIdentities.remember(child.nativeSessionId, index, sourceTurnId);
+    });
     return {
       streamId,
       turnCount: parent.turnCount,
@@ -1558,7 +1567,6 @@ export class KimiProtocolV2Adapter {
       throw new KimiProtocolError('SESSION_BUSY', 'Session already has an active turn.');
     }
     const key = this.turnKey(session.id, turnId);
-    this.sourceTurnIds.set(key, this.deriveSourceTurnId(session, input));
     this.turnsByRequest.set(requestId, { sessionId: session.id, turnId });
     this.requestByTurn.set(key, requestId);
     this.activeTurnBySession.set(session.id, turnId);
@@ -1579,7 +1587,9 @@ export class KimiProtocolV2Adapter {
       await this.service.startTurn({
         sessionId: session.serviceSessionId,
         input: kimiInput(input),
-      }, requestId);
+      }, requestId, () => {
+        this.sourceTurnIds.set(key, this.deriveSourceTurnId(session, input));
+      });
       return { accepted: true as const, turnId };
     } catch (error) {
       this.ledger.forget({ sessionId, streamId, turnId });
@@ -1604,6 +1614,7 @@ export class KimiProtocolV2Adapter {
       turnIndex: session.turnOrdinal,
       userText,
     });
+    this.turnIdentities.remember(session.nativeSessionId, session.turnOrdinal, sourceTurnId);
     session.turnOrdinal += 1;
     return sourceTurnId;
   }
@@ -1691,11 +1702,8 @@ export class KimiProtocolV2Adapter {
 
   private async renameSession(params: Record<string, unknown>) {
     this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
-    const name = typeof params.name === 'string' ? params.name : '';
-    if ([...name].length > 200) {
-      throw new KimiProtocolError('INVALID_PARAMS', 'Session name must not exceed 200 Unicode code points.');
-    }
-    return { ok: true as const };
+    throw new KimiProtocolError('CAPABILITY_NOT_SUPPORTED',
+      'Kimi ACP does not expose a native session rename method.');
   }
 
   private async closeSession(params: Record<string, unknown>) {
@@ -2267,11 +2275,11 @@ export class KimiProtocolV2Adapter {
     for (const [turnIndex, turn] of turns.entries()) {
       // Same derivation as live turns (see deriveSourceTurnId), so a native
       // turn keeps one sourceTurnId across live streaming and history replay.
-      const sourceTurnId = stableId('kimi-turn', {
+      const sourceTurnId = this.turnIdentities.resolve(nativeSessionId, turnIndex, stableId('kimi-turn', {
         nativeSessionId,
         turnIndex,
         userText: turn.userText,
-      });
+      }));
       const fallbackOccurrences = new Map<string, number>();
       const appendTurn = (
         method: string,

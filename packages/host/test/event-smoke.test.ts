@@ -283,3 +283,42 @@ test('event smoke · interaction approvals never auto-approve without a user cho
     decision: 'allow_once',
   }]);
 });
+
+test('file-change projections record the session launch cwd when provided', () => {
+  // cc: Write/Edit file-change events carry the root for last-turn
+  // attribution (sessions are not tree-stable).
+  const ccEvents = projectCcNotification(
+    {
+      method: 'tool.use',
+      params: {
+        sessionId: 'proxy',
+        data: { callId: 'write-1', toolName: 'Write', input: { file_path: '/repo/tree/src/x.ts', content: 'a\n' } },
+      },
+    },
+    'session-claude',
+    1,
+    '/repo/tree',
+  );
+  assert.equal(ccEvents[0]?.type, 'activity.file-change');
+  assert.equal((ccEvents[0]?.data as { cwd?: unknown }).cwd, '/repo/tree');
+
+  // codex: diff.updated paths are relative to the codex process cwd.
+  const diffPayload = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
+  const codexEvents = projectCodexNotification(
+    { method: 'diff.updated', params: { sessionId: 'proxy', data: { diff: diffPayload } } },
+    'session-codex',
+    1,
+    '/repo/tree',
+  );
+  assert.equal(codexEvents[0]?.type, 'activity.file-change');
+  assert.equal((codexEvents[0]?.data as { cwd?: unknown }).cwd, '/repo/tree');
+
+  // Callers without a launch root (old hosts, tests) get no cwd key —
+  // readers fall back to path heuristics for those events.
+  const legacy = projectCodexNotification(
+    { method: 'diff.updated', params: { sessionId: 'proxy', data: { diff: diffPayload } } },
+    'session-codex',
+    1,
+  );
+  assert.equal((legacy[0]?.data as Record<string, unknown>).cwd, undefined);
+});

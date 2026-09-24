@@ -834,6 +834,8 @@ export class ClaudeProtocolV2Adapter {
       description: string;
       source: 'builtin' | 'user' | 'project';
       argHints: Array<{ kind: 'free' | 'model' | 'path' | 'agent' | 'enum'; placeholder?: string; values?: string[] }>;
+      disabled?: boolean;
+      customizationId?: string;
     }> = [];
     try {
       const listed = await this.service.listSlashCommands(cwd);
@@ -847,6 +849,11 @@ export class ClaudeProtocolV2Adapter {
             ...(hint.placeholder ? { placeholder: hint.placeholder } : {}),
             ...(hint.values ? { values: hint.values } : {}),
           })),
+          // The additive inventory-join fields ride the catalog so a web `/`
+          // row can be matched to its Custom entry. `filePath` deliberately
+          // stays out of the catalog contract (strict schema).
+          ...(command.disabled ? { disabled: true } : {}),
+          ...(command.customizationId ? { customizationId: command.customizationId } : {}),
         });
       }
     } catch {
@@ -1157,6 +1164,7 @@ export class ClaudeProtocolV2Adapter {
       resumeRefId: resumeRef.id,
       anchor,
       createFingerprint: fingerprint,
+      resumeFingerprint: JSON.stringify({ parentSessionId, resumeRefId: resumeRef.id }),
     };
     this.sidechats.set(sidechatId, sidechat);
     return { sidechat: this.serializeSidechat(session, sidechat, createdAt) };

@@ -2,6 +2,7 @@
   "version": 1,
   "discoveryRoots": [
     "scripts",
+    "delivery/proxies/scripts",
     "catalog/proxy-information",
     "packages/host/test",
     "packages/web/test",
@@ -38,6 +39,16 @@
     "system"
   ],
   "groups": [
+    {
+      "id": "catalog-documentation-policy",
+      "patterns": ["delivery/proxies/scripts/catalog-docs-policy.test.mjs"],
+      "module": "scripts",
+      "scope": "unit",
+      "purposes": ["regression", "contract"],
+      "sideEffects": ["none"],
+      "platforms": ["any"],
+      "runner": "scripts-node"
+    },
     {
       "id": "proxy-information-projection",
       "patterns": ["catalog/proxy-information/project.test.mjs"],
@@ -77,6 +88,8 @@
         "packages/host/test/history-canonicalize.test.ts",
         "packages/host/test/input-items.test.ts",
         "packages/host/test/locate-jsonl-pure.test.ts",
+        "packages/host/test/link-preview-cache.test.ts",
+        "packages/host/test/link-preview-fetch.test.ts",
         "packages/host/test/maintenance-lock-path.test.ts",
         "packages/host/test/map-concurrency.test.ts",
         "packages/host/test/normalize-cc-parsers.test.ts",
@@ -127,6 +140,8 @@
     {
       "id": "host-integration",
       "patterns": [
+        "packages/host/test/translation.test.ts",
+        "packages/host/test/remote-translation.test.ts",
         "packages/host/test/agent-instructions.test.ts",
         "packages/host/test/agent-home.test.ts",
         "packages/host/test/ai-scaffold.test.ts",
@@ -159,6 +174,7 @@
         "packages/host/test/file-005-attachment-upload.test.ts",
         "packages/host/test/file-006-files-recursive.test.ts",
         "packages/host/test/file-012-absolute-preview.test.ts",
+        "packages/host/test/link-preview-routes.test.ts",
         "packages/host/test/gian-session-host-services.test.ts",
         "packages/host/test/browser-broker.test.ts",
         "packages/host/test/gian-tool-browser.test.ts",
@@ -223,6 +239,13 @@
         "packages/host/test/gian-tool-queue-revision.test.ts",
         "packages/host/test/remote-devices.test.ts",
         "packages/host/test/remote-identity.test.ts",
+        "packages/host/test/remote-identity-broker.test.ts",
+        "packages/host/test/remote-execution-bindings.test.ts",
+        "packages/host/test/remote-execution-history.test.ts",
+        "packages/host/test/remote-controller-hub.test.ts",
+        "packages/host/test/remote-controller-client.test.ts",
+        "packages/host/test/remote-controller-routes.test.ts",
+        "packages/host/test/remote-file-scope.test.ts",
         "packages/host/test/remote-crypto-session.test.ts",
         "packages/host/test/remote-connector.test.ts",
         "packages/host/test/remote-facade.test.ts",
@@ -533,7 +556,8 @@
       "id": "cc-proxy-integration",
       "patterns": [
         "packages/proxies/cc-proxy/test/native-history.test.ts",
-        "packages/proxies/cc-proxy/test/slash.test.ts"
+        "packages/proxies/cc-proxy/test/slash.test.ts",
+        "packages/proxies/cc-proxy/test/skill-discovery.test.ts"
       ],
       "module": "cc-proxy",
       "scope": "integration",

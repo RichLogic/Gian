@@ -15,6 +15,7 @@ import type {
 
 import { createAppError, KimiProxyError } from './errors.js';
 import { normalizeInputItems, toPromptBlocks } from './input.js';
+import { normalizeThinkingOption } from './thinking-options.js';
 import type {
   ApprovalResponseParams,
   CloseSessionParams,
@@ -210,8 +211,9 @@ interface ModelThinking {
 }
 
 function thinkingFromConfigOptions(options: SessionConfigOption[]): ModelThinking {
-  const thinkingOption = selectOptionByRole(options, 'thinking');
-  if (!thinkingOption) return { supportedThinking: [], defaultThinking: null };
+  const selected = selectOptionByRole(options, 'thinking');
+  if (!selected) return { supportedThinking: [], defaultThinking: null };
+  const thinkingOption = normalizeThinkingOption(selected) as SelectConfigOption;
   const current = typeof thinkingOption.currentValue === 'string'
     ? thinkingOption.currentValue
     : null;
@@ -640,7 +642,7 @@ export class KimiProxyService {
     return { session: this.serializeSession(this.requireSession(params.sessionId)) };
   }
 
-  async startTurn(params: StartTurnParams, requestId?: number | string) {
+  async startTurn(params: StartTurnParams, requestId?: number | string, beforeStart?: () => void) {
     const session = await this.ensureAttached(this.requireSession(params.sessionId));
     if (session.activeTurnId) {
       throw createAppError(409, 'SESSION_BUSY', 'This session already has an active turn.');
@@ -649,6 +651,9 @@ export class KimiProxyService {
     const input = normalizeInputItems(params.input, session.cwd);
     const prompt = await toPromptBlocks(input);
     const command = firstTextCommand(input);
+    // Commit the adapter's replay identity only after all asynchronous input
+    // preparation succeeds, but before publishing any turn-scoped event.
+    beforeStart?.();
     this.toolCallsByNativeId.delete(session.nativeSessionId);
     const turnId = randomId('turn');
     const activeTurn: ActiveTurn = {

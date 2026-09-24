@@ -8,11 +8,14 @@ import {
 } from '@gian/remote-protocol';
 import type { CryptoKeyPair, JsonWebKey } from './crypto-types.js';
 import type { RemoteIdentityMaterial, RemotePublicIdentity } from './identity.js';
+import type { RemoteAccountCredential } from '@gian/shared';
 
 interface StoredIdentityFile {
   version: 1;
   identity: JsonWebKey;
   refresh_secret: string | null;
+  accounts?: Record<string, RemoteAccountCredential>;
+  controllers?: Record<string, JsonWebKey>;
 }
 
 export function createRemoteIdentityFileMaterial(path: string): RemoteIdentityMaterial {
@@ -23,11 +26,18 @@ class FileRemoteIdentity implements RemoteIdentityMaterial {
   readonly kind = 'file' as const;
   private pair: CryptoKeyPair | null = null;
   private cached: RemotePublicIdentity | null = null;
+  private ensuring: Promise<RemotePublicIdentity> | null = null;
+  private writes: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly path: string) {}
 
   async ensurePublic(): Promise<RemotePublicIdentity> {
     if (this.cached) return this.cached;
+    if (!this.ensuring) this.ensuring = this.ensureOnce().finally(() => { this.ensuring = null; });
+    return this.ensuring;
+  }
+
+  private async ensureOnce(): Promise<RemotePublicIdentity> {
     const stored = await this.load();
     const pair = stored
       ? await importSigningPair(stored.identity)
@@ -55,12 +65,51 @@ class FileRemoteIdentity implements RemoteIdentityMaterial {
   }
 
   async setRefreshSecret(secret: string): Promise<void> {
-    if (!this.pair) await this.ensurePublic();
-    await this.save({
-      version: 1,
-      identity: await crypto.subtle.exportKey('jwk', this.pair!.privateKey),
-      refresh_secret: secret,
+    await this.mutate(stored => ({ ...stored, refresh_secret: secret }));
+  }
+
+  async getAccountSession(origin: string, role = 'host'): Promise<RemoteAccountCredential | null> {
+    return (await this.load())?.accounts?.[`${origin}#${role}`] ?? null;
+  }
+
+  async ensureControllerIdentity(scope: string): Promise<RemotePublicIdentity> {
+    let jwk: JsonWebKey | undefined;
+    await this.mutate(async stored => {
+      jwk = stored.controllers?.[scope];
+      if (jwk) return stored;
+      const generated = await generateP256SigningKeyPair();
+      jwk = await crypto.subtle.exportKey('jwk', generated.privateKey);
+      return { ...stored, controllers: { ...stored.controllers, [scope]: jwk } };
     });
+    const pair = await importSigningPair(jwk!);
+    const public_key = await exportPublicJwk(pair.publicKey);
+    return { public_key, fingerprint: await identityFingerprint(public_key) };
+  }
+
+  async signControllerIdentity(scope: string, bytes: Uint8Array): Promise<string> {
+    await this.ensureControllerIdentity(scope);
+    const pair = await importSigningPair((await this.load())!.controllers![scope]!);
+    return signBytes(pair.privateKey, bytes);
+  }
+
+  async setAccountSession(origin: string, value: RemoteAccountCredential | null, role = 'host'): Promise<void> {
+    await this.mutate(stored => {
+      const accounts = { ...stored.accounts };
+      const key = `${origin}#${role}`;
+      if (value) accounts[key] = value; else delete accounts[key];
+      return { ...stored, accounts };
+    });
+  }
+
+  private async mutate(update: (stored: StoredIdentityFile) => StoredIdentityFile | Promise<StoredIdentityFile>): Promise<void> {
+    await this.ensurePublic();
+    const run = this.writes.then(async () => {
+      const stored = (await this.load())!;
+      const next = await update(stored);
+      if (next !== stored) await this.save(next);
+    });
+    this.writes = run.catch(() => undefined);
+    return run;
   }
 
   private async load(): Promise<StoredIdentityFile | null> {

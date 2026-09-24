@@ -1,10 +1,11 @@
-import { AUTH_PROTOCOL, MAX_NAME_CHARS, adminCreateEnrollmentResultSchema, parseClosed } from '@gian/remote-protocol';
+import { AUTH_PROTOCOL, MAX_NAME_CHARS, adminCreateEnrollmentResultSchema, githubAccountIdSchema, parseClosed } from '@gian/remote-protocol';
 
 /** Issue through the running server, never by opening its database or printing admin credentials. */
 export async function createEnrollmentFromEnv(
   env: NodeJS.ProcessEnv,
   label?: string,
   fetchFn: typeof fetch = fetch,
+  githubAccountId?: string,
 ) {
   const admin = env.GIAN_REMOTE_ADMIN_TOKEN?.trim();
   if (!admin) throw new Error('GIAN_REMOTE_ADMIN_TOKEN is required in the server environment');
@@ -16,6 +17,7 @@ export async function createEnrollmentFromEnv(
   const port = Number(env.GIAN_REMOTE_PORT?.trim() || '8787');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid GIAN_REMOTE_PORT');
   if (label !== undefined && (!label.trim() || label.trim().length > MAX_NAME_CHARS)) throw new Error('Invalid enrollment label');
+  if (githubAccountId !== undefined) githubAccountIdSchema.parse(githubAccountId);
   // The admin endpoint is deliberately blocked by the public reverse proxy.
   const host = env.GIAN_REMOTE_HOST?.trim();
   const loopback = host === '::' || host === '::1' ? '[::1]' : '127.0.0.1';
@@ -24,7 +26,8 @@ export async function createEnrollmentFromEnv(
     response = await fetchFn(`http://${loopback}:${port}/api/v1/admin/host-enrollments`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
       headers: { authorization: `Bearer ${admin}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ protocol: AUTH_PROTOCOL, ...(label ? { label: label.trim() } : {}) }),
+      body: JSON.stringify({ protocol: AUTH_PROTOCOL, ...(label ? { label: label.trim() } : {}),
+        ...(githubAccountId ? { github_account_id: githubAccountId } : {}) }),
     });
   } catch {
     throw new Error('Cannot reach the local Remote Server. Run this command in its container or service environment.');

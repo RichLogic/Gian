@@ -102,6 +102,7 @@ function protocolEventPayloadHash(notification: ProtocolNotification): string {
 const SNAPSHOT_FLUSH_MS = 120;
 
 interface EventCoordinatorCallbacks {
+  onTurnCompleted?: (sessionId: string, turn: number) => void;
   sendMessage: (
     sessionId: string,
     text: string,
@@ -416,7 +417,9 @@ export class SessionEventCoordinator {
     }> | null,
     replayStreamId?: string,
   ): { turns: number; events: number; rebuilt: boolean } {
-    const provider = this.sessions.get(sessionId).executor;
+    const replaySession = this.sessions.get(sessionId);
+    const provider = replaySession.executor;
+    const replayCwd = this.cwdForSession(replaySession);
     const turns = new Map<string, {
       id: string;
       number: number;
@@ -537,6 +540,7 @@ export class SessionEventCoordinator {
             notification as unknown as ProxyNotification,
             sessionId,
             turn.number,
+            replayCwd,
           );
       for (const event of projected) {
         const result = this.history.appendEvent(
@@ -1094,7 +1098,25 @@ export class SessionEventCoordinator {
     turn: number,
   ): ChatEvent[] {
     const session = this.sessions.get(sessionId);
-    return this.projectEventsWithKindTracking(session.executor, notification, sessionId, turn);
+    return this.projectEventsWithKindTracking(
+      session.executor,
+      notification,
+      sessionId,
+      turn,
+      this.cwdForSession(session),
+    );
+  }
+
+  /** Launch root recorded on file-change projections (FileChangeData.cwd):
+   *  the session's worktree, else its workspace checkout. Mirrors
+   *  SessionManager.cwdForSession; the read side prefers it over path
+   *  heuristics when attributing last-turn diffs to their producing tree. */
+  private cwdForSession(session: Session): string | undefined {
+    if (session.worktree_path) return session.worktree_path;
+    const workspace = this.db
+      .prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(session.workspace_id) as { path: string } | undefined;
+    return workspace?.path;
   }
 
   /**
@@ -1108,6 +1130,7 @@ export class SessionEventCoordinator {
     notification: ProxyNotification,
     sessionId: string,
     turn: number,
+    cwd?: string,
   ): ChatEvent[] {
     // Record the raw context kind map first: exit_plan_mode requests carry no
     // display nativeOptions by design, so the registry must not depend on the
@@ -1122,6 +1145,7 @@ export class SessionEventCoordinator {
       sessionId,
       turn,
       (notificationSessionId, approvalId) => this.interactionKinds.lookup(notificationSessionId, approvalId),
+      cwd,
     );
     for (const event of events) {
       const type = event.display?.type;
@@ -1546,6 +1570,7 @@ export class SessionEventCoordinator {
       this.broadcastSessionUpdated(sessionId, { status: sessionStatus, unread: 1, updated_at: now });
     }
     if (terminalStatus === 'completed') {
+      this.callbacks.onTurnCompleted?.(sessionId, active.number);
       // Issue #57: acceptance starts the bounded title poll; completion is a
       // retry point after Host restart or an earlier failed lookup.
       // Fire-and-forget; failures are logged inside AutoTitleService.

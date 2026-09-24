@@ -5,6 +5,7 @@ import {
   signBytes,
 } from '@gian/remote-protocol';
 import type { CryptoKeyPair } from './crypto-types.js';
+import type { RemoteAccountCredential } from '@gian/shared';
 import { createRemoteIdentityFileMaterial } from './identity-file.js';
 import { RemoteIdentityBrokerClient } from './identity-broker.js';
 
@@ -25,6 +26,10 @@ export interface RemoteIdentityMaterial {
   sign(bytes: Uint8Array): Promise<string>;
   getRefreshSecret(): Promise<string | null>;
   setRefreshSecret(secret: string): Promise<void>;
+  getAccountSession?(origin: string, role?: 'host' | 'controller'): Promise<RemoteAccountCredential | null>;
+  setAccountSession?(origin: string, value: RemoteAccountCredential | null, role?: 'host' | 'controller'): Promise<void>;
+  ensureControllerIdentity?(scope: string): Promise<RemotePublicIdentity>;
+  signControllerIdentity?(scope: string, bytes: Uint8Array): Promise<string>;
 }
 
 export class UnavailableRemoteIdentity implements RemoteIdentityMaterial {
@@ -52,6 +57,8 @@ export class MemoryRemoteIdentity implements RemoteIdentityMaterial {
   private pair: CryptoKeyPair | null = null;
   private cached: RemotePublicIdentity | null = null;
   private refreshSecret: string | null = null;
+  private readonly accounts = new Map<string, RemoteAccountCredential>();
+  private readonly controllers = new Map<string, MemoryRemoteIdentity>();
 
   async ensurePublic(): Promise<RemotePublicIdentity> {
     if (this.cached) return this.cached;
@@ -73,6 +80,26 @@ export class MemoryRemoteIdentity implements RemoteIdentityMaterial {
 
   async setRefreshSecret(secret: string): Promise<void> {
     this.refreshSecret = secret;
+  }
+
+  async getAccountSession(origin: string, role = 'host'): Promise<RemoteAccountCredential | null> {
+    return this.accounts.get(`${origin}#${role}`) ?? null;
+  }
+
+  async ensureControllerIdentity(scope: string): Promise<RemotePublicIdentity> {
+    const identity = this.controllers.get(scope) ?? new MemoryRemoteIdentity();
+    this.controllers.set(scope, identity);
+    return identity.ensurePublic();
+  }
+
+  async signControllerIdentity(scope: string, bytes: Uint8Array): Promise<string> {
+    await this.ensureControllerIdentity(scope);
+    return this.controllers.get(scope)!.sign(bytes);
+  }
+
+  async setAccountSession(origin: string, value: RemoteAccountCredential | null, role = 'host'): Promise<void> {
+    const key = `${origin}#${role}`;
+    if (value) this.accounts.set(key, value); else this.accounts.delete(key);
   }
 }
 

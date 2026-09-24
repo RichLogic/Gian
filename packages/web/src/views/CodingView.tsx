@@ -67,6 +67,7 @@ export interface CodingViewProps {
     text: string,
     opts?: {
       oneShotBypass?: boolean;
+      translationId?: string;
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;

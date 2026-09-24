@@ -41,7 +41,9 @@
 }
 
 .msg-text p + p { margin-top: 6px; }
-/* User input is plain text — preserve newlines without enabling Markdown. */
+/* User input is markdown now (the composer is a markdown editor); pre-wrap
+ * stays so the soft line breaks that survive inside markdown text nodes still
+ * render as line breaks. */
 .msg-text.user-text {
   white-space: pre-wrap;
   word-break: break-word;
@@ -68,6 +70,7 @@
 }
 
 /* Markdown rendering inside assistant bubbles */
+.msg-text.md { min-width: 0; overflow-wrap: break-word; }
 .msg-text.md > * { margin: 0; }
 .msg-text.md > * + * { margin-top: 8px; }
 .msg-text.md h1,
@@ -118,17 +121,22 @@
 
 /* Mermaid diagram block: tagged ```mermaid fences (and bare fences whose
    first line is a diagram keyword) render as SVG. The .code-block wrapper is
-   kept so the copy button still copies the diagram source. The card stays
-   white in every theme because mermaid's neutral theme draws dark strokes. */
+   kept so the copy button still copies the diagram source. The card follows
+   the app theme: light themes keep a light card (mermaid's neutral theme
+   draws dark strokes); dark rides --surface-2 to match mermaid's dark
+   variables in markdown-mermaid.tsx. */
 .mermaid-block .mermaid-diagram {
   display: flex;
   justify-content: center;
   max-width: 100%;
   padding: 12px;
   overflow-x: auto;
-  background: oklch(1 0 0);
+  background: var(--surface, oklch(1 0 0));
   border: 1px solid var(--hairline);
   border-radius: var(--r-2);
+}
+body[data-theme="dark"] .mermaid-block .mermaid-diagram {
+  background: var(--surface-2, #252629);
 }
 .mermaid-block .mermaid-diagram svg { max-width: 100%; height: auto; }
 /* Fallback while mermaid loads or the source fails to parse (a diagram that
@@ -214,6 +222,12 @@ body[data-theme="dark"] .code-block .hljs-meta { color: oklch(0.78 0.13 65); }
   border-collapse: collapse;
   font-size: 12px;
 }
+/* The table scrolls inside its own wrapper on narrow viewports instead of
+   widening the transcript (and the whole page) — same pattern as <pre>. */
+.md-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
 .msg-text.md th,
 .msg-text.md td {
   border: 1px solid var(--surface-3);
@@ -229,6 +243,29 @@ body[data-theme="dark"] .code-block .hljs-meta { color: oklch(0.78 0.13 65); }
   color: var(--accent-text);
   border-radius: var(--r-2);
 }
+
+/* A user bubble reuses the assistant `.md` block styles above; the `.user-md`
+ * overrides keep the compact bubble look — tighter block spacing and headings
+ * restrained to the composer's 16/15/14/13 scale instead of document-sized. */
+.msg-text.md.user-md > * + * { margin-top: 6px; }
+.msg-text.md.user-md h1,
+.msg-text.md.user-md h2,
+.msg-text.md.user-md h3,
+.msg-text.md.user-md h4,
+.msg-text.md.user-md h5,
+.msg-text.md.user-md h6 {
+  margin: 4px 0 2px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: inherit;
+}
+.msg-text.md.user-md h1 { font-size: 16px; }
+.msg-text.md.user-md h2 { font-size: 15px; }
+.msg-text.md.user-md h3 { font-size: 14px; }
+.msg-text.md.user-md h4,
+.msg-text.md.user-md h5,
+.msg-text.md.user-md h6 { font-size: 13px; }
 
 /* ── from coding.css: approval / interaction cards (.ap2 shell) ─────────── */
 
@@ -613,6 +650,18 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   margin-right: 3px;
   opacity: 0.55;
 }
+/* Brand/extension glyphs carry their own hues (favicon images included) —
+   mute them less than the generic currentColor glyphs so the color still
+   reads. Monochrome marks (GitHub/X/MDN/localhost) stay currentColor and
+   follow the theme instead. */
+.link-kind-icon[data-link-icon^="web-"],
+.link-kind-icon[data-link-icon^="file-"] {
+  opacity: 0.85;
+}
+.link-favicon-icon {
+  border-radius: 2.5px;
+  object-fit: contain;
+}
 /* A link whose behavior is unavailable on this surface: styled like text,
    non-interactive, the tooltip explains why (never a dead <a>). */
 .link-inert {
@@ -986,8 +1035,12 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   max-width: 88%;
 }
 .msg.user .msg-attachments { justify-content: flex-end; margin-bottom: 4px; }
+/* Composer-document bubbles interleave attachment chips inside .msg-text, so
+ * their image previews sit BELOW it instead — swap the gap direction. */
+.msg.user .msg-text + .msg-attachments { margin-top: 6px; margin-bottom: 0; }
 .msg-att {
   display: block;
+  position: relative;
   border-radius: var(--r-2);
   overflow: hidden;
   background: var(--surface-2);
@@ -1002,6 +1055,24 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   height: auto;
 }
 .msg-att.zoomable { cursor: zoom-in; }
+/* Per-message attachment number, bottom-right on the inline preview. Dark
+   translucent chip reads on any image; the lightbox never shows it. */
+.msg-att-num,
+.ref-pop-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  box-sizing: border-box;
+  background: oklch(0 0 0 / 0.55);
+  color: oklch(1 0 0 / 0.95);
+  font: 600 10px/16px var(--font-sans);
+  text-align: center;
+  pointer-events: none;
+}
 .msg-file-att {
   min-width: 0;
   max-width: 280px;
@@ -1053,7 +1124,10 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  max-width: min(320px, 85%);
+  /* Cap by px only: a % cap against the shrink-to-fit bubble resolves AFTER
+   * the bubble sized itself to the chip, so a lone chip (image-only message)
+   * always lost 15% of its label to the ellipsis. */
+  max-width: min(320px, 100%);
   margin: 0 2px;
   padding: 0 6px;
   overflow: hidden;
@@ -1084,14 +1158,15 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   font-weight: 600;
 }
 /* Context chips read as @-mentions; the glyph lives in CSS so it never
- * pollutes text content, copy, or selection. File-reference chips render a
- * real file icon instead, so the '@' is suppressed. */
+ * pollutes text content, copy, or selection. File- and session-reference
+ * chips render a real icon instead, so the '@' is suppressed. */
 .message-inline-reference[data-reference-type="context"]::before {
   content: '@';
   color: var(--text-3);
   font-weight: 600;
 }
-.message-inline-reference[data-reference-kind="file"]::before {
+.message-inline-reference[data-reference-kind="file"]::before,
+.message-inline-reference[data-reference-kind="session"]::before {
   content: none;
 }
 .mir-glyph svg { width: 11px; height: 11px; }
@@ -1101,6 +1176,22 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   white-space: nowrap;
 }
 .inline-reference-document { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Text segments between reference chips are tiny markdown documents (the
+ * composer exports literal markdown; see UserMarkdownSegment). Paragraphs
+ * stay inline with collapsed margins so consecutive segments and chips rejoin
+ * into one flow; block structure inside a segment (lists, fences, headings)
+ * keeps its block layout. Segment-internal paragraph breaks come back as a
+ * line break since the paragraphs themselves are inline. Boundary newlines
+ * markdown would swallow are explicit elements: `.user-md-br` for a soft line
+ * break, `.user-md-gap` for a paragraph break. */
+.user-md-seg { display: inline; }
+.user-md-seg > * { margin: 0; }
+.user-md-seg > * + * { margin-top: 6px; }
+.user-md-seg p { display: inline; }
+.user-md-seg p + p::before { content: ""; display: block; height: 6px; }
+.user-md-br { display: block; }
+.user-md-gap { display: block; height: 6px; }
 
 /* Reference detail popover (floating preview card) */
 .ref-pop {
@@ -1223,6 +1314,16 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   white-space: normal;
   color: var(--text);
 }
+.ref-pop-thumb-wrap {
+  position: relative;
+  display: inline-block;
+  align-self: flex-start;
+  line-height: 0;
+}
+.ref-pop-thumb-wrap .ref-pop-thumb {
+  /* The wrapper owns the flex alignment now. */
+  align-self: auto;
+}
 .ref-pop-thumb {
   display: block;
   /* flex-none alone is not enough: as a column-flex child the default
@@ -1253,6 +1354,51 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
   text-decoration: none;
 }
 .ref-pop-download:hover { text-decoration: underline; }
+
+/* Web-link hover preview (unfurl) — lives inside .ref-pop, shares its quiet
+ * chrome and theme tokens. */
+.link-preview {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.link-preview-favicon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 1px;
+  border-radius: var(--r-1);
+}
+.link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.link-preview-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-preview-desc {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-preview-domain {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ── from shell-v2.css: user-message reset + message footer ─────────────── */
 

@@ -51,6 +51,7 @@ import { SettingsBody } from './components/SettingsBody.js';
 import { BrowserPanel } from './components/BrowserPanel.js';
 import type { NavKey } from './components/SettingsBody.js';
 import { createRemoteSettingsController } from './remote-settings/production.js';
+import { GitHubAuthorizationHost } from './components/GitHubAuthorizationHost.js';
 import type { RemoteSettingsController } from './remote-settings/types.js';
 import { makeWorkbenchWire } from './components/terminal-wire.js';
 import { ChatContextPanel } from './components/ChatContextPanel.js';
@@ -66,6 +67,7 @@ import { CodingView } from './views/CodingView.js';
 import type { SystemConfig } from '@gian/shared';
 import type { QueueEntry, TranscriptItem } from './types.js';
 import { applyGianIconAppearance } from './brand-icon.js';
+import { resolveTheme, useSystemDark } from './theme.js';
 import { ChatPanelOpenContext } from './presentation/chat-panel.js';
 import { decideWorktreeViewRequest, readWtAutoApplied, worktreeDisplayName, writeWtAutoApplied } from './presentation/wt-view.js';
 import { useSessionCommands } from './controllers/use-session-commands.js';
@@ -112,6 +114,7 @@ import './operations/browser.js';
 import './operations/onboarding.js';
 import './operations/sidechat.js';
 import './operations/schedule.js';
+import './operations/translation.js';
 import { sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
 import {
   createMessageEchoSink,
@@ -264,7 +267,7 @@ export function App() {
   // The exact create attempt is App-owned so an unknown outcome cannot be
   // forgotten by closing the form or switching away from Sessions mode.
   const [sessionCreateRunId, setSessionCreateRunId] = useState<string | undefined>();
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setActiveSessionId] = useState<string | null>(null);
   // ─── Tasks (PRD-v3) ───────────────────────────────────────────────────────
   // Tasks group Subtasks (sessions with type==='subtask' + a matching task_id).
   // Seeded from state_sync, kept fresh via the WS task:* handlers below.
@@ -286,6 +289,9 @@ export function App() {
   void pendingBySidechat;
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
+  // A selected Task row owns every Session surface and operation immediately,
+  // including the render before the stored selection is synchronized.
+  const activeSessionId = mode === 'tasks' && activeSubtaskId ? activeSubtaskId : selectedSessionId;
   const [sidebarListMode, setSidebarListMode] = useState<SidebarListMode>('tasks');
   const [newSubtaskForTaskId, setNewSubtaskForTaskId] = useState<string | null>(null);
   const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
@@ -589,6 +595,7 @@ export function App() {
   // lists all read the merged config so optimistic writes apply in the same
   // task they dispatch.
   const displayConfig = useStoreSettingsWithOverlays(operationStore, systemConfig);
+  const systemDark = useSystemDark();
   const assignTaskSession = assignTaskSessionId
     ? displaySessions.find(session => session.id === assignTaskSessionId) ?? null
     : null;
@@ -620,10 +627,16 @@ export function App() {
 
   // Appearance side-effect reads the RENDERED config (canonical +
   // settings.save overlays) so an optimistic theme switch applies in the
-  // same task it dispatches, and a rollback visibly reverts it.
+  // same task it dispatches, and a rollback visibly reverts it. The 'system'
+  // theme resolves against the live OS preference here, not at write time.
   useEffect(() => {
     if (!displayConfig) return;
-    document.body.setAttribute('data-theme', displayConfig.theme);
+    const resolvedTheme = resolveTheme(
+      displayConfig.theme,
+      systemDark,
+      displayConfig.system_light_theme ?? 'warm',
+    );
+    document.body.setAttribute('data-theme', resolvedTheme);
     document.body.setAttribute('data-accent', displayConfig.accent);
     document.body.setAttribute('data-density', 'cozy');
     document.body.setAttribute('data-scale-chrome', 'md');
@@ -636,14 +649,26 @@ export function App() {
       '--chat-font-family',
       CHAT_FONT_FAMILY_STACKS[displayConfig.chat_font_family],
     );
+    // Frame glass transparency (percent); the tokens mix --bg against
+    // transparent at this ratio (default 100 = fully opaque).
+    document.body.style.setProperty(
+      '--frame-opacity',
+      String(displayConfig.frame_opacity ?? 100),
+    );
     document.documentElement.setAttribute('lang', displayConfig.locale);
     // The brand mark is theme-adjusted but accent-fixed (Plum gradient,
     // 2026-09-08 owner call) — accent changes no longer repaint the logo.
-    applyGianIconAppearance(displayConfig.theme);
+    applyGianIconAppearance(resolvedTheme);
+    // macOS glass: the vibrancy material follows the resolved theme (dark
+    // needs the deep 'sidebar' material; frost can only wash grey). A System
+    // theme must leave themeSource on 'system' or the pinned appearance
+    // freezes prefers-color-scheme and OS switching stops working.
+    void desktopBridge()?.setFrameVibrancy?.(resolvedTheme, displayConfig.theme === 'system');
     // Keep the remappable-shortcut store aligned with the rendered config
     // (optimistic overlay applies in the same task; rollback reverts it).
     setKeymapPreferences(displayConfig.keymap);
-  }, [displayConfig?.theme, displayConfig?.accent,
+  }, [displayConfig?.theme, displayConfig?.system_light_theme, systemDark,
+      displayConfig?.accent, displayConfig?.frame_opacity,
       displayConfig?.chat_font_size, displayConfig?.chat_font_family,
       displayConfig?.keymap, displayConfig?.locale]);
 
@@ -1050,6 +1075,7 @@ export function App() {
   const selectSession = useSessionSelection({
     mode,
     activeSubtaskId,
+    activeSessionId: selectedSessionId,
     sessionsRef,
     activeSessionIdRef,
     setActiveSessionId,
@@ -1286,7 +1312,8 @@ export function App() {
     ? workingTrees.find(t => t.id === viewedWorkingTreeId(activeSession))
     : null;
   const activeWorktreeName = activeWtForSession
-    ? worktreeDisplayName(activeWtForSession)
+    ? activeSession?.remote_execution ? (activeSession.remote_execution.worktree_root?.split('/').filter(Boolean).at(-1) ?? activeWtForSession.label)
+      : worktreeDisplayName(activeWtForSession)
     : null;
   const {
     pathSegments,
@@ -1736,8 +1763,9 @@ export function App() {
                 // First message rides the dormant pendingFirstMessage channel:
                 // the session:created socket handler consumes it and dispatches
                 // the send once the session exists (use-app-socket.ts).
-                pendingFirstMessageRef.current = {
-                  scope: { kind: 'workspace', id: input.workspaceId },
+                pendingFirstMessageRef.current = input.remoteSessionId ? null : {
+                  scope: { kind: 'workspace', id: input.workspaceId,
+                    ...(input.executionEnvironmentId ? { environmentId: input.executionEnvironmentId } : {}) },
                   text: input.firstMessage,
                   attachments: input.firstAttachments ?? [],
                   ...(input.contextItems && input.contextItems.length > 0
@@ -1746,6 +1774,8 @@ export function App() {
                   ...(input.composerDocument ? { composerDocument: input.composerDocument } : {}),
                 };
                 const run = ops.dispatch('session.create', {
+                  executionEnvironmentId: input.executionEnvironmentId,
+                  remoteSessionId: input.remoteSessionId,
                   workspaceId: input.workspaceId,
                   ...(input.agentId ? { agentId: input.agentId } : {}),
                   executor: input.executor,
@@ -2143,6 +2173,8 @@ export function App() {
         </div>
       )}
       <ScheduleConfirmationHost />
+      <GitHubAuthorizationHost key={identity?.provider === 'github' ? identity.user.id : 'host'}
+        login={identity?.provider === 'github' ? identity.user.login : undefined} />
       <Toaster />
     </div>
     </ScheduleOpenContext.Provider>

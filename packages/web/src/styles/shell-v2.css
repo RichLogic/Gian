@@ -22,14 +22,16 @@
   width: var(--gian-browser-viewport-width, 100vw);
   height: var(--gian-browser-viewport-height, 100vh);
   min-width: 0;
-  background: var(--bg);
+  /* Frame translucency is painted once on body; nested chrome stays
+     transparent so the glass alpha never stacks. */
+  background: transparent;
   overflow: hidden;
 }
 .body {
   display: flex;
   min-width: 0;
   min-height: 0;
-  background: var(--bg);
+  background: transparent;
   /* override old grid */
   grid-template-columns: none;
   padding: 0;
@@ -95,7 +97,7 @@
   /* Right inset centers the trailing panel-3 toggle over the dock column
      below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
   padding: 0 6px 0 8px;
-  background: var(--bg);
+  background: transparent;
 }
 
 /* Hairline between the window-chrome button cluster and the path breadcrumb —
@@ -342,7 +344,7 @@
   align-items: center;
   padding: 6px 3px;
   gap: 2px;
-  background: var(--bg);
+  background: transparent;
 }
 .dock-group {
   display: flex; flex-direction: column;
@@ -737,6 +739,10 @@
 @keyframes ri-spin { to { transform: rotate(360deg); } }
 .ri-status.err svg path { stroke-linecap: round; }
 .rail-item.active .ri-status { opacity: 1; }
+/* Hover shows the row actions in the same slot, so the status glyph must
+   yield even on the active row — beats `.rail-item.active` above on
+   specificity. Running rows keep their spinner (tasks-v3.css). */
+.rail-item.session-row:not(.is-running):hover .ri-status { opacity: 0; }
 
 /* Status icon — gradient disc + knockout glyph (spec 2026-06-28 §H).
    Rendered INSIDE the .ri-status positioning wrapper, so session-row

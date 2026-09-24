@@ -177,6 +177,29 @@ export type GianBrowserProjectTarget =
   | { workingTreeId: string; path: string }
   | { absolutePath: string };
 
+/** Bounded accessibility-tree text of a Browser page, produced main-side by
+ * the Browser automation service (the same sanitized artifact the agent's
+ * browser.snapshot tool receives — never raw HTML). `snapshotId` references
+ * the main-owned ref table, so the chip's `@eN` markers stay actionable until
+ * the next snapshot on the tab. */
+export interface GianBrowserPageSnapshotCapture {
+  url: string;
+  title: string;
+  tree: string;
+  truncated: boolean;
+  snapshotId: string;
+}
+
+/** Bounded viewport screenshot of a Browser page (PNG, at most 1600 px wide
+ * and 4 MiB — sized for model consumption, matching the agent's
+ * browser.screenshot tool). */
+export interface GianBrowserPageScreenshotCapture {
+  mimeType: 'image/png';
+  base64: string;
+  width: number;
+  height: number;
+}
+
 /** Node-free API exposed only to Gian's trusted renderer. Previewed pages use
  * a separate WebContentsView with no preload, so they can never call this. */
 export interface GianBrowserApi {
@@ -195,6 +218,11 @@ export interface GianBrowserApi {
   /** Freeze-frame of the live page (PNG data URL) so an HTML overlay can sit
    *  where the native view was — null when the tab has no paintable view. */
   captureFrame(tabId: string): Promise<string | null>;
+  /** Composer-context captures, produced by the main-owned Browser automation
+   *  service under the ADR-0039 boundary. Null when the capture cannot run
+   *  (no open page, DevTools or element inspection holding the page, ...). */
+  capturePageSnapshot(tabId: string): Promise<GianBrowserPageSnapshotCapture | null>;
+  capturePageScreenshot(tabId: string): Promise<GianBrowserPageScreenshotCapture | null>;
   setBackground(tabId: string, cssColor: string): Promise<boolean>;
   setZoom(tabId: string, factor: number): Promise<GianBrowserState>;
   openExternal(tabId: string): Promise<boolean>;

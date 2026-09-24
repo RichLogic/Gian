@@ -97,7 +97,11 @@ test('bundled shipping proxy self-test ignores an ancestor app package.json', as
     await buildProxyBundle(
       join(repoRoot, 'packages', 'proxies', plugin.directory, 'src', 'cli', 'spawn.ts'),
       output,
+      { name: plugin.packageName, version: plugin.pluginVersion },
     );
+    assert.deepEqual(JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8')), {
+      name: plugin.packageName, version: plugin.pluginVersion, type: 'module',
+    });
     const result = await execFileAsync(process.execPath, [output, '--self-test'], { encoding: 'utf8' });
     const response = JSON.parse(result.stdout.trim());
     assert.equal(response.id, plugin.pluginId);
@@ -114,6 +118,7 @@ test('all six official bundles self-test as Manifest v4 with matching identity',
     await buildProxyBundle(
       join(repoRoot, 'packages', 'proxies', plugin.directory, 'src', 'cli', 'spawn.ts'),
       output,
+      { name: plugin.packageName, version: plugin.pluginVersion },
     );
     const manifest = JSON.parse(
       await readFile(join(repoRoot, 'packages', 'proxies', plugin.directory, 'manifest.json'), 'utf8'),

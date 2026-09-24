@@ -312,6 +312,7 @@ export function useWorkbench({
 
   function defaultWorkingTreeIdFor(sess: Session | null): string | null {
     if (sess) {
+      if (sess.remote_execution) return `remote:${sess.id}`;
       if (sess.worktree_path) return `wt:${sess.id}`;
       return `ws:${sess.workspace_id}`;
     }
@@ -326,6 +327,7 @@ export function useWorkbench({
   // then the persisted override, then the session default.
   function viewedWorkingTreeId(sess: Session | null): string | null {
     if (!sess) return defaultWorkingTreeIdFor(null);
+    if (sess.remote_execution) return `remote:${sess.id}`;
     return resolveViewedTreeId({
       sessionId: sess.id,
       inMemory: wtView,
@@ -392,6 +394,13 @@ export function useWorkbench({
   function handleOpenWith(tab: SheetTab, target: SheetOpenWith): void {
     const abs = tab.fullPath;
     if (!abs) return;
+    if (tab.workingTreeId?.startsWith('remote:')) {
+      const localId = tab.workingTreeId.slice(7);
+      const reference = abs.startsWith(`gian-remote://${localId}/`)
+        ? decodeURIComponent(abs.slice(`gian-remote://${localId}/`.length)) : abs;
+      dispatchOpen({ id: tab.workingTreeId }, reference, target);
+      return;
+    }
     // Authoritative: the tab's own working tree id. Fallback: the longest root
     // that actually contains `abs` (boundary-aware, longest wins) so a sibling
     // root can never shadow the real one.
@@ -425,7 +434,7 @@ export function useWorkbench({
     let cancelled = false;
     void loadAllFiles(wtId).then(files => {
       if (cancelled || fileIndexWtRef.current !== wtId) return;
-      const index = buildFileRefIndex(files, base);
+      const index = buildFileRefIndex(files, activeSession?.remote_execution?.worktree_root ?? base);
       setFileIndexAbs({
         wtId,
         paths: new Set(files),
@@ -920,19 +929,37 @@ export function useWorkbench({
     setActiveRail('files');
     const sess = sessions.find(s => s.id === ownerSessionId) ?? null;
     const wtId = sess ? viewedWorkingTreeId(sess) : null;
-    const currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
+    let currentWt = wtId ? workingTrees.find(t => t.id === wtId) ?? null : null;
+    const remote = sess?.remote_execution;
+    if (remote && !currentWt) currentWt = {
+      id: `remote:${ownerSessionId}`, kind: 'worktree', label: remote.repository_name,
+      path: `gian-remote://${ownerSessionId}`, branch: null,
+      workspace_id: `remote:${remote.environment_id}:${remote.repository_id}`, workspace_name: remote.repository_name,
+      session_id: ownerSessionId, session_name: sess?.name ?? null,
+    };
+    const prefix = `gian-remote://${ownerSessionId}/`;
+    const attachmentPrefix = `/api/remote/sessions/${ownerSessionId}/files/`;
+    const remoteReference = absPath.startsWith(prefix) ? decodeURIComponent(absPath.slice(prefix.length))
+      : absPath.startsWith(attachmentPrefix) ? decodeURIComponent(absPath.slice(attachmentPrefix.length)) : absPath;
     let currentFiles: ReadonlySet<string> = new Set();
-    if (currentWt) {
+    if (currentWt && !remote) {
       currentFiles = fileIndexAbs?.wtId === currentWt.id
         ? fileIndexAbs.paths
         : new Set(await loadAllFiles(currentWt.id));
     }
     let route = resolveFilePanelRoute(absPath, currentWt, workingTrees, currentFiles);
+    if (remote && currentWt) {
+      const root = remote.worktree_root?.replace(/\/+$/, '');
+      const reference = root && remoteReference.startsWith(root + '/') ? remoteReference.slice(root.length + 1) : remoteReference;
+      const inside = !reference.startsWith('/') && !reference.startsWith('attachment:');
+      route = { ...route, sourceTree: currentWt, sourceRel: reference,
+        inCurrentFiles: inside, revealRel: inside ? reference : null };
+    }
     // Agent turns commonly create a file after the transcript link index was
     // first loaded. A cached miss inside the current tree gets one fresh check
     // before we classify it as panel-only.
     if (
-      currentWt
+      !remote && currentWt
       && fileIndexAbs?.wtId === currentWt.id
       && route.sourceTree?.id === currentWt.id
       && !route.inCurrentFiles
@@ -956,12 +983,12 @@ export function useWorkbench({
     const wt = route.sourceTree;
     const rel = route.sourceRel;
     const name = (rel ?? absPath).split('/').pop() || absPath;
-    const fullPath = wt && rel
+    const fullPath = remote ? prefix + encodeURIComponent(rel ?? remoteReference) : wt && rel
       ? `${wt.path.replace(/\/+$/, '')}/${rel}`
       : absPath;
     const icoKind = extOf(name);
     const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
-    const rawUrl = wt && rel
+    const rawUrl = remote ? `/api/remote/sessions/${ownerSessionId}/raw?reference=${encodeURIComponent(rel ?? remoteReference)}` : wt && rel
       ? `/api/working_trees/${encodeURIComponent(wt.id)}/raw?path=${encodeURIComponent(rel)}`
       : `/api/files/raw?path=${encodeURIComponent(fullPath)}`;
     const isImage = IMAGE_EXTS.has(ext);

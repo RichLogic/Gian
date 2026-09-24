@@ -22,21 +22,25 @@ export function ContextCards({
     <div className={`context-cards${className ? ` ${className}` : ''}`}>
       {items.map(item => {
         const open = expanded.has(item.id);
-        const expandable = item.type !== 'folder' && item.type !== 'file';
+        const expandable = item.type !== 'folder' && item.type !== 'file' && item.type !== 'session';
         const label = item.type === 'folder' || item.type === 'file'
           ? item.name
-          : item.type === 'browserElement'
-            ? t('composer.context.browserElement')
-            : item.origin === 'selection'
-              ? t('composer.context.quote')
-              : t('composer.context.pastedText');
+          : item.type === 'session'
+            ? item.title
+            : item.type === 'browserElement'
+              ? t('composer.context.browserElement')
+              : item.origin === 'selection'
+                ? t('composer.context.quote')
+                : t('composer.context.pastedText');
         const meta = item.type === 'folder' || item.type === 'file'
           ? item.path
-          : item.type === 'browserElement'
-            ? item.selector
-            : t('composer.context.pastedMeta')
-                .replace('{lines}', String(item.lineCount))
-                .replace('{size}', formatBytes(item.byteSize));
+          : item.type === 'session'
+            ? (item.workspaceName ?? t('composer.context.session'))
+            : item.type === 'browserElement'
+              ? item.selector
+              : t('composer.context.pastedMeta')
+                  .replace('{lines}', String(item.lineCount))
+                  .replace('{size}', formatBytes(item.byteSize));
         const title = item.type === 'browserElement'
           ? `${item.pageTitle || item.pageUrl}\n${item.pageUrl}\n${item.selector}`
           : meta;
@@ -52,6 +56,10 @@ export function ContextCards({
                 <svg viewBox="0 0 16 16" fill="none">
                   <path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" strokeWidth="1.2" />
                   <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
+                </svg>
+              ) : item.type === 'session' ? (
+                <svg viewBox="0 0 16 16" fill="none">
+                  <path d="M2.25 3.25h11.5v8H8.75l-3.5 3v-3h-3z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                 </svg>
               ) : item.type === 'browserElement' ? (
                 <svg viewBox="0 0 16 16" fill="none">
@@ -112,7 +120,9 @@ export function ContextCards({
               <pre className="context-card-preview">{
                 (item.type === 'browserElement'
                   ? `${item.pageTitle || item.pageUrl}\n${item.pageUrl}\n\n${item.snippet}`
-                  : item.text)
+                  : item.type === 'pastedText'
+                    ? item.text
+                    : '')
                   .split(/\r\n|\r|\n/)
                   .slice(0, PREVIEW_LINES)
                   .join('\n')

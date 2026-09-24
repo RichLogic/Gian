@@ -16,6 +16,7 @@ import {
   discardComposerDraft,
 } from '../components/Composer.js';
 import { loadSessionTrace, loadAgents } from '../api.js';
+import { remoteRequest } from '../remote-environments.js';
 import { DeletedAgentDialog } from '../components/DeletedAgentDialog.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
@@ -24,6 +25,9 @@ import { TurnDiffChip } from '../components/TurnDiffChip.js';
 import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
 import { useT } from '../i18n/index.js';
 import { toast } from '../feedback.js';
+import { useTranslation } from '../translation/use-translation.js';
+import { AutoTranslationChip, TranslationSendStatus, languageName } from '../translation/TranslationControls.js';
+import '../translation/translation.css';
 import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import {
   useOperationDispatchOptional,
@@ -66,6 +70,7 @@ export interface SessionMainProps {
     text: string,
     options?: {
       oneShotBypass?: boolean;
+      translationId?: string;
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
@@ -159,6 +164,7 @@ export function SessionMain({
   onConsumeScheduleFocus,
 }: SessionMainProps) {
   const t = useT();
+  const translation = useTranslation(session.id);
   const dispatch = useOperationDispatchOptional();
   const openChatPanel = useContext(ChatPanelOpenContext);
   const [selectionCreate, setSelectionCreate] = useState<{
@@ -171,6 +177,21 @@ export function SessionMain({
   // input — the composer blocks and a banner explains how to reopen. The host
   // enforces the same rule in `sendMessage` and the queue drain.
   const sessionCompleted = session.completed_at != null;
+  const [remoteStatus, setRemoteStatus] = useState('connecting');
+  useEffect(() => {
+    if (!session.remote_execution) return;
+    let alive = true;
+    setRemoteStatus('connecting');
+    const refresh = () => {
+      void remoteRequest<{ status: string }>(`/sessions/${session.id}/status`)
+        .then(result => { if (alive) setRemoteStatus(result.status); })
+        .catch(() => { if (alive) setRemoteStatus('offline'); });
+    };
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [session.id, session.remote_execution?.environment_id]);
+  const remoteUnavailable = !!session.remote_execution && remoteStatus !== 'ready';
   const [knownAgents, setKnownAgents] = useState<UserAgentStatus[] | null>(null);
   const [agentRepairRunId, setAgentRepairRunId] = useState<string>();
   const agentRepairRun = useOperationRun(agentRepairRunId);
@@ -188,9 +209,12 @@ export function SessionMain({
   }, []);
   // A deleted Agent's session stays readable from its snapshots. New turns
   // remain blocked until the user chooses a same-Proxy replacement.
-  const agentDeleted = !!session.agent_id
+  const agentDeleted = !session.remote_execution && !!session.agent_id
     && knownAgents !== null
     && !knownAgents.some(agent => agent.id === session.agent_id);
+  // A disabled Agent keeps its session history readable but cannot continue.
+  const agentDisabled = !!session.agent_id
+    && knownAgents?.find(agent => agent.id === session.agent_id)?.enabled === false;
 
   useEffect(() => {
     if (!agentDeleted) {
@@ -224,7 +248,7 @@ export function SessionMain({
     }
   }, [selectionCreate, selectionCreateRun, t]);
 
-  const transcriptReadOnly = sessionCompleted || agentDeleted;
+  const transcriptReadOnly = sessionCompleted || agentDeleted || agentDisabled;
   const selectionCreatePending = selectionCreateRun?.phase === 'pending'
     || selectionCreateRun?.phase === 'optimistic';
   const askSelectionEnabled = !transcriptReadOnly
@@ -360,6 +384,18 @@ export function SessionMain({
           )}
         </div>
       )}
+      {remoteUnavailable && <div className="session-banner" role="status">
+        <span>{remoteStatus === 'auth_required' ? t('remote.execution.authRequired')
+          : remoteStatus === 'unavailable' ? t('remote.execution.unavailable')
+            : remoteStatus === 'connecting' ? t('remote.execution.connecting') : t('remote.execution.offline')}</span>
+      </div>}
+      {agentDisabled && !agentDeleted && (
+        <div className="session-banner agent-disabled-banner" role="status"
+             data-testid="agent-disabled-banner">
+          <span>{t('agents.disabled.banner')}</span>
+          <span className="session-banner-spacer" />
+        </div>
+      )}
       <div className="main-scroll">
         {sessionView === 'trace' ? (
           <TraceView snapshot={traceSnapshot} />
@@ -375,7 +411,13 @@ export function SessionMain({
             onRetryHistory={onRetryHistory}
             pending={running}
             onApprove={onApprove}
+            translation={translation}
             selectionActions={{
+              translate: {
+                label: t('translation.to').replace('{language}', languageName(translation.state.preferences.reading_language)),
+                enabled: translation.ready,
+                run: selection => translation.select(selection.text),
+              },
               addToChat: {
                 enabled: !transcriptReadOnly,
                 ...(!transcriptReadOnly ? {} : { reason: t('transcript.selection.readOnly') }),
@@ -401,13 +443,13 @@ export function SessionMain({
           <QueueList
             sessionId={session.id}
             queue={queue}
-            onRemove={sessionCompleted ? undefined : onQueueRemove}
-            onUpdate={sessionCompleted ? undefined : onQueueUpdate}
-            onClear={sessionCompleted ? undefined : onQueueClear}
-            onSendNow={session.executor === 'codex' && !sessionCompleted
+            onRemove={sessionCompleted || remoteUnavailable ? undefined : onQueueRemove}
+            onUpdate={sessionCompleted || remoteUnavailable ? undefined : onQueueUpdate}
+            onClear={sessionCompleted || remoteUnavailable ? undefined : onQueueClear}
+            onSendNow={session.executor === 'codex' && !sessionCompleted && !remoteUnavailable
               ? onQueueSendNow
               : undefined}
-            readOnly={sessionCompleted}
+            readOnly={sessionCompleted || remoteUnavailable}
           />
           <UnderbarPanelGroup sessionId={session.id}>
             <PlanChip
@@ -423,11 +465,20 @@ export function SessionMain({
               sessionId={session.id}
               onShowLastTurn={onShowLastTurnChanges}
             />
+            <AutoTranslationChip controller={translation} />
             <TranscriptNavigation items={items} />
           </UnderbarPanelGroup>
+          {translation.error && <div className="translation-error" role="alert">{translation.error}</div>}
+          <TranslationSendStatus controller={translation} />
           <Composer
             session={session}
-            onSend={onSend}
+            onSend={(text, options) => {
+              if (translation.state.enabled && text.trim()) {
+                return translation.prepareSend(text, options?.composerDocument)
+                  .then(translationId => { onSend(text, { ...options, translationId }); });
+              }
+              onSend(text, options);
+            }}
             onSendSkill={onSendSkill}
             onStop={onStop}
             onQueueAdd={onQueueAdd}
@@ -438,13 +489,15 @@ export function SessionMain({
             onSetServiceTier={onSetServiceTier}
             onSetNativeConfig={onSetNativeConfig}
             onSetTurnConfig={onSetTurnConfig}
-            disabled={pending || sessionCompleted || agentDeleted}
+            disabled={pending || sessionCompleted || agentDeleted || agentDisabled || remoteUnavailable}
             running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={sessionCompleted ? 'block' : 'queue'}
+            disabledSubmitBehavior={sessionCompleted || remoteUnavailable ? 'block' : 'queue'}
             executor={session.executor}
             agentId={session.agent_id ?? null}
             workspaceId={workspace?.id}
-            workingTree={workspace
+            workingTree={session.remote_execution ? {
+              id: `remote:${session.id}`, path: session.remote_execution.worktree_root ?? '',
+            } : workspace
               ? {
                   id: session.worktree_path ? `wt:${session.id}` : `ws:${session.workspace_id}`,
                   path: session.worktree_path ?? workspace.path,

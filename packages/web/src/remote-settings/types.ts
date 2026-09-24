@@ -154,6 +154,7 @@ export interface RemoteAuditEntry {
 // ---------------------------------------------------------------------------
 
 export interface RemoteSettingsState {
+  account?: import('@gian/shared').RemoteSettingsSnapshot['account'];
   error?: string | null;
   busy?: boolean;
   enrollment: RemoteEnrollmentState;
@@ -164,6 +165,8 @@ export interface RemoteSettingsState {
 }
 
 export interface RemoteSettingsController {
+  startAccountLogin?(serverUrl: string): Promise<void>;
+  pollAccountLogin?(): Promise<void>;
   getState(): RemoteSettingsState;
   /** Store subscription for the React binding (useSyncExternalStore). */
   subscribe(listener: () => void): () => void;
@@ -174,7 +177,7 @@ export interface RemoteSettingsController {
    * immediately after invoking this; the token is never echoed back through
    * `RemoteSettingsState`.
    */
-  enroll(input: { serverUrl: string; enrollmentToken: string }): Promise<void>;
+  enroll(input: { serverUrl: string; enrollmentToken: string; hostName?: string }): Promise<void>;
   /** Graceful disconnect (keeps enrollment so the user can reconnect). */
   disconnect(): Promise<void>;
   /** Resume the connector after a graceful disconnect. */

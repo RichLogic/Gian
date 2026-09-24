@@ -59,20 +59,70 @@ describe('SettingsBody Appearance', () => {
     expect(localStorage.getItem('gian.appearance.zoom-percent')).toBe('130');
   });
 
-  it('switches theme from a dropdown and resets accent to the theme default', async () => {
+  it('switches theme from a dropdown without touching the accent', async () => {
     renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.change(screen.getByRole('combobox', { name: 'Theme' }), { target: { value: 'dark' } });
     await waitFor(() => {
-      expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'dark', accent: 'plum' });
+      expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'dark' });
     });
   });
 
-  it('switching to light theme resets accent to azure', async () => {
+  it('switching to light theme keeps the current accent too', async () => {
     renderWithOperations(<SettingsBody config={baseConfig()} />);
     fireEvent.change(screen.getByRole('combobox', { name: 'Theme' }), { target: { value: 'light' } });
     await waitFor(() => {
-      expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'light', accent: 'azure' });
+      expect(api.saveSettings).toHaveBeenCalledWith({ theme: 'light' });
     });
+  });
+
+  it('offers the System theme and shows the light-theme sub-select only then', () => {
+    renderWithOperations(<SettingsBody config={baseConfig({ theme: 'dark' })} />);
+    const themeSelect = screen.getByRole('combobox', { name: 'Theme' }) as HTMLSelectElement;
+    expect(Array.from(themeSelect.options).map(option => option.value))
+      .toEqual(['light', 'warm', 'dark', 'system']);
+    expect(screen.queryByRole('combobox', { name: 'Light theme' })).toBeNull();
+  });
+
+  it('renders the light-theme sub-select for the system theme and patches it', async () => {
+    renderWithOperations(<SettingsBody config={baseConfig({ theme: 'system' })} />);
+    const sub = screen.getByRole('combobox', { name: 'Light theme' }) as HTMLSelectElement;
+    expect(sub.value).toBe('warm');
+    expect(Array.from(sub.options).map(option => option.value)).toEqual(['light', 'warm']);
+    fireEvent.change(sub, { target: { value: 'light' } });
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith({ system_light_theme: 'light' });
+    });
+  });
+
+  it('toggles frame transparency between glass and opaque on macOS Desktop', async () => {
+    (window as { gianDesktop?: unknown }).gianDesktop = { platform: 'darwin' };
+    renderWithOperations(<SettingsBody config={baseConfig({ frame_opacity: 100 })} />);
+    const toggle = screen.getByRole('switch', { name: 'Frame transparency' }) as HTMLInputElement;
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith({ frame_opacity: 20 });
+    });
+  });
+
+  it('toggles the glass back to fully opaque', async () => {
+    (window as { gianDesktop?: unknown }).gianDesktop = { platform: 'darwin' };
+    renderWithOperations(<SettingsBody config={baseConfig({ frame_opacity: 20 })} />);
+    const toggle = screen.getByRole('switch', { name: 'Frame transparency' }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(api.saveSettings).toHaveBeenCalledWith({ frame_opacity: 100 });
+    });
+  });
+
+  it('disables the transparency switch outside macOS with an explanation', () => {
+    renderWithOperations(<SettingsBody config={baseConfig()} />);
+    const toggle = screen.getByRole('switch', { name: 'Frame transparency' }) as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.checked).toBe(false);
+    expect(screen.getByText(/macOS Desktop app/)).toBeTruthy();
   });
 
   it('renders all 8 accent swatches', () => {

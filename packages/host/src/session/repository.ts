@@ -30,6 +30,10 @@ type SessionRow = Omit<
   runtime_profile_json?: string | null;
   proxy_plugin_id?: string | null;
   proxy_binding_json?: string | null;
+  remote_environment_id?: string | null;
+  remote_repository_id?: string | null;
+  remote_repository_name?: string | null;
+  remote_worktree_root?: string | null;
 };
 
 function hydrateProxyBinding(
@@ -234,6 +238,10 @@ export class SessionRepository {
       created_by_actor_id: createdByActorId,
       created_by_session_id: createdBySessionId,
       native_session_id: nativeSessionId,
+      remote_environment_id: remoteEnvironmentId,
+      remote_repository_id: remoteRepositoryId,
+      remote_repository_name: remoteRepositoryName,
+      remote_worktree_root: remoteWorktreeRoot,
       ...stored
     } = row;
     const turnConfigOptions = parseTurnConfigOptions(turnConfigOptionsJson);
@@ -242,8 +250,18 @@ export class SessionRepository {
     const runtimeProfile = binding.authoritative
       ? binding.proxy_binding?.runtimeProfile ?? null
       : parseRuntimeProfile(runtimeProfileJson);
+    const remote = remoteEnvironmentId ? this.db.prepare(`SELECT e.name, e.host_id, b.remote_session_id
+      FROM remote_controller_environments e JOIN remote_execution_bindings b
+      ON b.local_session_id = ? WHERE e.id = ?`).get(row.id, remoteEnvironmentId) as
+      { name: string; host_id: string; remote_session_id: string } | undefined : undefined;
     return {
       ...stored,
+      ...(remote && remoteEnvironmentId ? { remote_execution: {
+        environment_id: remoteEnvironmentId, environment_name: remote.name, host_id: remote.host_id,
+        remote_session_id: remote.remote_session_id, repository_id: remoteRepositoryId ?? '',
+        repository_name: remoteRepositoryName ?? '',
+        ...(remoteWorktreeRoot ? { worktree_root: remoteWorktreeRoot } : {}),
+      } } : {}),
       proxy_binding: binding.proxy_binding,
       proxy_binding_error: binding.proxy_binding_error,
       native_session_id: nativeSessionId || null,

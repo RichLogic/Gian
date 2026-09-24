@@ -147,6 +147,10 @@ const taskDelete: OperationDefinition<TaskIdInput> = {
 };
 
 export interface TaskCreateSubtaskInput {
+  executionEnvironmentId?: string;
+  remoteSessionId?: string;
+  sessionConfig?: Record<string, import('@gian/shared').ConfigValue>;
+  turnConfig?: Record<string, import('@gian/shared').ConfigValue>;
   taskId: string;
   workspaceId: string;
   /** Owning saved Agent (the new-session form always carries it). */
@@ -168,8 +172,12 @@ const taskCreateSubtask: OperationDefinition<TaskCreateSubtaskInput, Session> = 
   // The created Session is the run result: the caller selects it once the
   // run confirms. Canonical state converges via the host's `session:created`
   // broadcast (routes/tasks.ts) — no reconcile needed.
-  execute: async input => {
+  execute: async (input, context) => {
     const session = await createSubtask(input.taskId, {
+      ...(input.executionEnvironmentId ? { remote_environment_id: input.executionEnvironmentId, request_id: context.requestId } : {}),
+      ...(input.remoteSessionId ? { remote_session_id: input.remoteSessionId } : {}),
+      ...(input.sessionConfig ? { session_config: input.sessionConfig } : {}),
+      ...(input.turnConfig ? { turn_config: input.turnConfig } : {}),
       workspace_id: input.workspaceId,
       agent_id: input.agentId,
       ...(input.name ? { name: input.name } : {}),

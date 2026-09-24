@@ -540,7 +540,10 @@ function catalogConfigOptions(capabilities: CapabilitiesPayload): CatalogOption[
   const models = capabilities.models.filter((model) => !model.hidden);
   const defaultModel = models.find((model) => model.isDefault) ?? models[0];
   const efforts = uniqueEfforts(models);
-  const options: CatalogOption[] = [];
+  const options: CatalogOption[] = [{
+    id: 'gian.translation', displayName: 'Text-only translation',
+    binding: 'session', control: 'boolean', required: false, defaultValue: false,
+  }];
   if (models.length > 0) {
     options.push({
       id: 'model',
@@ -1192,6 +1195,8 @@ export class CodexProtocolV2Adapter {
       description: string;
       source: 'builtin' | 'user' | 'project';
       argHints: Array<{ kind: 'free' | 'model' | 'path' | 'agent' | 'enum'; placeholder?: string }>;
+      disabled?: boolean;
+      customizationId?: string;
     }>;
     const attached = this.sessions.values().next().value as AttachedSession | undefined;
     try {
@@ -1205,6 +1210,12 @@ export class CodexProtocolV2Adapter {
             kind: hint.kind,
             ...(hint.placeholder ? { placeholder: hint.placeholder } : {}),
           })),
+          // The additive inventory-join fields ride the catalog so a web `/`
+          // row can be matched to its Custom entry and disabled skills can be
+          // dimmed. `filePath` deliberately stays out of the catalog
+          // contract (strict schema).
+          ...(command.disabled ? { disabled: true } : {}),
+          ...(command.customizationId ? { customizationId: command.customizationId } : {}),
         });
       }
     } catch {
@@ -1298,8 +1309,13 @@ export class CodexProtocolV2Adapter {
     const native = record(params.nativeSession);
     const nativeSessionId = nonEmptyString(native.id);
     const history = nonEmptyString(native.history);
+    const textOnly = config['gian.translation'] === true;
+    if (textOnly && (nativeSessionId || hostServiceConfig)) {
+      throw new CodexProtocolError('CONFIG_VALUE_INVALID', 'Translation cannot resume history or attach Host services.');
+    }
     const result = await this.service.createSession({
       cwd,
+      ...(textOnly ? { textOnly: true, ephemeral: true } : {}),
       ...(nativeSessionId ? { threadId: nativeSessionId } : {}),
       ...(hostServiceConfig ? { config: hostServiceConfig } : {}),
     });
@@ -1411,6 +1427,7 @@ export class CodexProtocolV2Adapter {
       resumeRefId: resumeRef.id,
       anchor,
       createFingerprint: fingerprint,
+      resumeFingerprint: stableStringify({ parentSessionId, resumeRefId: resumeRef.id }),
     };
     this.sidechats.set(sidechatId, record);
     return { sidechat: this.serializeSidechat(session, record, createdAt) };
@@ -1827,7 +1844,9 @@ export class CodexProtocolV2Adapter {
         additionalWorkspaceRoots: session.roots,
         ...(turnModel ? { model: turnModel } : {}),
         ...(turnEffort ? { thinking: turnEffort } : {}),
-        ...approvalModeParams(approvalMode),
+        ...(session.sessionConfig['gian.translation'] === true
+          ? { sandbox: 'read-only' as const, approvalPolicy: 'never' as const }
+          : approvalModeParams(approvalMode)),
         serviceTier: turnConfig.service_tier === true ? 'fast' : null,
       }, requestId);
       return { accepted: true as const, turnId };
@@ -1944,9 +1963,21 @@ export class CodexProtocolV2Adapter {
   }
 
   private async closeSession(params: Record<string, unknown>) {
-    const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
-    return this.detachSession(session);
+    const sessionId = String(params.sessionId ?? '');
+    const streamId = String(params.streamId ?? '');
+    if (!this.sessions.has(sessionId) && this.closedAttaches.has(sessionId)) {
+      if (this.closedAttaches.get(sessionId) === streamId) return { ok: true as const };
+      throw new CodexProtocolError('SESSION_STALE', 'Session stream is stale.');
+    }
+    const session = this.requireOrdinaryAttached(sessionId, streamId);
+    const result = await this.detachSession(session);
+    this.closedAttaches.delete(sessionId);
+    this.closedAttaches.set(sessionId, streamId);
+    if (this.closedAttaches.size > 200) this.closedAttaches.delete(this.closedAttaches.keys().next().value!);
+    return result;
   }
+
+  private readonly closedAttaches = new Map<string, string>();
 
   private async detachSession(session: AttachedSession) {
     const activeTurn = this.activeTurnBySession.get(session.id);

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import {
   officialCatalogSourcePolicy,
+  OFFICIAL_PROXY_REPOSITORY,
   parseProxyPluginId,
   parseSessionProxyBinding,
   resolvePluginIdInput,
@@ -56,7 +57,7 @@ const PACKAGES_DIR = resolve(HERE, '..', '..');
 async function main(): Promise<void> {
   const dataDir = resolveDataDir();
   const releaseVersion = process.env.GIAN_RELEASE_VERSION ?? '0.1.0';
-  const releaseRepository = (process.env.GIAN_RELEASE_REPOSITORY ?? 'RichLogic/Gian').trim();
+  const proxyReleaseRepository = OFFICIAL_PROXY_REPOSITORY;
   const githubBrokerSocketPath = process.env.GIAN_DESKTOP_GITHUB_BROKER_SOCKET;
   const remoteBrokerSocketPath = process.env.GIAN_DESKTOP_REMOTE_BROKER_SOCKET;
   const browserBrokerSocketPath = process.env[BROWSER_USE_BROKER_SOCKET_ENV];
@@ -108,9 +109,9 @@ async function main(): Promise<void> {
   const agentManager = await AgentManager.create({
     dataDir,
     releaseVersion,
-    releaseRepository,
+    releaseRepository: proxyReleaseRepository,
     fetchImpl: createGitHubReleaseFetch({
-      releaseRepository,
+      releaseRepository: proxyReleaseRepository,
       brokerSocketPath: githubBrokerSocketPath,
     }),
     managedProxies: process.env.GIAN_MANAGED_PLUGINS === '1',
@@ -274,6 +275,7 @@ async function main(): Promise<void> {
     runtimeResolver,
     runtimeControl,
     runtimeInstaller,
+    pluginStore,
     readinessCache,
     agentManager,
     catalogService,

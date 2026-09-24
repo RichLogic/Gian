@@ -608,6 +608,7 @@ export class CodexProxyService {
   private readonly customization: CodexCustomizationScanner;
   private emitEvent: ProxyEventSink;
   private readonly sessionsById = new Map<string, SessionRecord>();
+  private readonly ephemeralThreads = new Set<string>();
   private readonly sessionsByThreadId = new Map<string, SessionRecord>();
   private readonly approvalsById = new Map<string, PendingApproval>();
   private readonly approvalsBySessionId = new Map<string, Map<string, PendingApproval>>();
@@ -733,7 +734,7 @@ export class CodexProxyService {
   async listSlashCommands(cwd?: string): Promise<{ commands: import('@gian/shared').SlashCommand[] }> {
     try {
       const response = await this.runtime.listSkills(cwd);
-      return { commands: listCodexSlashCommands(response) };
+      return { commands: listCodexSlashCommands(response, cwd) };
     } catch {
       // skills/list can fail before a thread exists or when codex is older;
       // still surface the built-ins instead of crashing the whole RPC.
@@ -774,6 +775,7 @@ export class CodexProxyService {
       // Let Codex resolve config.toml here. We retain the effective policy so
       // the composer can restore it after an explicit permission preset.
       const thread = await this.runtime.startThread({
+        ...(input.textOnly ? { textOnly: true } : {}),
         cwd,
         model: typeof input.model === 'string' && input.model.trim() ? input.model.trim() : null,
         ephemeral: input.ephemeral === true,
@@ -800,6 +802,7 @@ export class CodexProxyService {
     };
 
     this.addSession(session);
+    if (!adoptThreadId && (input.ephemeral || input.textOnly)) this.ephemeralThreads.add(threadId);
     return { session: this.serializeSession(session) };
   }
 
@@ -1128,7 +1131,13 @@ export class CodexProxyService {
       throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before closing the session.');
     }
 
-    if (params.force) {
+    const ephemeral = this.ephemeralThreads.has(session.threadId);
+    if (params.force && ephemeral) {
+      // Ephemeral translation threads have no readable history. Interrupt
+      // the known turn, then require unsubscribe to release this thread only.
+      const turnId = this.activeTurnsByThreadId.get(session.threadId)?.turnId ?? session.activeTurnId;
+      if (turnId) await this.runtime.interruptTurn(session.threadId, turnId).catch(() => undefined);
+    } else if (params.force) {
       // Proxy-local activeTurnId can diverge from Codex after a retryable
       // stream error was misclassified as terminal. Read the runtime's own
       // thread state so Force Recover interrupts the turn Codex actually owns.
@@ -1153,7 +1162,10 @@ export class CodexProxyService {
       }
     }
 
-    if (typeof this.runtime.unsubscribeThread === 'function') {
+    if (ephemeral) {
+      if (!this.runtime.unsubscribeThread) throw new Error('Cannot release ephemeral Codex thread.');
+      await this.runtime.unsubscribeThread(session.threadId);
+    } else if (typeof this.runtime.unsubscribeThread === 'function') {
       await this.runtime.unsubscribeThread(session.threadId).catch(() => undefined);
     }
 
@@ -1350,6 +1362,7 @@ export class CodexProxyService {
   }
 
   private removeSession(session: SessionRecord) {
+    this.ephemeralThreads.delete(session.threadId);
     this.sessionsById.delete(session.id);
     this.sessionsByThreadId.delete(session.threadId);
     this.contextCompactionUsageGuards.delete(session.threadId);
@@ -1376,6 +1389,7 @@ export class CodexProxyService {
       this.sessionsByThreadId.get(session.threadId)?.id === session.id
     ) {
       this.sessionsByThreadId.delete(session.threadId);
+      this.ephemeralThreads.delete(session.threadId);
     }
     this.sessionsByThreadId.set(next.threadId, next);
     return next;

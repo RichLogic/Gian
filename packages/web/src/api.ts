@@ -1,3 +1,4 @@
+import { remoteAgentIdentity, loadRemoteAgentCatalog, optionModels, remoteRequest } from './remote-environments.js';
 import type {
   AgentInstallResult,
   AgentProxyDefaults,
@@ -170,7 +171,9 @@ export async function loadWorkingTrees(options: { refresh?: boolean } = {}): Pro
   // Keep transport failure distinct from a legitimate empty list. Callers can
   // then retain the last known-good picker contents instead of flashing empty.
   if (!res.ok) throw new Error(`working trees request failed (${res.status})`);
-  return (await res.json()) as WorkingTree[];
+  const local = (await res.json()) as WorkingTree[];
+  const remote = await remoteRequest<WorkingTree[]>('/working-trees').catch(() => []);
+  return [...local, ...(Array.isArray(remote) ? remote : [])];
 }
 
 export async function loadTree(workingTreeId: string, path: string): Promise<TreeEntry[]> {
@@ -198,6 +201,14 @@ export interface ChangedEntry {
   staged: boolean;
   added: number;
   removed: number;
+  /** Last-turn only: absolute root the change was produced under when it is
+   *  not the viewed tree (the turn ran in another worktree). `path` is
+   *  relative to this root; absent for in-tree entries. */
+  root?: string;
+  /** Last-turn only: true when the file lives outside the viewed tree. Its
+   *  patch comes from the persisted turn snapshot, never from viewed-tree
+   *  git or the filesystem. */
+  external?: boolean;
 }
 
 /** Diff comparison scope. Mirrors Codex's picker plus the legacy `all`:
@@ -485,6 +496,9 @@ export async function loadProxyModels(
   executor: 'claude' | 'codex',
   agentId?: string | null,
 ): Promise<Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>> {
+  if (remoteAgentIdentity(agentId)) {
+    return optionModels((await loadRemoteAgentCatalog(agentId!)).configOptions) as Array<import('@gian/shared').CcModelCapabilities | import('@gian/shared').CodexModelCapabilities>;
+  }
   const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
   const res = await fetch(`/api/proxy/${executor}/models${query}`);
   if (!res.ok) return [];
@@ -496,6 +510,14 @@ export async function loadProxyCapabilities(
   executor: Executor,
   agentId?: string | null,
 ): Promise<ProxyCapabilities> {
+  if (remoteAgentIdentity(agentId)) {
+    const catalog = await loadRemoteAgentCatalog(agentId!);
+    const mode = catalog.configOptions.find(option => option.role === 'approval_mode');
+    return { ...catalog, models: optionModels(catalog.configOptions), slashCommands: [],
+      modes: mode?.choices?.map(choice => ({ id: String(choice.value), label: choice.displayName,
+        description: choice.description ?? '', isDefault: choice.value === mode.defaultValue })) ?? [],
+      capabilities: catalog.resolveSupported ? { 'catalog.resolve': 1 } : {} } as unknown as ProxyCapabilities;
+  }
   const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
   const response = await fetch(`/api/proxy/${executor}/capabilities${query}`);
   return agentResponse<ProxyCapabilities>(response);
@@ -522,6 +544,11 @@ export async function loadResolvedProxyCatalog(
   },
   agentId?: string | null,
 ): Promise<import('@gian/shared').ResolvedProxyCatalog> {
+  if (remoteAgentIdentity(agentId)) {
+    const catalog = await loadRemoteAgentCatalog(agentId!, params);
+    if (!catalog.resolvedDefaults) throw new Error('Remote catalog resolution unavailable');
+    return { ...catalog, slashCommands: [], resolvedDefaults: catalog.resolvedDefaults };
+  }
   const query = agentId ? `?agent=${encodeURIComponent(agentId)}` : '';
   return postJson(`/api/proxy/${executor}/catalog/resolve${query}`, params);
 }
@@ -630,6 +657,45 @@ export async function updateCatalogProxy(pluginId: string): Promise<CatalogMutat
 
 export async function rollbackCatalogProxy(pluginId: string): Promise<CatalogMutationReceipt> {
   return catalogMutation(pluginId, 'rollback');
+}
+
+export interface IntegrationUninstallReceipt {
+  removedAgents: number;
+  removedRuntime: boolean;
+  removedProxy: boolean;
+}
+
+export interface IntegrationUninstallConflict {
+  agentId: string;
+  name: string;
+  runningSessions: number;
+}
+
+/** Sentinel run-error prefix for the 409 in-flight-Session guard on
+ *  Integration uninstall; the Agents view renders the localized conflict
+ *  notice from the JSON payload in the suffix. */
+export const INTEGRATION_UNINSTALL_BLOCKED_PREFIX = 'INTEGRATION_UNINSTALL_BLOCKED:';
+
+/** Uninstall one Integration: bound Agents, managed Runtime generations and
+ *  the Proxy package go together. Idempotent — an absent Integration returns
+ *  an all-zero receipt. */
+export async function uninstallIntegration(pluginId: string): Promise<IntegrationUninstallReceipt> {
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/uninstall`, {
+    method: 'POST',
+  });
+  const body = await response.json() as {
+    receipt?: IntegrationUninstallReceipt;
+    error?: string;
+    code?: string;
+    conflicts?: IntegrationUninstallConflict[];
+  };
+  if (!response.ok) {
+    if (body.code === 'INTEGRATION_HAS_RUNNING_SESSIONS' && Array.isArray(body.conflicts)) {
+      throw new Error(`${INTEGRATION_UNINSTALL_BLOCKED_PREFIX}${JSON.stringify(body.conflicts)}`);
+    }
+    throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  }
+  return body.receipt!;
 }
 
 /** WP6 Runtime control plane: discover the Runtime one installed Catalog
@@ -836,7 +902,14 @@ export interface UpdateAgentInput {
   cliPath?: string | null;
   proxy?: ProductExecutor;
   defaults?: Partial<AgentProxyDefaults>;
+  enabled?: boolean;
 }
+
+/** Sentinel run-error prefix for the 409 running-session guard on PATCH
+ *  enabled=false (precedent: SCHEDULE_REVISION_CONFLICT_MESSAGE). The Agents
+ *  view recognizes it and renders the localized conflict notice with the
+ *  count carried in the suffix. */
+export const AGENT_DISABLE_BLOCKED_PREFIX = 'AGENT_DISABLE_BLOCKED:';
 
 /** Open the native folder picker for a draft or saved Agent HOME. */
 export async function pickAgentHome(agentId?: string): Promise<string | null> {
@@ -857,8 +930,19 @@ export async function updateAgent(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(patch),
   });
-  const body = await agentResponse<{ agent: UserAgentStatus }>(response);
-  return cacheAgent(body.agent);
+  const body = await response.json() as {
+    agent?: UserAgentStatus;
+    error?: string;
+    code?: string;
+    runningSessions?: number;
+  };
+  if (!response.ok) {
+    if (body.code === 'AGENT_HAS_RUNNING_SESSIONS' && typeof body.runningSessions === 'number') {
+      throw new Error(`${AGENT_DISABLE_BLOCKED_PREFIX}${body.runningSessions}`);
+    }
+    throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  }
+  return cacheAgent(body.agent!);
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
@@ -990,6 +1074,9 @@ export async function loadDiff(
   base?: string | null,
   sessionId?: string | null,
   turn?: number | null,
+  /** Last-turn only: the producing root of a cross-tree entry, so the host
+   *  can disambiguate same-named paths and skip viewed-tree fallbacks. */
+  root?: string | null,
 ): Promise<FileDiffResult> {
   const params = new URLSearchParams({ path });
   if (scope !== 'all') params.set('scope', scope);
@@ -997,6 +1084,7 @@ export async function loadDiff(
   if (scope === 'branch' && base) params.set('base', base);
   if (scope === 'lastturn' && sessionId) params.set('session', sessionId);
   if (scope === 'lastturn' && turn != null) params.set('turn', String(turn));
+  if (scope === 'lastturn' && root) params.set('root', root);
   const res = await fetch(`/api/working_trees/${encodeURIComponent(workingTreeId)}/diff?${params.toString()}`);
   // Throws on failure (Phase 3b): the diff view's loading→fill-or-fail timing
   // must distinguish a failed load (error state + retry) from an empty diff.
@@ -1198,6 +1286,11 @@ export async function loadTasks(): Promise<Task[]> {
 export async function createSubtask(
   taskId: string,
   input: {
+    remote_environment_id?: string;
+    remote_session_id?: string;
+    request_id?: string;
+    session_config?: Record<string, import('@gian/shared').ConfigValue>;
+    turn_config?: Record<string, import('@gian/shared').ConfigValue>;
     workspace_id: string;
     agent_id: string;
     name?: string;
@@ -1281,6 +1374,7 @@ export async function saveSettings(partial: Partial<SystemConfig>): Promise<Syst
     body: JSON.stringify(partial),
   });
   if (!res.ok) return null;
+  if (partial.translation) window.dispatchEvent(new Event('gian:translation-settings'));
   return (await res.json()) as SystemConfig;
 }
 

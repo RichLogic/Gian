@@ -7,6 +7,169 @@
 
 * { box-sizing: border-box; }
 
+/* ── Host enrollment page (/enrollment) ───────────────────────────────────
+   One centered card over the app background. Every action uses the shared
+   .btn component; the page-specific rules below only handle layout. */
+.rw-enroll {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  letter-spacing: 0;
+}
+.rw-enroll-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+}
+.rw-enroll-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-2);
+  color: var(--text-2);
+  font: 500 var(--fz-12, 12px)/1 var(--font-sans);
+  text-decoration: none;
+}
+.rw-enroll-back:hover { background: var(--surface-2); color: var(--text); }
+
+.rw-enroll-card {
+  width: min(100% - 32px, 400px);
+  margin: 6vh auto 40px;
+  padding: 28px 24px 24px;
+  border-radius: var(--r-3, 10px);
+  background: var(--surface);
+  box-shadow: var(--shadow-2, 0 1px 2px rgb(0 0 0 / 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.rw-enroll-brand {
+  font: 600 11px/1 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.rw-enroll-title { margin: 0; font: 650 20px/1.25 var(--font-sans); color: var(--text); }
+.rw-enroll-sub { margin: -6px 0 0; font: 400 12.5px/1.5 var(--font-sans); color: var(--text-3); }
+.rw-enroll-note { margin: 0; font: 400 12.5px/1.5 var(--font-sans); color: var(--text-3); }
+.rw-enroll-error { margin: 0; font: 500 12.5px/1.5 var(--font-sans); color: var(--danger, #d33); }
+
+.rw-enroll-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+.rw-enroll-server-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 12px/1.3 var(--font-mono);
+  color: var(--text-2);
+}
+
+.rw-enroll-cta {
+  display: inline-flex;
+  justify-content: center;
+  width: 100%;
+  min-height: 36px;
+  text-decoration: none;
+}
+
+.rw-enroll-login {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.rw-enroll-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.rw-enroll-code {
+  font: 650 22px/1.4 var(--font-mono);
+  letter-spacing: 0.12em;
+  color: var(--text);
+  background: var(--surface-2);
+  border-radius: var(--r-2);
+  padding: 8px 14px;
+}
+.rw-enroll-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-3);
+  font: 400 12.5px/1.3 var(--font-sans);
+}
+.rw-enroll-login > .btn.ghost { align-self: center; }
+
+.rw-enroll-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+.rw-enroll-account-name { font: 500 12.5px/1.3 var(--font-sans); color: var(--text-2); overflow-wrap: anywhere; }
+.rw-enroll-account-name strong { color: var(--text); }
+
+.rw-enroll-token {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline-2, var(--border));
+}
+.rw-enroll-token-label { font: 600 11px/1 var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); }
+.rw-enroll-token-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.rw-enroll-token-value {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: 1px solid var(--hairline, var(--border));
+  border-radius: var(--r-2);
+  padding: 10px 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 500 13px/1.5 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.rw-enroll-ttl { display: grid; gap: 4px; }
+.rw-enroll-ttl-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.rw-enroll-ttl-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 1s linear;
+}
+.rw-enroll-ttl-text { font: 400 12px/1.3 var(--font-sans); color: var(--text-3); }
+
+@media (max-width: 480px) {
+  .rw-enroll-card { margin-top: 2vh; padding: 22px 16px 18px; }
+}
+
 html, body {
   height: 100%;
   margin: 0;
@@ -59,6 +222,7 @@ input, select, textarea {
   color: var(--text);
 }
 .btn:hover { background: var(--surface-3); }
+.rw-context-usage { width: 16px; height: 16px; flex: 0 0 16px; border-radius: 50%; margin: 0 6px; mask: radial-gradient(circle, transparent 5px, #000 5.5px); }
 .btn.primary { background: var(--accent); color: var(--accent-contrast, #fff); }
 .btn.primary:hover { background: var(--accent-strong, var(--accent)); }
 .btn.danger { background: var(--danger); color: #fff; }
@@ -83,8 +247,27 @@ input, select, textarea {
   border-radius: var(--r-1);
   font: 550 11.5px/1 var(--font-sans);
   color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .segm-item.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-1); }
+
+/* Proxy branding logo (new-chat picker, session rows). Monogram fallback
+   keeps the tile size stable while bytes are in flight. */
+.proxy-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-1);
+  object-fit: contain;
+  flex: none;
+}
+.proxy-logo-mono {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: 600 10px/1 var(--font-sans);
+}
 
 .spinner {
   display: inline-block;
@@ -228,7 +411,13 @@ input, select, textarea {
 }
 .rail-item.session-row { padding-left: 30px; }
 .rail-item:hover { background: var(--surface); }
-.rail-item.active { background: var(--surface-2); }
+/* Selected reads at a glance, clearly above the --surface hover wash: one
+   ramp step deeper (--surface-3), a left accent edge, and a 600 title. */
+.rail-item.active {
+  background: var(--surface-3);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.rail-item.active .ri-title { font-weight: 600; }
 .ri-row1 { display: flex; align-items: center; gap: 6px; }
 .session-row .ri-row1 { padding-right: 0; }
 .session-row.has-status .ri-row1 { padding-right: 26px; }
@@ -314,7 +503,8 @@ input, select, textarea {
   display: flex;
   align-items: center;
   gap: 4px;
-  width: 100%;
+  /* No width:100% — with the 2px side margins it overflowed the scroll
+   *  container by 4px and produced a stray horizontal scrollbar. */
   margin: 10px 2px 2px;
   padding: 2px 8px;
   border-radius: var(--r-1);
@@ -455,6 +645,9 @@ input, select, textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Wide markdown (tables, code) scrolls inside its own container; the page
+   *  itself never gains a horizontal scrollbar on narrow viewports. */
+  overflow-x: hidden;
   padding: 14px 18px;
 }
 

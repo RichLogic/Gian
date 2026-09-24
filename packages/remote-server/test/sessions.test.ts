@@ -425,7 +425,7 @@ test('self-revoke rejects stale signed_at, is idempotent, and allows a later re-
   const reusedGrant = await reused.json() as { code: string };
   const sameKey = await fetch('/api/v1/pairings/claim', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-gian-account-token': device.accountToken },
     body: JSON.stringify({
       protocol: AUTH_PROTOCOL,
       browser_installation_id: device.browserId,

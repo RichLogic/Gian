@@ -32,6 +32,11 @@ import {
 } from '../operations/browser.js';
 import { useOperationDispatch, useOperationPending } from '../operations/use-operations.js';
 import { injectComposerContextItems } from './Composer.js';
+import {
+  attachBrowserPageScreenshot,
+  attachBrowserPageSnapshot,
+  attachBrowserTabReference,
+} from '../controllers/browser-panel-context.js';
 
 const EMPTY_STATE: GianBrowserState = {
   url: '',
@@ -72,6 +77,9 @@ const ICONS = {
   extension: 'M9 3h6v5h5v6h-5v7H9v-7H4V8h5z',
   trash: 'M4 7h16 M9 7V4h6v3 M7 7l1 14h8l1-14',
   more: 'M12 5h.01 M12 12h.01 M12 19h.01',
+  camera: 'M4 7h3l2-2.5h6L17 7h3v12H4z M12 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z',
+  snapshot: 'M4 6h16 M4 12h10 M4 18h14',
+  link: 'M10 14a4.5 4.5 0 0 0 6.5.5l3-3a4.5 4.5 0 0 0-6.5-6.5l-1.5 1.5 M14 10a4.5 4.5 0 0 0-6.5-.5l-3 3a4.5 4.5 0 0 0 6.5 6.5l1.5-1.5',
 };
 
 const EMPTY_FIND_RESULT: GianBrowserFindResult = {
@@ -148,6 +156,7 @@ export function BrowserPanel({
   const [extensions, setExtensions] = useState<GianBrowserExtension[]>([]);
   const extensionsRevisionRef = useRef(-1);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [attachPending, setAttachPending] = useState<'screenshot' | 'snapshot' | null>(null);
   // Freeze-frame shown under the ⋯ menu overlay (2026-09-15 owner): Electron's
   // native webview always paints above renderer HTML, so instead of squeezing
   // the page narrower (which reflowed it across its media-query breakpoints),
@@ -511,6 +520,55 @@ export function BrowserPanel({
     });
   }
 
+  // While the ⋯ menu is open the native view is detached, so a capture taken
+  // then would come back empty. Close the menu and wait two frames for the
+  // layout effect to reattach and repaint the view before capturing.
+  function afterNativeViewRestored(run: () => void): void {
+    setMenuOpen(false);
+    requestAnimationFrame(() => requestAnimationFrame(run));
+  }
+
+  function notifyAttachResult(result: 'attached' | 'full' | 'capture-failed' | 'upload-failed'): void {
+    if (result === 'attached') return;
+    toast({
+      kind: 'warning',
+      message: t(result === 'full' ? 'composer.context.limitReached' : 'browser.attachFailed'),
+    });
+  }
+
+  function attachScreenshot(): void {
+    const sessionId = contextTargetRef.current;
+    if (!browser || !sessionId || attachPending) return;
+    setAttachPending('screenshot');
+    afterNativeViewRestored(() => {
+      void attachBrowserPageScreenshot(browser, tabId, sessionId)
+        .then(notifyAttachResult)
+        .finally(() => setAttachPending(null));
+    });
+  }
+
+  function attachSnapshot(): void {
+    const sessionId = contextTargetRef.current;
+    if (!browser || !sessionId || attachPending) return;
+    setAttachPending('snapshot');
+    afterNativeViewRestored(() => {
+      void attachBrowserPageSnapshot(browser, tabId, sessionId)
+        .then(notifyAttachResult)
+        .finally(() => setAttachPending(null));
+    });
+  }
+
+  function attachTabReference(): void {
+    const sessionId = contextTargetRef.current;
+    if (!sessionId) return;
+    setMenuOpen(false);
+    notifyAttachResult(attachBrowserTabReference(sessionId, {
+      tabId,
+      title: state.title,
+      url: state.url,
+    }));
+  }
+
   function handleFindKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -737,6 +795,34 @@ export function BrowserPanel({
         )}
         {menuOpen && (
           <div className="browser-menu" ref={menuRef} role="menu" aria-label={t('browser.more')}>
+            <button type="button" className="browser-menu-item" role="menuitem"
+                    disabled={!state.url || !contextTargetSessionId || attachPending !== null}
+                    title={state.url && contextTargetSessionId
+                      ? t('browser.attachScreenshot')
+                      : t('browser.attachUnavailable')}
+                    onClick={attachScreenshot}>
+              <Icon d={ICONS.camera} />
+              <span>{t('browser.attachScreenshot')}</span>
+            </button>
+            <button type="button" className="browser-menu-item" role="menuitem"
+                    disabled={!state.url || !contextTargetSessionId || attachPending !== null}
+                    title={state.url && contextTargetSessionId
+                      ? t('browser.attachSnapshot')
+                      : t('browser.attachUnavailable')}
+                    onClick={attachSnapshot}>
+              <Icon d={ICONS.snapshot} />
+              <span>{t('browser.attachSnapshot')}</span>
+            </button>
+            <button type="button" className="browser-menu-item" role="menuitem"
+                    disabled={!state.url || !contextTargetSessionId}
+                    title={state.url && contextTargetSessionId
+                      ? t('browser.attachTab')
+                      : t('browser.attachUnavailable')}
+                    onClick={attachTabReference}>
+              <Icon d={ICONS.link} />
+              <span>{t('browser.attachTab')}</span>
+            </button>
+            <div className="browser-menu-separator" />
             <button type="button" className="browser-menu-item" role="menuitem"
                     disabled={!state.url} onClick={openFind}>
               <Icon d={ICONS.find} />

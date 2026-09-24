@@ -89,10 +89,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       // view no longer prepends the task name — the task is already the
       // selected row in the sidebar, and its menu lives on the rail row.
       const segments: PathSegment[] = [];
+      segments.push({ kind: 'environment', label: activeSession.remote_execution?.environment_name ?? t('remote.local') });
       segments.push({
         kind: 'workspace',
-        label: activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled'),
-        copyHint: `${t('common.copy')} "${activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled')}"`,
+        label: activeSession.remote_execution?.repository_name ?? activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled'),
+        copyHint: `${t('common.copy')} "${activeSession.remote_execution?.repository_name ?? activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled')}"`,
       });
       segments.push({
         kind: 'session',

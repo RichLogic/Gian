@@ -16,6 +16,11 @@ import type {
 export const CATALOG_DOC_KEYS = ['overview', 'setup', 'usage', 'troubleshooting'] as const;
 export type CatalogDocKey = (typeof CATALOG_DOC_KEYS)[number];
 
+export function localizeCatalogItem(item: ProxyCatalogItem, locale: 'en' | 'zh-CN'): ProxyCatalogItem {
+  const translation = item.localizations?.[locale];
+  return translation ? { ...item, ...translation } : item;
+}
+
 /** The only installation states exposed to people. Host keeps richer
  * fail-closed detail and Web collapses it into one actionable product state. */
 export type CatalogBadge =

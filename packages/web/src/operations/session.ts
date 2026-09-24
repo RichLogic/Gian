@@ -211,6 +211,8 @@ const sessionSetNativeConfig: OperationDefinition<SessionIdInput & { configId: s
 };
 
 export interface SessionCreateInput {
+  executionEnvironmentId?: string;
+  remoteSessionId?: string;
   workspaceId: string;
   /** Owning saved Agent. New sessions always carry it; the Host resolves
    *  the Proxy kind, CLI path, and defaults from it. */
@@ -235,6 +237,8 @@ const sessionCreate: OperationDefinition<SessionCreateInput> = {
   entityKey: () => `pending:session.create:${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
   buildMessage: input => ({
     type: 'session:create',
+    ...(input.executionEnvironmentId ? { remote_environment_id: input.executionEnvironmentId } : {}),
+    ...(input.remoteSessionId ? { remote_session_id: input.remoteSessionId } : {}),
     workspace_id: input.workspaceId,
     ...(input.agentId ? { agent_id: input.agentId } : {}),
     executor: input.executor,

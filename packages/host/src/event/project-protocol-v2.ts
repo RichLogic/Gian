@@ -77,6 +77,7 @@ function projectActivity(
   sessionId: string,
   turn: number,
   ts: number,
+  cwd?: string,
 ): DisplayEvent[] {
   const activityId = String(data.activityId ?? '');
   const presentation = asRecord(data.presentation);
@@ -132,6 +133,7 @@ function projectActivity(
             ? { removed: presentationData.removed }
             : {}),
         }],
+        ...(cwd ? { cwd } : {}),
       },
     }];
   }
@@ -382,6 +384,7 @@ export function projectProtocolV2Notification(
   sessionId: string,
   turn: number,
   interactionKinds?: InteractionKindLookup,
+  cwd?: string,
 ): DisplayEvent[] {
   if (!('sessionId' in notification.params) && notification.method !== 'catalog.changed') {
     return [];
@@ -431,7 +434,7 @@ export function projectProtocolV2Notification(
       return [];
     }
     case 'activity.updated':
-      return projectActivity(data, sessionId, turn, ts);
+      return projectActivity(data, sessionId, turn, ts, cwd);
     case 'interaction.requested':
       return projectInteractionRequested(data, sessionId, turn, ts);
     case 'interaction.resolved': {
@@ -498,6 +501,9 @@ export function projectProtocolV2Notification(
             String(data.diff ?? ''),
           ),
           diff: String(data.diff ?? ''),
+          // The runtime's launch root, so last-turn attribution does not
+          // assume the viewed tree (FileChangeData.cwd).
+          ...(cwd ? { cwd } : {}),
         },
       }];
     case 'step.updated':

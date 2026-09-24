@@ -22,6 +22,7 @@ import {
   generateCanonicalId,
   generateP256KeyPair,
   generateP256SigningKeyPair,
+  identityFingerprint,
   importP256PublicKey,
   parseRelayFrame,
   parseRelayHandshake,
@@ -33,10 +34,13 @@ import {
 import { listenRemoteApp, makeRemoteTestApp, signChallenge } from '../../remote-server/test/fixture.js';
 import { PeerCryptoSession } from '../src/remote/crypto-session.js';
 import { MemoryDuplexTransport, RemoteConnector, type RemoteServerAuthClient } from '../src/remote/connector.js';
-import { HostRelaySocket } from '../src/remote/host-relay.js';
+import { HostRelaySocket, DeviceRouteTransport } from '../src/remote/host-relay.js';
+import { devicePublicKeyCanonical } from '../src/remote/device-store.js';
+import { defaultRemoteDeviceGrants } from '../src/remote/grants.js';
 import { RemoteReplayBuffer } from '../src/remote/replay-buffer.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 import { makeTestApp } from './fixtures/test-app.js';
+import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
 
 async function pairCrypto() {
   const host = await generateP256KeyPair();
@@ -94,9 +98,10 @@ function unusedAuth(overrides: Partial<RemoteServerAuthClient> = {}): RemoteServ
   };
 }
 
-async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
-  const { handle, fetch, clock } = await makeRemoteTestApp();
+async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>, options: { start?: boolean } = {}) {
+  const { handle, fetch: unauthenticated, clock } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle);
+  const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, listened.url);
   const identity = await context.identity.ensurePublic();
   const created = await (await fetch('/api/v1/admin/host-enrollments', {
     method: 'POST',
@@ -128,9 +133,62 @@ async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
     hostName: 'Office Mac',
     refreshSecret: claimed.connector_refresh_secret,
   });
-  await context.runtime.start();
+  if (options.start !== false) await context.runtime.start();
   return { handle, fetch, clock, listened, hostId: claimed.host_id };
 }
+
+test('cold startup recovers automatically when Desktop account broker starts after Host', async t => {
+  const context = setupRemoteHarness();
+  const enrolled = await enrollAndStart(context, { start: false });
+  const getAccount = context.identity.getAccountSession.bind(context.identity);
+  let brokerReady = false;
+  let attempts = 0;
+  t.mock.method(context.identity, 'getAccountSession', async (origin: string, role?: 'host' | 'controller') => {
+    attempts += 1;
+    if (!brokerReady) throw Object.assign(new Error('broker not listening'), { code: 'ECONNREFUSED' });
+    return getAccount(origin, role);
+  });
+  try {
+    await assert.doesNotReject(() => context.runtime.start());
+    assert.equal(attempts, 1);
+    assert.equal(context.runtime.relaySocket?.bound ?? false, false);
+    brokerReady = true;
+    await waitUntil(() => context.runtime.relaySocket?.bound === true, 8000);
+    assert.ok(attempts >= 2, 'account lookup is retried, not just relay authentication');
+    assert.equal(context.runtime.settingsState().account?.status, 'authorized');
+    assert.equal(context.runtime.settingsState().connection, 'online');
+  } finally {
+    context.runtime.close(); enrolled.listened.close(); teardownRemoteHarness(context);
+  }
+});
+
+test('disconnect during cold-start account lookup cannot resurrect heartbeat or reconnect timers', async t => {
+  const context = setupRemoteHarness();
+  const enrolled = await enrollAndStart(context, { start: false });
+  const getAccount = context.identity.getAccountSession.bind(context.identity);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let entered = false;
+  t.mock.method(context.identity, 'getAccountSession', async (origin: string, role?: 'host' | 'controller') => {
+    entered = true;
+    await pending;
+    return getAccount(origin, role);
+  });
+  try {
+    const starting = context.runtime.start();
+    await waitUntil(() => entered);
+    context.runtime.disconnect();
+    release();
+    await starting;
+    assert.equal(context.runtime.relaySocket?.bound ?? false, false);
+    const lifecycle = context.runtime as unknown as { heartbeatTimer: unknown; reconnectTimer: unknown };
+    assert.equal(lifecycle.heartbeatTimer, null);
+    assert.equal(lifecycle.reconnectTimer, null);
+    assert.equal(context.runtime.enrollment.current()?.connectorEnabled, false);
+  } finally {
+    release(); context.runtime.close(); enrolled.listened.close(); teardownRemoteHarness(context);
+  }
+});
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 3_000): Promise<T> {
   const started = Date.now();
@@ -264,6 +322,22 @@ async function openHostFrames(
   }
   return opened;
 }
+
+test('local account revocation closes the peer before executing an already-encrypted command', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    let executed = 0;
+    const connector = new RemoteConnector(transports.host, crypto.host, new RemoteReplayBuffer(), async () => {
+      executed += 1; return { ok: true };
+    }, device, undefined, undefined, { authorize: async () => { throw new Error('signed out'); } });
+    await sendDeviceFrame(transports.device, crypto.device, command('catalog.read', {}));
+    await waitUntil(() => !connector.connected);
+    assert.equal(executed, 0);
+  } finally { teardownRemoteHarness(context); }
+});
 
 test('connector negotiates authenticated hello before commands and rejects disjoint versions', async () => {
   const context = setupRemoteHarness();
@@ -1142,8 +1216,9 @@ test('Host relay surfaces a dead socket through close instead of silent frame dr
 
 test('production runtime start performs signed login and binds outbound WSS', async () => {
   const context = setupRemoteHarness();
-  const { handle, fetch } = await makeRemoteTestApp();
+  const { handle, fetch: unauthenticated } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle);
+  const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, listened.url);
   try {
     const identity = await context.identity.ensurePublic();
     const created = await (await fetch('/api/v1/admin/host-enrollments', {
@@ -1809,8 +1884,9 @@ test('Host relay reconnects after socket close without connectDevice', async () 
 
 test('Host HTTP pairings create a Server grant and confirm writes the Host device', async () => {
   const hostApp = await makeTestApp();
-  const { handle, fetch } = await makeRemoteTestApp();
+  const { handle, fetch: unauthenticated } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle);
+  const fetch = await authenticatedRemoteFixture(unauthenticated, hostApp.remoteIdentity, listened.url);
   try {
     const identity = await hostApp.remoteIdentity.ensurePublic();
     const created = await (await fetch('/api/v1/admin/host-enrollments', {
@@ -2151,7 +2227,9 @@ test('a second device websocket replaces the previous crypto session', async () 
 
 test('Host start before Server listen becomes online after Server starts', async () => {
   const context = setupRemoteHarness();
-  const { handle, fetch } = await makeRemoteTestApp();
+  const { handle, fetch: unauthenticated } = await makeRemoteTestApp();
+  const port = await reservePort();
+  const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, `http://127.0.0.1:${port}`);
   const identity = await context.identity.ensurePublic();
   const created = await (await fetch('/api/v1/admin/host-enrollments', {
     method: 'POST',
@@ -2176,7 +2254,6 @@ test('Host start before Server listen becomes online after Server starts', async
     connector_refresh_secret: string;
     server_identity: { public_key: { kty: 'EC'; crv: 'P-256'; x: string; y: string }; fingerprint: string };
   };
-  const port = await reservePort();
   await context.runtime.enrollment.recordClaim({
     hostId: claimed.host_id,
     serverUrl: `http://127.0.0.1:${port}`,
@@ -2450,3 +2527,182 @@ async function openPairedDevice(
     },
   };
 }
+
+test('approval:created broadcast pushes interaction.updated to the connected device', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const crypto = await pairCrypto();
+    const transports = MemoryDuplexTransport.pair();
+    const received: Array<{ type?: string; event?: { kind?: string; interaction?: { kind?: string; session_id?: string } } }> = [];
+    transports.device.onMessage((raw) => {
+      void (async () => {
+        const frame = parseRelayFrame(raw);
+        const plaintext = await crypto.device.open({
+          ciphertext: frame.ciphertext,
+          sequence: frame.transport_sequence,
+          direction: 'host_to_device',
+          routeId: frame.route_id,
+          connectionId: crypto.device.connectionId,
+        });
+        received.push(JSON.parse(new TextDecoder().decode(plaintext)));
+      })();
+    });
+    context.runtime.connectDevice(device, crypto.host, transports.host);
+
+    const created = await context.sessions.createSession({
+      workspace_id: context.workspaceId,
+      agent_id: 'agent-claude-review',
+      task_id: context.taskId,
+      type: 'subtask',
+      name: 'Remote interaction push',
+    });
+    const asking = context.approvals.request({
+      sessionId: created.id,
+      turnId: generateCanonicalId(),
+      turnNumber: 1,
+      category: 'question',
+      risk: 'low',
+      description: 'Pick one',
+      payload: {
+        questions: [{
+          question: 'Which option?',
+          multiSelect: false,
+          options: [{ label: 'A' }, { label: 'B' }],
+        }],
+      },
+    });
+    void asking.catch(() => undefined);
+
+    const pushed = await waitUntil(
+      () => received.find((entry) => entry.type === 'event' && entry.event?.kind === 'interaction.updated') ?? null,
+    );
+    assert.equal(pushed.event?.interaction?.kind, 'question');
+    assert.equal(pushed.event?.interaction?.session_id, created.id);
+    const patched = await waitUntil(
+      () => received.find((entry) => entry.type === 'state.patch'
+        && JSON.stringify(entry).includes('"interactions"')) ?? null,
+    );
+    assert.ok(patched);
+
+    // The Kimi shape: a question riding ACP native permission options — the
+    // record carries nativeOptions, so it projects as native_choice, and it
+    // must still reach the device.
+    const kimiAsking = context.approvals.request({
+      sessionId: created.id,
+      turnId: generateCanonicalId(),
+      turnNumber: 2,
+      category: 'question',
+      risk: 'low',
+      description: 'Kimi asks',
+      subject: 'AskUserQuestion',
+      nativeOptions: [
+        { optionId: 'opt-a', label: 'Option A', kind: 'allow_once' },
+        { optionId: 'opt-b', label: 'Option B', kind: 'reject_once' },
+      ],
+    });
+    void kimiAsking.catch(() => undefined);
+    const kimiPushed = await waitUntil(
+      () => received.find((entry) => entry.type === 'event'
+        && entry.event?.kind === 'interaction.updated'
+        && entry.event.interaction?.kind === 'native_choice') ?? null,
+    );
+    assert.equal(kimiPushed.event?.interaction?.session_id, created.id);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
+test('a failed handshake accept attaches no half-bound connector, and the next offer recovers', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const signing = await generateP256SigningKeyPair();
+    const devicePublic = await exportPublicJwk(signing.publicKey);
+    const hostId = generateCanonicalId();
+    const serverKeys = await generateP256KeyPair();
+    const serverPublic = await exportPublicJwk(serverKeys.publicKey);
+    const origin = 'http://127.0.0.1:9';
+    await context.identity.setAccountSession!(origin, {
+      role: 'host', serverOrigin: origin, serverFingerprint: await identityFingerprint(serverPublic),
+      installationId: generateCanonicalId(), accountId: '42', accountLogin: 'test',
+      token: 'fixture-only', expiresAt: Date.now() + 60_000,
+    }, 'host');
+    await context.runtime.enrollment.recordClaim({
+      hostId,
+      serverUrl: 'http://127.0.0.1:9',
+      serverIdentity: { public_key: serverPublic, fingerprint: await identityFingerprint(serverPublic) },
+      hostName: 'Test Host',
+      refreshSecret: 'test-secret',
+    });
+    const cryptoConnectionId = generateCanonicalId();
+    const device = context.runtime.devices.create({
+      publicKey: devicePublicKeyCanonical(devicePublic),
+      name: 'Phone',
+      platform: 'ios',
+      grants: defaultRemoteDeviceGrants(),
+      cryptoConnectionId,
+    });
+
+    const sentAccepts: unknown[] = [];
+    context.runtime.devices.bindAccount(device.id, '42');
+    const fakeRoutes = new Map<string, InstanceType<typeof DeviceRouteTransport>>();
+    const fakeRelay = {
+      bound: true,
+      onNotice() {},
+      onClose() {},
+      onHandshake() {},
+      close() {},
+      sendHandshake(message: unknown) { sentAccepts.push(message); },
+      attachDevice(deviceId: string) {
+        const transport = new DeviceRouteTransport(() => {}, () => fakeRoutes.delete(deviceId));
+        fakeRoutes.set(deviceId, transport);
+        return transport;
+      },
+    };
+    (context.runtime as unknown as { relay: unknown }).relay = fakeRelay;
+    const acceptHandshake = (context.runtime as unknown as {
+      acceptHandshake(offer: unknown): Promise<void>;
+    }).acceptHandshake.bind(context.runtime);
+
+    const makeOffer = async () => {
+      const ephemeral = await generateP256KeyPair();
+      const fields = {
+        host_id: hostId,
+        device_id: device.id,
+        crypto_connection_id: cryptoConnectionId,
+        handshake_nonce: generateCanonicalId(),
+        sent_at: Date.now(),
+        device_identity: devicePublic,
+        device_ephemeral: await exportPublicJwk(ephemeral.publicKey),
+      };
+      return {
+        protocol: 'gian.relay/1',
+        type: 'crypto.offer',
+        ...fields,
+        signature: await signBytes(signing.privateKey, new TextEncoder().encode(cryptoOfferPayload(fields))),
+      };
+    };
+
+    // The identity broker (Desktop-held signing key) is unreachable: the
+    // accept must fail WITHOUT leaving a connector/route behind — the Server
+    // never saw an accept, so that route would never be crypto-bound and
+    // every Host push on it would bounce as route.not_bound.
+    const identity = context.identity as unknown as { sign(bytes: Uint8Array): Promise<string> };
+    const realSign = identity.sign.bind(context.identity as never);
+    identity.sign = () => Promise.reject(new Error('Remote identity broker timed out'));
+    const failingOffer = await makeOffer();
+    await assert.rejects(() => acceptHandshake(failingOffer), /broker timed out/);
+    assert.equal(context.runtime.connectorFor(device.id), undefined);
+    assert.equal(fakeRoutes.size, 0);
+    assert.equal(sentAccepts.length, 0);
+
+    // Broker back: the device's next offer completes and binds normally.
+    identity.sign = realSign;
+    await acceptHandshake(await makeOffer());
+    assert.equal(sentAccepts.length, 1);
+    assert.ok(context.runtime.connectorFor(device.id));
+    assert.equal(fakeRoutes.size, 1);
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});

@@ -136,4 +136,5 @@ test('isolated Host-only runs build both Remote and Catalog contracts', async ()
   const source = await readFile(new URL('./run-tests.mjs', import.meta.url), 'utf8');
   assert.match(source, /entry.runner === 'host-node-tsx' \|\| entry.runner === 'remote-protocol-node'/);
   assert.match(source, /hostSelected && !selected.some\(entry => entry.runner === 'proxy-catalog-contract-node'\)/);
+  assert.match(source, /entry.runner === 'host-node-tsx' \|\| entry.runner === 'web-vitest'[\s\S]*?runPnpm\(\['--filter', '@gian\/chat-ui', 'build'\], env\)/);
 });

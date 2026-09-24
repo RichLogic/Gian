@@ -22,6 +22,7 @@ export type RemotePairingStatus =
   | 'consumed';
 
 export interface RemotePairingRecord {
+  accountId?: string | null;
   id: string;
   grantId: string;
   serverPairingId: string | null;
@@ -42,6 +43,7 @@ export interface RemotePairingRecord {
 }
 
 interface PairingRow {
+  account_id: string | null;
   id: string;
   grant_id: string;
   code_hash: string;
@@ -99,6 +101,7 @@ export class RemotePairingService {
   }
 
   applyServerClaim(input: {
+    accountId?: string;
     grantId: string;
     pairingId: string;
     publicKey: { kty: 'EC'; crv: 'P-256'; x: string; y: string };
@@ -124,6 +127,7 @@ export class RemotePairingService {
               device_name = ?,
               platform = ?,
               user_agent = ?,
+              account_id = ?,
               claimed_at = ?,
               expires_at = ?
         WHERE grant_id = ? AND status = 'pending_claim'`,
@@ -133,6 +137,7 @@ export class RemotePairingService {
       input.name ?? null,
       input.platform ?? null,
       input.userAgent ?? null,
+      input.accountId ?? null,
       claimedAt.toISOString(),
       new Date(claimedAt.getTime() + PAIRING_TTL_MS).toISOString(),
       input.grantId,
@@ -355,6 +360,7 @@ export class RemotePairingService {
 
   private project(row: PairingRow): RemotePairingRecord {
     return {
+      accountId: row.account_id,
       id: row.id,
       grantId: row.grant_id,
       serverPairingId: row.server_pairing_id,

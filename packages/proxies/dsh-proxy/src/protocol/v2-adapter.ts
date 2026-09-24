@@ -796,6 +796,7 @@ export class DshV2Adapter {
     const sessionId = stringField(params, 'sessionId');
     const streamId = stringField(params, 'streamId');
     const session = this.service.requireStream(sessionId, streamId);
+    if (session.closed) return { ok: true };
     await this.bridge.request('session.close', { sessionId });
     this.service.closeSession(sessionId, streamId);
     return { ok: true, ...(session ? {} : {}) };

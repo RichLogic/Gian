@@ -7,6 +7,7 @@
 
 import { useEffect } from 'react';
 import { useT } from './i18n/index.js';
+import { resolveTheme, useSystemDark } from './theme.js';
 import { useRemoteActions, useRemoteState } from './ui/controller-context.js';
 import { ConnectionBanner, DeviceRevokedPage } from './ui/banners.js';
 import { ChatPage } from './ui/chat.js';
@@ -240,12 +241,14 @@ function Shell() {
   const state = useRemoteState();
   const actions = useRemoteActions();
   const mode = useViewportMode();
+  const systemDark = useSystemDark();
 
   // Apply theme/accent to the document root element the tokens bind to.
+  // `system` tracks the OS dark-mode preference live.
   useEffect(() => {
-    document.body.dataset.theme = state.settings.theme;
+    document.body.dataset.theme = resolveTheme(state.settings.theme, systemDark);
     document.body.dataset.accent = state.settings.accent;
-  }, [state.settings.theme, state.settings.accent]);
+  }, [state.settings.theme, state.settings.accent, systemDark]);
 
   useEffect(() => {
     if (state.auth.kind === 'pairing' && state.auth.pairing.kind === 'enter-code') {

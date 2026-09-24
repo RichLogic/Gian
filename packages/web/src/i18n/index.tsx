@@ -38,4 +38,8 @@ export function useT(): (key: MessageKey) => string {
   return useContext(Ctx).t;
 }
 
+export function useLocale(): Locale {
+  return useContext(Ctx).locale;
+}
+
 export type { Locale, MessageKey };

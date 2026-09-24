@@ -23,6 +23,7 @@ import type { CreateSessionParams, NotificationHandler, ProxyClient, StartTurnPa
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
+import { compileContextIntoInput, decompileContextFromText } from '../src/session/context-items.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic fakes — no real proxy spawn, no I/O outside the tmp DB.
@@ -201,6 +202,22 @@ function finalizeWorktree(
 }
 
 const COMPLETED_SESSION_ERROR = /session is completed; reopen it before sending more messages/;
+
+test('remote compiled context keeps references but uses the edited queue text at dispatch', async () => {
+  const ctx = setup();
+  try {
+    const sid = await makeSessionId(ctx);
+    const contextItems = [{ type: 'pastedText' as const, id: 'remote-context', text: 'reference', lineCount: 1, byteSize: 9 }];
+    const compiled = compileContextIntoInput('old request', undefined, contextItems);
+    const entry = ctx.queue.add(sid, 'old request', compiled);
+    ctx.queue.update(sid, entry.id, 'new request');
+    const drained = ctx.queue.popNext(sid)!;
+    assert.equal(drained.text, 'new request');
+    const text = drained.items?.find(item => item.type === 'text');
+    assert.ok(text && text.type === 'text');
+    assert.deepEqual(decompileContextFromText(text.text), { text: 'new request', contextItems });
+  } finally { teardown(ctx); }
+});
 
 // ---------------------------------------------------------------------------
 // QUEUE-001 — concurrent send must enqueue, not start a second turn.

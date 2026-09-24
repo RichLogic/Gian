@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  openSync,
+  closeSync,
+  readSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -9,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 export interface ReplayEvent {
   method: string;
@@ -37,7 +40,7 @@ export class CodexNativeHistoryWatcher {
     private nativeSessionId: string,
     private readonly onChange: () => void,
     private readonly intervalMs = 1_000,
-    private readonly homeDir = homedir(),
+    private readonly homeDir?: string,
   ) {}
 
   start(): void {
@@ -251,9 +254,12 @@ export class NativeTurnIdentityStore {
   }
 }
 
-function collectRollouts(homeDir = homedir()): string[] {
-  const root = join(homeDir, '.codex', 'sessions');
-  if (!existsSync(root)) return [];
+function collectRollouts(homeDir?: string, includeArchived = false): string[] {
+  const configured = process.env.CODEX_HOME;
+  const configHome = homeDir !== undefined
+    ? join(homeDir, '.codex')
+    : configured && isAbsolute(configured) ? configured : join(homedir(), '.codex');
+  const roots = [join(configHome, 'sessions'), ...(includeArchived ? [join(configHome, 'archived_sessions')] : [])];
   const files: string[] = [];
   const walk = (directory: string, depth: number) => {
     if (depth > 3) return;
@@ -269,7 +275,7 @@ function collectRollouts(homeDir = homedir()): string[] {
       }
     }
   };
-  walk(root, 0);
+  for (const root of roots) if (existsSync(root)) walk(root, 0);
   return files;
 }
 
@@ -315,7 +321,7 @@ function describe(path: string): CodexFile | null {
 
 export function listCodexNativeSessions(
   cwd: string | undefined,
-  homeDir = homedir(),
+  homeDir?: string,
 ): Array<{ id: string; displayName?: string; cwd?: string; updatedAt?: string }> {
   return collectRollouts(homeDir)
     .flatMap(path => {
@@ -331,8 +337,8 @@ export function listCodexNativeSessions(
     }));
 }
 
-function findSession(nativeSessionId: string, homeDir = homedir()): CodexFile | null {
-  const matches = collectRollouts(homeDir).flatMap(path => {
+function findSession(nativeSessionId: string, homeDir?: string): CodexFile | null {
+  const matches = collectRollouts(homeDir, true).flatMap(path => {
     if (!path.endsWith(`-${nativeSessionId}.jsonl`)) return [];
     const file = describe(path);
     return file?.id === nativeSessionId ? [file] : [];
@@ -344,17 +350,19 @@ function findSession(nativeSessionId: string, homeDir = homedir()): CodexFile | 
 export function replayCodexNativeSession(
   hostSessionId: string,
   nativeSessionId: string,
-  homeDir = homedir(),
+  homeDir?: string,
   identityStore?: NativeTurnIdentityStore,
 ): NativeReplay {
   const file = findSession(nativeSessionId, homeDir);
   if (!file) return { streamId: stableId('replay', { nativeSessionId, empty: true }), events: [] };
-  const content = readFileSync(file.path, 'utf8');
+  const content = readRolloutHistory(file, homeDir);
   const fallback = new Date(0).toISOString();
   const turns: Array<{
     id: string;
     timestamp: string;
     input: string;
+    nativeTurnId?: string;
+    completed?: boolean;
     messages: Array<{ id: string; timestamp: string; text: string }>;
   }> = [];
   let turn: (typeof turns)[number] | null = null;
@@ -362,13 +370,45 @@ export function replayCodexNativeSession(
     if (!line) continue;
     let record: Record<string, unknown>;
     try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-    if (record.type !== 'event_msg') continue;
     const payload = record.payload as Record<string, unknown> | undefined;
     const timestamp = typeof record.timestamp === 'string' && !Number.isNaN(Date.parse(record.timestamp))
       ? new Date(Date.parse(record.timestamp)).toISOString()
       : fallback;
     const lineId = stableId('codex-line', { nativeSessionId, lineIndex, line });
+    if (record.type === 'event_msg' && payload?.type === 'task_started' && typeof payload.turn_id === 'string') {
+      turn = { id: lineId, nativeTurnId: payload.turn_id, timestamp, input: '', messages: [], completed: false };
+      turns.push(turn);
+      continue;
+    }
+    if (record.type === 'event_msg' && payload?.type === 'task_complete' && turn?.nativeTurnId) {
+      if (payload.turn_id === turn.nativeTurnId) turn.completed = true;
+      continue;
+    }
+    if (record.type === 'response_item' && payload?.type === 'message' && turn?.nativeTurnId) {
+      const metadata = payload.internal_chat_message_metadata_passthrough as Record<string, unknown> | undefined;
+      if (typeof metadata?.turn_id === 'string' && metadata.turn_id !== turn.nativeTurnId) continue;
+      const kinds = metadata?.content_item_kinds;
+      // The runtime records environment/instruction messages as role=user too.
+      // Use its provenance field, never text matching, to exclude those facts.
+      if (payload.role === 'user' && Array.isArray(kinds) && kinds.length > 0
+        && !kinds.some(kind => typeof kind === 'string' && kind.startsWith('user.'))) continue;
+      const text = Array.isArray(payload.content) ? payload.content.flatMap(item => {
+        if (!item || typeof item !== 'object') return [];
+        const block = item as Record<string, unknown>;
+        return typeof block.text === 'string' ? [block.text] : [];
+      }).join('') : '';
+      if (payload.role === 'user') turn.input += text;
+      else if (payload.role === 'assistant' && text) turn.messages.push({ id: lineId, timestamp, text });
+      continue;
+    }
+    if (record.type !== 'event_msg') continue;
     if (payload?.type === 'user_message' && typeof payload.message === 'string') {
+      if (turn?.nativeTurnId) {
+        // Older versions record both response_item and event_msg views of
+        // the same task. The explicit user_message is the canonical input.
+        turn.input = payload.message;
+        continue;
+      }
       turn = { id: lineId, timestamp, input: payload.message, messages: [] };
       turns.push(turn);
     } else if (
@@ -376,6 +416,7 @@ export function replayCodexNativeSession(
       && typeof payload.message === 'string'
       && turn
     ) {
+      if (turn.nativeTurnId && turn.messages.length > 0) continue;
       turn.messages.push({ id: lineId, timestamp, text: payload.message });
     }
   }
@@ -404,7 +445,7 @@ export function replayCodexNativeSession(
   };
   for (const [index, item] of turns.entries()) {
     const fallbackSourceTurnId = stableId('replay-turn', { nativeSessionId, inputId: item.id, index });
-    const sourceTurnId = identityStore?.resolveReplay(
+    const sourceTurnId = item.nativeTurnId ?? identityStore?.resolveReplay(
       nativeSessionId,
       item.id,
       [{ type: 'text', text: item.input }],
@@ -444,6 +485,7 @@ export function replayCodexNativeSession(
         },
       );
     }
+    if (item.completed === false) continue;
     const completedAt = item.messages.at(-1)?.timestamp ?? item.timestamp;
     append(
       sourceTurnId,
@@ -459,6 +501,49 @@ export function replayCodexNativeSession(
     );
   }
   return { streamId, events };
+}
+
+/** New Codex rollouts store Fork ancestry as a pinned prefix, not copied
+ * records. Read only the native byte boundary, within the selected Home. */
+function readRolloutHistory(
+  file: CodexFile,
+  homeDir?: string,
+  endByteOffset?: number,
+  seen = new Set<string>(),
+  budget = { remaining: 64 * 1024 * 1024 },
+): string {
+  if (seen.has(file.id) || seen.size >= 32) throw new Error('Cyclic or excessively deep Codex history ancestry.');
+  seen.add(file.id);
+  const size = statSync(file.path).size;
+  const length = endByteOffset ?? size;
+  if (!Number.isSafeInteger(length) || length < 0 || length > size || length > budget.remaining) {
+    throw new Error('Codex history prefix is unavailable or exceeds its read limit.');
+  }
+  budget.remaining -= length;
+  if (length === 0) return '';
+  const bytes = Buffer.alloc(length);
+  const fd = openSync(file.path, 'r');
+  try {
+    let offset = 0;
+    while (offset < length) {
+      const count = readSync(fd, bytes, offset, length - offset, offset);
+      if (!count) throw new Error('Codex history changed while reading its prefix.');
+      offset += count;
+    }
+  } finally { closeSync(fd); }
+  if (endByteOffset !== undefined && bytes[length - 1] !== 10) {
+    throw new Error('Codex history prefix does not end at a record boundary.');
+  }
+  const content = bytes.toString('utf8');
+  const header = JSON.parse(content.split('\n', 1)[0]!) as { payload?: { history_base?: { thread_id?: unknown; end_byte_offset?: unknown } } };
+  const base = header.payload?.history_base;
+  if (!base) return content;
+  if (typeof base.thread_id !== 'string' || !Number.isSafeInteger(base.end_byte_offset)) {
+    throw new Error('Codex history ancestry is missing its exact prefix identity.');
+  }
+  const parent = findSession(base.thread_id, homeDir);
+  if (!parent) throw new Error('Codex inherited history is unavailable in the selected Home.');
+  return readRolloutHistory(parent, homeDir, base.end_byte_offset as number, seen, budget) + content;
 }
 
 function turnGroups(snapshot: NativeReplay): Map<string, ReplayEvent[]> {

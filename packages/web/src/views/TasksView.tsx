@@ -283,8 +283,9 @@ export function TasksView({
     // Stash the first message before dispatching: the session:created socket
     // frame (origin 'task-create') consumes it and auto-sends once the
     // subtask session exists — same channel as the plain session create.
-    onSetPendingFirstMessage({
-      scope: { kind: 'task', id: taskId },
+    onSetPendingFirstMessage(input.remoteSessionId ? null : {
+      scope: { kind: 'task', id: taskId,
+        ...(input.executionEnvironmentId ? { environmentId: input.executionEnvironmentId } : {}) },
       text: input.firstMessage,
       attachments: input.firstAttachments ?? [],
       ...(input.contextItems && input.contextItems.length > 0
@@ -293,6 +294,10 @@ export function TasksView({
       ...(input.composerDocument ? { composerDocument: input.composerDocument } : {}),
     });
     const run = dispatch('task.createSubtask', {
+      executionEnvironmentId: input.executionEnvironmentId,
+      remoteSessionId: input.remoteSessionId,
+      sessionConfig: input.sessionConfig,
+      turnConfig: input.turnConfig,
       taskId,
       workspaceId: input.workspaceId,
       agentId: input.agentId,
@@ -876,6 +881,7 @@ export function TasksSidebar({
             key={task.id}
             task={task}
             sessions={sessions}
+            mode={mode}
             activeSubtaskId={activeSubtaskId}
             isCollapsed={collapsedTasks.has(task.id)}
             completedSessionsHidden={tasksWithCompletedHidden.has(task.id)}
@@ -927,7 +933,7 @@ export function TasksSidebar({
               <SessionRow
                 key={s.id}
                 session={s}
-                active={s.id === activeSessionId}
+                active={(mode === 'tasks' || mode === 'sessions') && s.id === activeSessionId}
                 hideAge
                 hidePin
                 workspaceName={s.workspace_id != null ? wsById.get(s.workspace_id)?.name : undefined}
@@ -1010,6 +1016,7 @@ export function TasksSidebar({
 function OpenTaskGroup({
   task,
   sessions,
+  mode,
   activeSubtaskId,
   isCollapsed,
   completedSessionsHidden,
@@ -1031,6 +1038,7 @@ function OpenTaskGroup({
 }: {
   task: Task;
   sessions: Session[];
+  mode: Mode;
   activeSubtaskId: string | null;
   isCollapsed: boolean;
   completedSessionsHidden: boolean;
@@ -1152,7 +1160,7 @@ function OpenTaskGroup({
         <SubtaskRow
           key={st.id}
           subtask={st}
-          active={st.id === activeSubtaskId}
+          active={(mode === 'tasks' || mode === 'sessions') && st.id === activeSubtaskId}
           workspaceName={st.workspace_id != null ? wsById.get(st.workspace_id)?.name : undefined}
           onSelect={() => onSelectSubtask(task.id, st.id)}
           drag={reorderDrag

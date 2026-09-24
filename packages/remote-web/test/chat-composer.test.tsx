@@ -226,6 +226,27 @@ describe('chat + composer (B5)', () => {
     expect(controller.state.drafts['s-1']!.attachments).toHaveLength(0);
   });
 
+  it('image attachment chips read image<N> by draft position; files keep their names', async () => {
+    const user = userEvent.setup();
+    renderApp({ scenario: {}, viewport: 'wide' });
+    const attach = async (file: File) => {
+      await user.click(screen.getByRole('button', { name: '添加附件 / context / 文档' }));
+      await user.click(screen.getByRole('menuitem', { name: '附件' }));
+      await user.upload(document.querySelector('input[type="file"]') as HTMLInputElement, file);
+    };
+    await attach(new File(['x'], 'shot.png', { type: 'image/png' }));
+    await attach(new File(['x'], 'notes.txt', { type: 'text/plain' }));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll('.composer-chip[data-kind="attachment"]')).toHaveLength(2);
+    });
+    const chips = document.querySelectorAll('.composer-chip[data-kind="attachment"]');
+    // N = 1-based position among the draft's attachments — the same
+    // numbering the main composer applies to image chips at send time.
+    expect(chips[0]).toHaveTextContent('image1');
+    expect(chips[1]).toHaveTextContent('notes.txt');
+  });
+
   it('production capabilities hide context and document entries that would fail on Host', async () => {
     const user = userEvent.setup();
     const caps = {

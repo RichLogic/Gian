@@ -1,7 +1,7 @@
 // Coverage for traceability:
 //   UI-ACCENT-001 — runtime sanitize for accent / font_scale / theme.
-//   loadConfig validates values against allowlists and falls back to
-//   the theme default accent (or 'md' for scales / 'warm' for theme)
+//   loadConfig validates values against allowlists and falls back to the
+//   decoupled plum default accent (or 'md' for scales / 'warm' for theme)
 //   so an invalid string in the DB never crashes the UI.
 
 import { test } from 'node:test';
@@ -10,12 +10,12 @@ import { makeTestApp } from './fixtures/test-app.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
 import { DEFAULT_NOTIFICATION_PREFERENCES, DEFAULT_TERMINAL_PREFERENCES } from '@gian/shared';
 
-test('UI-ACCENT-001 · invalid accent falls back to theme default', async () => {
+test('UI-ACCENT-001 · invalid accent falls back to plum regardless of theme', async () => {
   const ctx = await makeTestApp();
   ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('accent', 'banana')`).run();
-  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('theme',  'dark')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('theme',  'warm')`).run();
   const cfg = loadConfig(ctx.db);
-  assert.equal(cfg.accent, 'plum', 'dark theme default = plum');
+  assert.equal(cfg.accent, 'plum', 'accents are decoupled: the default is always plum');
   await ctx.cleanup?.();
 });
 
@@ -137,12 +137,39 @@ test('UI-ACCENT-001 · defaults when nothing is set', async () => {
   ctx.db.prepare('DELETE FROM config').run();
   const cfg = loadConfig(ctx.db);
   assert.equal(cfg.theme, 'warm');
-  assert.equal(cfg.accent, 'ember');           // warm theme default
+  assert.equal(cfg.accent, 'plum');
+  assert.equal(cfg.system_light_theme, 'warm');
+  assert.equal(cfg.frame_opacity, 100);
   assert.equal(cfg.font_scale_chrome, 'md');
   assert.equal(cfg.font_scale_chat, 'md');
   assert.equal(cfg.font_scale_code, 'md');
   assert.deepEqual(cfg.terminal, DEFAULT_TERMINAL_PREFERENCES);
   assert.deepEqual(cfg.notifications, DEFAULT_NOTIFICATION_PREFERENCES);
+  await ctx.cleanup?.();
+});
+
+test('appearance · system theme, system light theme, and frame opacity round-trip', async () => {
+  const ctx = await makeTestApp();
+  saveConfig(ctx.db, { theme: 'system', system_light_theme: 'light', frame_opacity: 72 });
+  const cfg = loadConfig(ctx.db);
+  assert.equal(cfg.theme, 'system');
+  assert.equal(cfg.system_light_theme, 'light');
+  assert.equal(cfg.frame_opacity, 72);
+  await ctx.cleanup?.();
+});
+
+test('appearance · invalid stored system_light_theme / frame_opacity fall back to defaults', async () => {
+  const ctx = await makeTestApp();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('system_light_theme', 'blue')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('frame_opacity', '10')`).run();
+  let cfg = loadConfig(ctx.db);
+  assert.equal(cfg.system_light_theme, 'warm');
+  assert.equal(cfg.frame_opacity, 100);
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('system_light_theme', '42')`).run();
+  ctx.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES ('frame_opacity', 'murky')`).run();
+  cfg = loadConfig(ctx.db);
+  assert.equal(cfg.system_light_theme, 'warm');
+  assert.equal(cfg.frame_opacity, 100);
   await ctx.cleanup?.();
 });
 

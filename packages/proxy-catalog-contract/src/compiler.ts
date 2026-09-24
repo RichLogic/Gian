@@ -33,6 +33,8 @@ import {
 } from './schemas.js';
 import { assertCatalogMarkdown } from './catalog-markdown.js';
 import { isApprovedGitHubReleaseAssetUrl, isApprovedRuntimeAssetUrl } from './url-policy.js';
+import { CATALOG_LOCALES, CATALOG_LOCALIZATIONS_FILE, readCatalogLocalizations,
+  type CatalogLocalizationInput, type CatalogLocalizations } from './localization.js';
 
 export interface CatalogSigningKey {
   keyId: string;
@@ -47,6 +49,7 @@ export interface CatalogCompilerPluginInput {
 }
 
 export interface CompileCatalogBundleInput {
+  localizations?: CatalogLocalizationInput;
   sourceId: string;
   sequence: number;
   issuedAt: string;
@@ -334,6 +337,28 @@ export function compileCatalogBundle(input: CompileCatalogBundleInput): Compiled
     throw new Error('Compiled Catalog index exceeds MAX_CATALOG_INDEX_BYTES.');
   }
   addFile(files, CATALOG_INDEX_FILE, indexBytes);
+
+  if (input.localizations) {
+    const localized: CatalogLocalizations = { schemaVersion: 1, plugins: [] };
+    for (const [pluginId, translations] of Object.entries(input.localizations)) {
+      const locales = {} as CatalogLocalizations['plugins'][number]['locales'];
+      for (const locale of CATALOG_LOCALES) {
+        const translation = translations[locale];
+        if (!translation) throw new Error(`Missing ${locale} Catalog translation for ${pluginId}`);
+        const documentation = {} as CompiledCatalogEntryV1['documentation'];
+        for (const key of CATALOG_DOCUMENT_KEYS) {
+          const bytes = asBuffer(translation.documents[key]);
+          if (bytes.byteLength > MAX_CATALOG_DOCUMENT_BYTES) throw new Error('Localized Catalog document is too large');
+          assertCatalogMarkdown(bytes.toString('utf8'), `${pluginId} ${locale} ${key}`);
+          documentation[key] = addFile(files, `docs/${pluginId}/${locale}/${key}.md`, bytes);
+        }
+        locales[locale] = { displayName: translation.displayName, tagline: translation.tagline, documentation };
+      }
+      localized.plugins.push({ pluginId, locales });
+    }
+    addFile(files, CATALOG_LOCALIZATIONS_FILE, Buffer.from(stableStringify(localized)));
+    readCatalogLocalizations(files, index);
+  }
 
   const assetManifest = catalogAssetManifestV1Schema.parse({
     schemaVersion: CATALOG_SCHEMA_VERSION,

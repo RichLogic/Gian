@@ -77,6 +77,22 @@ test('catalog glob matching never crosses a directory boundary for *', () => {
   assert.equal(matchesPattern('packages/web/test/nested/example.test.tsx', 'packages/web/test/*.test.tsx'), false);
 });
 
+test('discovers script tests in explicit Catalog/delivery roots without classifying tools or documents', () => {
+  const baseDir = mkdtempSync(join(tmpdir(), 'gian-catalog-discovery-'));
+  try {
+    const directory = join(baseDir, 'catalog', 'proxy-information');
+    mkdirSync(directory, { recursive: true });
+    for (const name of ['project.test.mjs', 'project.mjs', 'README.md']) writeFileSync(join(directory, name), '');
+    const delivery = join(baseDir, 'delivery', 'proxies', 'scripts');
+    mkdirSync(delivery, { recursive: true });
+    writeFileSync(join(delivery, 'catalog-docs-policy.test.mjs'), '');
+    assert.deepEqual(discoverStandardTests({ discoveryRoots: ['catalog/proxy-information', 'delivery/proxies/scripts'] }, baseDir),
+      ['catalog/proxy-information/project.test.mjs', 'delivery/proxies/scripts/catalog-docs-policy.test.mjs']);
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
 test('catalog rejects unclassified and multiply-classified tests', () => {
   const base = {
     version: 1,

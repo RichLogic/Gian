@@ -162,6 +162,35 @@ test('replacement gate treats a failed replacement action as retryable', async (
   assert.equal(await gate.run(null, () => true), 'started');
 });
 
+test('replacement gate shares asynchronous staging and disarms on native install failure', async () => {
+  const gate = new ManagedHostReplacementGate();
+  let finish!: (success: boolean) => void;
+  const installation = new Promise<boolean>(resolve => { finish = resolve; });
+  let attempts = 0;
+  const start = () => {
+    attempts += 1;
+    return installation;
+  };
+  const first = gate.run(null, start);
+  await Promise.resolve();
+  assert.equal(gate.isArmed(), true, 'native staging may emit before-quit');
+  assert.equal(gate.isDraining(), false);
+  assert.strictEqual(gate.run(null, start), first, 'armed does not mean completed');
+  assert.equal(attempts, 1);
+
+  finish(false);
+  assert.equal(await first, 'failed');
+  assert.equal(gate.isArmed(), false);
+  assert.equal(await gate.run(null, async () => true), 'started');
+});
+
+test('replacement gate releases a rejected asynchronous replacement for retry', async () => {
+  const gate = new ManagedHostReplacementGate();
+  assert.equal(await gate.run(null, async () => { throw new Error('install failed'); }), 'failed');
+  assert.equal(gate.isArmed(), false);
+  assert.equal(await gate.run(null, () => true), 'started');
+});
+
 test('drain coordinator reuses one signal request after timeout', async () => {
   const child = new FakeChild();
   const timers = schedulerFixture();

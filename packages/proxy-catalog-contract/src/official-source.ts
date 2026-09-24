@@ -178,6 +178,7 @@ export function verifyOfficialCatalogSource(
 
 export async function compileOfficialCatalogSource(input: {
   sourceRoot: string;
+  localizations?: import('./localization.js').CatalogLocalizationInput;
   sequence: number;
   issuedAt: string;
   signingKey: CatalogSigningKey;
@@ -189,6 +190,7 @@ export async function compileOfficialCatalogSource(input: {
   const plugins = await loadOfficialCatalogSource(input.sourceRoot);
   verifyOfficialCatalogSource(plugins, { allowedArtifactRepositories, allowedRuntimeAssetPrefixes });
   return compileCatalogBundle({
+    localizations: input.localizations,
     sourceId: 'gian-official',
     sequence: input.sequence,
     issuedAt: input.issuedAt,

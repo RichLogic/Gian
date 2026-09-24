@@ -679,7 +679,9 @@ export class DshProxyService {
     if (state.open === false) return;
     session.sequence += 1;
     this.emit('content.delta', {
-      eventId: this.nextEventId(session, 'content-delta', nativeSeq),
+      eventId: typeof data.liveAttemptId === 'string' && Number.isSafeInteger(data.liveChunkIndex)
+        ? hashId([session.nativeSessionId ?? session.id, 'assistant-stream', data.liveAttemptId, data.liveChunkIndex])
+        : this.nextEventId(session, 'content-delta', nativeSeq),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,

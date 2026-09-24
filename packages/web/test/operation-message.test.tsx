@@ -127,7 +127,7 @@ describe('message send echo (proposal §9, product definitions)', () => {
     const echo = sink.appended[0]!.item;
     expect(echo).toMatchObject({ kind: 'user', text: 'hello', pending: true });
     expect(echo.sendRunId).toBe(run.id);
-    expect(echo.sendRetry).toEqual(payload());
+    expect(echo.sendRetry).toEqual({ ...payload(), sendId: expect.any(String) });
     expect(transport.sent[0]).toMatchObject({ type: 'message:send', session_id: 's1', text: 'hello' });
     expect(requestIdOf(transport.sent[0])).toBeTruthy();
   });
@@ -158,6 +158,38 @@ describe('message send echo (proposal §9, product definitions)', () => {
     expect(after).toHaveLength(1);
     expect((after[0] as MsgItem).contextItems).toEqual(contextItems);
     expect((after[0] as MsgItem).sendCanonical).toBe(true);
+  });
+
+  it('keeps the submission identity across retry while operation correlation changes', () => {
+    const { transport, dispatcher, sink } = setup();
+    dispatchMessageSend(dispatcher.dispatch, payload({ translationId: 'local-receipt' }));
+    const first = transport.sent[0] as Extract<ClientToServerMessage, { type: 'message:send' }>;
+    transport.emitResult(requestIdOf(first), false, { code: 'HOST_OFFLINE', message: 'lost reply' });
+    dispatchMessageSend(dispatcher.dispatch, sink.appended[0]!.item.sendRetry!);
+    const retry = transport.sent[1] as Extract<ClientToServerMessage, { type: 'message:send' }>;
+    expect(retry.send_id).toBe(first.send_id);
+    expect(retry.translation_id).toBe('local-receipt');
+    expect(retry.request_id).not.toBe(first.request_id);
+    transport.emitResult(requestIdOf(retry), true);
+    dispatchMessageSend(dispatcher.dispatch, payload());
+    const independent = transport.sent[2] as Extract<ClientToServerMessage, { type: 'message:send' }>;
+    expect(independent.send_id).not.toBe(first.send_id);
+  });
+
+  it('does not consume a new identical echo when a translated historical message is reprojected', () => {
+    const { dispatcher, sink } = setup();
+    dispatchMessageSend(dispatcher.dispatch, payload({ text: 'same original' }));
+    const echo = sink.appended[0]!.item;
+    const historical: EventEnvelope = { session_id: 's1', turn: 1, call_id: 'old-message', ts: 1,
+      event: 'user_message', data: { text: 'same original', send_id: 'older-submission',
+        translation: { text: 'same translated text' } } };
+    const after = applyEnvelope([echo], historical, 'codex');
+    expect(after).toHaveLength(2);
+    expect(after[0]).toBe(echo);
+    const current = applyEnvelope(after, { ...historical, call_id: 'new-message', turn: 2,
+      data: { ...historical.data, send_id: echo.sendRetry!.sendId } }, 'codex');
+    expect(current).toHaveLength(2);
+    expect(current[0]).toMatchObject({ id: 'new-message', sendCanonical: true });
   });
 
   it('carries an ordered composer document through wire, echo, and canonical reconciliation', () => {

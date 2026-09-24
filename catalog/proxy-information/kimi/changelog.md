@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-当前 Catalog 1.7.0 选择：Proxy **0.3.2**，Runtime **2.0.0**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.3**，Runtime **2.1.0**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.3
+
+首次公开发布：2026-09-24T09:39:35Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.3.3)：2026-09-24T09:39:35Z。
+- 对应 CLI：2.1.0（Manifest 兼容声明，不是本机状态）。
+
+### 修复
+
+- 适配 Kimi Code 2.1.0，修复模型切换后的 thinking 选项和历史轮次身份；不再宣告上游未支持的原生重命名。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.3.3) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/4740fab7dc3370cc812984519b5e9509bbcad2c0/CHANGELOG.md)
 
 ## 0.3.2
 

@@ -349,6 +349,8 @@ export interface ScheduleConfirmationMessage {
 
 export interface SessionCreateMessage {
   type: 'session:create';
+  remote_environment_id?: string;
+  remote_session_id?: string;
   name?: string;
   workspace_id: string;
   /** Owning user Agent (agents.json). Interactive creation always sends it;
@@ -382,6 +384,9 @@ export interface EventSubscribeMessage {
 }
 
 export interface MessageSendMessage {
+  /** Local submission identity, retained across UI retries; distinct from operation correlation. */
+  send_id?: string;
+  translation_id?: string;
   type: 'message:send';
   session_id: string;
   text: string;

@@ -104,6 +104,30 @@ describe('catalog condition evaluation', () => {
     expect(catalog.slashCommands).toEqual([]);
   });
 
+  it('passes additive slash command fields (disabled, customizationId) through the capabilities parse', () => {
+    const catalog = catalogFromCapabilities({
+      slashCommands: [
+        { name: '/clear', description: 'Clear', source: 'builtin', argHints: [] },
+        {
+          name: '/off-skill',
+          description: 'Disabled skill',
+          source: 'project',
+          argHints: [],
+          disabled: true,
+          customizationId: 'ci1_0123456789abcdef0123456789abcdef',
+        },
+        { description: 'missing name — dropped' },
+      ],
+    });
+    expect(catalog.slashCommands).toHaveLength(2);
+    const off = catalog.slashCommands.find(command => command.name === '/off-skill');
+    expect(off?.disabled).toBe(true);
+    expect(off?.customizationId).toBe('ci1_0123456789abcdef0123456789abcdef');
+    const clear = catalog.slashCommands.find(command => command.name === '/clear');
+    expect(clear?.disabled).toBeUndefined();
+    expect(clear?.customizationId).toBeUndefined();
+  });
+
   it('maps gian.proxy/2.1 Special Catalog ids into the fixed internal UI slots', () => {
     const catalog = catalogFromCapabilities({
       specialCatalogs: {

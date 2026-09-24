@@ -88,8 +88,8 @@ describe('Transcript body', () => {
     const { container } = render(
       <Transcript items={[userMsg(), cmd(), assistantMsg(), turnEnd()]} pending={false} onApprove={onApprove} />,
     );
-    expect(container.querySelector('.msg.user')).not.toBeNull();
-    expect(container.querySelector('.msg-text.md')!.textContent).toBe('done');
+    expect(container.querySelector('.msg.user .msg-text.md')!.textContent).toBe('do it');
+    expect(container.querySelector('.msg:not(.user) .msg-text.md')!.textContent).toBe('done');
     const work = container.querySelector('[data-testid="turn-work"]')!;
     expect(work.getAttribute('data-state')).toBe('worked');
     expect(work.textContent).toContain('Worked');

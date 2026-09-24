@@ -11,21 +11,28 @@ import type {
   ToolPreferences,
 } from '@gian/shared';
 import {
+  FRAME_OPACITY_MAX,
+  FRAME_OPACITY_MIN,
   KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
   MIN_CHAT_FONT_SIZE,
   SHORTCUT_ACTIONS,
+  SYSTEM_LIGHT_THEMES,
   isValidKeymapBinding,
   isValidShortcutCombo,
 } from '@gian/shared';
 import { loadConfig, saveConfig } from '../../storage/config.js';
+import { parseTranslationPreferences } from '@gian/shared';
 import type { Db } from '../../storage/db.js';
 import { isAvailableTerminalShell, terminalOptions } from '../../term/manager.js';
 
 type EditableSettingsKey =
+  | 'translation'
   | 'port'
   | 'theme'
   | 'accent'
+  | 'system_light_theme'
+  | 'frame_opacity'
   | 'density'
   | 'font_scale_chrome'
   | 'font_scale_chat'
@@ -360,18 +367,33 @@ function parseTerminalPreferences(value: unknown): TerminalPreferences {
 }
 
 const SETTINGS_PATCH_SCHEMA = {
+  translation: parseTranslationPreferences,
   port(value: unknown) {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65_535) {
       throw new Error('port must be an integer between 1 and 65535');
     }
     return value;
   },
-  theme: (value: unknown, field: string) => parseEnum(value, field, ['light', 'warm', 'dark']),
+  theme: (value: unknown, field: string) => parseEnum(value, field, ['light', 'warm', 'dark', 'system']),
   accent: (value: unknown, field: string) => parseEnum(
     value,
     field,
     ['rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum'],
   ),
+  system_light_theme: (value: unknown, field: string) => parseEnum(
+    value,
+    field,
+    SYSTEM_LIGHT_THEMES,
+  ),
+  frame_opacity(value: unknown) {
+    if (typeof value !== 'number' || !Number.isInteger(value)
+      || value < FRAME_OPACITY_MIN || value > FRAME_OPACITY_MAX) {
+      throw new Error(
+        `frame_opacity must be an integer between ${FRAME_OPACITY_MIN} and ${FRAME_OPACITY_MAX}`,
+      );
+    }
+    return value;
+  },
   density: (value: unknown, field: string) => parseEnum(
     value,
     field,

@@ -16,6 +16,7 @@ import { hashSecret } from '../crypto-hash.js';
 import { type RemoteDb } from './db.js';
 
 export interface HostRow {
+  account_peer_id: string | null;
   id: string;
   name: string;
   public_key_jwk: string;
@@ -38,6 +39,7 @@ export interface PairingGrantRow {
 }
 
 export interface DevicePairingRow {
+  account_peer_id: string | null;
   id: string;
   browser_installation_id: string;
   host_id: string;
@@ -51,6 +53,7 @@ export interface DevicePairingRow {
 }
 
 export interface DeviceSessionRow {
+  account_peer_id: string | null;
   id: string;
   browser_installation_id: string;
   current_refresh_hash: string;
@@ -84,23 +87,24 @@ export class RemoteRepositories {
     private readonly now: Clock,
   ) {}
 
-  createEnrollment(token: string, label?: string): { id: string; expires_at: number } {
+  createEnrollment(token: string, githubAccountId: string, label?: string): { id: string; expires_at: number } {
     const id = generateCanonicalId();
     const expiresAt = this.now() + ENROLLMENT_TTL_MS;
     this.db.prepare(`
-      INSERT INTO host_enrollments(id, token_hash, label, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, hashSecret(token), label ?? null, expiresAt, this.now());
+      INSERT INTO host_enrollments(id, token_hash, label, expires_at, created_at, github_account_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, hashSecret(token), label ?? null, expiresAt, this.now(), githubAccountId);
     return { id, expires_at: expiresAt };
   }
 
-  claimEnrollment(token: string, host: { name: string; public_key_jwk: string }): HostRow | null {
+  claimEnrollment(token: string, host: { name: string; public_key_jwk: string }, githubAccountId: string): HostRow | null {
     const tokenHash = hashSecret(token);
     return this.db.transaction(() => {
       const enrollment = this.db.prepare(`
-        SELECT id, expires_at, used_at FROM host_enrollments WHERE token_hash = ?
-      `).get(tokenHash) as { id: string; expires_at: number; used_at: number | null } | undefined;
-      if (!enrollment || enrollment.used_at !== null || enrollment.expires_at <= this.now()) {
+        SELECT id, expires_at, used_at, github_account_id FROM host_enrollments WHERE token_hash = ?
+      `).get(tokenHash) as { id: string; expires_at: number; used_at: number | null; github_account_id: string | null } | undefined;
+      if (!enrollment || enrollment.used_at !== null || enrollment.expires_at <= this.now()
+        || !enrollment.github_account_id || enrollment.github_account_id !== githubAccountId) {
         return null;
       }
       const now = this.now();
@@ -276,6 +280,11 @@ export class RemoteRepositories {
 
   confirmGrant(pairingId: string, decision: 'confirm' | 'reject'): PairingGrantRow | undefined {
     const now = this.now();
+    const current = this.db.prepare('SELECT * FROM pairing_grants WHERE pairing_id = ?').get(pairingId) as PairingGrantRow | undefined;
+    if (!current || current.claimed_at === null) return undefined;
+    if (current.consumed_at !== null) return decision === 'confirm' ? current : undefined;
+    if (current.rejected_at !== null) return decision === 'reject' ? current : undefined;
+    if (current.expires_at <= now) return undefined;
     if (decision === 'reject') {
       this.db.prepare(`
         UPDATE pairing_grants SET rejected_at = ? WHERE pairing_id = ? AND consumed_at IS NULL AND rejected_at IS NULL
@@ -324,7 +333,16 @@ export class RemoteRepositories {
   }
 
   confirmPairing(id: string): void {
-    this.db.prepare('UPDATE device_host_pairings SET confirmed_at = ? WHERE id = ?').run(this.now(), id);
+    this.db.prepare('UPDATE device_host_pairings SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL').run(this.now(), id);
+  }
+
+  revokeExpiredOrUnboundPairings(hostId: string): void {
+    const expired = this.db.prepare(`SELECT p.id FROM device_host_pairings p LEFT JOIN account_peers a
+      ON a.role = 'controller' AND a.installation_id = p.account_peer_id
+      WHERE p.host_id = ? AND p.revoked_at IS NULL
+        AND (p.account_peer_id IS NULL OR (a.delegated_host_id = p.host_id AND a.expires_at <= ?))`)
+      .all(hostId, this.now()) as Array<{ id: string }>;
+    for (const pairing of expired) this.revokePairing(pairing.id);
   }
 
   deletePairing(id: string): void {
@@ -606,6 +624,7 @@ export class RemoteRepositories {
   cleanupExpired(): void {
     const now = this.now();
     this.db.prepare('DELETE FROM host_enrollments WHERE expires_at <= ? AND used_at IS NOT NULL').run(now - ENROLLMENT_TTL_MS);
+    this.db.prepare('DELETE FROM enrollment_sessions WHERE expires_at <= ?').run(now);
     this.db.prepare('DELETE FROM pairing_grants WHERE expires_at <= ? AND claimed_at IS NULL').run(now);
     this.db.prepare('DELETE FROM ws_tickets WHERE expires_at <= ?').run(now);
     this.db.prepare('DELETE FROM connector_challenges WHERE expires_at <= ?').run(now);

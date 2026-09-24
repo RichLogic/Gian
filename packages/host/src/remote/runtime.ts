@@ -17,6 +17,7 @@ import {
   type RemoteControlMessage,
   type RemoteStatePatch,
   type StatePatch,
+  type AccountLoginStarted,
   verifyBytes,
 } from '@gian/remote-protocol';
 import type { ServerToClientMessage, RemoteSettingsSnapshot, RemoteSettingsPairing } from '@gian/shared';
@@ -45,8 +46,11 @@ import {
 } from './projection.js';
 import { RemoteReplayBuffer } from './replay-buffer.js';
 import { HttpRemoteServerAuthClient } from './server-client.js';
+import { RemoteExecutionJournal } from './execution-journal.js';
+import { conversationReferencesFile, conversationReferencesAttachment } from './file-references.js';
 
 export interface RemoteRuntimeDeps {
+  gitRead?: (params: unknown) => Promise<unknown>;
   db: Db;
   sessions: SessionManager;
   tasks: TaskManager;
@@ -66,6 +70,13 @@ export interface RemoteRuntimeDeps {
   hostEvents?: {
     onBroadcast(listener: (message: ServerToClientMessage) => void): () => void;
   };
+  /** Branding bytes for one Proxy (manifest branding.logo), keyed by the
+   *  proxy name Remote catalogs carry. Null when unknown. */
+  proxyLogo?: (proxy: string, variant: 'light' | 'dark') => Promise<{
+    bytes: Uint8Array;
+    mediaType: 'image/png' | 'image/webp';
+    sha256: string;
+  } | null>;
 }
 
 export class RemoteRuntime {
@@ -73,6 +84,7 @@ export class RemoteRuntime {
   readonly devices: RemoteDeviceStore;
   readonly pairings: RemotePairingService;
   readonly enrollment: RemoteEnrollmentStore;
+  readonly executions: RemoteExecutionJournal;
   readonly audit: RemoteMutationAudit;
   readonly attachments: RemoteAttachmentService;
   readonly fileRefs: RemoteFileRefService;
@@ -82,6 +94,9 @@ export class RemoteRuntime {
   private readonly connectors = new Map<string, RemoteConnector>();
   private relay: HostRelaySocket | null = null;
   private authClient: HttpRemoteServerAuthClient | null = null;
+  private accountLogin: { client: HttpRemoteServerAuthClient; started: AccountLoginStarted; serverUrl: string } | null = null;
+  private accountState: RemoteSettingsSnapshot['account'] = null;
+  private authorizedAccount: { origin: string; id: string; fingerprint: string; until: number } | null = null;
   private readonly identity: RemoteIdentityMaterial;
   private shuttingDown = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -120,7 +135,8 @@ export class RemoteRuntime {
     const sessionVisible = (sessionId: string): boolean => {
       try {
         const session = deps.sessions.getSession(sessionId);
-        return isRemoteSessionVisible(deps.db, session);
+        return isRemoteSessionVisible(deps.db, session)
+          || Boolean(deps.db.prepare('SELECT 1 FROM remote_execution_exports WHERE session_id = ?').get(sessionId));
       } catch {
         return false;
       }
@@ -129,7 +145,9 @@ export class RemoteRuntime {
     this.fileRefs = new RemoteFileRefService(deps.db, sessionId => {
       try {
         if (!sessionVisible(sessionId)) return null;
-        const workspaceId = deps.sessions.getSession(sessionId).workspace_id;
+        const session = deps.sessions.getSession(sessionId);
+        if (session.worktree_path) return session.worktree_path;
+        const workspaceId = session.workspace_id;
         if (!workspaceId) return null;
         const row = deps.db.prepare('SELECT path FROM workspaces WHERE id = ?')
           .get(workspaceId) as { path: string } | undefined;
@@ -137,7 +155,8 @@ export class RemoteRuntime {
       } catch {
         return null;
       }
-    }, sessionVisible);
+    }, sessionVisible, (sessionId, path) => conversationReferencesFile(deps.sessions.listEvents(sessionId), path),
+    (sessionId, filename) => conversationReferencesAttachment(deps.sessions.listEvents(sessionId), sessionId, filename));
     const fallbackHostId = generateCanonicalId();
     const enrollment = this.enrollment;
     const hostName = this.hostName;
@@ -161,7 +180,9 @@ export class RemoteRuntime {
       fileRefs: this.fileRefs,
       workspacePath: sessionId => {
         try {
-          const workspaceId = deps.sessions.getSession(sessionId).workspace_id;
+          const session = deps.sessions.getSession(sessionId);
+          if (session.worktree_path) return session.worktree_path;
+          const workspaceId = session.workspace_id;
           if (!workspaceId) return null;
           const row = deps.db.prepare('SELECT path FROM workspaces WHERE id = ?')
             .get(workspaceId) as { path: string } | undefined;
@@ -171,7 +192,10 @@ export class RemoteRuntime {
         }
       },
     });
+    this.executions = new RemoteExecutionJournal(deps.db, deps.sessions, this.projector);
     this.commands = new RemoteCommandAdapter({
+      gitRead: deps.gitRead,
+      executions: this.executions,
       db: deps.db,
       access: deps.access,
       tool: deps.tool,
@@ -196,8 +220,10 @@ export class RemoteRuntime {
         eventSequence: this.replay.eventSequence,
       }),
       onSubscribe: (deviceId, sessionId) => this.subscriptions.set(deviceId, sessionId),
+      proxyLogo: deps.proxyLogo,
     });
     this.detachHostEvents = deps.hostEvents?.onBroadcast(message => {
+      if (message.type === 'event') this.executions.append(message);
       this.observeHostBroadcast(message);
     }) ?? null;
   }
@@ -206,22 +232,62 @@ export class RemoteRuntime {
     return this.relay;
   }
 
-  async enroll(input: { serverUrl: string; enrollmentToken: string; publicUrl?: string }): Promise<{ host_id: string }> {
+  async enroll(input: { serverUrl: string; enrollmentToken: string; publicUrl?: string; hostName?: string }): Promise<{ host_id: string }> {
     if (this.enrolling || this.enrollment.current()) throw new Error('already_enrolled');
     const attempt = this.enrollOnce(input);
     this.enrolling = attempt;
     try { return await attempt; } finally { this.enrolling = null; }
   }
 
-  private async enrollOnce(input: { serverUrl: string; enrollmentToken: string; publicUrl?: string }): Promise<{ host_id: string }> {
+  async startAccountLogin(serverUrl: string): Promise<void> {
+    const origin = remoteOrigin(serverUrl);
+    const enrolled = this.enrollment.current();
+    if (enrolled && enrolled.serverUrl !== origin) throw new Error('invalid_url');
+    const client = new HttpRemoteServerAuthClient(origin, this.identity);
+    const saved = await client.existingAccount('host');
+    if (saved) {
+      if (enrolled && enrolled.serverIdentityFingerprint !== saved.serverFingerprint) throw new Error('identity_changed');
+      this.accountLogin = null;
+      this.accountState = { status: 'authorized', server_url: origin, login: saved.accountLogin, expires_at: saved.expiresAt };
+      return;
+    }
+    const started = await client.startAccountLogin('host');
+    if (enrolled && enrolled.serverIdentityFingerprint !== started.challenge.server_identity_fingerprint) {
+      throw new Error('identity_changed');
+    }
+    this.accountLogin = { client, started, serverUrl: origin };
+    this.accountState = { status: 'pending', server_url: origin, user_code: started.user_code,
+      verification_uri: started.verification_uri, expires_at: started.expires_at, interval_seconds: started.interval_seconds };
+  }
+
+  async pollAccountLogin(): Promise<void> {
+    const pending = this.accountLogin;
+    if (!pending) return;
+    const result = await pending.client.pollAccountLogin(pending.started);
+    if (pending !== this.accountLogin) return;
+    if (result.status === 'pending') {
+      if (this.accountState) this.accountState.interval_seconds = result.interval_seconds;
+      return;
+    }
+    this.accountLogin = null;
+    this.accountState = { status: result.status, server_url: pending.serverUrl,
+      expires_at: result.status === 'authorized' ? result.expires_at : Date.now(),
+      ...(result.status === 'authorized' ? { login: result.account.login } : {}) };
+    if (result.status === 'authorized' && this.enrollment.current()) {
+      this.authClient = pending.client;
+    }
+  }
+
+  private async enrollOnce(input: { serverUrl: string; enrollmentToken: string; publicUrl?: string; hostName?: string }): Promise<{ host_id: string }> {
     const epoch = this.connectionEpoch;
     const serverUrl = remoteOrigin(input.serverUrl);
     const publicUrl = input.publicUrl ? remoteOrigin(input.publicUrl) : serverUrl;
+    const hostName = (input.hostName?.trim().slice(0, MAX_NAME_CHARS) ?? '') || this.hostName;
     const identity = await this.identity.ensurePublic();
     const auth = new HttpRemoteServerAuthClient(serverUrl, this.identity);
     const claimed = await auth.claimEnrollment({
       enrollmentToken: input.enrollmentToken,
-      hostName: this.hostName,
+      hostName,
       hostVersion: this.hostVersion,
       hostPublicKey: identity.public_key,
     });
@@ -230,7 +296,7 @@ export class RemoteRuntime {
       hostId: claimed.host_id,
       serverUrl,
       serverIdentity: claimed.server_identity,
-      hostName: this.hostName,
+      hostName,
       refreshSecret: claimed.connector_refresh_secret,
     });
     if (epoch !== this.connectionEpoch) throw new Error('connection_cancelled');
@@ -245,6 +311,8 @@ export class RemoteRuntime {
     if (!enrollment?.connectorEnabled || enrollment.pendingIdentityFingerprint) return;
     if (this.relay?.bound) return;
     this.shuttingDown = false;
+    // Source previews start Host before Desktop's identity broker. Arm
+    // recovery before the first broker request, including account lookup.
     this.startHeartbeat();
     try {
       await this.connectRelay();
@@ -439,6 +507,7 @@ export class RemoteRuntime {
           platform: local.platform ?? 'unknown',
           cryptoConnectionId: result.crypto_connection_id,
         });
+        if (local.accountId) this.devices.bindAccount(created.id, local.accountId);
         this.pairings.confirm(local.id, created.id);
         return created;
       })();
@@ -470,6 +539,7 @@ export class RemoteRuntime {
       this.authClient ?? undefined,
       this.enrollment.current()?.hostId,
       {
+        ...(this.enrollment.current() ? { authorize: () => this.authorizeDeviceAccount(device) } : {}),
         attachments: this.attachments,
         hostVersion: this.hostVersion,
         fileRefs: this.fileRefs,
@@ -487,6 +557,28 @@ export class RemoteRuntime {
     return this.connectors.get(deviceId);
   }
 
+  private async authorizeDeviceAccount(device: RemoteDeviceRecord): Promise<void> {
+    const enrollment = this.enrollment.current();
+    if (!enrollment || !device.accountId || !this.devices.getActive(device.id)) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'active account required');
+    }
+    let account = this.authorizedAccount;
+    if (!account || account.origin !== enrollment.serverUrl || account.until <= Date.now()) {
+      const saved = await this.identity.getAccountSession?.(enrollment.serverUrl, 'host');
+      if (!saved || saved.expiresAt <= Date.now()) {
+        this.authorizedAccount = null;
+        this.accountState = { status: 'expired', server_url: enrollment.serverUrl, expires_at: Date.now() };
+        throw new RemoteProtocolError('AUTH_REQUIRED', 'Host GitHub login required');
+      }
+      account = { origin: enrollment.serverUrl, id: saved.accountId, fingerprint: saved.serverFingerprint,
+        until: Math.min(saved.expiresAt, Date.now() + 1000) };
+      this.authorizedAccount = account;
+    }
+    if (account.id !== device.accountId || account.fingerprint !== enrollment.serverIdentityFingerprint) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'account identity changed');
+    }
+  }
+
   private async ensureRelay(): Promise<void> {
     const enrollment = this.enrollment.current();
     if (!enrollment?.connectorEnabled || enrollment.pendingIdentityFingerprint) {
@@ -501,10 +593,18 @@ export class RemoteRuntime {
 
   private async connectRelay(): Promise<void> {
     if (this.connecting) return this.connecting;
-    this.connecting = this.connectRelayOnce().finally(() => {
-      this.connecting = null;
+    const epoch = this.connectionEpoch;
+    const run = this.connectRelayOnce().catch(error => {
+      if (epoch === this.connectionEpoch && error instanceof RemoteProtocolError && error.code === 'AUTH_REQUIRED') {
+        const origin = this.enrollment.current()?.serverUrl;
+        if (origin) this.accountState = { status: 'expired', server_url: origin, expires_at: Date.now() };
+      }
+      throw error;
+    }).finally(() => {
+      if (this.connecting === run) this.connecting = null;
     });
-    return this.connecting;
+    this.connecting = run;
+    return run;
   }
 
   private async connectRelayOnce(): Promise<void> {
@@ -514,6 +614,14 @@ export class RemoteRuntime {
     };
     const enrollment = this.enrollment.current();
     if (!enrollment?.connectorEnabled || enrollment.pendingIdentityFingerprint || this.shuttingDown) return;
+    const account = await this.identity.getAccountSession?.(enrollment.serverUrl, 'host');
+    checkCurrent();
+    this.accountState = account && account.expiresAt > Date.now()
+      ? { status: 'authorized', server_url: enrollment.serverUrl, expires_at: account.expiresAt, login: account.accountLogin }
+      : { status: 'expired', server_url: enrollment.serverUrl, expires_at: Date.now() };
+    if (!account || account.expiresAt <= Date.now()) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'Remote GitHub login required');
+    }
     const refreshSecret = await this.identity.getRefreshSecret();
     checkCurrent();
     if (!enrollment?.serverUrl || !refreshSecret) return;
@@ -652,6 +760,7 @@ export class RemoteRuntime {
     if (devicePublicKeyCanonical(offer.device_identity) !== device.publicKey) return;
     const enrollment = this.enrollment.current();
     if (!enrollment || enrollment.hostId !== offer.host_id) return;
+    await this.authorizeDeviceAccount(device);
     const deviceKey = await importP256PublicKey(JSON.parse(device.publicKey) as {
       kty: 'EC'; crv: 'P-256'; x: string; y: string;
     }, 'verify');
@@ -711,21 +820,32 @@ export class RemoteRuntime {
         connectionId: offer.crypto_connection_id,
       },
     });
+    // Sign BEFORE attaching: when the identity broker is unreachable the
+    // accept never ships, and an already-attached connector would keep
+    // soaking up Host pushes on a route the Server never crypto-bound (they
+    // bounce back as route.not_bound and the device sees nothing live).
+    const signature = await this.identity.sign(new TextEncoder().encode(cryptoAcceptPayload(acceptFields)));
     const connector = this.connectDevice(device, crypto);
-    this.relay.sendHandshake({
-      protocol: 'gian.relay/1',
-      type: 'crypto.accept',
-      host_id: acceptFields.host_id,
-      device_id: acceptFields.device_id,
-      crypto_connection_id: acceptFields.crypto_connection_id,
-      handshake_nonce: acceptFields.handshake_nonce,
-      host_generation: acceptFields.host_generation,
-      host_identity: acceptFields.host_identity,
-      host_ephemeral: acceptFields.host_ephemeral,
-      device_ephemeral: acceptFields.device_ephemeral,
-      signature: await this.identity.sign(new TextEncoder().encode(cryptoAcceptPayload(acceptFields))),
-      sent_at: sentAt,
-    });
+    try {
+      this.relay.sendHandshake({
+        protocol: 'gian.relay/1',
+        type: 'crypto.accept',
+        host_id: acceptFields.host_id,
+        device_id: acceptFields.device_id,
+        crypto_connection_id: acceptFields.crypto_connection_id,
+        handshake_nonce: acceptFields.handshake_nonce,
+        host_generation: acceptFields.host_generation,
+        host_identity: acceptFields.host_identity,
+        host_ephemeral: acceptFields.host_ephemeral,
+        device_ephemeral: acceptFields.device_ephemeral,
+        signature,
+        sent_at: sentAt,
+      });
+    } catch (error) {
+      connector.close();
+      this.connectors.delete(device.id);
+      throw error;
+    }
     connector.scheduleInitialSnapshot();
   }
 
@@ -740,6 +860,7 @@ export class RemoteRuntime {
     if (notice.type === 'pairing.claimed' && notice.grant_id && notice.pairing_id && notice.device_public_key) {
       try {
       this.pairings.applyServerClaim({
+        accountId: notice.account_id,
         grantId: notice.grant_id,
         pairingId: notice.pairing_id,
         publicKey: notice.device_public_key,
@@ -1023,6 +1144,7 @@ export class RemoteRuntime {
     };
     return {
       enrolled: enrollment !== null,
+      account: this.accountState,
       host_id: enrollment?.hostId ?? null,
       host_name: enrollment?.hostName ?? null,
       server_url: enrollment?.serverUrl ?? null,
@@ -1065,6 +1187,7 @@ export class RemoteRuntime {
   }
 
   private stopConnection(): void {
+    this.authorizedAccount = null;
     this.shuttingDown = true;
     this.connectionEpoch += 1;
     this.stopHeartbeat();

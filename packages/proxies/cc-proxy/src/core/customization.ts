@@ -15,6 +15,12 @@ import {
   type CustomizationListResult,
 } from '@gian/proxy-protocol';
 
+import {
+  claudeConfigDir,
+  discoverAgentSkills,
+  discoverLegacyCommands,
+} from './skill-discovery.js';
+
 export const SCAN_TIMEOUT_MS = 15_000;
 export const SCAN_MAX_ENTRIES = 500;
 export const SCAN_CONCURRENCY = 16;
@@ -208,7 +214,7 @@ async function findInstructionFiles(
 }
 
 function claudeDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
+  return claudeConfigDir();
 }
 
 function userStateFilePath(): string {
@@ -324,78 +330,37 @@ export class ClaudeCustomizationScanner {
     cwd: string | null,
     diagnostics: CustomizationDiagnostic[],
   ): Promise<CustomizationItem[]> {
-    const items: CustomizationItem[] = [];
-    const itemsBase = join(root, 'skills');
-    let entries: string[] = [];
-    try {
-      entries = await fsp.readdir(itemsBase);
-    } catch {
-      return items;
-    }
-    if (entries.length > this.limits.maxScanEntries) {
-      addBoundedDiagnostics(diagnostics, [{
-        code: 'SOURCE_NOT_ENUMERABLE',
-        message: 'Skill directory exceeded the entry bound; some skills were not enumerated.',
-      }]);
-    }
-    for (const entry of entries.slice(0, this.limits.maxScanEntries)) {
-      const skillDir = join(itemsBase, entry);
-      let stat: Stats | null = null;
-      try {
-        stat = await fsp.lstat(skillDir);
-      } catch {
-        continue;
-      }
-      if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) continue;
-      const entryPath = join(skillDir, 'SKILL.md');
-      const content = await readBounded(entryPath, DETAIL_TEXT_MAX_BYTES);
-      if (content.state === 'oversized' || content.state === 'unreadable') {
-        addBoundedDiagnostics(diagnostics, [{
-          code: 'SOURCE_UNREADABLE',
-          message: `Skill ${truncateUtf8(entry, 200)} entry could not be read within bounds.`,
-        }]);
-        continue;
-      }
-      if (content.state !== 'ok') continue;
-      const frontmatter = parseSkillFrontmatter(content.data.toString('utf8'));
-      const name = truncateUtf8(frontmatter.name ?? entry, 256);
-      const description = frontmatter.description
-        ? truncateUtf8(frontmatter.description, 4096)
-        : undefined;
-      const id = stableCustomizationId({
-        provider: 'claude',
-        kind: 'skill',
-        scopeKey: scopeLevel === 'user' ? 'user' : `workspace:${cwd ?? ''}`,
-        canonicalSourceLocator: resolve(entryPath),
-        nativeIdentity: name,
-      });
-      this.remember(id, 'skill', entryPath);
-      items.push({
-        id,
-        kind: 'skill',
-        name,
-        ...(description ? { description } : {}),
+    const discovered = await discoverAgentSkills(root, scopeLevel, cwd, {
+      maxEntries: this.limits.maxScanEntries,
+      reportDiagnostic: diagnostic => addBoundedDiagnostics(diagnostics, [diagnostic]),
+    });
+    return discovered.map(skill => {
+      this.remember(skill.customizationId, 'skill', skill.entryPath);
+      return {
+        id: skill.customizationId,
+        kind: 'skill' as const,
+        name: skill.name,
+        ...(skill.description ? { description: skill.description } : {}),
         nativeType: 'claude.agent-skill',
         nativeStatus: 'configured',
-        activation: 'unknown',
+        activation: 'unknown' as const,
         scope: {
           level: scopeLevel,
           ...(scopeLevel === 'workspace' && cwd ? { root: cwd } : {}),
         },
         origin: {
-          kind: scopeLevel === 'user' ? 'user_file' : 'project_file',
-          path: entryPath,
+          kind: scopeLevel === 'user' ? 'user_file' as const : 'project_file' as const,
+          path: skill.entryPath,
         },
-        discovery: { method: 'filesystem_scan' },
+        discovery: { method: 'filesystem_scan' as const },
         skill: {
-          format: 'agent-skill',
-          entryPath,
+          format: 'agent-skill' as const,
+          entryPath: skill.entryPath,
           userInvocable: true,
           modelInvocable: false,
         },
-      });
-    }
-    return items;
+      };
+    });
   }
 
   private async commandItemsFromRoot(
@@ -404,62 +369,38 @@ export class ClaudeCustomizationScanner {
     cwd: string | null,
     diagnostics: CustomizationDiagnostic[],
   ): Promise<CustomizationItem[]> {
-    const items: CustomizationItem[] = [];
-    const commandsBase = join(root, 'commands');
-    let entries: string[] = [];
-    try {
-      entries = await fsp.readdir(commandsBase);
-    } catch {
-      return items;
-    }
-    if (entries.length > this.limits.maxScanEntries) {
-      addBoundedDiagnostics(diagnostics, [{
-        code: 'SOURCE_NOT_ENUMERABLE',
-        message: 'Command directory exceeded the entry bound; some commands were not enumerated.',
-      }]);
-    }
-    for (const entry of entries.slice(0, this.limits.maxScanEntries)) {
-      if (!entry.endsWith('.md')) continue;
-      const entryPath = join(commandsBase, entry);
-      const content = await readBounded(entryPath, DETAIL_TEXT_MAX_BYTES);
-      if (content.state !== 'ok') continue;
-      const name = truncateUtf8(entry.slice(0, -3), 256);
-      const description = firstNonEmptyLine(content.data.toString('utf8'));
-      const id = stableCustomizationId({
-        provider: 'claude',
-        kind: 'skill',
-        scopeKey: scopeLevel === 'user' ? 'user' : `workspace:${cwd ?? ''}`,
-        canonicalSourceLocator: resolve(entryPath),
-        nativeIdentity: name,
-      });
-      this.remember(id, 'skill', entryPath);
-      items.push({
-        id,
-        kind: 'skill',
-        name,
-        ...(description ? { description: truncateUtf8(description, 4096) } : {}),
+    const discovered = await discoverLegacyCommands(root, scopeLevel, cwd, {
+      maxEntries: this.limits.maxScanEntries,
+      reportDiagnostic: diagnostic => addBoundedDiagnostics(diagnostics, [diagnostic]),
+    });
+    return discovered.map(command => {
+      this.remember(command.customizationId, 'skill', command.entryPath);
+      return {
+        id: command.customizationId,
+        kind: 'skill' as const,
+        name: command.name,
+        ...(command.description ? { description: command.description } : {}),
         nativeType: 'claude.legacy-command',
         nativeStatus: 'configured',
-        activation: 'unknown',
+        activation: 'unknown' as const,
         scope: {
           level: scopeLevel,
           ...(scopeLevel === 'workspace' && cwd ? { root: cwd } : {}),
         },
         origin: {
-          kind: scopeLevel === 'user' ? 'user_file' : 'project_file',
-          path: entryPath,
+          kind: scopeLevel === 'user' ? 'user_file' as const : 'project_file' as const,
+          path: command.entryPath,
         },
-        discovery: { method: 'filesystem_scan' },
+        discovery: { method: 'filesystem_scan' as const },
         skill: {
-          format: 'legacy-command',
-          entryPath,
-          invocation: `/${name}`,
+          format: 'legacy-command' as const,
+          entryPath: command.entryPath,
+          invocation: `/${command.name}`,
           userInvocable: true,
           modelInvocable: false,
         },
-      });
-    }
-    return items;
+      };
+    });
   }
 
   private async listSkills(cwd: string | null): Promise<CustomizationListResult> {
@@ -1072,24 +1013,6 @@ async function withScanTimeout<T>(
 /** Internal marker: list/detail timeouts surface as unavailable at the
  *  adapter boundary (see service.ts). */
 export class ScanTimeoutError extends Error {}
-
-function parseSkillFrontmatter(content: string): { name?: string; description?: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
-  if (!match) return {};
-  const out: { name?: string; description?: string } = {};
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const nameMatch = /^name:\s*(.+)$/.exec(line);
-    if (nameMatch) out.name = nameMatch[1]!.trim().replace(/^["']|["']$/g, '');
-    const descriptionMatch = /^description:\s*(.+)$/.exec(line);
-    if (descriptionMatch) out.description = descriptionMatch[1]!.trim().replace(/^["']|["']$/g, '');
-  }
-  return out;
-}
-
-function firstNonEmptyLine(content: string): string | undefined {
-  const line = content.split(/\r?\n/).find((candidate) => candidate.trim().length > 0);
-  return line?.trim();
-}
 
 function sanitizeMcpServerConfig(config: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};

@@ -180,6 +180,9 @@ export class SessionLifecycleService {
     if (input.agent_id !== undefined && !resolvedAgent) {
       throw new Error(`agent not found: ${input.agent_id}`);
     }
+    if (resolvedAgent && resolvedAgent.agent.enabled === false) {
+      throw new Error(`agent is disabled: ${input.agent_id}`);
+    }
     const executor = resolvedAgent
       ? compatibilityExecutorColumn({
         pluginId: resolvedAgent.agent.pluginId,

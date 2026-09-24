@@ -325,7 +325,38 @@ export class ManagedRuntimeGenerationStore {
     return generation;
   }
 
+  /** Drop every generation record of one plugin — active pointer and any
+   *  pending activation journal included — and forget its cached state.
+   *  Managed Runtime payload trees stay on disk: they are content-addressed,
+   *  may serve other plugins' generations, and are re-verified before reuse
+   *  by a later reinstall. Returns false when no records existed. */
+  async removePlugin(pluginId: string): Promise<boolean> {
+    const id = parseProxyPluginId(pluginId);
+    const directory = join(this.generationRoot, id);
+    try {
+      const metadata = await lstat(directory);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new ManagedRuntimeStoreError(
+          'RUNTIME_PATH_OUTSIDE_STORE',
+          'Runtime generation root is not an owned directory.',
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.activeGenerations.delete(id);
+        return false;
+      }
+      throw error;
+    }
+    await rm(directory, { recursive: true, force: true });
+    await fsyncDirectory(this.generationRoot);
+    this.activeGenerations.delete(id);
+    this.pendingActivations.delete(id);
+    return true;
+  }
+
   async list(pluginId: string): Promise<ManagedRuntimeGeneration[]> {
+
     const id = parseProxyPluginId(pluginId);
     const directory = join(this.generationRoot, id);
     let entries;

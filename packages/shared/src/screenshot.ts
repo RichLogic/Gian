@@ -10,6 +10,7 @@ export type GianScreenshotTarget =
       scope: {
         kind: 'workspace' | 'task';
         id: string;
+        environmentId?: string;
       };
       label: string;
     };

@@ -31,6 +31,9 @@ export interface UserAgent {
   pluginId: ProxyPluginId;
   /** Official product kind when `pluginId` aliases one; otherwise null. */
   proxy: ProductExecutor | null;
+  /** Absent means enabled; `false` blocks new Sessions and Turns while
+   *  existing Session history stays readable. */
+  enabled?: boolean;
   /** Provider state/configuration root. ZCode is the external-App exception
    *  and therefore has no Gian-managed HOME. */
   home?: AgentHomeBinding | null;

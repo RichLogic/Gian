@@ -131,6 +131,7 @@ export function dispatchMessageSend(
   dispatch: OperationDispatcher['dispatch'],
   input: MessageSendPayload,
 ): ReturnType<OperationDispatcher['dispatch']> {
+  input = { ...input, sendId: input.sendId ?? globalThis.crypto?.randomUUID?.() ?? `send:${Date.now()}:${Math.random()}` };
   if (input.oneShotBypass && input.exec !== 'claude') {
     throw new Error(`One-shot bypass is only supported for Claude sessions; got ${input.exec}.`);
   }
@@ -176,6 +177,8 @@ function buildSendMessage(input: MessageSendPayload) {
     : inputItems(input.text, input.attachments ?? []);
   return {
     type: 'message:send' as const,
+    ...(input.sendId ? { send_id: input.sendId } : {}),
+    ...(input.translationId ? { translation_id: input.translationId } : {}),
     session_id: input.sessionId,
     text: input.text,
     ...(items.length > 0 ? { items } : {}),

@@ -22,9 +22,10 @@ function projectLegacyNotification(
   notification: ProxyNotification,
   sessionId: string,
   turn: number,
+  cwd?: string,
 ): DisplayEvent[] {
-  if (provider === 'claude') return projectCcNotification(notification, sessionId, turn);
-  if (provider === 'codex') return projectCodexNotification(notification, sessionId, turn);
+  if (provider === 'claude') return projectCcNotification(notification, sessionId, turn, cwd);
+  if (provider === 'codex') return projectCodexNotification(notification, sessionId, turn, cwd);
   return projectKimiNotification(notification, sessionId, turn);
 }
 
@@ -33,7 +34,9 @@ function projectLegacyNotification(
  * `interactionKinds` supplies the pending interaction's native
  * optionId -> ACP permission kind map so resolved events can derive their
  * Gian decision before persistence; both live and replay callers pass the
- * same sequential registry.
+ * same sequential registry. `cwd` is the session's launch root (its worktree,
+ * else the workspace checkout); file-change projections record it so
+ * last-turn attribution never assumes the currently viewed tree.
  */
 export function projectNotification(
   provider: Executor,
@@ -41,6 +44,7 @@ export function projectNotification(
   sessionId: string,
   turn: number,
   interactionKinds?: InteractionKindLookup,
+  cwd?: string,
 ): ChatEvent[] {
   const standard = proxyNotificationSchema.safeParse(notification);
   if (standard.success && standard.data.method === 'input.recorded') {
@@ -78,7 +82,7 @@ export function projectNotification(
   }
 
   const projected: DisplayEvent[] = standard.success
-    ? projectProtocolV2Notification(standard.data, sessionId, turn, interactionKinds)
+    ? projectProtocolV2Notification(standard.data, sessionId, turn, interactionKinds, cwd)
     : (() => {
       const historical = isHistoricalProtocolV1(notification)
         ? (() => {
@@ -95,7 +99,7 @@ export function projectNotification(
         : [];
       return historical.length > 0
         ? historical
-        : projectLegacyNotification(provider, notification, sessionId, turn);
+        : projectLegacyNotification(provider, notification, sessionId, turn, cwd);
     })();
 
   const raw = notification.params?.data && typeof notification.params.data === 'object'

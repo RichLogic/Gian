@@ -17,6 +17,22 @@
   },
   "rules": [
     {
+      "id": "catalog-localization",
+      "patterns": ["packages/proxy-catalog-contract/src/localization.ts", "packages/shared/src/proxy-catalog-projection.ts", "catalog/proxy-information/**"],
+      "modules": ["scripts", "proxy-catalog-contract", "shared", "host", "web"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Signed localized Catalog metadata and documents cross compiler, Host projection and locale-aware Web cache boundaries."
+    },
+    {
+      "id": "conversation-translation",
+      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx"],
+      "modules": ["shared", "host", "web", "chat-ui", "codex-proxy"],
+      "scopes": ["unit", "integration"],
+      "checks": ["typecheck", "quality:test-catalog"],
+      "reason": "Translation binds settings, isolated Provider calls, original-message persistence and reading-only projections."
+    },
+    {
       "id": "proxy-information-projection",
       "patterns": ["catalog/proxy-information/**"],
       "modules": ["scripts", "proxy-catalog-contract"],
@@ -723,7 +739,10 @@
         "docs/proposals/remote-web-v1-architecture-and-protocol.md",
         "docs/data-model.md",
         "docs/operations/gian-tool-v0-api-and-implementation.md",
-        "packages/host/migrations/077_remote_settings_lifecycle.sql"
+        "packages/host/migrations/077_remote_settings_lifecycle.sql",
+        "packages/host/migrations/079_remote_execution_bindings.sql",
+        "packages/host/migrations/080_remote_execution_history.sql",
+        "packages/host/migrations/081_remote_controller_environments.sql"
       ],
       "optionalPatterns": [
         "docs/proposals/remote-web-v1-architecture-and-protocol.md",

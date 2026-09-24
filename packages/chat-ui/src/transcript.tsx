@@ -206,7 +206,7 @@ export interface RenderItemContext {
   hideAvatar?: boolean;
   showFooter?: boolean;
   turnCompleted?: boolean;
-  assistantFooter?: { copyable?: boolean; actions?: ReactNode };
+  assistantFooter?: { copyable?: boolean; actions?: ReactNode; translation?: ReactNode };
   /** Host-app in-flight signal for an approval.resolve mutation; drives the
    *  card's disabled/resolving state. Defaults to false. */
   isApprovalResolving?: (approvalId: string) => boolean;
@@ -237,6 +237,7 @@ export function renderChatItem(item: TranscriptItem, ctx: RenderItemContext): Re
           showFooter={ctx.showFooter}
           copyable={ctx.assistantFooter?.copyable}
           footerActions={ctx.assistantFooter?.actions}
+          translation={ctx.assistantFooter?.translation}
         />
       );
     case 'reasoning':
@@ -461,6 +462,7 @@ export function Transcript({
   renderItem = renderChatItem,
   workingIndicator,
   renderAssistantFooterActions,
+  renderAssistantTranslation,
   renderTurnEndFooter,
   renderOverlay,
   renderInlineEventDetails,
@@ -494,6 +496,7 @@ export function Transcript({
    *  the host app's per-turn Fork control). Receives the result item and the
    *  Turn's `turn-end` row (the verbatim protocol turn identity carrier). */
   renderAssistantFooterActions?: (item: MsgItem, turnEnd: StatusItem | undefined) => ReactNode;
+  renderAssistantTranslation?: (item: MsgItem) => ReactNode;
   /** Footer for a failed/stopped or text-free Terminal Turn, which has no
    *  result message to own the action. */
   renderTurnEndFooter?: (item: StatusItem) => ReactNode;
@@ -777,6 +780,7 @@ export function Transcript({
                     ? {
                       copyable: true,
                       actions: renderAssistantFooterActions?.(item, terminalByTurn.get(item.turn)),
+                      translation: renderAssistantTranslation?.(item),
                     }
                     : undefined,
                 },

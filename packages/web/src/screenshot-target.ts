@@ -1,4 +1,4 @@
-import type { GianScreenshotTarget } from '@gian/shared';
+import type { GianScreenshotStartResult, GianScreenshotTarget } from '@gian/shared';
 import { desktopBridge } from './desktop-bridge.js';
 
 let currentOwner: symbol | null = null;
@@ -19,9 +19,13 @@ export function publishScreenshotTarget(target: GianScreenshotTarget): () => voi
   };
 }
 
-export async function startScreenshotCapture(): Promise<boolean> {
+/**
+ * Ask the Desktop shell to start an interactive capture. `busy` means a
+ * capture is already running; other failures are also broadcast through the
+ * bridge's screenshot error event.
+ */
+export async function startScreenshotCapture(): Promise<GianScreenshotStartResult> {
   const api = desktopBridge()?.screenshot;
-  if (!api) return false;
-  const result = await api.start();
-  return result.ok;
+  if (!api) return { ok: false };
+  return api.start();
 }

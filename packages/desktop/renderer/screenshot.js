@@ -44,6 +44,26 @@
     return (scaleX() + scaleY()) / 2;
   }
 
+  /** Source-image pixels per canvas pixel. Annotations and the selection
+   * live in canvas space; the export maps them back onto the captured image. */
+  function exportScale() {
+    return image.naturalWidth / Math.max(1, canvas.width);
+  }
+
+  // The interactive canvas is sized for the display (capped at the captured
+  // image size) instead of the image's natural size, so every drag frame
+  // blits display-sized pixels rather than a multi-thousand-pixel bitmap.
+  function sizeCanvasToDisplay() {
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const fit = Math.min(
+      1,
+      image.naturalWidth / Math.max(1, window.innerWidth * dpr),
+      image.naturalHeight / Math.max(1, window.innerHeight * dpr),
+    );
+    canvas.width = Math.max(1, Math.round(window.innerWidth * dpr * fit));
+    canvas.height = Math.max(1, Math.round(window.innerHeight * dpr * fit));
+  }
+
   function imagePoint(event) {
     const bounds = canvas.getBoundingClientRect();
     return {
@@ -120,8 +140,8 @@
   function buildMosaicSource() {
     const block = Math.max(8, Math.round(10 * scaleAverage()));
     const small = document.createElement('canvas');
-    small.width = Math.max(1, Math.ceil(image.naturalWidth / block));
-    small.height = Math.max(1, Math.ceil(image.naturalHeight / block));
+    small.width = Math.max(1, Math.ceil(canvas.width / block));
+    small.height = Math.max(1, Math.ceil(canvas.height / block));
     const smallContext = small.getContext('2d');
     smallContext.imageSmoothingEnabled = true;
     smallContext.drawImage(image, 0, 0, small.width, small.height);
@@ -292,6 +312,18 @@
     updateFloatingUi();
   }
 
+  // Pointermove fires far more often than the display refreshes; coalesce the
+  // full-canvas re-blit into one paint per animation frame.
+  let renderQueued = false;
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      render();
+    });
+  }
+
   function updateFloatingUi() {
     if (!selection || selection.width < 1 || selection.height < 1) {
       toolbar.hidden = true;
@@ -300,7 +332,8 @@
     }
     toolbar.hidden = false;
     selectionSize.hidden = false;
-    selectionSize.textContent = `${Math.round(selection.width)} × ${Math.round(selection.height)}`;
+    selectionSize.textContent =
+      `${Math.round(selection.width * exportScale())} × ${Math.round(selection.height * exportScale())}`;
 
     const topLeft = cssPoint({ x: selection.x, y: selection.y });
     const bottomRight = cssPoint({
@@ -441,7 +474,7 @@
         activeAction.end = clamped;
       }
     }
-    render();
+    scheduleRender();
   }
 
   function finishDrag() {
@@ -509,19 +542,21 @@
   }
 
   function drawExport(outputContext) {
+    const scale = exportScale();
     outputContext.imageSmoothingEnabled = true;
     outputContext.drawImage(
       image,
-      selection.x,
-      selection.y,
-      selection.width,
-      selection.height,
+      selection.x * scale,
+      selection.y * scale,
+      selection.width * scale,
+      selection.height * scale,
       0,
       0,
-      selection.width,
-      selection.height,
+      outputContext.canvas.width,
+      outputContext.canvas.height,
     );
     outputContext.save();
+    outputContext.scale(scale, scale);
     outputContext.translate(-selection.x, -selection.y);
     outputContext.beginPath();
     outputContext.rect(selection.x, selection.y, selection.width, selection.height);
@@ -538,8 +573,9 @@
     displayStatus('正在生成截图…');
     try {
       const output = document.createElement('canvas');
-      output.width = Math.max(1, Math.round(selection.width));
-      output.height = Math.max(1, Math.round(selection.height));
+      const scale = exportScale();
+      output.width = Math.max(1, Math.round(selection.width * scale));
+      output.height = Math.max(1, Math.round(selection.height * scale));
       const outputContext = output.getContext('2d', { alpha: false });
       drawExport(outputContext);
       const blob = await new Promise((resolve, reject) => {
@@ -693,7 +729,11 @@
     }
   });
 
-  window.addEventListener('resize', render);
+  window.addEventListener('resize', () => {
+    if (!image.complete || !image.naturalWidth) return;
+    sizeCanvasToDisplay();
+    render();
+  });
   window.addEventListener('dragstart', event => event.preventDefault());
 
   async function loadCapture() {
@@ -719,8 +759,7 @@
       } finally {
         URL.revokeObjectURL(imageUrl);
       }
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
+      sizeCanvasToDisplay();
       mosaicSource = buildMosaicSource();
       render();
       api.painted();

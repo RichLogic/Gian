@@ -3,7 +3,7 @@
 // upserted by activity id; distinct Claude/Kimi edits add by path.
 
 import { describe, it, expect } from 'vitest';
-import { projectTurnDiff } from '../src/presentation/turn-diff.js';
+import { matchChangedFilePath, projectTurnDiff } from '../src/presentation/turn-diff.js';
 import type { DiffFile, DiffItem, TranscriptItem } from '../src/types.js';
 
 function file(path: string, add: number, del: number): DiffFile {
@@ -78,5 +78,38 @@ describe('projectTurnDiff', () => {
       },
     ];
     expect(projectTurnDiff(items)).toBeNull();
+  });
+});
+
+// TurnDiffChip sends the RAW transcript path (absolute for Claude, possibly
+// `a/`-`b/` prefixed for diff-derived cards) while the Changes inspector
+// list carries host-normalized paths; the anchor must still resolve.
+describe('matchChangedFilePath', () => {
+  const paths = ['src/app.ts', 'docs/new.md'];
+
+  it('matches exact paths', () => {
+    expect(matchChangedFilePath('src/app.ts', paths)).toBe('src/app.ts');
+  });
+
+  it('matches an absolute transcript path against the normalized list path', () => {
+    expect(matchChangedFilePath('/repo/task-worktree/src/app.ts', paths)).toBe('src/app.ts');
+  });
+
+  it('matches an absolute path whose file lived in a deleted worktree', () => {
+    // The host keeps unmappable entries under their absolute path.
+    expect(matchChangedFilePath('/repo/gone/out.txt', ['/repo/gone/out.txt'])).toBe('/repo/gone/out.txt');
+  });
+
+  it('strips a/ b/ diff prefixes', () => {
+    expect(matchChangedFilePath('b/docs/new.md', paths)).toBe('docs/new.md');
+    expect(matchChangedFilePath('a/src/app.ts', paths)).toBe('src/app.ts');
+  });
+
+  it('matches when the list path is longer than the chip path', () => {
+    expect(matchChangedFilePath('app.ts', paths)).toBe('src/app.ts');
+  });
+
+  it('returns null when nothing matches', () => {
+    expect(matchChangedFilePath('other/thing.ts', paths)).toBeNull();
   });
 });

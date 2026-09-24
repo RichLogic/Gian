@@ -4,6 +4,7 @@ import { Inspector } from '../src/components/Inspector.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import type { WorkingTree, ChangedEntry } from '../src/api.js';
 import * as api from '../src/api.js';
+import { injectComposerContextItems } from '../src/components/Composer.js';
 import {
   __resetChangesDiffForTests,
   getChangesDiffState,
@@ -16,10 +17,17 @@ vi.mock('../src/api.js', async () => {
     loadChanged: vi.fn().mockResolvedValue([] as ChangedEntry[]),
     loadCommits: vi.fn().mockResolvedValue([]),
     loadBranchList: vi.fn().mockResolvedValue({ head: 'demo', base: 'main', branches: ['main', 'demo'] }),
+    loadDiff: vi.fn().mockResolvedValue({ diff: 'diff --git a/src/a.ts b/src/a.ts', truncated: false }),
     stageFile: vi.fn().mockResolvedValue(true),
     unstageFile: vi.fn().mockResolvedValue(true),
   };
 });
+
+// The attach-diff flow injects through the Composer draft store; stub the
+// injection point so the wiring test asserts the call, not draft persistence.
+vi.mock('../src/components/Composer.js', () => ({
+  injectComposerContextItems: vi.fn(() => true),
+}));
 
 const workingTrees: WorkingTree[] = [{
   id: 'ws:demo', kind: 'workspace', label: 'demo', path: '/tmp/demo',
@@ -192,5 +200,35 @@ describe('Inspector CHANGES', () => {
     const commitBtn = screen.getByText(/Commit or push/).closest('button')!;
     expect(commitBtn).toBeDisabled();
     expect(screen.getByText('Create PR').closest('button')).toBeDisabled();
+  });
+
+  it('Attach diff injects the loaded patches as one pastedText context chip', async () => {
+    (api.loadChanged as ReturnType<typeof vi.fn>).mockResolvedValue([unstagedRow]);
+    const inject = injectComposerContextItems as ReturnType<typeof vi.fn>;
+    renderChanges({ activeSessionId: 'session-1' });
+    await screen.findByText('a.ts');
+
+    fireEvent.click(screen.getByText('Attach diff'));
+    await waitFor(() => expect(inject).toHaveBeenCalledTimes(1));
+    const [sessionId, items] = inject.mock.calls[0] as [string, Array<{ type: string; text?: string }>];
+    expect(sessionId).toBe('session-1');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.type).toBe('pastedText');
+    // The default branch scope names its compare base in the chip's first line.
+    expect(items[0]!.text).toMatch(/^Diff · Branch \(vs main\)\n\n/);
+    expect(items[0]!.text).toContain('diff --git a/src/a.ts');
+  });
+
+  it('Attach diff is disabled with no active session or no changes', async () => {
+    renderChanges({ canCommit: false });
+    await waitFor(() => expect(api.loadChanged).toHaveBeenCalled());
+    expect(screen.getByText('Attach diff').closest('button')).toBeDisabled();
+
+    // No changes in scope → nothing to attach, even with a session.
+    renderChanges({ canCommit: true });
+    await waitFor(() => expect(screen.getAllByText('Attach diff').length).toBeGreaterThan(0));
+    for (const el of screen.getAllByText('Attach diff')) {
+      expect(el.closest('button')).toBeDisabled();
+    }
   });
 });

@@ -32,6 +32,56 @@ test('DSH runtime version follows the real CLI entry behind an npm launcher syml
   assert.equal(dshVersionFromEntrypoint(join(root, 'missing')), null);
 });
 
+test('DSH 0.1.5 transient assistant streams preserve identity and reject duplicate or foreign frames', async () => {
+  const listeners = new Map<string, (...args: unknown[]) => unknown>();
+  const emitted: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const agent = {
+    id: 'native-stream', status: 'idle', session: { id: 'native-stream', events: [] }, ctx: {},
+    cancel: () => undefined, whenIdle: async () => undefined,
+    followup: () => undefined, steer: () => undefined,
+  };
+  const host = new CordisDshHost({
+    agents: { create: async (options: { sessionId: string }) => {
+      agent.id = options.sessionId;
+      agent.session.id = options.sessionId;
+      return { agent, dispose: async () => undefined };
+    } },
+    llm: {
+      listProviders: () => [{ id: 'deepseek' }],
+      listModels: async () => [{ id: 'flash', provider: 'deepseek' }],
+    },
+    on: (name: string, listener: (...args: unknown[]) => unknown, options?: { global?: boolean }) => {
+      if (name === 'agent/assistant-stream') assert.deepEqual(options, { global: true });
+      listeners.set(name, listener);
+      return () => listeners.delete(name);
+    },
+  } as never, '0.1.4');
+  host.attachSink(event => emitted.push(event));
+  try {
+    await host.sessionCreate({ sessionId: 'gian-stream', cwd: '/tmp', roots: ['/tmp'], config: {} });
+    const send = (frame: Record<string, unknown>, source = agent) => listeners.get('agent/assistant-stream')?.({ agent: source, frame });
+    const start = { type: 'start', attemptId: 'attempt-1', revision: 1, turn: 0, step: 0 };
+    const chunk = { type: 'chunk', attemptId: 'attempt-1', revision: 2, index: 0, chunk: { type: 'text-delta', index: 0, text: 'hello' } };
+    send(start);
+    send(chunk);
+    send(chunk);
+    send({ ...chunk, index: 1 }, { ...agent, session: { id: 'foreign', events: [] } });
+    send({ type: 'end', attemptId: 'attempt-1', revision: 3, index: 1, outcome: { kind: 'committed', seq: 9 } });
+    send(start);
+    send({ ...chunk, index: 1 });
+    const streams = emitted.filter(event => event.method === 'session.event' && event.params.type === 'assistant/chunk');
+    assert.equal(streams.length, 1);
+    assert.deepEqual(streams[0]?.params, {
+      sessionId: 'gian-stream', type: 'assistant/chunk', data: {
+        turn: 0, step: 0, liveAttemptId: 'attempt-1', liveChunkIndex: 0,
+        chunk: { type: 'text-delta', index: 0, text: 'hello' },
+      },
+    });
+  } finally {
+    await host.dispose();
+  }
+});
+
 test('real Cordis host catalog projects registered providers, models, and DSH modes', async () => {
   const mountedPresets: string[] = [];
   const host = new CordisDshHost({

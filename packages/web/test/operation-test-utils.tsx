@@ -29,6 +29,7 @@ import '../src/operations/terminal.js';
 import '../src/operations/auth.js';
 import '../src/operations/onboarding.js';
 import '../src/operations/schedule.js';
+import '../src/operations/translation.js';
 import { OperationDispatcherProvider, OperationStoreProvider } from '../src/operations/use-operations.js';
 
 /** Fake WS transport: captures sent messages and lets the test deliver

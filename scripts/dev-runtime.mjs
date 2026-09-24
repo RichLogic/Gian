@@ -86,6 +86,7 @@ export function resolveRuntimeIdentity(worktree = rootDir) {
 export function resolveDevEnvironment(
   env = process.env,
   identity = resolveRuntimeIdentity(),
+  homeDir = homedir(),
 ) {
   const githubClientId = env.GIAN_GITHUB_CLIENT_ID?.trim()
     || DEFAULT_GITHUB_CLIENT_ID;
@@ -100,8 +101,14 @@ export function resolveDevEnvironment(
     ? env.GIAN_DEV_DATA_DIR.trim()
     : '';
   const canonical = path => existsSync(path) ? realpathSync(path) : resolve(path);
-  if (isolatedDataDir && ['.gian', '.gian-dev'].some(name => canonical(isolatedDataDir) === canonical(join(homedir(), name)))) {
-    throw new Error('Source worktrees cannot use installed Gian/GianDev data');
+  const releasePreview = identity.branch.startsWith('release/')
+    && identity.branch.length > 'release/'.length;
+  if (isolatedDataDir && canonical(isolatedDataDir) === canonical(join(homeDir, '.gian'))) {
+    throw new Error('Source worktrees cannot use production Gian data');
+  }
+  if (isolatedDataDir && !releasePreview
+    && canonical(isolatedDataDir) === canonical(join(homeDir, '.gian-dev'))) {
+    throw new Error('Only release/ branches may use installed GianDev data');
   }
   const desktopUserDataDir = typeof env.GIAN_DESKTOP_USER_DATA_DIR === 'string'
     ? env.GIAN_DESKTOP_USER_DATA_DIR.trim()

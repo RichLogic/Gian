@@ -396,6 +396,43 @@ export class SessionHistoryStore {
     }
     return parts.join('');
   }
+
+  /** Ordered user + assistant conversation text for the session-reference
+   *  compile (see `conversationMessagesFromEvents`). */
+  conversationMessages(sessionId: string): SessionTranscriptMessage[] {
+    return conversationMessagesFromEvents(compactHistoryEnvelopes(this.listEvents(sessionId)));
+  }
+}
+
+export interface SessionTranscriptMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/**
+ * Project replayed history into the plain conversation: user messages and
+ * assistant message text in order, with tool/activity noise excluded and
+ * streamed assistant fragments already merged by the caller's compaction.
+ * Best-effort — malformed rows are skipped, never thrown.
+ */
+export function conversationMessagesFromEvents(events: EventEnvelope[]): SessionTranscriptMessage[] {
+  const out: SessionTranscriptMessage[] = [];
+  for (const event of events) {
+    if (event.event === 'user_message') {
+      const text = typeof (event.data as { text?: unknown }).text === 'string'
+        ? (event.data as { text: string }).text
+        : '';
+      if (text) out.push({ role: 'user', text });
+      continue;
+    }
+    const display = event.display;
+    if (display?.type !== 'message') continue;
+    const data = display.data as unknown as Record<string, unknown>;
+    const text = typeof data.text === 'string' ? data.text : '';
+    if (!text) continue;
+    out.push({ role: data.role === 'user' ? 'user' : 'assistant', text });
+  }
+  return out;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

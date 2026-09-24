@@ -6,6 +6,7 @@ import { Sheet } from '../src/components/Sheet.js';
 import type { SheetTab } from '../src/components/sheet-model.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { createOperationHarness } from './operation-test-utils.js';
+import { mockFetch } from './setup.js';
 
 const initialState: GianBrowserState = {
   url: 'https://example.com/',
@@ -64,6 +65,8 @@ beforeEach(() => {
     openDevTools: vi.fn().mockResolvedValue(true),
     setLayout: vi.fn().mockResolvedValue(true),
     captureFrame: vi.fn().mockResolvedValue('data:image/png;base64,Zm9vZQ=='),
+    capturePageSnapshot: vi.fn().mockResolvedValue(null),
+    capturePageScreenshot: vi.fn().mockResolvedValue(null),
     setBackground: vi.fn().mockResolvedValue(true),
     setZoom: vi.fn().mockImplementation(async (_tabId, factor) => ({
       ...initialState,
@@ -367,6 +370,138 @@ describe('BrowserPanel', () => {
       </LocaleProvider>,
     );
     await waitFor(() => expect(browser.setInspectMode).toHaveBeenCalledWith(TAB_ID, false));
+  });
+
+  it('attaches a tab reference chip to the target Session composer from the More menu', async () => {
+    localStorage.clear();
+    renderPanel(true, 'session-browser-attach');
+    await screen.findByDisplayValue('https://example.com/');
+
+    await openBrowserMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Attach tab reference' }));
+
+    expect(screen.queryByRole('menu', { name: 'More Browser actions' })).not.toBeInTheDocument();
+    const draft = JSON.parse(
+      localStorage.getItem('gian.composer.draft.v4.session-browser-attach') ?? 'null',
+    );
+    expect(draft.contextItems).toHaveLength(1);
+    expect(draft.contextItems[0]).toEqual(expect.objectContaining({ type: 'pastedText' }));
+    expect(draft.contextItems[0].text).toContain(
+      `Browser tab · Example · https://example.com/ · tabId ${TAB_ID}`,
+    );
+    expect(draft.contextItems[0].text).toContain(`tab_id "${TAB_ID}"`);
+  });
+
+  it('attaches a page snapshot chip after the menu closes and the native view restores', async () => {
+    localStorage.clear();
+    vi.mocked(browser.capturePageSnapshot).mockResolvedValue({
+      url: 'https://example.com/',
+      title: 'Example',
+      tree: '- RootWebArea "Example"\n  - button "Save" [ref=@e1]',
+      truncated: false,
+      snapshotId: 'browser-snapshot-test',
+    });
+    renderPanel(true, 'session-browser-attach');
+    await screen.findByDisplayValue('https://example.com/');
+
+    await openBrowserMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Attach page snapshot' }));
+
+    // The capture waits for the native view to reattach after the menu closes.
+    expect(screen.queryByRole('menu', { name: 'More Browser actions' })).not.toBeInTheDocument();
+    await waitFor(() => expect(browser.capturePageSnapshot).toHaveBeenCalledWith(TAB_ID));
+    await waitFor(() => {
+      const draft = JSON.parse(
+        localStorage.getItem('gian.composer.draft.v4.session-browser-attach') ?? 'null',
+      );
+      expect(draft?.contextItems?.[0]?.text ?? '').toContain('Page snapshot · Example');
+    });
+    const draft = JSON.parse(
+      localStorage.getItem('gian.composer.draft.v4.session-browser-attach') ?? 'null',
+    );
+    expect(draft.contextItems[0].text).toContain(`tabId ${TAB_ID} · snapshotId browser-snapshot-test`);
+    expect(draft.contextItems[0].text).toContain('- button "Save" [ref=@e1]');
+  });
+
+  it('uploads a viewport screenshot and attaches it as an image in the target composer', async () => {
+    localStorage.clear();
+    vi.mocked(browser.capturePageScreenshot).mockResolvedValue({
+      mimeType: 'image/png',
+      base64: btoa('png-bytes'),
+      width: 1_280,
+      height: 800,
+    });
+    mockFetch(async input => {
+      if (String(input).includes('/api/sessions/session-browser-attach/attachments')) {
+        return new Response(JSON.stringify({
+          path: '/uploads/shot.png',
+          name: 'browser-screenshot.png',
+          mime: 'image/png',
+          size: 9,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected' }), { status: 404 });
+    });
+    renderPanel(true, 'session-browser-attach');
+    await screen.findByDisplayValue('https://example.com/');
+
+    await openBrowserMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Attach screenshot' }));
+
+    await waitFor(() => expect(browser.capturePageScreenshot).toHaveBeenCalledWith(TAB_ID));
+    await waitFor(() => {
+      const draft = JSON.parse(
+        localStorage.getItem('gian.composer.draft.v4.session-browser-attach') ?? 'null',
+      );
+      expect(draft?.attachments?.[0]?.path).toBe('/uploads/shot.png');
+    });
+    const draft = JSON.parse(
+      localStorage.getItem('gian.composer.draft.v4.session-browser-attach') ?? 'null',
+    );
+    expect(draft.attachments[0]).toEqual(expect.objectContaining({
+      name: 'browser-screenshot.png',
+      mime: 'image/png',
+    }));
+  });
+
+  it('attaches nothing when the main-side capture fails', async () => {
+    localStorage.clear();
+    vi.mocked(browser.capturePageSnapshot).mockResolvedValue(null);
+    vi.mocked(browser.capturePageScreenshot).mockResolvedValue(null);
+    renderPanel(true, 'session-browser-attach');
+    await screen.findByDisplayValue('https://example.com/');
+
+    await openBrowserMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Attach page snapshot' }));
+    await waitFor(() => expect(browser.capturePageSnapshot).toHaveBeenCalledWith(TAB_ID));
+    await openBrowserMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Attach screenshot' }));
+    await waitFor(() => expect(browser.capturePageScreenshot).toHaveBeenCalledWith(TAB_ID));
+
+    await waitFor(() => expect(browser.capturePageScreenshot).toHaveBeenCalledTimes(1));
+    expect(localStorage.getItem('gian.composer.draft.v4.session-browser-attach')).toBeNull();
+  });
+
+  it('keeps the attach actions unavailable without an active Session context target', async () => {
+    renderPanel();
+    await screen.findByDisplayValue('https://example.com/');
+    await openBrowserMenu();
+    expect(screen.getByRole('menuitem', { name: 'Attach screenshot' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Attach page snapshot' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Attach tab reference' })).toBeDisabled();
+  });
+
+  it('hides the toolbar and attach actions entirely off desktop', () => {
+    delete window.gianDesktop;
+    const harness = createOperationHarness();
+    render(
+      <LocaleProvider locale="en">
+        <BrowserPanel tabId={TAB_ID} visible contextTargetSessionId="session-off-desktop" />
+      </LocaleProvider>,
+      { wrapper: harness.wrapper },
+    );
+    expect(screen.getByText('Browser is available in the Electron desktop app.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'More Browser actions' })).not.toBeInTheDocument();
   });
 
   it('forwards page titles as the Sheet tab name with a default fallback and no rename loops', async () => {

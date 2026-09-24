@@ -90,7 +90,45 @@ function MarkdownPre({ children }: { node?: unknown; children?: React.ReactNode 
   );
 }
 
-export function MarkdownText({ children }: { children: string }) {
+/** Custom <table> for rendered markdown: wraps the table in a horizontally
+ *  scrolling container so a wide table scrolls on its own (touch-friendly on
+ *  narrow viewports) instead of widening the whole transcript. */
+function MarkdownTable({ children }: { node?: unknown; children?: React.ReactNode }) {
+  return (
+    <div className="md-table-scroll">
+      <table>{children}</table>
+    </div>
+  );
+}
+
+interface MarkdownBoundaryNode {
+  type: string;
+  value?: string;
+  children?: MarkdownBoundaryNode[];
+}
+
+function remarkBoundarySpaces({ source }: { source: string }) {
+  return (tree: unknown) => {
+    const blocks = (tree as MarkdownBoundaryNode).children ?? [];
+    for (const edge of ['start', 'end'] as const) {
+      const block = edge === 'start' ? blocks[0] : blocks.at(-1);
+      // Preserve paragraph boundaries without changing indented/fenced code,
+      // lists or headings into plain text.
+      if (block?.type !== 'paragraph' || !block.children) continue;
+      const pattern = edge === 'start' ? /^[ \t]+/ : /[ \t]+$/;
+      const expected = pattern.exec(source)?.[0] ?? '';
+      if (!expected) continue;
+      const text = edge === 'start' ? block.children[0] : block.children.at(-1);
+      const present = text?.type === 'text' ? pattern.exec(text.value ?? '')?.[0] ?? '' : '';
+      if (present.length >= expected.length) continue;
+      const node = { type: 'text', value: expected.slice(present.length) };
+      if (edge === 'start') block.children.unshift(node);
+      else block.children.push(node);
+    }
+  };
+}
+
+export function MarkdownText({ children, preserveBoundarySpaces = false }: { children: string; preserveBoundarySpaces?: boolean }) {
   const makeRehype = useContext(FileRefRehypeContext);
   const rehypePlugins = useMemo(
     () => [
@@ -108,12 +146,15 @@ export function MarkdownText({ children }: { children: string }) {
   const source = useMemo(() => normalizeGfmTables(children), [children]);
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
+      remarkPlugins={preserveBoundarySpaces
+        ? [remarkGfm, remarkMath, [remarkBoundarySpaces, { source }]]
+        : [remarkGfm, remarkMath]}
       rehypePlugins={rehypePlugins as never}
       components={{
         a: LinkAnchor as never,
         pre: MarkdownPre as never,
         code: MarkdownCode as never,
+        table: MarkdownTable as never,
       }}
     >
       {source}

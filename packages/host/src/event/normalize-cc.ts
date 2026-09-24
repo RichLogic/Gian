@@ -4,6 +4,7 @@ import type {
   ApprovalRequestedData,
   ApprovalResolvedData,
   AskQuestion,
+  FileChangeData,
   FileChangeSummary,
   DisplayEvent,
 } from '@gian/shared';
@@ -28,6 +29,7 @@ export function projectCcNotification(
   raw: ProxyNotification,
   sessionId: string,
   turn: number,
+  cwd?: string,
 ): DisplayEvent[] {
   const data = (raw.params.data ?? {}) as Record<string, unknown>;
 
@@ -84,6 +86,13 @@ export function projectCcNotification(
           // unified diff so DiffCard can render real hunks instead of just
           // path + stat. Without this the diff body would render empty.
           const diff = buildCcSyntheticDiff(toolName, file.path, input);
+          const changeData: FileChangeData = {
+            files: [file],
+            ...(diff ? { diff } : {}),
+            // Record the producing root so last-turn attribution survives
+            // cross-worktree turns (FileChangeData.cwd).
+            ...(cwd ? { cwd } : {}),
+          };
           const events: DisplayEvent[] = [
             {
               session_id: sessionId,
@@ -91,9 +100,7 @@ export function projectCcNotification(
               call_id: callId,
               ts: Date.now(),
               type: 'activity.file-change',
-              data: diff
-                ? { files: [file], diff }
-                : { files: [file] },
+              data: changeData,
             },
           ];
           const plan = claudePlanWrite(toolName, input);

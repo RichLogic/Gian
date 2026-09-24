@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { stableCustomizationId } from '@gian/proxy-protocol';
+
 import { CODEX_NATIVE_COMMANDS, listCodexSlashCommands, mapSkillsResponse } from '../src/core/slash.js';
-import type { SkillsListResponse } from '../src/runtime/types.js';
+import { CodexCustomizationScanner } from '../src/core/customization.js';
+import type { SkillMetadata, SkillsListResponse } from '../src/runtime/types.js';
 
 test('mapSkillsResponse maps user/repo/system/admin scopes to wire sources', () => {
   const response: SkillsListResponse = {
@@ -34,7 +37,7 @@ test('mapSkillsResponse maps user/repo/system/admin scopes to wire sources', () 
   }
 });
 
-test('mapSkillsResponse skips disabled skills', () => {
+test('mapSkillsResponse keeps disabled skills and flags them', () => {
   const response: SkillsListResponse = {
     data: [
       {
@@ -47,8 +50,11 @@ test('mapSkillsResponse skips disabled skills', () => {
       },
     ],
   };
-  const names = mapSkillsResponse(response).map((c) => c.name);
-  assert.deepEqual(names, ['/enabled']);
+  const commands = mapSkillsResponse(response);
+  assert.deepEqual(commands.map((c) => c.name), ['/enabled', '/disabled']);
+  const byName = Object.fromEntries(commands.map((c) => [c.name, c]));
+  assert.equal(byName['/enabled']?.disabled, undefined);
+  assert.equal(byName['/disabled']?.disabled, true);
 });
 
 test('mapSkillsResponse prefers interface.shortDescription over description', () => {
@@ -136,4 +142,63 @@ test('listCodexSlashCommands lets repo/user skills override native names', () =>
   assert.equal(compact?.source, 'project');
   assert.equal(compact?.description, 'project compact skill');
   assert.equal(compact?.filePath, '/repo/.codex/skills/compact');
+});
+
+test('mapSkillsResponse customizationId is stable and matches the inventory item id', async () => {
+  const skill: SkillMetadata = {
+    name: 'review-pr',
+    description: 'Review the PR',
+    enabled: true,
+    path: '/repo/.codex/skills/review-pr',
+    scope: 'repo',
+  };
+  const response: SkillsListResponse = {
+    data: [{ cwd: '/repo', errors: [], skills: [skill] }],
+  };
+
+  const first = mapSkillsResponse(response, '/repo')[0]?.customizationId;
+  const second = mapSkillsResponse(response, '/repo')[0]?.customizationId;
+  assert.ok(first);
+  assert.equal(first, second, 'same input must produce the same id');
+  assert.match(first!, /^ci1_[a-f0-9]{32}$/);
+
+  // The id must equal the Customization inventory item id for the same
+  // skill — this is the join the web deep-link relies on.
+  class FakeRuntime {
+    async listSkills(): Promise<SkillsListResponse> {
+      return response;
+    }
+  }
+  const scanner = new CodexCustomizationScanner(new FakeRuntime() as never);
+  const inventory = await scanner.list('skill', '/repo');
+  const item = inventory.items.find((candidate) => candidate.name === 'review-pr');
+  assert.ok(item);
+  assert.equal(first, item.id);
+});
+
+test('mapSkillsResponse scopes ids like the inventory: user vs system vs workspace cwd', () => {
+  const response: SkillsListResponse = {
+    data: [
+      {
+        cwd: '/repo',
+        errors: [],
+        skills: [
+          { name: 'a', description: '', enabled: true, path: '/u/a', scope: 'user' },
+          { name: 'b', description: '', enabled: true, path: '/r/b', scope: 'repo' },
+          { name: 'c', description: '', enabled: true, path: '/s/c', scope: 'system' },
+        ],
+      },
+    ],
+  };
+  const byName = Object.fromEntries(mapSkillsResponse(response, '/repo').map((c) => [c.name, c]));
+  const expected = (scopeKey: string, path: string, name: string) => stableCustomizationId({
+    provider: 'codex',
+    kind: 'skill',
+    scopeKey,
+    canonicalSourceLocator: path,
+    nativeIdentity: name,
+  });
+  assert.equal(byName['/a']?.customizationId, expected('user', '/u/a', 'a'));
+  assert.equal(byName['/b']?.customizationId, expected('workspace:/repo', '/r/b', 'b'));
+  assert.equal(byName['/c']?.customizationId, expected('system', '/s/c', 'c'));
 });

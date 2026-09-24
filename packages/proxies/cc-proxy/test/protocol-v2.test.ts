@@ -869,6 +869,11 @@ test('Claude gian.proxy/2 implements billing-safe Side Chat and exact JSONL Fork
       parentStreamId: streamId,
       sidechatId: 'side-1',
     })));
+    for (const id of ['resume-created', 'resume-created-again']) {
+      assert.deepEqual(await adapter.handle(request(id, 'sidechat.resume', {
+        parentSessionId: 'host-session', sidechatId: 'side-1', resumeRef: sidechat.sidechat.resumeRef,
+      })), sidechat);
+    }
     assert.deepEqual(sidechat.sidechat.anchor, {
       type: 'turn',
       turnId: 'host-turn-1',

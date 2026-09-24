@@ -272,10 +272,12 @@ function githubReleaseBrokerSocketPath(): string {
 async function startGitHubReleaseBroker(): Promise<void> {
   if (githubReleaseBroker) return;
   const service = getGitHubAuthService();
+  const catalogPolicy = officialCatalogSourcePolicy();
   const broker = new GitHubReleaseMetadataBroker({
     socketPath: githubReleaseBrokerSocketPath(),
     allowedRepository: releaseRepository(),
-    allowedCatalogRepository: officialCatalogSourcePolicy().repository,
+    allowedCatalogRepository: catalogPolicy.repository,
+    allowedArtifactRepositories: catalogPolicy.artifactRepositories,
     fetchReleaseMetadata: (request, signal) => service.fetchReleaseMetadata(request, signal),
   });
   await broker.start();
@@ -305,6 +307,10 @@ async function startRemoteIdentityBroker(): Promise<void> {
   if (remoteIdentityBroker) return;
   const broker = new RemoteIdentityBroker({
     socketPath: remoteIdentityBrokerSocketPath(),
+    githubAccountId: async () => {
+      const state = await getGitHubAuthService().getState();
+      return state.status === 'signed_in' ? String(state.user.id) : null;
+    },
     store: new FileRemoteIdentityStore({
       path: join(app.getPath('userData'), 'remote-identity.json'),
       encryptionAvailable: () => safeStorage.isEncryptionAvailable(),
@@ -375,6 +381,7 @@ function changeMainWindowZoom(direction: -1 | 1): number {
 }
 
 function startProductionHost(): void {
+  if (desktopReplacementPending()) return;
   if (!app.isPackaged || !desktopToken || !desktopInstanceId) return;
   if (!environmentSelected) return;
   if (managedHost && managedHost.exitCode === null && !managedHost.killed) return;
@@ -443,6 +450,7 @@ async function ensureMainWindow(): Promise<BrowserWindow> {
 }
 
 async function activateDesktopNavigation(target: DesktopNavigationTarget): Promise<void> {
+  if (desktopReplacementPending()) return;
   pendingNavigationTarget = target;
   const window = await ensureMainWindow();
   if (window.isMinimized()) window.restore();
@@ -536,6 +544,7 @@ function initializeDesktopServices(): void {
     logger: {
       warn: message => { console.warn(message); },
     },
+    beforeInstall: disposeScreenshotController,
   });
   appUpdateController.subscribe(state => {
     if (rendererCanNavigate()) mainWindow?.webContents.send('desktop:updater-state', state);
@@ -562,10 +571,31 @@ function stopDesktopServicesForExit(): void {
   githubAuthService?.cancel();
 }
 
+function desktopReplacementPending(): boolean {
+  return managedHostReplacementGate.isDraining() || managedHostReplacementGate.isArmed();
+}
+
 function resumeDesktopServicesAfterCancelledExit(restartManagedHost: boolean): void {
   if (restartManagedHost) startProductionHost();
+  initializeScreenshotController();
   attentionClient?.start();
   appUpdateController?.start();
+}
+
+function disposeScreenshotController(): void {
+  // macOS quitAndInstall closes windows BEFORE before-quit. A prewarmed
+  // screenshot panel is non-closable, so waiting for before-quit deadlocks it.
+  screenshotController?.dispose();
+  screenshotController = null;
+}
+
+function initializeScreenshotController(): void {
+  if (screenshotController) return;
+  screenshotController = createScreenshotController();
+  screenshotController.registerShortcut();
+  void screenshotController.warmUp().catch(error => {
+    console.warn('[desktop] screenshot overlay warm-up failed', error);
+  });
 }
 
 function showUnsafeExitBlocked(): void {
@@ -580,7 +610,7 @@ function showReplacementStartFailed(): void {
   console.error('[desktop] replacement could not be started after the managed Host exited');
   dialog.showErrorBox(
     'Gian could not restart',
-    'The managed Host exited, but Gian could not start its replacement. Open Gian again manually.',
+    'Gian could not complete the restart or update. Its services have been restored. Check Updates for an error, then try again.',
   );
 }
 
@@ -597,9 +627,9 @@ function showReplacementBusy(): void {
  * exited. Electron's relaunch helper and Squirrel updater both remember their
  * launch intent even when a later before-quit event is prevented.
  */
-function runAfterManagedHostExit(startReplacement: () => boolean): Promise<boolean> {
-  if (managedHostReplacementGate.isArmed()) return Promise.resolve(true);
+function runAfterManagedHostExit(startReplacement: () => boolean | Promise<boolean>): Promise<boolean> {
   if (replacementOperation) return replacementOperation;
+  if (managedHostReplacementGate.isArmed()) return Promise.resolve(true);
   // A normal OS quit owns the existing drain attempt. Do not attach a second
   // replacement continuation to the same process exit.
   if (managedHostQuitGate.isDraining()) {
@@ -624,6 +654,12 @@ function runAfterManagedHostExit(startReplacement: () => boolean): Promise<boole
     // The Host was confirmed gone, but the updater/relauncher itself failed.
     // Restore a packaged Host so the current window does not become stranded.
     resumeDesktopServicesAfterCancelledExit(hadLiveManagedHost);
+    // Native installation may have closed the main window before failing.
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      void ensureMainWindow().catch(error => {
+        console.error('[desktop] failed to restore window after cancelled replacement', error);
+      });
+    }
     showReplacementStartFailed();
     return false;
   }).finally(() => {
@@ -640,7 +676,9 @@ async function openExternal(candidate: string): Promise<void> {
 // Match the web shell's theme backgrounds (styles/tokens.css): light is
 // #f7f7f5, dark is oklch(0.140 0.004 265) ≈ #08090b (Air-matched ramp). A
 // hardcoded light background made dark-theme users see a bright flash on
-// launch and reload before the renderer applied body[data-theme].
+// launch and reload before the renderer applied body[data-theme]. macOS
+// skips this entirely: createMainWindow uses a fully transparent base over
+// the system vibrancy instead, so this only serves non-macOS launches.
 function windowBackground(): string {
   return nativeTheme.shouldUseDarkColors ? '#08090b' : '#f7f7f5';
 }
@@ -841,6 +879,7 @@ async function showUnavailable(
 }
 
 async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
+  if (desktopReplacementPending()) return false;
   if (loadingSurface?.window === window) return loadingSurface.promise;
   if (mainWindow === window) screenshotController?.invalidateTarget();
 
@@ -1003,7 +1042,17 @@ async function createMainWindow(): Promise<BrowserWindow> {
     minHeight: 640,
     show: false,
     title: displayName,
-    backgroundColor: windowBackground(),
+    // macOS gets the liquid-glass frame: a fully transparent base over the
+    // system under-window vibrancy; the renderer's --bg-frame carries the
+    // theme tint at the user's opacity. Other platforms keep the
+    // theme-matched opaque flash color.
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : windowBackground(),
+    ...(process.platform === 'darwin'
+      // Initial material; the renderer corrects both material and
+      // nativeTheme.themeSource to the resolved theme via
+      // desktop:set-frame-vibrancy right after load.
+      ? { vibrancy: 'under-window' as const, visualEffectState: 'active' as const }
+      : {}),
     webPreferences: {
       preload: preloadPath,
       additionalArguments: [
@@ -1305,6 +1354,28 @@ ipcMain.handle('desktop:set-dock-icon', (event, dataUrl: unknown) => {
   return true;
 });
 
+// The glass frame's vibrancy follows the resolved APP theme, not the OS:
+// themeSource pins the window material's appearance (adaptive materials like
+// 'sidebar'/'under-window' otherwise track the OS — OS dark muddied
+// Light/Warm, OS light washed Dark to grey; Owner 2026-09-24), and 'sidebar'
+// gives Dark its deep glass while 'under-window' stays a light frost.
+// A System app theme is the exception: themeSource stays 'system' so the
+// renderer's prefers-color-scheme keeps tracking the OS.
+ipcMain.handle('desktop:set-frame-vibrancy', (event, theme: unknown, system: unknown) => {
+  if (
+    process.platform !== 'darwin'
+    || !mainWindow
+    || event.sender !== mainWindow.webContents
+    || (theme !== 'light' && theme !== 'warm' && theme !== 'dark')
+    || typeof system !== 'boolean'
+  ) {
+    return false;
+  }
+  nativeTheme.themeSource = system ? 'system' : theme === 'dark' ? 'dark' : 'light';
+  mainWindow.setVibrancy(theme === 'dark' ? 'sidebar' : 'under-window');
+  return true;
+});
+
 ipcMain.handle('desktop:navigation:ready', event => {
   if (!isMainWindowSender(event.sender) || !rendererDocumentReady) return null;
   rendererReady = true;
@@ -1540,6 +1611,51 @@ ipcMain.handle('desktop:browser:capture-frame', (event, tabId: unknown) => {
   return browserController?.captureFrame(tabId) ?? null;
 });
 
+// Composer-context captures run through the Browser automation service so the
+// renderer receives the same bounded, main-sanitized artifacts the agent's
+// browser.snapshot / browser.screenshot tools produce (ADR-0039). Any failure
+// (no page, DevTools/inspection holding the page, capture error) becomes null.
+ipcMain.handle('desktop:browser:capture-page-snapshot', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  if (!browserAutomationService) return null;
+  try {
+    const result = await browserAutomationService.call(
+      'browser.snapshot',
+      { tab_id: tabId },
+      { callerId: 'browser-panel', sessionId: null },
+    );
+    return {
+      url: result.url,
+      title: result.title,
+      tree: result.tree,
+      truncated: result.truncated,
+      snapshotId: result.snapshot_id,
+    };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('desktop:browser:capture-page-screenshot', async (event, tabId: unknown) => {
+  if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return null;
+  if (!browserAutomationService) return null;
+  try {
+    const result = await browserAutomationService.call(
+      'browser.screenshot',
+      { tab_id: tabId },
+      { callerId: 'browser-panel', sessionId: null },
+    );
+    return {
+      mimeType: result.mime_type,
+      base64: result.base64,
+      width: result.width,
+      height: result.height,
+    };
+  } catch {
+    return null;
+  }
+});
+
 ipcMain.handle('desktop:browser:open-external', async (event, tabId: unknown) => {
   if (!isMainWindowSender(event.sender) || !isBrowserTabId(tabId)) return false;
   return browserController?.openExternal(tabId) ?? false;
@@ -1592,11 +1708,13 @@ ipcMain.handle('desktop:github-auth:start', async event => {
   return result;
 });
 
-ipcMain.handle('desktop:github-auth:finish', event => {
+ipcMain.handle('desktop:github-auth:finish', async event => {
   if (!isMainWindowSender(event.sender)) {
     return { ok: false, error: 'not_started' };
   }
-  return getGitHubAuthService().finish();
+  const result = await getGitHubAuthService().finish();
+  if (result.ok) remoteIdentityBroker?.resumeAccountSessions();
+  return result;
 });
 
 ipcMain.handle('desktop:github-auth:cancel', event => {
@@ -1604,7 +1722,10 @@ ipcMain.handle('desktop:github-auth:cancel', event => {
 });
 
 ipcMain.handle('desktop:github-auth:sign-out', async event => {
-  if (isMainWindowSender(event.sender)) await getGitHubAuthService().signOut();
+  if (isMainWindowSender(event.sender)) {
+    try { await remoteIdentityBroker?.revokeAccountSessions(); }
+    finally { await getGitHubAuthService().signOut(); }
+  }
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -1612,6 +1733,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    if (desktopReplacementPending()) return;
     if (!environmentSelected) return;
     if (screenshotController?.getState().capturing) return;
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -1669,6 +1791,8 @@ if (!hasSingleInstanceLock) {
     attentionClient?.start();
 
     app.on('activate', () => {
+      // Do not recreate windows or restart the Host during native staging.
+      if (desktopReplacementPending()) return;
       if (screenshotController?.getState().capturing) return;
       if (!mainWindow || mainWindow.isDestroyed()) void ensureMainWindow();
     });
@@ -1692,8 +1816,7 @@ app.on('before-quit', event => {
   }
   stopDesktopServicesForExit();
   const disposeDesktopResources = () => {
-    screenshotController?.dispose();
-    screenshotController = null;
+    disposeScreenshotController();
     const broker = githubReleaseBroker;
     githubReleaseBroker = null;
     if (broker) void broker.close();
@@ -1718,6 +1841,10 @@ app.on('before-quit', event => {
   });
   if (preventQuit) event.preventDefault();
   else disposeDesktopResources();
+});
+
+app.on('will-quit', () => {
+  appUpdateController?.confirmInstallQuit();
 });
 
 function isBrowserBounds(value: unknown): value is GianBrowserBounds {
@@ -1842,10 +1969,12 @@ function normalizeScreenshotTarget(value: unknown): GianScreenshotTarget | null 
   if (
     (scope['kind'] !== 'workspace' && scope['kind'] !== 'task')
     || !isScreenshotText(scope['id'], 512)
+    || (scope['environmentId'] !== undefined && !isScreenshotText(scope['environmentId'], 128))
   ) return null;
   return {
     kind: 'new-session',
-    scope: { kind: scope['kind'], id: scope['id'] },
+    scope: { kind: scope['kind'], id: scope['id'],
+      ...(typeof scope['environmentId'] === 'string' ? { environmentId: scope['environmentId'] } : {}) },
     label: candidate['label'],
   };
 }

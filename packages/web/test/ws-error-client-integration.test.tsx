@@ -74,6 +74,8 @@ function ClientReducerHarness({
     Record<string, PlanLifecycleState>
   >(initialPlanStateBySession);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(initialActiveSessionId);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeSubtaskId, setActiveSubtaskId] = useState<string | null>(null);
   const sessionsRef = useRef<Session[]>(initialSessions);
   const itemsBySessionRef = useRef<Record<string, TranscriptItem[]>>(initialItemsBySession);
   itemsBySessionRef.current = itemsBySession;
@@ -109,8 +111,8 @@ function ClientReducerHarness({
     setSystemConfig: ignoreState,
     setRunner: ignoreState,
     setActiveSessionId,
-    setActiveTaskId: ignoreState,
-    setActiveSubtaskId: ignoreState,
+    setActiveTaskId,
+    setActiveSubtaskId,
     setItemsBySession,
     setPendingBySession,
     setQueueBySession: ignoreState,
@@ -134,6 +136,8 @@ function ClientReducerHarness({
             {JSON.stringify({
               authed,
               activeSessionId,
+              activeTaskId,
+              activeSubtaskId,
               pendingFirstMessage: pendingFirstMessageRef.current,
               itemsBySession,
               pendingBySession,
@@ -169,6 +173,20 @@ function snapshot(): Snapshot {
 }
 
 describe('WS-003: Host dispatch failure through the real Web client chain', () => {
+  it('selects a created subtask and its Task together with the composer Session', async () => {
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops} />);
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      const session = sessionContractFixture({ id: 'subtask-b', type: 'subtask', task_id: 'task-b' });
+      act(() => socket.fakeMessage({ type: 'session:created', origin: 'task-create', session }));
+      expect(snapshot()).toMatchObject({ activeSessionId: 'subtask-b', activeTaskId: 'task-b', activeSubtaskId: 'subtask-b' });
+    } finally { view.unmount(); ops.dispose(); ws.disconnect(); }
+  });
+
   it('opens the locally requested Fork when its canonical session:created arrives', async () => {
     const parent = sessionContractFixture();
     const ws = new GianWs('ws://test.invalid/ws', () => 'token');

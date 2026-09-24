@@ -3,10 +3,11 @@ import { test } from 'node:test';
 
 import { AUTH_PROTOCOL, PAIRING_TTL_MS } from '@gian/remote-protocol';
 
-import { enrollHost, makeRemoteTestApp, pairDevice } from './fixture.js';
+import { enrollHost, makeRemoteTestApp, pairDevice, withControllerAccount } from './fixture.js';
 
 test('QR nonce and short code claim the same grant; reuse and expiry fail', async () => {
-  const { fetch, clock, handle } = await makeRemoteTestApp();
+  const { fetch: unauthenticatedFetch, clock, handle } = await makeRemoteTestApp();
+  const fetch = await withControllerAccount(unauthenticatedFetch);
   const host = await enrollHost(fetch);
   const created = await (await fetch('/api/v1/host/pairings', {
     method: 'POST',
@@ -86,7 +87,8 @@ test('QR nonce and short code claim the same grant; reuse and expiry fail', asyn
 });
 
 test('pairing failure cap and reject prevent session issuance', async () => {
-  const { fetch, handle } = await makeRemoteTestApp();
+  const { fetch: unauthenticatedFetch, handle } = await makeRemoteTestApp();
+  const fetch = await withControllerAccount(unauthenticatedFetch);
   const host = await enrollHost(fetch);
   const created = await (await fetch('/api/v1/host/pairings', {
     method: 'POST',
@@ -205,7 +207,8 @@ test('pairing failure cap and reject prevent session issuance', async () => {
 });
 
 test('pairing claim race freezes the grant once', async () => {
-  const { fetch, handle } = await makeRemoteTestApp();
+  const { fetch: unauthenticatedFetch, handle } = await makeRemoteTestApp();
+  const fetch = await withControllerAccount(unauthenticatedFetch);
   const host = await enrollHost(fetch);
   const created = await (await fetch('/api/v1/host/pairings', {
     method: 'POST',

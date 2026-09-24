@@ -32,6 +32,12 @@
 - Develop, integrate fixes, build test packages and accept the version on its
   release line, for example `release/0.6.2`. Task branches/worktrees remain useful
   for isolation; their integration target is that version branch.
+- `release/` source previews may explicitly use the installed GianDev data
+  directory (`GIAN_DEV_DATA_DIR="$HOME/.gian-dev"`); main/task/detached previews
+  remain isolated from it. Production `~/.gian` stays forbidden to all source
+  previews. Only one Host may own shared GianDev data at a time. Data/profile
+  selection is separate from ports and from permission to run or restart App
+  previews; see [startup](docs/giandev-startup.md) and ADR-0090.
 - Only pushes to `release/X.Y.Z` automatically run development CI (three numeric
   components, no `v` prefix). Main, task branches and PRs do not trigger it.
   Successful release-branch CI triggers a GianDev test package from the same SHA;

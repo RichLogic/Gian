@@ -1,7 +1,4 @@
-// Remote Web link behavior: the degradation contract. Remote has no in-app
-// browser, no relative-link file index and no editor-scheme href factory —
-// those behaviors stay null and the shared LinkAnchor must degrade VISIBLY
-// (inert span + tooltip), never a dead <a> and never a swallowed click.
+// Remote file links resolve against the execution worktree, not the browser.
 
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -15,10 +12,10 @@ function renderWithRemoteBehavior(ui: React.ReactElement, openFile = vi.fn()) {
 }
 
 describe('createRemoteLinkBehavior', () => {
-  it('declares web/relative/file-href as unavailable', () => {
+  it('keeps local browser/editor integration unavailable but supports remote relative files', () => {
     const behavior = createRemoteLinkBehavior({ openFile: vi.fn() });
     expect(behavior.openWebUrl).toBeNull();
-    expect(behavior.openRelative).toBeNull();
+    expect(behavior.openRelative).toBeTypeOf('function');
     expect(behavior.fileHref).toBeNull();
   });
 
@@ -34,14 +31,10 @@ describe('createRemoteLinkBehavior', () => {
     expect(openFile).toHaveBeenCalledWith('/repo/a.ts', undefined);
   });
 
-  it('renders relative links as inert spans with an explanatory tooltip (not a swallowed click)', () => {
-    renderWithRemoteBehavior(<LinkAnchor href="./missing.md">missing</LinkAnchor>);
-    expect(screen.queryByRole('link')).toBeNull();
-    const span = screen.getByText('missing');
-    expect(span.tagName).toBe('SPAN');
-    expect(span.className).toContain('link-inert');
-    expect(span.getAttribute('title')).toContain('./missing.md');
-    expect(span.getAttribute('title')).toContain('not available');
+  it('resolves relative links through the remote transport, including missing-file errors', () => {
+    const openFile = renderWithRemoteBehavior(<LinkAnchor href="./missing.md">missing</LinkAnchor>);
+    fireEvent.click(screen.getByText('missing'));
+    expect(openFile).toHaveBeenCalledWith('./missing.md');
   });
 
   it('keeps web links as plain _blank anchors (Remote Web runs in a real browser tab)', () => {

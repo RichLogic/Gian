@@ -100,6 +100,30 @@ function renderDeletedAgentSession(status: 'done' | 'running' = 'done') {
   return handlers;
 }
 
+function renderDisabledAgentSession() {
+  const handlers = callbacks();
+  renderWithOperations(
+    <LocaleProvider locale="en">
+      <SessionMain
+        session={sessionContractFixture({
+          id: 'session-disabled-agent',
+          status: 'done',
+          agent_id: 'agent-off',
+          agent_name: 'Paused Codex',
+          proxy_plugin_id: 'codex',
+        })}
+        workspace={workspace}
+        items={[]}
+        hydrated
+        pending={false}
+        queue={[]}
+        {...handlers}
+      />
+    </LocaleProvider>,
+  );
+  return handlers;
+}
+
 describe('deleted Agent conversation recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -154,5 +178,35 @@ describe('deleted Agent conversation recovery', () => {
     expect(within(dialog).getByTestId('deleted-agent-option-codex-current')).toBeDisabled();
     expect(within(dialog).getByText(/active Turn or Interaction/)).toBeVisible();
     expect(api.rebindDeletedSessionAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('disabled Agent conversation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('keeps history readable behind a banner and blocks new input', async () => {
+    vi.mocked(api.loadAgents).mockResolvedValue([
+      { ...agent('agent-off', 'Paused Codex', 'codex', 'codex'), enabled: false },
+    ]);
+    renderDisabledAgentSession();
+
+    const banner = await screen.findByTestId('agent-disabled-banner');
+    expect(banner).toHaveTextContent(/This Agent is disabled/);
+    expect(banner).toHaveTextContent(/cannot continue/);
+    // Not the deleted-Agent repair dialog.
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+  });
+
+  it('renders no banner while the bound Agent is enabled', async () => {
+    vi.mocked(api.loadAgents).mockResolvedValue([
+      agent('agent-off', 'Paused Codex', 'codex', 'codex'),
+    ]);
+    renderDisabledAgentSession();
+
+    await waitFor(() => expect(api.loadAgents).toHaveBeenCalled());
+    expect(screen.queryByTestId('agent-disabled-banner')).not.toBeInTheDocument();
   });
 });

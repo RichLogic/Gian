@@ -7,6 +7,7 @@ import { MemoryEncryptedHostCache } from '../../remote-web/src/cache/encrypted-c
 import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/identity.js';
 import { DeviceRelayClient } from '../../remote-web/src/transport/relay-client.js';
 import { makeTestApp } from './fixtures/test-app.js';
+import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promise<T> {
   const started = Date.now();
@@ -35,6 +36,7 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
   }
   const { handle, fetch } = await makeRemoteTestApp();
   const listened = await listenRemoteApp(handle);
+  await authenticatedRemoteFixture(fetch, hostApp.remoteIdentity, listened.url);
   const identity = new MemoryBrowserIdentityStore();
   let controller: ReturnType<typeof createProductionController> | undefined;
   const relays: DeviceRelayClient[] = [];
@@ -78,6 +80,10 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
       platform: 'macOS',
       userAgent: 'GianRemoteSystemTest',
     });
+    controller.actions.startGitHubLogin!();
+    await waitUntil(() => controller!.state.account?.userCode);
+    controller.actions.pollGitHubLogin!();
+    await waitUntil(() => controller!.state.account?.status === 'signed_in');
     controller.actions.submitPairingCode(grant.code);
     const pending = await waitUntil(() => (
       hostApp.app.remote.settingsState().pending_pairings

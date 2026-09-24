@@ -5,6 +5,7 @@ import type { Db } from '../storage/db.js';
 import { assertExactRemoteGrants, defaultRemoteDeviceGrants } from './grants.js';
 
 export interface RemoteDeviceRecord {
+  accountId?: string | null;
   id: string;
   publicKey: string;
   name: string;
@@ -19,6 +20,7 @@ export interface RemoteDeviceRecord {
 }
 
 interface DeviceRow {
+  account_id: string | null;
   id: string;
   public_key: string;
   name: string;
@@ -49,6 +51,10 @@ export class RemoteDeviceStore {
   markRevocationSynced(id: string): void {
     this.db.prepare('UPDATE remote_devices SET revoke_synced_at = ? WHERE id = ? AND revoked_at IS NOT NULL')
       .run(new Date().toISOString(), id);
+  }
+
+  bindAccount(id: string, accountId: string): void {
+    this.db.prepare('UPDATE remote_devices SET account_id = ? WHERE id = ? AND revoked_at IS NULL').run(accountId, id);
   }
 
   revocationSynced(id: string): boolean {
@@ -141,6 +147,7 @@ export class RemoteDeviceStore {
 
 function project(row: DeviceRow): RemoteDeviceRecord {
   return {
+    accountId: row.account_id,
     id: row.id,
     publicKey: row.public_key,
     name: row.name,

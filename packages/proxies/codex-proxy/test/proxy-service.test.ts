@@ -71,6 +71,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
   readonly injectCalls: Array<{ threadId: string; items: Array<Record<string, unknown>> }> = [];
   readonly archiveCalls: string[] = [];
   readonly readThreadCalls: string[] = [];
+  readonly unsubscribeCalls: string[] = [];
   failReadThreadRuntimeWide = false;
   nativeThreads: CodexNativeThreadSummary[] = [];
   readonly listNativeThreadsCalls: Array<string | undefined> = [];
@@ -243,7 +244,7 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     }];
   }
 
-  async listSkills(_cwd?: string) {
+  async listSkills(_cwd?: string): ReturnType<CodexRuntime['listSkills']> {
     return { data: [] };
   }
 
@@ -252,7 +253,8 @@ class FakeRuntime extends EventEmitter implements CodexRuntime {
     return this.nativeThreads;
   }
 
-  async unsubscribeThread(_threadId: string) {
+  async unsubscribeThread(threadId: string) {
+    this.unsubscribeCalls.push(threadId);
     return {};
   }
 
@@ -634,12 +636,18 @@ test('gian.proxy/2 session.close permits Force Recover to reattach the same Host
       sessionId: createParams.sessionId,
       streamId: first.session.streamId,
     }));
+    assert.deepEqual(await adapter.handle(v2Request('3-repeat', 'session.close', {
+      sessionId: createParams.sessionId, streamId: first.session.streamId,
+    })), { ok: true });
 
     const recovered = resultSchemas['session.create'].parse(
       await adapter.handle(v2Request('4', 'session.create', createParams)),
     );
     assert.notEqual(recovered.session.streamId, first.session.streamId);
     assert.equal(recovered.session.nativeSession?.id, 'thread-recover');
+    await assert.rejects(adapter.handle(v2Request('stale-close', 'session.close', {
+      sessionId: createParams.sessionId, streamId: first.session.streamId,
+    })), /stale/i);
 
     const started = resultSchemas['turn.start'].parse(await adapter.handle(v2Request('5', 'turn.start', {
       sessionId: createParams.sessionId,
@@ -992,6 +1000,44 @@ test('gian.proxy/2 catalog omits Fast when model/list advertises no Fast tier', 
     );
     assert.equal(catalog.specialCatalogs?.fast, undefined);
     assert.equal(catalog.configOptions.some((option) => option.id === 'service_tier'), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('gian.proxy/2 catalog slash commands carry disabled and customizationId through the strict schema', async () => {
+  const harness = await createHarness();
+  const adapter = new CodexProtocolV2Adapter(harness.service, '0.2.2', () => undefined);
+  try {
+    harness.runtime.listSkills = async () => ({
+      data: [{
+        cwd: '/tmp/work',
+        errors: [],
+        skills: [
+          { name: 'on-skill', description: 'enabled', enabled: true, path: '/tmp/work/.codex/skills/on-skill', scope: 'repo' as const },
+          { name: 'off-skill', description: 'disabled', enabled: false, path: '/tmp/work/.codex/skills/off-skill', scope: 'repo' as const },
+        ],
+      }],
+    });
+    await adapter.handle(v2Request('slash-initialize', 'initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    }));
+    // Strict parse here is part of the assertion: the additive fields must
+    // survive the catalog contract validation.
+    const catalog = resultSchemas['catalog.list'].parse(
+      await adapter.handle(v2Request('slash-catalog', 'catalog.list')),
+    );
+    const byName = new Map(catalog.slashCommands.map(command => [command.name, command]));
+    const on = byName.get('/on-skill');
+    const off = byName.get('/off-skill');
+    assert.ok(on, 'enabled skill must appear in the catalog');
+    assert.ok(off, 'disabled skill must appear in the catalog');
+    assert.equal(on.disabled, undefined);
+    assert.equal(off.disabled, true);
+    assert.match(on.customizationId ?? '', /^ci1_[a-f0-9]{32}$/);
+    assert.match(off.customizationId ?? '', /^ci1_[a-f0-9]{32}$/);
+    assert.notEqual(on.customizationId, off.customizationId);
   } finally {
     await harness.cleanup();
   }
@@ -1471,6 +1517,40 @@ test('non-retryable Codex runtime errors remain terminal', async () => {
   } finally {
     await harness.cleanup();
   }
+});
+
+for (const options of [{ ephemeral: true }, { textOnly: true }]) {
+  test(`ephemeral translation close never reads history: ${JSON.stringify(options)}`, async () => {
+    const harness = await createHarness();
+    try {
+      const other = await harness.service.createSession({ cwd: '/tmp/ordinary' });
+      const created = await harness.service.createSession({ cwd: '/tmp/translation', ...options });
+      const started = await harness.service.startTurn({ sessionId: created.session.id,
+        input: [{ type: 'text', text: 'translate only this' }] });
+      harness.runtime.readThread = async () => { throw new Error('ephemeral threads do not support includeTurns'); };
+      await harness.service.closeSession({ sessionId: created.session.id, force: true });
+      assert.deepEqual(harness.runtime.interruptCalls, [{ threadId: created.session.threadId, turnId: started.turn.id }]);
+      assert.deepEqual(harness.runtime.unsubscribeCalls, [created.session.threadId]);
+      assert.throws(() => harness.service.getSession({ sessionId: created.session.id }), /not found/);
+      assert.equal(harness.service.getSession({ sessionId: other.session.id }).session.threadId, other.session.threadId);
+    } finally { await harness.cleanup(); }
+  });
+}
+
+test('ephemeral close tolerates an interrupt race but never hides failed thread release', async () => {
+  const harness = await createHarness();
+  try {
+    const created = await harness.service.createSession({ cwd: '/tmp/translation', ephemeral: true });
+    await harness.service.startTurn({ sessionId: created.session.id, input: [{ type: 'text', text: 'translate' }] });
+    harness.runtime.interruptTurn = async () => { throw new Error('turn already ended'); };
+    harness.runtime.unsubscribeThread = async () => { throw new Error('unsubscribe failed'); };
+    await assert.rejects(harness.service.closeSession({ sessionId: created.session.id, force: true }), /unsubscribe failed/);
+    assert.equal(harness.service.getSession({ sessionId: created.session.id }).session.threadId, created.session.threadId);
+    assert.deepEqual(harness.runtime.readThreadCalls, []);
+    harness.runtime.unsubscribeThread = async () => ({});
+    await harness.service.closeSession({ sessionId: created.session.id, force: true });
+    assert.throws(() => harness.service.getSession({ sessionId: created.session.id }), /not found/);
+  } finally { await harness.cleanup(); }
 });
 
 test('force close interrupts the runtime-owned turn after proxy turn state diverges', async () => {
@@ -2498,6 +2578,12 @@ test('gian.proxy/2 Codex adapter implements durable Side Chat and exact native f
       parentStreamId: parent.session.streamId,
       sidechatId: 'side-1',
     })));
+    for (const id of ['resume-created', 'resume-created-again']) {
+      assert.deepEqual(await adapter.handle(v2Request(id, 'sidechat.resume', {
+        parentSessionId: 'parent', sidechatId: 'side-1', resumeRef: sidechat.sidechat.resumeRef,
+      })), sidechat);
+    }
+    assert.equal(harness.runtime.forkCalls.length, 1, 'resume must not create another native fork');
     assert.equal(sidechat.sidechat.anchor.type, 'empty');
     assert.equal(sidechat.sidechat.parentSessionId, 'parent');
     assert.equal(harness.runtime.forkCalls[0]?.threadId, 'thread-1');

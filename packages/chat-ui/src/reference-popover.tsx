@@ -207,6 +207,11 @@ export const REFERENCE_ICONS = {
       <path d="M9 1.75v3h3" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   ),
+  session: (
+    <svg viewBox="0 0 16 16" fill="none">
+      <path d="M2.25 3.25h11.5v8H8.75l-3.5 3v-3h-3z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  ),
 };
 
 function clipLines(text: string): string {
@@ -214,8 +219,8 @@ function clipLines(text: string): string {
 }
 
 /** Floating detail card for a context reference (browser element, pasted
- *  text, folder, file). Used by the transcript's context chips and reference
- *  documents. */
+ *  text, folder, file, referenced conversation). Used by the transcript's
+ *  context chips and reference documents. */
 export function ContextReferencePopover({
   item,
   anchor,
@@ -236,11 +241,13 @@ export function ContextReferencePopover({
   const t = useChatUiT();
   const title = item.type === 'folder' || item.type === 'file'
     ? item.name
-    : item.type === 'browserElement'
-      ? t('composer.context.browserElement')
-      : item.origin === 'selection'
-        ? t('composer.context.quote')
-        : t('composer.context.pastedText');
+    : item.type === 'session'
+      ? item.title
+      : item.type === 'browserElement'
+        ? t('composer.context.browserElement')
+        : item.origin === 'selection'
+          ? t('composer.context.quote')
+          : t('composer.context.pastedText');
   return (
     <ReferencePopover anchor={anchor} anchorEl={anchorEl} onClose={onClose}
                       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
@@ -276,6 +283,11 @@ export function ContextReferencePopover({
         )}
         {item.type === 'file' && (
           <span className="ref-pop-url" title={item.path}>{item.path}</span>
+        )}
+        {item.type === 'session' && (
+          <span className="ref-pop-url">
+            {item.workspaceName ?? t('composer.context.session')}
+          </span>
         )}
       </div>
     </ReferencePopover>

@@ -1,4 +1,4 @@
-import type { SystemConfig } from '@gian/shared';
+import type { ResolvedTheme } from './theme.js';
 import { desktopBridge } from './desktop-bridge.js';
 
 export const GIAN_ICON_VIEWBOX = 1254;
@@ -23,14 +23,14 @@ export const GIAN_DRAGON_WHISKER_BOTTOM_PATH = 'M 985.028 407.574 C 968.818 415.
 const ICON_HUE = 320;
 const ICON_CHROMA = 0.14;
 
-const THEME_LIGHTNESS: Record<SystemConfig['theme'], [number, number, number]> = {
+const THEME_LIGHTNESS: Record<ResolvedTheme, [number, number, number]> = {
   light: [0.66, 0.74, 0.58],
   warm: [0.64, 0.73, 0.56],
   dark: [0.70, 0.80, 0.62],
 };
 
 export function gianIconGradient(
-  theme: SystemConfig['theme'],
+  theme: ResolvedTheme,
 ): [string, string, string] {
   const [l1, l2, l3] = THEME_LIGHTNESS[theme];
   const outerChroma = (ICON_CHROMA + 0.04).toFixed(2);
@@ -43,7 +43,7 @@ export function gianIconGradient(
 }
 
 export function buildGianIconSvg(
-  theme: SystemConfig['theme'],
+  theme: ResolvedTheme,
   development = false,
 ): string {
   const [g1, g2, g3] = gianIconGradient(theme);
@@ -75,7 +75,7 @@ function updateFavicon(svg: string): void {
 }
 
 function renderDockIcon(
-  theme: SystemConfig['theme'],
+  theme: ResolvedTheme,
   development: boolean,
 ): string | null {
   const size = 512;
@@ -137,7 +137,7 @@ function renderDockIcon(
 }
 
 export function applyGianIconAppearance(
-  theme: SystemConfig['theme'],
+  theme: ResolvedTheme,
 ): void {
   const bridge = desktopBridge();
   const development = bridge?.appVariant === 'development';

@@ -4,7 +4,9 @@
  */
 
 import { createInterface } from 'node:readline';
-import { isAbsolute } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
 import { planRuntimeInstallation } from '../runtime/install.js';
 import { DshV2Adapter } from '../protocol/v2-adapter.js';
@@ -13,7 +15,21 @@ import { discoverDshRuntimes, probeDshRuntime } from '../runtime/discover.js';
 import { ensureGianProfile } from '../runtime/profile.js';
 import { parseArgs } from './bridge-launch.js';
 
-const PLUGIN_VERSION = '0.3.1';
+function readPluginVersion(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === '@gian/dsh-proxy' && typeof pkg.version === 'string' && pkg.version.length > 0) return pkg.version;
+    } catch { /* keep walking */ }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error('DSH Proxy package version is unavailable');
+}
+
+const PLUGIN_VERSION = readPluginVersion();
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);

@@ -19,7 +19,7 @@ export function serveStaticArtifact(
   staticDir: string,
   manifest: StaticManifest,
 ): Response | null {
-  const urlPath = context.req.path === '/' ? '/index.html' : context.req.path;
+  const urlPath = context.req.path === '/' || context.req.path === '/enrollment' ? '/index.html' : context.req.path;
   const relativePath = urlPath.replace(/^\//, '');
   if (!manifest.files[relativePath]) return null;
   const absolute = normalize(join(staticDir, relativePath));

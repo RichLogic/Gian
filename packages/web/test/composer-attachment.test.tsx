@@ -17,10 +17,19 @@ import { OperationDispatcherProvider, OperationStoreProvider } from '../src/oper
 import { ImageZoomContext } from '../src/transcript/items.js';
 import { typeInlineComposer } from './inline-composer-test-utils.js';
 
-const { pickResourcesMock } = vi.hoisted(() => ({ pickResourcesMock: vi.fn() }));
+const { pickResourcesMock, screenshotStartMock, desktopScreenshotAvailable } = vi.hoisted(() => ({
+  pickResourcesMock: vi.fn(),
+  screenshotStartMock: vi.fn(),
+  desktopScreenshotAvailable: { current: false },
+}));
 
 vi.mock('../src/desktop-bridge.js', () => ({
-  desktopBridge: () => ({ resources: { pick: pickResourcesMock } }),
+  desktopBridge: () => ({
+    resources: { pick: pickResourcesMock },
+    ...(desktopScreenshotAvailable.current
+      ? { screenshot: { start: screenshotStartMock, setTarget: vi.fn(async () => true) } }
+      : {}),
+  }),
 }));
 
 vi.mock('../src/api.js', () => ({
@@ -98,6 +107,8 @@ describe('Composer file attachments', () => {
     vi.mocked(uploadAttachment).mockReset();
     pickResourcesMock.mockReset();
     pickResourcesMock.mockResolvedValue({ resources: [], rejectedFiles: [] });
+    screenshotStartMock.mockReset();
+    desktopScreenshotAvailable.current = false;
     Object.defineProperties(URL, {
       createObjectURL: { configurable: true, value: vi.fn(() => 'blob:attachment-preview') },
       revokeObjectURL: { configurable: true, value: vi.fn() },
@@ -369,6 +380,41 @@ describe('Composer file attachments', () => {
     }));
   });
 
+  it('starts a Desktop screenshot from the add menu when the bridge supports it', async () => {
+    const user = userEvent.setup();
+    desktopScreenshotAvailable.current = true;
+    screenshotStartMock.mockResolvedValue({ ok: true });
+    renderComposer();
+
+    await user.click(screen.getByRole('button', { name: 'Add context' }));
+    await user.click(screen.getByRole('button', { name: 'Screenshot' }));
+
+    await waitFor(() => expect(screenshotStartMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: 'Files and folders' })).toBeNull();
+  });
+
+  it('hides the screenshot menu item when the bridge has no screenshot API', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    await user.click(screen.getByRole('button', { name: 'Add context' }));
+
+    expect(screen.getByRole('button', { name: 'Files and folders' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
+  });
+
+  it('surfaces the busy error when a screenshot is already in progress', async () => {
+    const user = userEvent.setup();
+    desktopScreenshotAvailable.current = true;
+    screenshotStartMock.mockResolvedValue({ ok: false, error: 'busy' });
+    renderComposer();
+
+    await user.click(screen.getByRole('button', { name: 'Add context' }));
+    await user.click(screen.getByRole('button', { name: 'Screenshot' }));
+
+    expect(await screen.findByText('A screenshot is already in progress.')).toBeInTheDocument();
+  });
+
   it('adds a folder as a path-only context item', async () => {
     const user = userEvent.setup();
     pickResourcesMock.mockResolvedValue({
@@ -472,5 +518,62 @@ describe('Composer file attachments', () => {
     await waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(2));
     const names = vi.mocked(uploadAttachment).mock.calls.map(call => (call[1] as File).name);
     expect(names).toEqual(['image.png', 'image-2.png']);
+  });
+
+  it('sends image chips labelled image<N> by document position; files keep their names', async () => {
+    const user = userEvent.setup();
+    const { onSend } = renderComposer();
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/notes.txt',
+      name: 'notes.txt', mime: 'text/plain', size: 5,
+    }));
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/one.png',
+      name: 'one.png', mime: 'image/png', size: 3,
+    }));
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/two.png',
+      name: 'two.png', mime: 'image/png', size: 3,
+    }));
+    await screen.findByText('two.png');
+
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    // N counts EVERY attachment reference in document order — the same N the
+    // Host compile emits as [Attached resource N]. Only the labels change;
+    // the stored/uploaded files keep their original names.
+    expect(onSend).toHaveBeenCalledWith('', expect.objectContaining({
+      attachments: [
+        expect.objectContaining({ name: 'notes.txt' }),
+        expect.objectContaining({ name: 'one.png' }),
+        expect.objectContaining({ name: 'two.png' }),
+      ],
+      composerDocument: expect.objectContaining({
+        segments: expect.arrayContaining([
+          expect.objectContaining({ referenceType: 'attachment', label: 'notes.txt' }),
+          expect.objectContaining({ referenceType: 'attachment', label: 'image2' }),
+          expect.objectContaining({ referenceType: 'attachment', label: 'image3' }),
+        ]),
+      }),
+    }));
+  });
+
+  it('pre-send image popover shows the attachment number the chip will carry', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/notes.txt',
+      name: 'notes.txt', mime: 'text/plain', size: 5,
+    }));
+    act(() => injectComposerAttachment(SESSION.id, {
+      path: '/tmp/gian/attachments/session-attachment/shot.png',
+      name: 'shot.png', mime: 'image/png', size: 3,
+    }));
+    const chip = await screen.findByText('shot.png');
+
+    await user.hover(chip);
+    await waitFor(() => expect(document.querySelector('.ref-pop')).not.toBeNull());
+    expect(screen.getByTestId('composer-attachment-number')).toHaveTextContent('2');
+    expect(document.querySelector('.ref-pop-title')).toHaveTextContent('image2 · shot.png');
   });
 });

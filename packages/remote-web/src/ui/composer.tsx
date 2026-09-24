@@ -11,12 +11,14 @@
 import { useRef, useState } from 'react';
 import type { RemoteSession } from '@gian/remote-protocol';
 import type { EffectiveCapabilities } from '@gian/remote-protocol';
+import { isNativeImageMime } from '@gian/chat-ui';
 import { draftIsEmpty, emptyDraft, mutationsEnabled } from '../controller/types.js';
 import type { DraftState } from '../controller/types.js';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
 import { useViewportMode } from './viewport.js';
+import { ProxyLogo } from './proxy-logo.js';
 
 function capabilityState(caps: EffectiveCapabilities, id: keyof EffectiveCapabilities) {
   return caps[id]?.state ?? 'unsupported';
@@ -34,10 +36,15 @@ function DraftChips({ sessionId, draft, disabled }: { sessionId: string; draft: 
   if (draft.attachments.length === 0 && draft.contextItems.length === 0 && !draft.document) return null;
   return (
     <div className="composer-chips">
-      {draft.attachments.map((a) => (
+      {draft.attachments.map((a, index) => (
         <span key={a.id} className="composer-chip" data-kind="attachment">
           <Icon name="file" size={12} />
-          {a.name}
+          {/* Images read as image<N> (N = 1-based position among the
+              message's attachments) — the same numbering the main composer
+              applies at send time. The real name stays in the tooltip. */}
+          {isNativeImageMime(a.mime) ? (
+            <span title={a.name}>{`image${index + 1}`}</span>
+          ) : a.name}
           <button
             type="button"
             className="chip-x"
@@ -453,6 +460,11 @@ export function Composer({ session }: { session: RemoteSession }) {
   const serviceTier = session.service_tier === 'fast' ? 'fast' : 'standard';
   const approvalModes = APPROVAL_MODES[session.agent.proxy] ?? [];
   const approvalValue = session.approval_mode ?? 'ask';
+  const contextPercent = typeof session.context_tokens_used === 'number' && (session.context_window_tokens ?? 0) > 0
+    ? Math.round(Math.min(1, session.context_tokens_used / session.context_window_tokens!) * 100) : null;
+  const contextLabel = contextPercent === null ? t('chat.context.pending')
+    : t('chat.context.usage', { percent: String(contextPercent), used: session.context_tokens_used!.toLocaleString(),
+      capacity: session.context_window_tokens!.toLocaleString() });
 
   const toggleSheet = (page: 'root' | 'model' | 'thinking') => {
     setSheetPage(page);
@@ -498,7 +510,7 @@ export function Composer({ session }: { session: RemoteSession }) {
               aria-expanded={sheetOpen}
               onClick={() => toggleSheet('root')}
             >
-              <span className="rw-agent-dot" data-proxy={session.agent.proxy} aria-hidden="true" />
+              <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
             </button>
           ) : (
             <>
@@ -509,7 +521,7 @@ export function Composer({ session }: { session: RemoteSession }) {
                 aria-expanded={sheetOpen && sheetPage === 'model'}
                 onClick={() => toggleSheet('model')}
               >
-                <span className="rw-agent-dot" data-proxy={session.agent.proxy} aria-hidden="true" />
+                <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
                 <span className="name">{model}</span>
                 <span className="caret">▾</span>
               </button>
@@ -548,6 +560,8 @@ export function Composer({ session }: { session: RemoteSession }) {
             </>
           )}
           <span className="spacer" style={{ flex: 1 }} />
+          <span className="rw-context-usage" tabIndex={0} role="img" aria-label={contextLabel} title={contextLabel}
+            style={{ background: `conic-gradient(var(--accent) ${(contextPercent ?? 0) * 3.6}deg, var(--accent-soft) 0)` }} />
           {approvalModes.length > 0 && (
             <button
               type="button"

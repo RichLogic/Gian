@@ -1168,5 +1168,105 @@
     "process": {
       "scope": "session"
     }
+  },
+  {
+    "tag": "proxy-claude-v0.3.2",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.2",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.2/gian-proxy-claude-0.3.2-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:ee9ff410332f08c5115c135b5b926880b5a58e27fa78acd2d512cc39ad7ca78a",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "claude",
+    "pluginVersion": "0.3.2",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "claude",
+      "displayName": "Claude Code",
+      "verifiedVersions": [
+        "2.1.280"
+      ]
+    },
+    "process": {
+      "scope": "session"
+    }
+  },
+  {
+    "tag": "proxy-codex-v0.3.2",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.2",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.2/gian-proxy-codex-0.3.2-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:0ce5b510e61e060c9afbffd5a523dfc6452ecc32ad325bf9896f2b6d394def23",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "codex",
+    "pluginVersion": "0.3.2",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "codex",
+      "displayName": "Codex CLI",
+      "verifiedVersions": [
+        "0.156.1"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-dsh-v0.3.2",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.2",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.2/gian-proxy-dsh-0.3.2-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:19b17ca7b8a1dbeecfb7ec42fec37e3629c939b88df0ea1b73281d26a0b9a7dd",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "ai.deepseek.harness",
+    "pluginVersion": "0.3.2",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "deepseek-harness",
+      "displayName": "DeepSeek Harness",
+      "verifiedVersions": [
+        "0.1.5-rc.3"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-kimi-v0.3.3",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.3.3",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.3.3/gian-proxy-kimi-0.3.3-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:520ba1787b42163f3f9d6911a8478f0358d9e4c43bef471c3062cfd7abb2d99b",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.3.3",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.0"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
   }
 ]

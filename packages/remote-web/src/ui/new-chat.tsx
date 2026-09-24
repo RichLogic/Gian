@@ -9,6 +9,7 @@ import { mutationsEnabled } from '../controller/types.js';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
+import { ProxyLogo } from './proxy-logo.js';
 
 export function NewChatPage() {
   const t = useT();
@@ -23,6 +24,7 @@ export function NewChatPage() {
   const [taskId, setTaskId] = useState<string>(presetTaskId);
   const [name, setName] = useState('');
   const [model, setModel] = useState<string>('');
+  const [thinking, setThinking] = useState('');
 
   const online = mutationsEnabled(state.connection);
   const creating = Object.values(state.mutations).some(
@@ -34,6 +36,9 @@ export function NewChatPage() {
   const selectedAgent = catalog?.agents.find((a) => a.id === agentId) ?? null;
   const selectedTask = catalog?.tasks.find((task) => task.id === taskId) ?? null;
   const defaultModel = selectedAgent?.defaults?.model ?? '';
+  const selectedModel = selectedAgent?.models?.find(item => item.id === (model || defaultModel))
+    ?? selectedAgent?.models?.find(item => item.is_default);
+  const efforts = selectedModel?.supported_thinking ?? [];
   const canSubmit =
     online &&
     !creating &&
@@ -108,8 +113,10 @@ export function NewChatPage() {
                 onClick={() => {
                   setAgentId(agent.id);
                   setModel('');
+                  setThinking('');
                 }}
               >
+                <ProxyLogo proxy={agent.proxy} name={agent.name} size={14} />
                 {agent.name}
               </button>
             ))}
@@ -152,15 +159,25 @@ export function NewChatPage() {
           <span className="rw-form-label">
             {t('newchat.model')} <span className="opt">{t('newchat.optional')}</span>
           </span>
-          <input
-            className="rw-input"
+          <select
+            className="rw-select"
             aria-label={t('newchat.model')}
-            placeholder={defaultModel ? t('newchat.modelDefault', { model: defaultModel }) : ''}
             value={model}
-            onChange={(event) => setModel(event.target.value)}
-          />
-          <span className="rw-form-note">{t('newchat.modelDefault', { model: defaultModel || '—' })}</span>
+            onChange={(event) => { setModel(event.target.value); setThinking(''); }}
+          >
+            <option value="">{t('newchat.modelDefault', { model: defaultModel || '—' })}</option>
+            {selectedAgent?.models?.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
         </div>
+
+        {efforts.length > 0 && <div className="rw-form-row">
+          <span className="rw-form-label">{t('chat.sheet.effort')}</span>
+          <select className="rw-select" aria-label={t('chat.sheet.effort')} value={thinking}
+            onChange={event => setThinking(event.target.value)}>
+            <option value="">{selectedAgent?.defaults?.thinking ?? 'Default'}</option>
+            {efforts.map(value => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </div>}
 
         {createError && (
           <div className="session-banner rw-danger" role="alert">
@@ -184,6 +201,7 @@ export function NewChatPage() {
                 taskId,
                 name: name.trim() === '' ? undefined : name.trim(),
                 model: model.trim() === '' ? undefined : model.trim(),
+                thinking: thinking || undefined,
               })
             }
           >

@@ -241,8 +241,23 @@ describe('CustomView', () => {
     expect(screen.getByRole('button', { name: 'Open in VS Code' })).toBeInTheDocument();
   });
 
-  it('shows a stable loading skeleton while the agents list is still loading', () => {
-    mockLoadAgents.mockReturnValue(new Promise(() => {})); // never settles
+  it('hides disabled Agents from the selector and defaults to an enabled one', async () => {
+    mockLoadAgents.mockResolvedValue([
+      makeAgent({ enabled: false }),
+      makeAgent({ id: 'agent-kimi', name: 'Kimi', proxy: 'kimi' }),
+    ]);
+    mockInventory.mockResolvedValue(inventory({ skill: kindResult('skill', []) }));
+
+    renderView();
+    // The disabled Agent is never the default: the enabled one wins and the
+    // inventory request goes out under its identity.
+    await waitFor(() => expect(mockInventory).toHaveBeenCalledWith('agent-kimi', WS.id));
+    await userEvent.click(await screen.findByRole('button', { name: 'Agent' }));
+    expect(screen.queryByRole('menuitemradio', { name: /Codex/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitemradio', { name: /Kimi/ })).toBeInTheDocument();
+  });
+
+  it('shows a stable loading skeleton while the agents list is still loading', () => {    mockLoadAgents.mockReturnValue(new Promise(() => {})); // never settles
     renderView();
     expect(screen.getByTestId('custom-skeleton')).toBeInTheDocument();
   });

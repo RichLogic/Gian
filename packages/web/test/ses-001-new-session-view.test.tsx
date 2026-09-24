@@ -27,6 +27,7 @@ import {
 } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
+import { remoteRequest, type RemoteEnvironmentCatalog } from '../src/remote-environments.js';
 import {
   clearNewSessionDraft,
   NewSessionView,
@@ -42,14 +43,21 @@ import {
   OperationStoreProvider,
 } from '../src/operations/use-operations.js';
 
-const { pickResourcesMock, desktopResourcesAvailable } = vi.hoisted(() => ({
+const { pickResourcesMock, screenshotStartMock, desktopResourcesAvailable, desktopScreenshotAvailable } = vi.hoisted(() => ({
   pickResourcesMock: vi.fn(),
+  screenshotStartMock: vi.fn(),
   desktopResourcesAvailable: { current: true },
+  desktopScreenshotAvailable: { current: false },
 }));
 
 vi.mock('../src/desktop-bridge.js', () => ({
   desktopBridge: () => desktopResourcesAvailable.current
-    ? { resources: { pick: pickResourcesMock } }
+    ? {
+        resources: { pick: pickResourcesMock },
+        ...(desktopScreenshotAvailable.current
+          ? { screenshot: { start: screenshotStartMock, setTarget: vi.fn(async () => true) } }
+          : {}),
+      }
     : undefined,
 }));
 
@@ -60,6 +68,24 @@ vi.mock('../src/api.js', () => ({
   loadProxyCapabilities: vi.fn(),
   loadResolvedProxyCatalog: vi.fn(),
 }));
+
+vi.mock('../src/remote-environments.js', async () => ({
+  ...await vi.importActual<typeof import('../src/remote-environments.js')>('../src/remote-environments.js'),
+  remoteRequest: vi.fn(),
+}));
+
+const hostA = '11111111-1111-4111-8111-111111111111';
+const hostB = '22222222-2222-4222-8222-222222222222';
+const remoteAgentId = '33333333-3333-4333-8333-333333333333';
+const hostChoices = { environments: [
+  { id: hostA, name: 'Build Mac', host_id: 'host-a', server_origin: 'https://remote.example.com', pending: false, connected: true },
+  { id: hostB, name: 'Office Mac', host_id: 'host-b', server_origin: 'https://remote.example.com', pending: false, connected: false },
+] };
+const remoteCatalog: RemoteEnvironmentCatalog = {
+  catalog_revision: 'remote-1',
+  agents: [{ id: remoteAgentId, name: 'Remote Codex', proxy: 'codex', readiness: 'ready' }],
+  workspaces: [{ id: 'remote-workspace', name: 'Remote project' }],
+};
 
 function agent(kind: Executor, name: string, ready = true): UserAgentStatus {
   return {
@@ -150,7 +176,7 @@ function renderView(props: Partial<Parameters<typeof NewSessionView>[0]> = {}) {
       </OperationStoreProvider>
     </LocaleProvider>,
   );
-  return { onCreate, onNewWorkspace, unmount: view.unmount };
+  return { onCreate, onNewWorkspace, unmount: view.unmount, container: view.container };
 }
 
 async function openAgentPicker() {
@@ -165,6 +191,15 @@ describe('NewSessionView', () => {
     localStorage.clear();
     delete window.gianDesktop;
     desktopResourcesAvailable.current = true;
+    desktopScreenshotAvailable.current = false;
+    vi.mocked(remoteRequest).mockImplementation(async <T,>(path: string): Promise<T> => {
+      if (path === '/environments') return hostChoices as T;
+      if (path === `/environments/${hostA}/catalog`) return remoteCatalog as T;
+      if (path.includes('/agents/')) return {
+        catalogRevision: 'remote-1', input: [{ type: 'text' }], configOptions: [], slashCommands: [], resolveSupported: false,
+      } as T;
+      throw new Error('Remote Host unavailable');
+    });
     vi.mocked(loadAgents).mockResolvedValue(agents);
     vi.mocked(loadProxyModels).mockResolvedValue(codexModels);
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
@@ -184,6 +219,94 @@ describe('NewSessionView', () => {
     });
   });
 
+  it('places the Host picker before Agent and workspace, with connection controls inside its popover', async () => {
+    const { container } = renderView();
+    const row = await screen.findByTestId('ns-agent-row');
+    const picker = within(row).getByRole('button', { name: 'Host: This Mac' });
+    expect(row.firstElementChild).toBe(picker);
+    expect(picker.closest('.main-head')).toBeNull();
+    expect(container.querySelector('.remote-environment-toolbar')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Connect Host' })).toBeNull();
+    fireEvent.click(picker);
+    const popover = await screen.findByRole('dialog', { name: 'Host' });
+    expect(await within(popover).findByRole('button', { name: /Build Mac/ })).toBeTruthy();
+    fireEvent.click(within(popover).getByRole('button', { name: 'Connect Host' }));
+    expect(within(popover).getByLabelText('Remote Server URL')).toBeTruthy();
+    expect(within(popover).getByLabelText('Host name')).toBeTruthy();
+    expect(within(popover).getByLabelText('Pairing code')).toBeTruthy();
+    expect(within(popover).queryByRole('button', { name: /GitHub/ })).toBeNull();
+    fireEvent.keyDown(popover, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Host' })).toBeNull();
+    expect(document.activeElement).toBe(picker);
+    expect(screen.getByTestId('ns-agent-row')).toBeTruthy();
+  });
+
+  it('clears the previous Host choices immediately and allows switching back while the next Host loads', async () => {
+    let resolveOffice!: (catalog: RemoteEnvironmentCatalog) => void;
+    const office = new Promise<RemoteEnvironmentCatalog>(resolve => { resolveOffice = resolve; });
+    const previous = vi.mocked(remoteRequest).getMockImplementation()!;
+    vi.mocked(remoteRequest).mockImplementation(<T,>(path: string, body?: unknown): Promise<T> =>
+      path === `/environments/${hostB}/catalog` ? office as Promise<T> : previous(path, body) as Promise<T>);
+    const { onCreate } = renderView();
+    await screen.findByTestId('ns-agent-picker');
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Build Mac/ }));
+    await waitFor(() => expect(screen.getByTestId('ns-agent-picker').textContent).toContain('Remote Codex'));
+    expect(screen.getByTestId('ns-workspace-chip').textContent).toContain('Remote project');
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(screen.getByRole('button', { name: /Office Mac/ }));
+    expect(screen.queryByTestId('ns-agent-picker')).toBeNull();
+    expect(screen.queryByTestId('ns-workspace-chip')).toBeNull();
+    expect(screen.getByTestId('ns-host-picker').textContent).toContain('Office Mac');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(screen.getByRole('button', { name: /This Mac/ }));
+    await waitFor(() => expect(screen.getByTestId('ns-workspace-chip').textContent).toContain('Alpha'));
+    await act(async () => { resolveOffice(remoteCatalog); await office; });
+    expect(screen.getByTestId('ns-host-picker').textContent).toContain('This Mac');
+    expect(screen.getByTestId('ns-workspace-chip').textContent).toContain('Alpha');
+    expect(screen.queryByText('Remote Codex')).toBeNull();
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(vi.mocked(remoteRequest).mock.calls.filter(([path]) => path === '/environments')).toHaveLength(1);
+  });
+
+  it('keeps the Host picker available after a connection failure', async () => {
+    renderView();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Office Mac/ }));
+    expect(await screen.findByText('Waiting for the remote Gian connection and device confirmation.')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(screen.getByRole('button', { name: /This Mac/ }));
+    expect(await screen.findByTestId('ns-agent-picker')).toBeTruthy();
+  });
+
+  it('keeps takeover attached to the selected Host in the picker menu', async () => {
+    const previous = vi.mocked(remoteRequest).getMockImplementation()!;
+    vi.mocked(remoteRequest).mockImplementation(async <T,>(path: string, body?: unknown): Promise<T> => {
+      if (path === `/environments/${hostA}/sessions`) return { sessions: [{
+        id: 'remote-session', name: 'Existing task', workspace_id: 'remote-workspace',
+        agent: { id: remoteAgentId, name: 'Remote Codex', proxy: 'codex' },
+      }] } as T;
+      return previous(path, body) as Promise<T>;
+    });
+    const { onCreate } = renderView();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Build Mac/ }));
+    await screen.findByTestId('ns-agent-picker');
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue remote session' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Existing task' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      executionEnvironmentId: hostA, remoteSessionId: 'remote-session',
+      agentId: `remote:${hostA}:${remoteAgentId}`, workspaceId: 'remote-workspace',
+    }));
+  });
+
+  it('locks the Host choice while Session creation is in progress', () => {
+    renderView({ creating: true });
+    expect(screen.getByTestId('ns-host-picker')).toBeDisabled();
+  });
+
   it('lists only saved-and-ready agents in the picker', async () => {
     vi.mocked(loadAgents).mockResolvedValue([...agents, agent('dsh', 'DeepSeek Harness', false)]);
     renderView();
@@ -200,6 +323,31 @@ describe('NewSessionView', () => {
     const picker = screen.getByTestId('ns-agent-picker');
     expect(picker.querySelector('.agent-logo')).toBeTruthy();
     expect(document.querySelector('[data-testid="ns-model-chip"] .agent-logo')).toBeNull();
+  });
+
+  it('hides disabled Agents from the picker and never auto-selects one', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([
+      { ...agent('codex', 'Codex'), enabled: false },
+      agent('claude', 'Claude Code'),
+      agent('kimi', 'Kimi Code'),
+    ]);
+    renderView();
+    await openAgentPicker();
+    // Ready but disabled: not offered.
+    expect(screen.queryByTestId('ns-agent-option-agent-codex-1')).toBeNull();
+    expect(screen.getByTestId('ns-agent-option-agent-claude-1')).toBeEnabled();
+    expect(screen.getByTestId('ns-agent-option-agent-kimi-1')).toBeEnabled();
+  });
+
+  it('does not default-select when every ready Agent is disabled', async () => {
+    vi.mocked(loadAgents).mockResolvedValue([{ ...agent('codex', 'Codex'), enabled: false }]);
+    renderView();
+    // One ready-but-disabled Agent is not "exactly one usable agent": the chip
+    // stays an unselected chooser and the drop offers nothing.
+    const picker = await screen.findByTestId('ns-agent-picker');
+    expect(picker).not.toHaveTextContent('Codex');
+    await openAgentPicker();
+    expect(screen.queryByTestId('ns-agent-option-agent-codex-1')).toBeNull();
   });
 
   it('allows an unverified Agent but shows its red consequence warning', async () => {
@@ -272,10 +420,45 @@ describe('NewSessionView', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
     expect(screen.getByText('Folder references require Gian Desktop')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: /^Files/ }));
 
     expect(click).toHaveBeenCalledTimes(1);
     expect(pickResourcesMock).not.toHaveBeenCalled();
+  });
+
+  it('starts a Desktop screenshot from the add menu when the bridge supports it', async () => {
+    desktopScreenshotAvailable.current = true;
+    screenshotStartMock.mockResolvedValue({ ok: true });
+    renderView();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Screenshot' }));
+
+    await waitFor(() => expect(screenshotStartMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: 'Files and folders' })).toBeNull();
+    expect(screen.queryByTestId('new-session-attachment-error')).toBeNull();
+  });
+
+  it('hides the screenshot menu item when the bridge has no screenshot API', async () => {
+    renderView();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
+
+    expect(screen.getByRole('button', { name: 'Files and folders' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Screenshot' })).toBeNull();
+  });
+
+  it('surfaces the busy error when a screenshot is already in progress', async () => {
+    desktopScreenshotAvailable.current = true;
+    screenshotStartMock.mockResolvedValue({ ok: false, error: 'busy' });
+    renderView();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add context' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Screenshot' }));
+
+    expect(await screen.findByTestId('new-session-attachment-error'))
+      .toHaveTextContent('A screenshot is already in progress.');
   });
 
   it('calls catalog.resolve only after a Proxy-advertised option changes', async () => {

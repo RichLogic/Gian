@@ -54,6 +54,7 @@ interface PendingRequest {
 }
 
 interface ClientInternals {
+  retiringProcesses: Set<FakeChild>;
   pending: Map<number, PendingRequest>;
   nextId: number;
   process: FakeChild | null;
@@ -74,6 +75,14 @@ interface ClientInternals {
 
 function internals(client: CodexAppServerClient): ClientInternals {
   return client as unknown as ClientInternals;
+}
+
+async function stopClient(client: CodexAppServerClient): Promise<void> {
+  const stopping = client.stop();
+  for (const child of internals(client).retiringProcesses) {
+    if (child instanceof FakeChild) child.exit();
+  }
+  await stopping;
 }
 
 function makePending(): { promise: Promise<unknown>; pending: PendingRequest } {
@@ -236,7 +245,7 @@ test('PROXY-004: real start path spans spawn, stdio initialize, serverRequest, a
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(stoppedCount, 1);
   } finally {
-    await client.stop();
+    await stopClient(client);
   }
 });
 
@@ -337,7 +346,7 @@ test('PROXY-004: send() writes one JSONL message without the JSON-RPC header', a
   const { child } = await installRuntime(client);
   await internals(client).send({ jsonrpc: '2.0', method: 'noop', params: { ok: true } });
   assert.deepEqual(child.stdin.writes, ['{"method":"noop","params":{"ok":true}}\n']);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -354,7 +363,7 @@ test('PROXY-004: concurrent sends are serialized through stdin', async () => {
   assert.deepEqual(child.stdin.writes, ['{"method":"first"}\n', '{"method":"second"}\n']);
   child.stdin.releaseNext();
   await Promise.all([first, second]);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -366,7 +375,7 @@ test('PROXY-004: stdout buffers a protocol message split across chunks', async (
   child.stdout.write('{"id":42,"res');
   child.stdout.write('ult":{"ok":true}}\n');
   assert.deepEqual(await pending.promise, { ok: true });
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -383,7 +392,7 @@ test('PROXY-004: stdout handles multiple protocol messages in one chunk', async 
     { method: 'first', params: { n: 1 } },
     { method: 'second', params: { n: 2 } },
   ]);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -399,7 +408,7 @@ test('PROXY-004: stderr remains diagnostic and never enters the protocol channel
   assert.deepEqual(debug, ['{not-json diagnostic only}']);
   assert.equal(stops, 0);
   assert.equal(internals(client).activeGeneration, 1);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -459,7 +468,7 @@ test('PROXY-004: oversized thread snapshot is discarded while bounded resume res
   assert.equal(resumed.thread.id, 'thread-large-history');
   assert.ok(debug.some(message => message.includes('Discarded oversized Codex thread/started')));
   assert.equal(internals(client).activeGeneration, 1);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -555,7 +564,7 @@ test('PROXY-004: resume, bounded fork, and item injection leave the shared runti
   });
   assert.equal(stops, 0);
   assert.deepEqual(child.killSignals, []);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -668,7 +677,7 @@ test('PROXY-005: a never-returning RPC times out, tears down, and the next reque
   firstRuntime.child.exit();
   assert.equal(i.activeGeneration, 2, 'a stale generation exit must not stop the recovered runtime');
   assert.equal(stops, 1);
-  await client.stop();
+  await stopClient(client);
   recoveredChild.exit();
 });
 
@@ -687,7 +696,7 @@ test('PROXY-005: successful response clears its RPC timer', async () => {
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(stops, 0);
   assert.equal(internals(client).pending.size, 0);
-  await client.stop();
+  await stopClient(client);
   child.exit();
 });
 
@@ -722,7 +731,7 @@ test('PROXY-004: unsupported stdio CLI startup has an actionable version diagnos
     started,
     new RegExp(`does not support app-server stdio transport.*${MIN_CODEX_STDIO_VERSION}`),
   );
-  await client.stop();
+  await stopClient(client);
 });
 
 test('PROXY-004: general stdio startup failures are not mislabeled as old CLI support', async () => {
@@ -743,7 +752,7 @@ test('PROXY-004: general stdio startup failures are not mislabeled as old CLI su
     assert.doesNotMatch(String(error), /does not support/);
     return true;
   });
-  await client.stop();
+  await stopClient(client);
 });
 
 test('PROXY-005: startup deadline covers spawn through initialize completion', async () => {
@@ -759,7 +768,7 @@ test('PROXY-005: startup deadline covers spawn through initialize completion', a
     () => client.ensureStarted(),
   );
   await assert.rejects(started, /Timed out starting Codex app-server after 30ms/);
-  await client.stop();
+  await stopClient(client);
 });
 
 // ---------------------------------------------------------------------------
@@ -768,14 +777,47 @@ test('PROXY-005: startup deadline covers spawn through initialize completion', a
 
 test('PROXY-004: stop() is a clean no-op when nothing was started', async () => {
   const client = new CodexAppServerClient();
-  await client.stop(); // must not throw
+  await stopClient(client); // must not throw
+});
+
+test('PROXY-004: stop waits for observed app-server exit before Proxy shutdown can finish', async t => {
+  const client = new CodexAppServerClient();
+  const { child } = await installRuntime(client);
+  t.after(() => child.exit());
+  let settled = false;
+  const stopping = client.stop().then(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(child.killSignals, ['SIGTERM']);
+  assert.equal(settled, false, 'sending SIGTERM is not proof that the Runtime exited');
+  child.exit();
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test('PROXY-004: shutdown reaps Runtime descendants even after the main process exits', { skip: process.platform === 'win32' }, async () => {
+  const fakeCodex = fileURLToPath(new URL('./fixtures/fake-codex-app-server.js', import.meta.url));
+  chmodSync(fakeCodex, 0o755);
+  const client = new CodexAppServerClient({ codexBin: fakeCodex, deadlines: { terminateGraceMs: 100 } });
+  let helperPid: number | undefined;
+  const helper = new Promise<number>(resolve => client.on('notification', message => {
+    if (message.method === 'fixture/descendant') resolve(message.params.pid);
+  }));
+  try {
+    await withSpawnEnvironment('GIAN_FAKE_CODEX_DESCENDANT', '1', () => client.ensureStarted());
+    helperPid = await within(helper, 3000, 'fixture descendant');
+    await client.stop();
+    assert.throws(() => process.kill(helperPid!, 0), (error: NodeJS.ErrnoException) => error.code === 'ESRCH');
+  } finally {
+    if (helperPid) { try { process.kill(helperPid, 'SIGKILL'); } catch {} }
+    await stopClient(client);
+  }
 });
 
 test('PROXY-004: stop() SIGTERMs the child process', async () => {
   const client = new CodexAppServerClient();
   const { child } = await installRuntime(client);
 
-  await client.stop();
+  await stopClient(client);
   assert.deepEqual(child.killSignals, ['SIGTERM']);
   assert.equal(internals(client).process, null,
     'process reference must be dropped so stop() is idempotent');
@@ -790,7 +832,7 @@ test('PROXY-004: stop() does NOT re-kill an already-killed child', async () => {
   child.killed = true;
   await installRuntime(client, 1, child);
 
-  await client.stop();
+  await stopClient(client);
   assert.equal(child.killSignals.length, 0,
     'already-killed child must not be SIGTERMed again — would surface as ESRCH in the log');
   child.exit();
@@ -827,6 +869,43 @@ test('thread/start inherits config.toml and captures the effective permission pr
     approvalsReviewer: 'user',
     permissions: 'my-profile',
   });
+});
+
+test('translation thread disables inherited integrations and uses isolated read-only ephemeral state', async () => {
+  const client = new CodexAppServerClient();
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request = async (method, params) => {
+    calls.push({ method, params: params as Record<string, unknown> });
+    if (method === 'config/read') return { config: {
+      features: { shell_tool: true, future_tool: true },
+      mcp_servers: { private: { command: 'private-server', enabled: true } },
+      plugins: { plugin: { enabled: true } }, apps: { external: { enabled: true } },
+    } };
+    return { thread: { id: 'translation-thread' }, approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly' } };
+  };
+  await client.startThread({ cwd: '/isolated', textOnly: true });
+  const params = calls[1]!.params;
+  assert.equal(params.ephemeral, true);
+  assert.equal(params.sandbox, 'read-only');
+  assert.equal(params.approvalPolicy, 'never');
+  assert.deepEqual(params.dynamicTools, []);
+  assert.deepEqual(params.selectedCapabilityRoots, []);
+  const config = params.config as Record<string, any>;
+  assert.equal(config.features.shell_tool, false);
+  assert.equal(config.features.future_tool, false);
+  assert.equal(config.features.multi_agent, false);
+  assert.deepEqual(config.mcp_servers, { private: { enabled: false } });
+  assert.deepEqual(config.plugins, { plugin: { enabled: false } });
+  assert.equal(config.apps.external.enabled, false);
+  assert.equal(config.web_search, 'disabled');
+});
+
+test('translation refuses a runtime that does not confirm its restricted policy', async () => {
+  const client = new CodexAppServerClient();
+  (client as unknown as { request(method: string, params: unknown): Promise<unknown> }).request = async method => (
+    method === 'config/read' ? { config: {} } : CODEX_APP_SERVER_V2_NAMED_PERMISSIONS.response
+  );
+  await assert.rejects(client.startThread({ cwd: '/isolated', textOnly: true }), /did not confirm/);
 });
 
 test('thread bootstrap RPCs forward trusted per-thread MCP config exactly', async () => {

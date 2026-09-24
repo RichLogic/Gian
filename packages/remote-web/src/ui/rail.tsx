@@ -12,6 +12,7 @@ import type { RemoteSession, RemoteTask } from '@gian/remote-protocol';
 import { useT } from '../i18n/index.js';
 import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
+import { ProxyLogo } from './proxy-logo.js';
 import { RemoteStatusIcon, remoteStatusGlyphShown } from './session-status.js';
 import { useViewportMode } from './viewport.js';
 
@@ -55,6 +56,7 @@ function SessionRow({ session, stale }: { session: RemoteSession; stale: boolean
     >
       <div className="ri-body">
         <div className="ri-row1">
+          <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
           <span className="ri-title">{session.name ?? session.id}</span>
           {showStatus && <RemoteStatusIcon status={session.status} unread={unread} />}
         </div>

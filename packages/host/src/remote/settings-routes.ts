@@ -1,5 +1,7 @@
 import type { Context, Hono } from 'hono';
+import { RemoteProtocolError } from '@gian/remote-protocol';
 import type { RemoteRuntime } from './runtime.js';
+import { RemoteAccountRequiredError, RemoteAccountRetryError } from './server-client.js';
 
 /** Settings is local-Host authenticated. No Remote Server admin token enters the renderer. */
 export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): void {
@@ -14,6 +16,21 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
       return context.json({ ok: true, ...fields?.(result), ...remote.settingsState() });
     } catch (error) {
       // Never echo tokens, credential-bearing URLs, or remote response bodies.
+      if (error instanceof RemoteAccountRequiredError) {
+        return context.json({ error: 'remote_auth_required' }, 401);
+      }
+      if (error instanceof RemoteAccountRetryError
+        || (error instanceof RemoteProtocolError && ['HOST_OFFLINE', 'RATE_LIMITED'].includes(error.code))) {
+        context.header('Retry-After', String(error instanceof RemoteAccountRetryError ? error.retryAfterSeconds : 5));
+        return context.json({ error: 'remote_unavailable' }, 503);
+      }
+      if (context.req.path === '/api/remote/enroll'
+        && error instanceof RemoteProtocolError && error.code === 'AUTH_REQUIRED') {
+        return context.json({ error: 'enrollment_rejected' }, 400);
+      }
+      if (error instanceof RemoteProtocolError && error.code === 'AUTH_REQUIRED') {
+        return context.json({ error: 'remote_auth_required' }, 401);
+      }
       const safe = ['invalid_url', 'already_enrolled', 'not_enrolled', 'identity_changed',
         'pairing_busy', 'connection_cancelled', 'pairing_not_found', 'invalid_host_name'];
       const message = error instanceof Error && safe.includes(error.message)
@@ -24,16 +41,26 @@ export function registerRemoteSettingsRoutes(app: Hono, remote: RemoteRuntime): 
   const body = (context: Context) => context.req.json<Record<string, unknown>>()
     .catch(() => ({} as Record<string, unknown>));
 
+  app.post('/api/remote/account/start', mutate(async context => {
+    const input = await body(context);
+    if (typeof input.server_url !== 'string') throw new Error('invalid_url');
+    await remote.startAccountLogin(input.server_url);
+  }));
+  app.post('/api/remote/account/poll', mutate(() => remote.pollAccountLogin()));
+
   app.post('/api/remote/enroll', mutate(async context => {
     const input = await body(context);
     if (typeof input.server_url !== 'string' || typeof input.enrollment_token !== 'string'
         || !input.enrollment_token.trim() || input.enrollment_token.length > 4096
-        || (input.public_url !== undefined && typeof input.public_url !== 'string')) {
+        || (input.public_url !== undefined && typeof input.public_url !== 'string')
+        || (input.host_name !== undefined
+          && (typeof input.host_name !== 'string' || input.host_name.length > 256))) {
       throw new Error('invalid_enrollment');
     }
     await remote.enroll({
       serverUrl: input.server_url, enrollmentToken: input.enrollment_token,
       ...(typeof input.public_url === 'string' && input.public_url ? { publicUrl: input.public_url } : {}),
+      ...(typeof input.host_name === 'string' && input.host_name.trim() ? { hostName: input.host_name } : {}),
     });
   }));
   app.post('/api/remote/disconnect', mutate(() => remote.disconnect()));

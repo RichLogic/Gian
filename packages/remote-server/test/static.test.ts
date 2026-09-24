@@ -42,6 +42,9 @@ test('static HTML injects only public origin and build id and ships CSP', async 
   assert.doesNotMatch(html, /admin-test-token|enrollment|refresh|ciphertext/);
   assert.equal(response.headers.get('Content-Security-Policy'), SECURITY_HEADERS['Content-Security-Policy']);
   assert.equal(response.headers.get('X-Frame-Options'), 'DENY');
+  const enrollment = await fetch('/enrollment');
+  assert.equal(enrollment.status, 200);
+  assert.equal(await enrollment.text(), html);
   const runtime = await fetch('/__gian_remote_runtime.js');
   assert.equal(runtime.status, 200);
   const script = await runtime.text();

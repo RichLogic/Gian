@@ -9,6 +9,8 @@ import type {
 } from '@gian/shared';
 import { productExecutorForPluginId } from '@gian/shared';
 import {
+  AGENT_DISABLE_BLOCKED_PREFIX,
+  INTEGRATION_UNINSTALL_BLOCKED_PREFIX,
   loadAgents,
   loadManagedRuntimeStatus,
   loadProxyCatalog,
@@ -23,7 +25,8 @@ import {
   waitForRunSettle,
 } from '../operations/use-operations.js';
 import type { OperationRun } from '../operations/types.js';
-import { useT } from '../i18n/index.js';
+import { useT, useLocale } from '../i18n/index.js';
+import { localizeCatalogItem } from '../agents/catalog-model.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import { Splitter } from '../components/Splitter.js';
 import { usePanel2Width } from '../components/RailLayout.js';
@@ -78,23 +81,17 @@ function RefreshIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
          strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M20 11a8 8 0 1 0 2 5.3" />
-      <path d="M20 4v7h-7" />
-    </svg>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" />
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M3 21v-5h5" />
     </svg>
   );
 }
 
 export function AgentsView() {
   const t = useT();
+  const locale = useLocale();
   const dispatch = useOperationDispatch();
   const store = useOperationStore();
   const [agents, setAgents] = useState<UserAgentStatus[]>([]);
@@ -239,7 +236,44 @@ export function AgentsView() {
     else setError(settled.error ?? 'Catalog sync failed');
   }
 
-  const signedCatalogItems = catalog?.items ?? [];
+  async function uninstallIntegration(item: ProxyCatalogItem): Promise<void> {
+    const bound = agents.filter(agent => agent.pluginId === item.pluginId).length;
+    const accepted = await confirm({
+      title: t('agents.catalog.uninstallTitle'),
+      message: t('agents.catalog.uninstallConfirm').replace('{count}', String(bound)),
+      confirmLabel: t('agents.catalog.action.uninstall'),
+      cancelLabel: t('common.cancel'),
+    });
+    if (!accepted) return;
+    setError('');
+    const settled = await waitForRunSettle(store, dispatch('catalog.uninstallProxy', {
+      pluginId: item.pluginId,
+    }).id);
+    if (settled.phase === 'confirmed') {
+      setSelection(null);
+      await refresh();
+      return;
+    }
+    const failure = settled.error ?? '';
+    if (failure.startsWith(INTEGRATION_UNINSTALL_BLOCKED_PREFIX)) {
+      let detail = '';
+      try {
+        const conflicts = JSON.parse(
+          failure.slice(INTEGRATION_UNINSTALL_BLOCKED_PREFIX.length),
+        ) as Array<{ name: string; runningSessions: number }>;
+        detail = conflicts
+          .map(entry => `${entry.name} (${entry.runningSessions})`)
+          .join(', ');
+      } catch {
+        detail = '';
+      }
+      setError(t('agents.catalog.uninstallBlocked').replace('{agents}', detail));
+      return;
+    }
+    setError(failure || 'Catalog operation failed');
+  }
+
+  const signedCatalogItems = (catalog?.items ?? []).map(item => localizeCatalogItem(item, locale));
   // GianDev can remain useful while the remote Catalog is unavailable: the
   // Host's bounded legacy metadata is a development-only fallback. Production
   // never manufactures actions when its signed Catalog is empty.
@@ -338,8 +372,27 @@ export function AgentsView() {
     return null;
   }
 
-  async function removeAgent(agent: UserAgentStatus): Promise<void> {
-    const accepted = await confirm({
+  async function setAgentEnabled(agent: UserAgentStatus, enabled: boolean): Promise<boolean> {
+    setError('');
+    const settled: OperationRun = await waitForRunSettle(store, dispatch('agent.patch', {
+      agentId: agent.id,
+      patch: { enabled },
+    }).id);
+    if (settled.phase === 'confirmed') {
+      await refresh();
+      return true;
+    }
+    const failure = settled.error ?? '';
+    setError(
+      failure.startsWith(AGENT_DISABLE_BLOCKED_PREFIX)
+        ? t('agents.disabled.blocked')
+          .replace('{count}', failure.slice(AGENT_DISABLE_BLOCKED_PREFIX.length))
+        : failure || 'Agent operation failed',
+    );
+    return false;
+  }
+
+  async function removeAgent(agent: UserAgentStatus): Promise<void> {    const accepted = await confirm({
       title: t('settings.agents.deleteTitle'),
       message: t('settings.agents.deleteMessage').replace('{name}', agent.name),
       confirmLabel: t('settings.agents.deleteConfirm'),
@@ -404,6 +457,13 @@ export function AgentsView() {
                   </span>
                 )}
                 <span className="spacer" />
+                <button type="button" className="btn icon ghost" data-testid="agents-page-refresh"
+                        aria-label={t('agents.page.refresh')}
+                        title={t('agents.page.refresh')}
+                        disabled={catalogSyncing}
+                        onClick={() => { void syncCatalog(); }}>
+                  {catalogSyncing ? <span className="spinner" aria-hidden="true" /> : <RefreshIcon />}
+                </button>
                 <button type="button" className="btn sm primary" data-testid="agents-add"
                         onClick={() => openAddAgent()}>
                   <PlusIcon />{t('settings.agents.add')}
@@ -436,6 +496,13 @@ export function AgentsView() {
                               {display.name}
                             </span>
                           </span>
+                          {agent.enabled === false && (
+                            <span className="st muted" data-badge="disabled"
+                                  data-testid={`agent-disabled-badge-${agent.id}`}>
+                              <span className="st-dot" />
+                              {t('agents.disabled.badge')}
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -444,25 +511,13 @@ export function AgentsView() {
                   {catalogNotice}
                   <div className="s2-subhead agents-integrations-head">
                     <span>{t('agents.integrations').replace('{count}', String(integrationItems.length))}</span>
-                    <button
-                      type="button"
-                      className="btn icon ghost agents-integrations-refresh"
-                      data-testid="agent-integrations-refresh"
-                      aria-label={t('agents.catalog.refreshIntegrations')}
-                      title={t('agents.catalog.refreshIntegrations')}
-                      disabled={catalogSyncing}
-                      onClick={() => { void syncCatalog(); }}
-                    >
-                      {catalogSyncing ? <span className="spinner" aria-hidden="true" /> : <RefreshIcon />}
-                    </button>
                   </div>
                   <div className="catalog" data-testid="agent-integrations-list">
                     {integrationItems.map(item => (
                       <CatalogRow key={item.pluginId} item={item}
                                   active={selection?.kind === 'proxy'
                                     && selection.pluginId === item.pluginId}
-                                  onPick={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }}
-                                  onInfo={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }} />
+                                  onPick={() => { setSelection({ kind: 'proxy', pluginId: item.pluginId }); }} />
                     ))}
                   </div>
                 </>
@@ -489,22 +544,24 @@ export function AgentsView() {
             <ProxyDetailWithBusy
               item={selectedProxy}
               runtime={runtimeByPlugin[selectedProxy.pluginId] ?? null}
-              developmentFallback={window.gianDesktop?.appVariant === 'development'
-                ? agents.find(agent => agent.pluginId === selectedProxy.pluginId
-                  || agent.proxy === productExecutorForPluginId(selectedProxy.pluginId))
-                : undefined}
+              developmentFallback={agents.find(agent => agent.plugin.source === 'development'
+                && (agent.pluginId === selectedProxy.pluginId
+                  || (agent.proxy !== null && agent.proxy === productExecutorForPluginId(selectedProxy.pluginId))))}
               docGeneration={catalog?.source.sequence ?? null}
+              docSourceId={catalog?.source.id ?? null}
               showBack={narrow}
               installTerminal={integrationTerminals[selectedProxy.pluginId]}
               onInstallTerminalHide={() => setIntegrationTerminalVisibility(selectedProxy.pluginId, false)}
               onInstallTerminalShow={() => setIntegrationTerminalVisibility(selectedProxy.pluginId, true)}
+              errorNotice={errorNotice}
+              onRefresh={() => { void syncCatalog(); }}
+              onUninstall={() => { void uninstallIntegration(selectedProxy); }}
               onAction={action => { void runCatalog(
                 action === 'install_runtime' ? 'catalog.installRuntime'
                   : action === 'install_proxy' ? 'catalog.installProxy'
                   : action === 'update_proxy' ? 'catalog.updateProxy' : 'catalog.rollbackProxy',
                 selectedProxy.pluginId,
               ); }}
-              onCreateAgent={() => openAddAgent(selectedProxy.pluginId)}
               onClose={() => setSelection(null)}
             />
           ) : selectedAgent ? (
@@ -518,6 +575,15 @@ export function AgentsView() {
                 agentId: selectedAgent.id,
                 patch: { defaults },
               })}
+              onSetEnabled={enabled => setAgentEnabled(selectedAgent, enabled)}
+              onChangeHome={selectedAgent.home !== null ? async () => {
+                const path = await pickHome(selectedAgent.id);
+                if (!path) return;
+                await run('agent.patch', {
+                  agentId: selectedAgent.id,
+                  patch: { home: { kind: 'custom', path } },
+                });
+              } : undefined}
               onDelete={() => { void removeAgent(selectedAgent); }}
               onOpenProxy={integrationItems.some(item => item.pluginId === selectedAgent.pluginId)
                 ? () => { setSelection({ kind: 'proxy', pluginId: selectedAgent.pluginId }); }
@@ -547,14 +613,11 @@ function CatalogRow({
   item,
   active,
   onPick,
-  onInfo,
 }: {
   item: ProxyCatalogItem;
   active: boolean;
   onPick: () => void;
-  onInfo: () => void;
 }) {
-  const t = useT();
   return (
     <div className={`catalog-item catalog-card ${active ? 'active' : ''}`}
          data-testid={`catalog-item-${item.pluginId}`}>
@@ -564,15 +627,8 @@ function CatalogRow({
         <AgentLogo proxy={null} logo={item.logo} fallback={item.displayName} size={28} />
         <span className="grow">
           <span className="catalog-name">{item.displayName}</span>
-          <span className="catalog-sub ellip" title={item.tagline}>{item.tagline}</span>
         </span>
-      </button>
-      <CatalogBadgeList item={item} />
-      <button type="button" className="btn icon ghost row-info"
-              title={t('agents.detail.viewInCatalog')}
-              aria-label={t('agents.detail.viewInCatalog')}
-              onClick={onInfo}>
-        <InfoIcon />
+        <CatalogBadgeList item={item} />
       </button>
     </div>
   );
@@ -583,9 +639,12 @@ function ProxyDetailWithBusy({
   runtime,
   developmentFallback,
   docGeneration,
+  docSourceId,
   showBack,
+  errorNotice,
   onAction,
-  onCreateAgent,
+  onRefresh,
+  onUninstall,
   installTerminal,
   onInstallTerminalHide,
   onInstallTerminalShow,
@@ -595,9 +654,12 @@ function ProxyDetailWithBusy({
   runtime: ManagedRuntimeStatus | null;
   developmentFallback?: UserAgentStatus;
   docGeneration: number | null;
+  docSourceId: string | null;
   showBack: boolean;
+  errorNotice?: React.ReactNode;
   onAction: (action: 'install_runtime' | 'install_proxy' | 'update_proxy' | 'rollback_proxy') => void;
-  onCreateAgent: () => void;
+  onRefresh: () => void;
+  onUninstall: () => void;
   installTerminal?: IntegrationInstallTerminalState;
   onInstallTerminalHide: () => void;
   onInstallTerminalShow: () => void;
@@ -612,10 +674,13 @@ function ProxyDetailWithBusy({
       runtime={runtime}
       developmentFallback={developmentFallback}
       docGeneration={docGeneration}
+      docSourceId={docSourceId}
       showBack={showBack}
       busy={runs.length > 0 || runtimeRuns.length > 0 || syncRuns.length > 0}
+      errorNotice={errorNotice}
       onAction={onAction}
-      onCreateAgent={onCreateAgent}
+      onRefresh={onRefresh}
+      onUninstall={onUninstall}
       installTerminal={installTerminal}
       onInstallTerminalHide={onInstallTerminalHide}
       onInstallTerminalShow={onInstallTerminalShow}

@@ -9,6 +9,7 @@ import {
   SNAPSHOT_SPLIT_THRESHOLD_BYTES,
   addSnapshotPart,
   createSnapshotPartAssembly,
+  commandResultSchema,
   finalizeSnapshotParts,
   generateCanonicalId,
   generateUuidV7,
@@ -27,16 +28,69 @@ import {
 import { hostServiceTier } from '../src/remote/command-adapter.js';
 import {
   command,
+  HARNESS_PROXY_LOGO,
   seedDevice,
   setupRemoteHarness,
   teardownRemoteHarness,
 } from './fixtures/remote-harness.js';
 
+test('Provider protocol faults produce valid Remote error replies and cached retries do not execute again', async t => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const session = await context.sessions.createSession({ workspace_id: context.workspaceId,
+      task_id: context.taskId, agent_id: 'agent-claude-review', type: 'subtask' });
+    let executions = 0;
+    t.mock.method(context.access, 'call', async () => {
+      executions += 1;
+      throw Object.assign(new Error('persisted Provider event changed'), { code: 'PROTOCOL_VIOLATION' });
+    });
+    const request = command('session.send', { session_id: session.id, text: 'continue' });
+    const result = await context.runtime.commands.execute(device, request);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'UNKNOWN_OUTCOME');
+    assert.doesNotThrow(() => commandResultSchema.parse({ type: 'command.result',
+      command_id: request.command_id, attempt_id: request.attempt_id, ...result }));
+    const repeated = await context.runtime.commands.execute(device, { ...request, attempt_id: generateCanonicalId() });
+    assert.deepEqual(repeated, result);
+    assert.equal(executions, 1);
+  } finally { teardownRemoteHarness(context); }
+});
+
+test('proxy.logo serves branding bytes and reports unknown proxies', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const logo = await context.runtime.commands.execute(device, command('proxy.logo', {
+      proxy: 'claude',
+      variant: 'light',
+    }));
+    assert.equal(logo.ok, true, logo.error?.message);
+    const data = logo.data as { media_type: string; data_base64: string; sha256: string };
+    assert.equal(data.media_type, 'image/png');
+    assert.equal(
+      Buffer.from(data.data_base64, 'base64').toString(),
+      new TextDecoder().decode(HARNESS_PROXY_LOGO.bytes),
+    );
+    assert.match(data.sha256, /^[0-9a-f]{64}$/);
+    assertNoLeak(data);
+
+    const missing = await context.runtime.commands.execute(device, command('proxy.logo', {
+      proxy: 'no-such-proxy',
+      variant: 'dark',
+    }));
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error?.code, 'RESOURCE_NOT_FOUND');
+  } finally {
+    teardownRemoteHarness(context);
+  }
+});
+
 test('RemoteMethod registry is exhaustive and rejects crafted params', async () => {
   const context = setupRemoteHarness();
   try {
     const device = seedDevice(context);
-    assert.equal(REMOTE_METHODS.length, 16);
+    assert.equal(REMOTE_METHODS.length, 25);
     for (const method of REMOTE_METHODS) {
       assert.equal(typeof method, 'string');
     }
@@ -55,26 +109,6 @@ test('RemoteMethod registry is exhaustive and rejects crafted params', async () 
       role: 'admin',
     }));
     assert.equal(role.ok, false);
-  } finally {
-    teardownRemoteHarness(context);
-  }
-});
-
-test('Remote Protocol 1.1 logo requests retain the older Host fallback without creating ledger entries', async () => {
-  const context = setupRemoteHarness();
-  try {
-    const device = seedDevice(context);
-    const request = command('proxy.logo', { proxy: 'claude', variant: 'light' });
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await context.runtime.commands.execute(device, request);
-      assert.equal(result.ok, false);
-      assert.equal(result.error?.code, 'INVALID_FRAME');
-      assert.equal(result.error?.message, 'unsupported method proxy.logo');
-    }
-    const ledger = context.db.prepare(
-      'SELECT COUNT(*) AS count FROM remote_command_ledger WHERE device_id = ? AND command_id = ?',
-    ).get(device.id, request.command_id) as { count: number };
-    assert.equal(ledger.count, 0);
   } finally {
     teardownRemoteHarness(context);
   }

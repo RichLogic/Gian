@@ -94,6 +94,7 @@ function EnterCodePage() {
         <p className="rw-pair-desc">{t('pair.code.desc')}</p>
         <span className="rw-pair-hint">{t('pair.code.qrHint')}</span>
         <TrustNote />
+        <a href="/enrollment">{t('enrollment.title')}</a>
         {state.addingHost && <button type="button" className="btn sm ghost" onClick={() => actions.cancelPairing()}>
           {t('common.cancel')}
         </button>}

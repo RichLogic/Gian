@@ -26,8 +26,12 @@
   cursor: pointer;
 }
 
-.sb-navrow:hover { background: var(--surface); }
-.sb-navrow.active { background: var(--surface-2); }
+.sb-navrow:hover { background: var(--row-hover); }
+.sb-navrow.active,
+.sb-navrow.active:hover {
+  background: var(--row-active);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
 .sb-navrow .sb-group-ico { width: 18px; }
 
 /* 显示更多 row — quiet; its text lands on the shared 43px title column
@@ -123,7 +127,18 @@
   position: sticky;
   top: 0;
   z-index: 3;
-  background: var(--bg);
+  /* This control is text on the rail, not a separate glass surface. */
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+.sb-scroll > .sb-listswitch:hover,
+.sb-scroll > .sb-listswitch:active,
+.sb-scroll > .sb-listswitch[aria-expanded="true"] {
+  background: transparent;
+  box-shadow: none;
 }
 
 /* List-switch nav row (2026-09-08 owner call): a plain `.sb-navrow` under

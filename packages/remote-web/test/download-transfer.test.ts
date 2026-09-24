@@ -127,11 +127,10 @@ describe('download transfer validation', () => {
       mime: 'text/plain',
     });
     expect(previewMayComplete(current, null)).toBe(false);
-    expect(previewMayComplete(current, { status: 'loading', handle })).toBe(true);
+    expect(previewMayComplete(current, { handle })).toBe(true);
     expect(previewMayComplete(current, {
-      status: 'loading',
       handle: { ...handle, id: generateCanonicalId() },
     })).toBe(false);
-    expect(previewMayComplete({ ...current, purpose: 'save' }, { status: 'loading', handle })).toBe(false);
+    expect(previewMayComplete({ ...current, purpose: 'save' }, { handle })).toBe(false);
   });
 });

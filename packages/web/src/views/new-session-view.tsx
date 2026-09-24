@@ -1,4 +1,7 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
+import { RemoteEnvironmentControl } from '../components/RemoteEnvironmentControl.js';
+import { remoteRequest, remotePickerAgents, remotePickerWorkspaces, type RemoteEnvironmentCatalog } from '../remote-environments.js';
 import { createPortal } from 'react-dom';
 import type {
   ApprovalMode,
@@ -77,6 +80,10 @@ import {
   type InlineComposerEditorHandle,
 } from '../components/composer/InlineComposerEditor.js';
 import {
+  SessionReferencePicker,
+  type SessionReferenceChoice,
+} from '../components/composer/session-reference-picker.js';
+import {
   useOperationDispatchOptional,
   useOperationStoreOptional,
   waitForRunSettle,
@@ -92,7 +99,7 @@ import {
   storeNewSessionAttachment,
   type NewSessionScreenshotDraftAttachment,
 } from '../screenshot-drafts.js';
-import { publishScreenshotTarget } from '../screenshot-target.js';
+import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
@@ -102,6 +109,8 @@ export interface NewSessionFirstAttachment extends NewSessionScreenshotDraftAtta
 }
 
 export interface CreateSessionInput {
+  executionEnvironmentId?: string;
+  remoteSessionId?: string;
   workspaceId: string;
   name: string;
   /** Owning saved Agent — the Host resolves kind/path/defaults from it. */
@@ -215,6 +224,7 @@ const EMPTY_COMPOSER_DOCUMENT: ComposerDocument = { version: 1, segments: [] };
 function newSessionContextLabel(item: MessageContextItem): string {
   if (item.type === 'folder') return item.name;
   if (item.type === 'file') return item.name;
+  if (item.type === 'session') return item.title;
   if (item.type === 'browserElement') return item.name || item.selector;
   const preview = item.text.replace(/\s+/g, ' ').trim();
   return preview.slice(0, 80) || 'Pasted text';
@@ -243,6 +253,7 @@ function newSessionComposerDocument(draft: NewSessionDraft | null): ComposerDocu
       id: item.id,
       referenceType: 'context' as const,
       label: newSessionContextLabel(item),
+      ...(item.type === 'file' || item.type === 'session' ? { kind: item.type } : {}),
     })),
   ];
   const text = draft?.message ?? '';
@@ -277,6 +288,17 @@ function savedContextItems(value: unknown): MessageContextItem[] {
       && typeof candidate.byteSize === 'number') {
       return [candidate as unknown as MessageContextItem];
     }
+    if (candidate.type === 'session'
+      && typeof candidate.sessionId === 'string'
+      && typeof candidate.title === 'string') {
+      return [{
+        type: 'session',
+        id: candidate.id,
+        sessionId: candidate.sessionId,
+        title: candidate.title,
+        ...(typeof candidate.workspaceName === 'string' ? { workspaceName: candidate.workspaceName } : {}),
+      }];
+    }
     if (candidate.type === 'browserElement') {
       const capture = normalizeBrowserElementCapture(candidate);
       return capture ? [{ type: 'browserElement', id: candidate.id, ...capture }] : [];
@@ -286,6 +308,7 @@ function savedContextItems(value: unknown): MessageContextItem[] {
 }
 
 export interface NewSessionDraftScope {
+  environmentId?: string;
   kind: 'workspace' | 'task';
   id: string;
 }
@@ -339,7 +362,66 @@ function ControlSeparator() {
   return <span className="cmp-control-sep" aria-hidden="true">|</span>;
 }
 
-export function NewSessionView({
+function NewSessionHeader({ onCancel, creating }: { onCancel(): void; creating: boolean }) {
+  const t = useT();
+  return <div className="main-head session-chat-head">
+    <div className="main-head-l"><span className="main-title">{t('coding.new.title')}</span></div>
+    <div className="main-head-r">
+      <button className="btn ghost sm" onClick={onCancel} disabled={creating}>{t('coding.new.cancel')}</button>
+    </div>
+  </div>;
+}
+
+export function NewSessionView(props: Omit<ComponentProps<typeof SessionCreateForm>, 'hostControl'>) {
+  const t = useT();
+  const [environmentId, setEnvironmentId] = useState('');
+  const [remoteCatalog, setRemoteCatalog] = useState<{ environmentId: string; catalog: RemoteEnvironmentCatalog } | null>(null);
+  const catalog = remoteCatalog?.environmentId === environmentId ? remoteCatalog.catalog : null;
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    setRemoteCatalog(null); setError(false);
+    if (!environmentId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = () => {
+      void remoteRequest<RemoteEnvironmentCatalog>(`/environments/${environmentId}/catalog`)
+        .then(value => { if (alive) { setRemoteCatalog({ environmentId, catalog: value }); setError(false); } })
+        .catch(() => { if (alive) { setError(true); timer = setTimeout(load, 3000); } });
+    };
+    load();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [environmentId]);
+  return <div className="remote-session-create">
+    <RemoteEnvironmentControl value={environmentId} onChange={setEnvironmentId} disabled={props.creating}
+      onTakeover={remote => props.onCreate({ workspaceId: remote.workspace_id,
+        agentId: `remote:${environmentId}:${remote.agent.id}`, executor: remote.agent.proxy,
+        name: remote.name ?? '', firstMessage: '', executionEnvironmentId: environmentId, remoteSessionId: remote.id })}>
+    {hostControl => environmentId && !catalog ? <main className="main">
+      <NewSessionHeader onCancel={props.onCancel} creating={props.creating} />
+      <div className="main-scroll" />
+      <div className="composer-wrap">
+        <div className="ns-agent-row" data-testid="ns-agent-row">
+          {hostControl}
+          <span className="s2-help" role="status">
+            {t(error ? 'remote.waitingForHost' : 'settings.remote.loading')}
+          </span>
+        </div>
+      </div>
+    </main> : <SessionCreateForm {...props} key={environmentId || 'local'} hostControl={hostControl}
+      executionEnvironmentId={environmentId || undefined}
+      workspaces={catalog ? remotePickerWorkspaces(catalog) : props.workspaces}
+      agentsOverride={catalog ? remotePickerAgents(environmentId, catalog) : undefined}
+      initialWorkspaceId={environmentId ? undefined : props.initialWorkspaceId}
+      initialAgentId={environmentId ? undefined : props.initialAgentId}
+      onCreate={input => props.onCreate({ ...input, ...(environmentId ? { executionEnvironmentId: environmentId } : {}) })} />}
+    </RemoteEnvironmentControl>
+  </div>;
+}
+
+function SessionCreateForm({
+  hostControl,
+  executionEnvironmentId,
+  agentsOverride,
   workspaces,
   initialWorkspaceId,
   initialAgentId,
@@ -355,6 +437,9 @@ export function NewSessionView({
   verifyingCreate = false,
   onVerifyCreate,
 }: {
+  hostControl: ReactNode;
+  executionEnvironmentId?: string;
+  agentsOverride?: UserAgentStatus[];
   workspaces: Workspace[];
   /** Preselected workspace (sidebar workspace-row "+" entry point, or the
    *  auto-return from the New Workspace sheet). */
@@ -387,13 +472,15 @@ export function NewSessionView({
   const zoomImage = useContext(ImageZoomContext);
   const operationDispatch = useOperationDispatchOptional();
   const operationStore = useOperationStoreOptional();
-  const [last] = useState(() => readJson<StoredNewSession>(LAST_KEY));
+  const lastKey = executionEnvironmentId ? `${LAST_KEY}.${executionEnvironmentId}` : LAST_KEY;
+  const activeWorkspaceDraftKey = executionEnvironmentId ? `${ACTIVE_WORKSPACE_DRAFT_KEY}.${executionEnvironmentId}` : ACTIVE_WORKSPACE_DRAFT_KEY;
+  const [last] = useState(() => readJson<StoredNewSession>(lastKey));
   const [initial] = useState(() => {
     const usable = (id: string | undefined) =>
       id !== undefined && workspaces.some(w => w.id === id);
     let activeDraftWorkspaceId: string | undefined;
     if (draftScope?.kind !== 'task') {
-      try { activeDraftWorkspaceId = localStorage.getItem(ACTIVE_WORKSPACE_DRAFT_KEY) ?? undefined; }
+      try { activeDraftWorkspaceId = localStorage.getItem(activeWorkspaceDraftKey) ?? undefined; }
       catch { /* best-effort */ }
     }
     let workspaceId = '';
@@ -401,9 +488,10 @@ export function NewSessionView({
     else if (usable(activeDraftWorkspaceId)) workspaceId = activeDraftWorkspaceId!;
     else if (usable(last?.workspaceId)) workspaceId = last!.workspaceId!;
     else workspaceId = workspaces.find(w => w.name !== '__gian_root__')?.id ?? '';
-    const owner = draftScope?.kind === 'task'
+    const baseOwner = draftScope?.kind === 'task'
       ? draftScope
       : workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null;
+    const owner = baseOwner && executionEnvironmentId ? { ...baseOwner, environmentId: executionEnvironmentId } : baseOwner;
     const restored = readNewSessionDraft(owner) ?? takeLegacyNewSessionDraft();
     // One-shot prefill (Timer's 新建定时任务 CTA): seeds the composer only
     // when the restored draft carries no text of its own.
@@ -437,7 +525,7 @@ export function NewSessionView({
   /** Which agents exist and whether they're usable — driven by the host's
    *  /api/agents install status so the picker follows Settings, not a
    *  hardcoded list. Null while loading. */
-  const [agents, setAgents] = useState<UserAgentStatus[] | null>(() => peekAgents());
+  const [agents, setAgents] = useState<UserAgentStatus[] | null>(() => agentsOverride ?? peekAgents());
   const requestedAgentId = initialAgentId ?? draft?.agentId ?? null;
   const [agentId, setAgentId] = useState<string | null>(requestedAgentId);
   const selectedAgent = agents?.find(agent => agent.id === agentId) ?? null;
@@ -470,6 +558,7 @@ export function NewSessionView({
   const thinkDrop = useUpDrop(210);
   const modeDrop = useUpDrop(340, { align: 'right' });
   const addDrop = useUpDrop(220, { align: 'right' });
+  const [sessionPickerAnchor, setSessionPickerAnchor] = useState<{ left: number; bottom: number } | null>(null);
   const [resourcePicking, setResourcePicking] = useState(false);
   const [activeReference, setActiveReference] = useState<{
     id: string;
@@ -488,11 +577,12 @@ export function NewSessionView({
 
   useEffect(() => {
     let cancelled = false;
+    if (agentsOverride) { setAgents(agentsOverride); return; }
     loadAgents()
       .then(list => { if (!cancelled) setAgents(list); })
       .catch(() => { if (!cancelled) setAgents([]); });
     return () => { cancelled = true; };
-  }, []);
+  }, [agentsOverride]);
 
   // Agent default: explicit preselect (⌘J/⌘K) > restored draft > last-used
   // Agent (still ready) > legacy last-used kind's first ready Agent > the
@@ -500,7 +590,7 @@ export function NewSessionView({
   // agents and no memory, nothing is selected and Send stays disabled.
   useEffect(() => {
     if (!agents || agentId) return;
-    const ready = agents.filter(agent => agent.ready);
+    const ready = agents.filter(agent => agent.ready && agent.enabled !== false);
     const rememberedId = draft?.agentId ?? last?.agentId;
     if (rememberedId && ready.some(agent => agent.id === rememberedId)) {
       setAgentId(rememberedId);
@@ -716,8 +806,9 @@ export function NewSessionView({
   }
 
   function activeDraftScope(workspaceId = selectedWs): NewSessionDraftScope | null {
-    if (draftScope?.kind === 'task') return draftScope;
-    return workspaceId ? { kind: 'workspace', id: workspaceId } : null;
+    const scope = draftScope?.kind === 'task' ? draftScope
+      : workspaceId ? { kind: 'workspace' as const, id: workspaceId } : null;
+    return scope && executionEnvironmentId ? { ...scope, environmentId: executionEnvironmentId } : scope;
   }
 
   // Persist continuously, not only during the New Workspace detour. A normal
@@ -728,7 +819,7 @@ export function NewSessionView({
     if (owner) {
       writeJson(newSessionDraftStorageKey(owner), currentDraft());
       if (owner.kind === 'workspace') {
-        try { localStorage.setItem(ACTIVE_WORKSPACE_DRAFT_KEY, owner.id); } catch { /* best-effort */ }
+        try { localStorage.setItem(activeWorkspaceDraftKey, owner.id); } catch { /* best-effort */ }
       }
     }
   }, [
@@ -749,7 +840,7 @@ export function NewSessionView({
   ]);
 
   const currentScope = activeDraftScope();
-  const currentScopeKey = currentScope ? `${currentScope.kind}:${currentScope.id}` : '';
+  const currentScopeKey = currentScope ? `${currentScope.environmentId ?? 'local'}:${currentScope.kind}:${currentScope.id}` : '';
   const selectedWorkspace = workspaces.find(w => w.id === selectedWs) ?? null;
 
   // `@` file-reference popover: the future session runs in the workspace's
@@ -757,7 +848,7 @@ export function NewSessionView({
   // `file` context items to once the session exists.
   const selectedWorkspaceId = selectedWorkspace?.id ?? null;
   const selectedWorkspacePath = selectedWorkspace?.path ?? null;
-  const fileMentionEnabled = selectedWorkspaceId !== null
+  const fileMentionEnabled = !executionEnvironmentId && selectedWorkspaceId !== null
     && contextItems.length < MAX_MESSAGE_CONTEXT_ITEMS;
   const handleFileQuery = useCallback(async (query: string) => {
     if (!selectedWorkspaceId || !selectedWorkspacePath) return [];
@@ -831,7 +922,7 @@ export function NewSessionView({
     return publishScreenshotTarget({ kind: 'new-session', scope: currentScope, label });
   }, [currentScopeKey, draftLabel, draftScope?.kind, screenshotAvailable, selectedWorkspace?.name, t]);
 
-  const readyAgents = (agents ?? []).filter(agent => agent.ready);
+  const readyAgents = (agents ?? []).filter(agent => agent.ready && agent.enabled !== false);
   // Exactly one usable agent: no choice to make — the chip shows it
   // statically (issue #57). Zero or 2+ ready agents get the picker drop
   // (not-ready rows render disabled).
@@ -977,7 +1068,8 @@ export function NewSessionView({
       if (currentOwner) {
         writeJson(newSessionDraftStorageKey(currentOwner), currentDraft());
       }
-      const nextOwner = { kind: 'workspace' as const, id: nextWorkspaceId };
+      const nextOwner = { kind: 'workspace' as const, id: nextWorkspaceId,
+        ...(executionEnvironmentId ? { environmentId: executionEnvironmentId } : {}) };
       const savedNextDraft = readNewSessionDraft(nextOwner);
       // A never-opened Workspace starts with a blank goal/title but keeps the
       // current Agent/capability choices as convenient defaults. Once that
@@ -1073,7 +1165,7 @@ export function NewSessionView({
         ? { catalogOptions: catalog.configOptions, catalogValues: values }
         : {}),
     });
-    writeJson(LAST_KEY, {
+    writeJson(lastKey, {
       workspaceId: selectedWs,
       ...(selectedAgent ? { agentId: selectedAgent.id } : {}),
       executor,
@@ -1145,6 +1237,52 @@ export function NewSessionView({
   const activeScreenshotThumb = activeScreenshot
     ? screenshotPreviews[activeScreenshot.id]
     : undefined;
+
+  async function startNewSessionScreenshot(): Promise<void> {
+    addDrop.setOpen(false);
+    setAttachmentError(null);
+    const result = await startScreenshotCapture();
+    if (result.ok) return;
+    // Other failures are broadcast through the bridge's screenshot error
+    // event and surface as an app-level toast.
+    if (result.error === 'busy') setAttachmentError(t('screenshot.busy'));
+    else if (!result.error) setAttachmentError(t('screenshot.startFailed'));
+  }
+
+  function openSessionReferencePicker(): void {
+    const rect = addDrop.btnRef.current?.getBoundingClientRect();
+    addDrop.setOpen(false);
+    if (!rect) return;
+    setSessionPickerAnchor({
+      left: rect.left,
+      bottom: window.innerHeight - rect.top + 6,
+    });
+  }
+
+  function handleSessionReference(choice: SessionReferenceChoice): void {
+    setSessionPickerAnchor(null);
+    // The draft has no session yet; any existing session may be referenced.
+    // The menu row disables at the context cap, and a repeated pick of the
+    // same conversation is a no-op.
+    if (contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS) return;
+    if (contextItems.some(item => item.type === 'session' && item.sessionId === choice.sessionId)) return;
+    const item: MessageContextItem = {
+      type: 'session',
+      id: crypto.randomUUID(),
+      sessionId: choice.sessionId,
+      title: choice.title,
+      ...(choice.workspaceName ? { workspaceName: choice.workspaceName } : {}),
+    };
+    setContextItems(previous => [...previous, item]);
+    editorRef.current?.insertReference({
+      id: item.id,
+      referenceType: 'context',
+      label: item.title,
+      kind: 'session',
+    });
+    requestAnimationFrame(() => editorRef.current?.focus());
+    setAttachmentError(null);
+  }
 
   async function pickComposerResources(): Promise<void> {
     addDrop.setOpen(false);
@@ -1288,14 +1426,7 @@ export function NewSessionView({
 
   return (
     <main className="main">
-      <div className="main-head session-chat-head">
-        <div className="main-head-l">
-          <span className="main-title">{t('coding.new.title')}</span>
-        </div>
-        <div className="main-head-r">
-          <button className="btn ghost sm" onClick={onCancel} disabled={creating}>{t('coding.new.cancel')}</button>
-        </div>
-      </div>
+      <NewSessionHeader onCancel={onCancel} creating={creating} />
       <div className="main-scroll">
         <div className="ns-center">
           {createError && (
@@ -1328,9 +1459,10 @@ export function NewSessionView({
       </div>
 
       <div className="composer-wrap">
-        {/* Agent + workspace selection live ABOVE the message box (issue #57
+        {/* Host + Agent + workspace selection live ABOVE the message box (issue #57
             v2 review); the picked agent drives the chips inside the bar. */}
           <div className="ns-agent-row" data-testid="ns-agent-row">
+          {hostControl}
           {agents === null ? (
             <span className="composer-opt" data-testid="ns-agent-loading">
               <span className="name">{t('common.loading')}</span>
@@ -1349,7 +1481,7 @@ export function NewSessionView({
               onClick={() => agentDrop.setOpen(open => !open)}
             >
               {selectedAgent && (
-                <AgentLogo proxy={selectedAgent.proxy} size={18} />
+                <AgentLogo proxy={selectedAgent.proxy} environmentId={executionEnvironmentId} size={18} />
               )}
               <span className="name">
                 {selectedAgent ? selectedAgent.name : t('coding.new.agent.select')}
@@ -1358,7 +1490,7 @@ export function NewSessionView({
             </button>
           ) : selectedAgent ? (
             <span className="composer-opt ns-chip-static" data-testid="ns-agent-picker">
-              <AgentLogo proxy={selectedAgent.proxy} size={18} />
+              <AgentLogo proxy={selectedAgent.proxy} environmentId={executionEnvironmentId} size={18} />
               <span className="name">{selectedAgent.name}</span>
             </span>
           ) : null}
@@ -1421,7 +1553,7 @@ export function NewSessionView({
                   onClick={() => { setAgentId(agent.id); agentDrop.setOpen(false); }}
                 >
                   <span className="mp-check">{agentId === agent.id ? '✓' : ''}</span>
-                  <AgentLogo proxy={agent.proxy} size={24} />
+                  <AgentLogo proxy={agent.proxy} environmentId={executionEnvironmentId} size={24} />
                   <span className="mp-row-body">
                     <span className="mp-row-title">{agent.name}</span>
                     <span className={`mp-row-hint${agent.runtimeProfile?.verification === 'unverified' ? ' danger-text' : ''}`}>
@@ -1486,6 +1618,7 @@ export function NewSessionView({
             <button
               type="button"
               className="ns-ws-new"
+              disabled={Boolean(executionEnvironmentId)}
               data-testid="ns-workspace-new"
               onClick={startNewWorkspace}
             >
@@ -1823,7 +1956,8 @@ export function NewSessionView({
               </span>
             )}
 
-            {/* Add resources - same files/folder menu as the session Composer. */}
+            {/* Add resources - same add menu as the session Composer:
+                files/folders plus the Desktop-only screenshot capture. */}
             <>
               <button
                 ref={addDrop.btnRef}
@@ -1875,9 +2009,47 @@ export function NewSessionView({
                         )}
                       </span>
                     </button>
+                    <button
+                      type="button"
+                      className="mp-row"
+                      disabled={contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS}
+                      onClick={openSessionReferencePicker}
+                    >
+                      <span className="composer-add-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M2.25 3.25h11.5v8H8.75l-3.5 3v-3h-3z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <span className="mp-row-body">
+                        <span className="mp-row-title">{t('composer.context.referenceSession')}</span>
+                      </span>
+                    </button>
+                    {screenshotAvailable && (
+                      <button
+                        type="button"
+                        className="mp-row"
+                        onClick={() => { void startNewSessionScreenshot(); }}
+                      >
+                        <span className="composer-add-icon" aria-hidden="true">
+                          <svg viewBox="0 0 16 16" fill="none">
+                            <path d="M5 1.75v8.75a1.5 1.5 0 0 0 1.5 1.5h8.75M1.75 5h8.75a1.5 1.5 0 0 1 1.5 1.5v8.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                        <span className="mp-row-body">
+                          <span className="mp-row-title">{t('screenshot.capture')}</span>
+                        </span>
+                      </button>
+                    )}
                   </div>
                 </div>,
                 document.body,
+              )}
+              {sessionPickerAnchor && (
+                <SessionReferencePicker
+                  anchor={sessionPickerAnchor}
+                  onSelect={handleSessionReference}
+                  onClose={() => setSessionPickerAnchor(null)}
+                />
               )}
             </>
 

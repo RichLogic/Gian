@@ -3,6 +3,7 @@
  * packages/web/src/i18n/zh.ts (parity is guarded by test/i18n.test.ts).
  */
 export const CHAT_UI_ZH: Record<string, string> = {
+  'translation.sentLabel': '经翻译后发给 LM 的文字如下',
   'coding.status.interrupted': '已中断',
   'common.cancel': '取消',
   'common.close': '关闭',
@@ -13,6 +14,7 @@ export const CHAT_UI_ZH: Record<string, string> = {
   'composer.context.pastedText': '粘贴的文本',
   'composer.context.quote': '引用',
   'composer.context.remove': '移除上下文',
+  'composer.context.session': '对话',
   'links.unavailable': '无法在此打开此链接',
   'message.attachment.download': '下载',
   'transcript.agent': 'Agent',

@@ -73,7 +73,7 @@ describe('LinkAnchor file links', () => {
     expect(container.querySelector('a')).toBeNull();
     const span = container.querySelector('span.link-inert')!;
     expect(span.getAttribute('title')).toContain('Opening this link is not available here');
-    expect(span.querySelector('svg[data-link-icon="file"]')).not.toBeNull();
+    expect(span.querySelector('svg[data-link-icon="file-ts"]')).not.toBeNull();
   });
 });
 

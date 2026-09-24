@@ -7,6 +7,7 @@ import type { OperationDispatcher } from '../operations/dispatcher.js';
 interface UseSessionSelectionInput {
   mode: Mode;
   activeSubtaskId: string | null;
+  activeSessionId: string | null;
   sessionsRef: RefObject<Session[]>;
   activeSessionIdRef: RefObject<string | null>;
   setActiveSessionId: Dispatch<SetStateAction<string | null>>;
@@ -17,6 +18,7 @@ interface UseSessionSelectionInput {
 export function useSessionSelection({
   mode,
   activeSubtaskId,
+  activeSessionId,
   sessionsRef,
   activeSessionIdRef,
   setActiveSessionId,
@@ -41,10 +43,10 @@ export function useSessionSelection({
 
   useEffect(() => {
     if (mode !== 'tasks' || !activeSubtaskId) return;
-    if (activeSessionIdRef.current === activeSubtaskId) return;
+    if (activeSessionId === activeSubtaskId) return;
     setActiveSessionId(activeSubtaskId);
     markSessionViewed(activeSubtaskId);
-  }, [activeSessionIdRef, activeSubtaskId, markSessionViewed, mode, setActiveSessionId]);
+  }, [activeSessionId, activeSubtaskId, markSessionViewed, mode, setActiveSessionId]);
 
   useEffect(() => {
     if (mode !== 'tasks' || activeSubtaskId) return;

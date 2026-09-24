@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "id": "codex",
   "displayName": "Codex",
-  "pluginVersion": "0.3.1",
+  "pluginVersion": "0.3.2",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",
@@ -16,7 +16,7 @@
     "id": "codex",
     "displayName": "Codex CLI",
     "verifiedVersions": [
-      "0.153.4"
+      "0.156.1"
     ]
   },
   "branding": {

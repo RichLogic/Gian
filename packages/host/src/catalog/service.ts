@@ -4,6 +4,9 @@ import {
   assertCatalogImageMagic,
   CATALOG_DOCUMENT_KEYS,
   isApprovedRuntimeAssetUrl,
+  readCatalogLocalizations,
+  type CatalogLocalizations,
+  type CatalogLocale,
   type CompiledCatalogEntryV1,
 } from '@gian/proxy-catalog-contract';
 import type { ManifestV4 } from '@gian/proxy-protocol';
@@ -33,6 +36,18 @@ import type { RuntimeKind } from '../runtime/resolver.js';
 export type OfficialBundledLaunch = OfficialPresence;
 
 export class CatalogService {
+  private localizedFiles: Map<string, Buffer> | null = null;
+  private localizedContent: CatalogLocalizations | null = null;
+
+  private localizedEntry(pluginId: string, snapshot = this.options.store.snapshot()) {
+    if (!snapshot.files || !snapshot.index) return undefined;
+    if (this.localizedFiles !== snapshot.files) {
+      this.localizedContent = readCatalogLocalizations(snapshot.files, snapshot.index);
+      this.localizedFiles = snapshot.files;
+    }
+    return this.localizedContent?.plugins.find(plugin => plugin.pluginId === pluginId)?.locales;
+  }
+
   constructor(
     private readonly options: {
       store: CatalogStore;
@@ -55,7 +70,7 @@ export class CatalogService {
     const items: ProxyCatalogItem[] = [];
     const seen = new Set<string>();
     for (const entry of snapshot.index?.plugins ?? []) {
-      items.push(await this.project(entry, installedById.get(entry.pluginId) ?? null));
+      items.push(await this.project(entry, installedById.get(entry.pluginId) ?? null, snapshot));
       seen.add(entry.pluginId);
     }
     for (const local of installed) {
@@ -245,11 +260,13 @@ export class CatalogService {
   async documentation(
     pluginId: string,
     document: (typeof CATALOG_DOCUMENT_KEYS)[number],
+    locale?: CatalogLocale,
   ): Promise<{ bytes: Buffer; mediaType: 'text/markdown; charset=utf-8' } | null> {
     const id = parseProxyPluginId(pluginId);
     const entry = this.catalogEntry(id);
     if (!entry) return null;
-    const ref = entry.documentation[document];
+    const ref = (locale ? this.localizedEntry(id)?.[locale]?.documentation[document] : undefined)
+      ?? entry.documentation[document];
     const bytes = this.cachedAsset(ref.path, ref.sha256, ref.size);
     if (!bytes) return null;
     return { bytes, mediaType: 'text/markdown; charset=utf-8' };
@@ -270,7 +287,7 @@ export class CatalogService {
     if (!entry) {
       throw new PluginStoreError('CATALOG_ENTRY_MISSING', `${pluginId} is not present in the trusted Catalog.`);
     }
-    return this.project(entry, view.installedById.get(id) ?? null);
+    return this.project(entry, view.installedById.get(id) ?? null, view.snapshot);
   }
 
   private coordinateFrom(view: CatalogActionView, pluginId: string): PluginInstallCoordinate {
@@ -313,6 +330,7 @@ export class CatalogService {
   private async project(
     entry: CompiledCatalogEntryV1,
     installed: InstalledPackageView | null,
+    snapshot: CatalogSnapshot,
   ): Promise<ProxyCatalogItem> {
     const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
     const compatibility = classifyCatalogCompatibility(entry.stable.protocolRange, hostVersions);
@@ -358,7 +376,17 @@ export class CatalogService {
       currentLaunch,
       effectiveInstallation,
     );
+    const translations = this.localizedEntry(entry.pluginId, snapshot);
+    const localizations: ProxyCatalogItem['localizations'] = translations ? Object.fromEntries(
+      Object.entries(translations).map(([locale, translation]) => [locale, {
+        displayName: translation.displayName,
+        tagline: translation.tagline,
+        documentation: Object.fromEntries(CATALOG_DOCUMENT_KEYS.map(key => [key,
+          `/api/proxies/${entry.pluginId}/docs/${key}?locale=${locale}`])) as ProxyCatalogItem['documentation'],
+      }]),
+    ) : undefined;
     return {
+      ...(localizations ? { localizations } : {}),
       pluginId: entry.pluginId,
       displayName: entry.displayName,
       tagline: entry.tagline,

@@ -600,6 +600,68 @@ test('agents.json v5 migrates to v6 with a data-neutral options map', async t =>
   assert.deepEqual(persisted.agents[1]!.defaults['options'], { provider: 'deepseek-official' });
 });
 
+test('agent enabled flag round-trips through agents.json; absent means enabled', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-enabled-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'data');
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, 'agents.json'), JSON.stringify({
+    schemaVersion: 6,
+    agents: [
+      {
+        id: 'agent-legacy',
+        name: 'Legacy Claude',
+        pluginId: 'claude',
+        proxy: 'claude',
+        cliPath: null,
+        defaults: { model: '', thinking: '', mode: '' },
+      },
+      {
+        id: 'agent-garbage',
+        name: 'Garbage Codex',
+        pluginId: 'codex',
+        proxy: 'codex',
+        enabled: 'no',
+        cliPath: null,
+        defaults: { model: '', thinking: '', mode: '' },
+      },
+    ],
+  }));
+  const options = {
+    allowCreateWithoutCatalog: true,
+    dataDir,
+    releaseVersion: '0.1.0',
+    managedProxies: false,
+    developmentProxyEntries: {},
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  } as const;
+
+  // Pre-existing files without `enabled` (and non-boolean values) load as
+  // undefined — treated as enabled, and the field stays unwritten.
+  const manager = await AgentManager.create(options);
+  assert.equal(manager.getAgent('agent-legacy').enabled, undefined);
+  assert.equal(manager.getAgent('agent-garbage').enabled, undefined);
+
+  await manager.updateAgent('agent-legacy', { enabled: false });
+  assert.equal(manager.getAgent('agent-legacy').enabled, false);
+
+  const reloaded = await AgentManager.create(options);
+  assert.equal(reloaded.getAgent('agent-legacy').enabled, false);
+  assert.equal(reloaded.getAgent('agent-garbage').enabled, undefined);
+  const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
+    schemaVersion: number;
+    agents: Array<{ id: string; enabled?: unknown }>;
+  };
+  assert.equal(persisted.schemaVersion, 6);
+  assert.equal(persisted.agents.find(agent => agent.id === 'agent-legacy')!.enabled, false);
+  assert.equal('enabled' in persisted.agents.find(agent => agent.id === 'agent-garbage')!, false);
+
+  await reloaded.updateAgent('agent-legacy', { enabled: true });
+  const reloadedAgain = await AgentManager.create(options);
+  assert.equal(reloadedAgain.getAgent('agent-legacy').enabled, true);
+});
+
 test('agent defaults normalize role-less options to a bounded scalar map', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-agent-options-normalize-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -1227,6 +1289,7 @@ test('checkProxyUpdate reports the newest compatible independent release', async
   })}\n`);
   const incompatibleName = 'gian-proxy-codex-9.0.0-darwin-arm64.tar.gz.manifest.json';
   const incompatibleDigest = createHash('sha256').update(incompatibleManifest).digest('hex');
+  const proxyRequests: string[] = [];
 
   const manager = await AgentManager.create({
     allowCreateWithoutCatalog: true,
@@ -1238,6 +1301,9 @@ test('checkProxyUpdate reports the newest compatible independent release', async
     pathEnv: '',
     fetchImpl: async input => {
       const url = String(input);
+      proxyRequests.push(url);
+      assert.ok(url.startsWith('https://api.github.com/repos/RichLogic/Gian-Proxies/')
+        || url.startsWith('https://github.com/RichLogic/Gian-Proxies/releases/download/'));
       if (url.endsWith('/releases?per_page=100')) {
         return new Response(JSON.stringify([
           // Newer but protocol-incompatible: must be skipped, not reported.
@@ -1263,6 +1329,7 @@ test('checkProxyUpdate reports the newest compatible independent release', async
     latestVersion: '7.5.0',
     updateAvailable: true,
   });
+  assert.ok(proxyRequests.length >= 3);
 });
 
 test('checkProxyUpdate reports up to date when the installed version matches', async t => {

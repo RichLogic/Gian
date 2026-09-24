@@ -11,6 +11,7 @@
  */
 
 export interface MsgItem {
+  translation?: import('@gian/shared').TranslationRecord;
   kind: 'user' | 'assistant';
   id: string;
   text: string;

@@ -4,6 +4,8 @@ import type { EventEnvelope } from '@gian/shared';
 
 import {
   canonicalizeHistoryEnvelopes,
+  compactHistoryEnvelopes,
+  conversationMessagesFromEvents,
   snapshotIdentity,
 } from '../src/session/history-store.js';
 
@@ -86,4 +88,69 @@ test('canonicalizeHistoryEnvelopes collapses Kimi tool_call updates by id', () =
 
   const canonical = canonicalizeHistoryEnvelopes([started, updated, other]);
   assert.deepEqual(canonical.map(event => event.call_id), ['update', 'other']);
+});
+
+test('conversationMessagesFromEvents keeps user and assistant text in order, excluding tool noise', () => {
+  const events = compactHistoryEnvelopes([
+    envelope({
+      event: 'user_message',
+      call_id: 'u1',
+      data: { text: 'first question' },
+    }),
+    envelope({
+      event: 'output.text.delta',
+      call_id: 'a1',
+      display: { type: 'message', data: { text: 'ans', delta: true } },
+    }),
+    envelope({
+      event: 'output.text.delta',
+      call_id: 'a1',
+      display: { type: 'message', data: { text: 'wer', delta: true } },
+    }),
+    envelope({
+      event: 'tool_execution',
+      call_id: 't1',
+      display: { type: 'activity.tool', data: { itemId: 't1' } },
+    }),
+    envelope({
+      event: 'user_message',
+      call_id: 'u2',
+      data: { text: 'follow up' },
+    }),
+    envelope({
+      event: 'output.text',
+      call_id: 'a2',
+      display: { type: 'message', data: { text: 'second answer', role: 'assistant' } },
+    }),
+  ]);
+  assert.deepEqual(conversationMessagesFromEvents(events), [
+    { role: 'user', text: 'first question' },
+    { role: 'assistant', text: 'answer' },
+    { role: 'user', text: 'follow up' },
+    { role: 'assistant', text: 'second answer' },
+  ]);
+});
+
+test('conversationMessagesFromEvents treats native user-role messages as user text', () => {
+  const events = compactHistoryEnvelopes([
+    envelope({
+      event: 'gian.user',
+      call_id: 'n1',
+      display: { type: 'message', data: { text: 'native user note', role: 'user' } },
+    }),
+    envelope({
+      event: 'user_message',
+      call_id: 'u1',
+      data: {},
+    }),
+    envelope({
+      event: 'output.text',
+      call_id: 'a1',
+      display: { type: 'message', data: { text: '' } },
+    }),
+  ]);
+  // Empty user_message payloads and empty assistant texts are skipped.
+  assert.deepEqual(conversationMessagesFromEvents(events), [
+    { role: 'user', text: 'native user note' },
+  ]);
 });

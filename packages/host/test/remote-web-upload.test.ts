@@ -15,6 +15,7 @@ import { createProductionController } from '../../remote-web/src/controller/crea
 import { MemoryEncryptedHostCache } from '../../remote-web/src/cache/encrypted-cache.js';
 import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/identity.js';
 import { setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
+import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
 
 async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promise<T> {
   const started = Date.now();
@@ -28,7 +29,7 @@ async function waitUntil<T>(fn: () => T | Promise<T>, timeoutMs = 12_000): Promi
 }
 
 async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
-  const { handle, fetch } = await makeRemoteTestApp({
+  const { handle, fetch: unauthenticated } = await makeRemoteTestApp({
     clock: {
       get now() {
         return Date.now();
@@ -37,6 +38,7 @@ async function enrollAndStart(context: ReturnType<typeof setupRemoteHarness>) {
     },
   });
   const listened = await listenRemoteApp(handle);
+  const fetch = await authenticatedRemoteFixture(unauthenticated, context.identity, listened.url);
   const identity = await context.identity.ensurePublic();
   const created = await (await fetch('/api/v1/admin/host-enrollments', {
     method: 'POST',
@@ -85,6 +87,10 @@ async function pairController(context: ReturnType<typeof setupRemoteHarness>) {
     platform: 'macOS',
     userAgent: 'GianRemoteUploadTest',
   });
+  controller.actions.startGitHubLogin!();
+  await waitUntil(() => controller.state.account?.userCode);
+  controller.actions.pollGitHubLogin!();
+  await waitUntil(() => controller.state.account?.status === 'signed_in');
   const grant = await context.runtime.createPairingGrant();
   controller.actions.submitPairingCode(grant.code);
   const pending = await waitUntil(() => (

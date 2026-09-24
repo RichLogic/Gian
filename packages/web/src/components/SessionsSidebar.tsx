@@ -142,7 +142,7 @@ export function SessionsSidebar({
 
   function makeRowHandlers(s: Session) {
     return {
-      active: s.id === activeSessionId,
+      active: (mode === 'tasks' || mode === 'sessions') && s.id === activeSessionId,
       workspaceName: s.workspace_id != null ? wsById.get(s.workspace_id)?.name : undefined,
       onSelect: () => onSelect(s.id),
       onPin: (pinned: boolean) => onPinSession(s.id, pinned),

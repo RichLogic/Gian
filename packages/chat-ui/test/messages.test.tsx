@@ -64,6 +64,24 @@ describe('UserMessage', () => {
     expect(chip.textContent).toContain('2.0 KB');
   });
 
+  it('numbers image previews with a corner badge in attachment order; files get none', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        text: '',
+        attachments: [
+          { name: 'one.png', mime: 'image/png', url: '/api/x/one.png' },
+          { name: 'notes.txt', mime: 'text/plain', url: '/api/x/notes.txt' },
+          { name: 'two.png', mime: 'image/png', url: '/api/x/two.png' },
+        ],
+      })} />,
+    );
+    // N = 1-based position among ALL of the message's attachments — the same
+    // N the compiled prompt's [Attached resource N] uses.
+    const badges = [...container.querySelectorAll('.msg-att .msg-att-num')].map(el => el.textContent);
+    expect(badges).toEqual(['1', '3']);
+    expect(container.querySelector('.msg-file-att .msg-att-num')).toBeNull();
+  });
+
   it('routes attachments through an app-owned secure opener when provided', async () => {
     const user = userEvent.setup();
     const open = vi.fn();
@@ -86,6 +104,117 @@ describe('UserMessage', () => {
     );
     expect(container.querySelector('.message-context-cards .context-card')).not.toBeNull();
     expect(container.querySelector('.context-card-label')!.textContent).toBe('Pasted text');
+  });
+
+  it('composer-document message with image attachments renders thumbnails with badges below the text', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        composerDocument: {
+          version: 1,
+          segments: [
+            { type: 'reference', id: 'r1', referenceType: 'attachment', label: 'image1' },
+            { type: 'text', text: 'compare with ' },
+            { type: 'reference', id: 'r2', referenceType: 'attachment', label: 'image2' },
+          ],
+        },
+        attachments: [
+          { name: 'one.png', mime: 'image/png', url: '/api/x/one.png' },
+          { name: 'two.png', mime: 'image/png', url: '/api/x/two.png' },
+        ],
+      })} />,
+    );
+    // The inline chips still render inside the text…
+    expect(container.querySelectorAll('.message-inline-reference[data-reference-type="attachment"]')).toHaveLength(2);
+    // …and the image previews render in a gallery below it, badged with the
+    // same N as the image<N> chip labels.
+    const gallery = container.querySelector('.msg-text + .msg-attachments')!;
+    expect(gallery).not.toBeNull();
+    const thumbs = [...gallery.querySelectorAll('a.msg-att')];
+    expect(thumbs.map(a => a.querySelector('img')!.getAttribute('src'))).toEqual(['/api/x/one.png', '/api/x/two.png']);
+    expect([...gallery.querySelectorAll('.msg-att-num')].map(el => el.textContent)).toEqual(['1', '2']);
+  });
+
+  it('mixed file+image composer-document message: the file stays a chip, the image gets a thumbnail with its attachment-order N', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        composerDocument: {
+          version: 1,
+          segments: [
+            { type: 'reference', id: 'r1', referenceType: 'attachment', label: 'spec.pdf' },
+            { type: 'text', text: ' then ' },
+            { type: 'reference', id: 'r2', referenceType: 'attachment', label: 'image2' },
+          ],
+        },
+        attachments: [
+          { name: 'spec.pdf', mime: 'application/pdf', url: '/api/x/spec.pdf' },
+          { name: 'two.png', mime: 'image/png', url: '/api/x/two.png' },
+        ],
+      })} />,
+    );
+    const gallery = container.querySelector('.msg-text + .msg-attachments')!;
+    expect(gallery).not.toBeNull();
+    const thumbs = [...gallery.querySelectorAll('a.msg-att')];
+    expect(thumbs).toHaveLength(1);
+    expect(thumbs[0]!.querySelector('img')!.getAttribute('src')).toBe('/api/x/two.png');
+    // N = 1-based position among ALL attachments, so the second attachment
+    // (the image) is badged 2 — matching its image2 chip label.
+    expect(thumbs[0]!.querySelector('.msg-att-num')!.textContent).toBe('2');
+    // The file attachment renders as its inline chip only — no gallery entry.
+    expect(gallery.querySelector('.msg-file-att')).toBeNull();
+    expect(screen.getByText('spec.pdf')).toBeInTheDocument();
+  });
+
+  it('composer-document image thumbnails keep the lightbox click wiring', () => {
+    const zoom = vi.fn();
+    const { container } = render(
+      <ImageZoomContext.Provider value={zoom}>
+        <UserMessage item={userMsg({
+          text: '',
+          composerDocument: {
+            version: 1,
+            segments: [{ type: 'reference', id: 'r1', referenceType: 'attachment', label: 'image1' }],
+          },
+          attachments: [{ name: 'shot.png', mime: 'image/png', url: '/api/x/shot.png' }],
+        })} />
+      </ImageZoomContext.Provider>,
+    );
+    const thumb = container.querySelector('.msg-text + .msg-attachments a.msg-att.zoomable')!;
+    fireEvent.click(thumb);
+    expect(zoom).toHaveBeenCalledWith('/api/x/shot.png', 'shot.png');
+  });
+
+  it('secure opener transport degrades composer-document images to chips (no img thumbnails)', () => {
+    const open = vi.fn();
+    const { container } = render(
+      <MessageAttachmentOpenContext.Provider value={open}>
+        <UserMessage item={userMsg({
+          composerDocument: {
+            version: 1,
+            segments: [{ type: 'reference', id: 'r1', referenceType: 'attachment', label: 'image1' }],
+          },
+          // Remote-web rewrites url to an opaque attachment id — not a
+          // loadable img src — so the gallery must stay off there.
+          attachments: [{ name: 'screen.png', mime: 'image/png', url: 'opaque-handle', size: 128 }],
+        })} />
+      </MessageAttachmentOpenContext.Provider>,
+    );
+    expect(container.querySelector('.msg-attachments')).toBeNull();
+    expect(container.querySelector('img[src="opaque-handle"]')).toBeNull();
+    expect(container.querySelector('.message-inline-reference[data-reference-type="attachment"]')).not.toBeNull();
+  });
+
+  it('composer-document message with only non-image attachments renders no thumbnail gallery', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        composerDocument: {
+          version: 1,
+          segments: [{ type: 'reference', id: 'r1', referenceType: 'attachment', label: 'spec.pdf' }],
+        },
+        attachments: [{ name: 'spec.pdf', mime: 'application/pdf', url: '/api/x/spec.pdf', size: 512 }],
+      })} />,
+    );
+    expect(container.querySelector('.msg-attachments')).toBeNull();
+    expect(container.querySelector('.message-inline-reference[data-reference-type="attachment"]')!.textContent).toContain('spec.pdf');
   });
 
   it('renders a composer document with inline reference chips', () => {

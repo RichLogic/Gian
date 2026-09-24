@@ -7,13 +7,16 @@
  */
 
 export const OFFICIAL_CATALOG_SOURCE_ID = 'gian-official' as const;
-export const OFFICIAL_CATALOG_REPOSITORY = 'RichLogic/Gian-Proxy-Catalog' as const;
-export const OFFICIAL_CATALOG_ARTIFACT_REPOSITORIES = ['RichLogic/Gian'] as const;
+export const OFFICIAL_PROXY_REPOSITORY = 'RichLogic/Gian-Proxies' as const;
+export const OFFICIAL_CATALOG_REPOSITORY = OFFICIAL_PROXY_REPOSITORY;
+// Retained signed generations and installed Session bindings still use Gian assets.
+export const OFFICIAL_CATALOG_ARTIFACT_REPOSITORIES = [OFFICIAL_PROXY_REPOSITORY, 'RichLogic/Gian'] as const;
 export const OFFICIAL_RUNTIME_ASSET_PREFIXES = [
   'https://downloads.claude.ai/claude-code-releases/',
   'https://github.com/openai/codex/releases/download/',
   'https://github.com/MoonshotAI/kimi-code/releases/download/',
   'https://github.com/MoonshotAI/kimi-cli/releases/download/',
+  'https://github.com/RichLogic/Gian-Proxies/releases/download/',
   'https://github.com/RichLogic/Gian/releases/download/',
 ] as const;
 export const OFFICIAL_CATALOG_KEY_ID = 'gian-official-catalog-2026-09' as const;

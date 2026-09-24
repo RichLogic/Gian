@@ -16,6 +16,6 @@ export function createRemoteLinkBehavior(deps: {
     openWebUrl: null,
     openFile: deps.openFile,
     fileHref: null,
-    openRelative: null,
+    openRelative: href => deps.openFile(href),
   };
 }

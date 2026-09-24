@@ -13,7 +13,7 @@ import { useRemoteActions, useRemoteState } from './controller-context.js';
 import { Icon } from './icons.js';
 import { hostDisplayName } from '../host-selection.js';
 
-const THEMES: ThemeName[] = ['light', 'warm', 'dark'];
+const THEMES: ThemeName[] = ['light', 'warm', 'dark', 'system'];
 const ACCENTS: Array<{ id: AccentName; swatch: string }> = [
   { id: 'rose', swatch: 'oklch(0.62 0.15 5)' },
   { id: 'azure', swatch: 'oklch(0.62 0.13 230)' },
@@ -98,7 +98,7 @@ export function SettingsBody() {
                 className={`segm-item${state.settings.theme === theme ? ' active' : ''}`}
                 onClick={() => actions.setTheme(theme)}
               >
-                {theme}
+                {theme === 'system' ? t('settings.theme.system') : theme}
               </button>
             ))}
           </div>
@@ -164,6 +164,7 @@ export function SettingsBody() {
           </>
         )}
       </div>
+      <div className="rw-set-sec"><a href="/enrollment">{t('enrollment.title')}</a></div>
     </div>
   );
 }

@@ -1,9 +1,41 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { normalizeThinkingOption } from '../src/core/thinking-options.js';
+import { KimiTurnIdentityStore } from '../src/core/turn-identities.js';
+
+test('Kimi live turn identities survive Proxy restart without retaining prompt text', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-kimi-turn-identities-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const first = new KimiTurnIdentityStore(dir);
+  first.remember('native-session', 0, 'kimi-turn-1234abcd');
+  const reopened = new KimiTurnIdentityStore(dir);
+  assert.equal(reopened.resolve('native-session', 0, 'kimi-turn-deadbeef'), 'kimi-turn-1234abcd');
+  assert.equal(reopened.resolve('other-session', 0, 'kimi-turn-deadbeef'), 'kimi-turn-deadbeef');
+  const files = readdirSync(join(dir, 'kimi-turn-identities'));
+  assert.equal(files.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'kimi-turn-identities', files[0]!), 'utf8')), [[0, 'kimi-turn-1234abcd']]);
+});
+
+test('Kimi 2.0.2 model switches discard trailing thinking values from the previous family', () => {
+  const option = (values: string[], currentValue: string) => ({
+    type: 'select' as const, id: 'thinking', name: 'Thinking', currentValue,
+    options: values.map(value => ({ value, name: value })),
+  });
+  assert.deepEqual(normalizeThinkingOption(option(['off', 'on', 'high'], 'high')),
+    option(['off', 'on'], 'off'));
+  assert.deepEqual(normalizeThinkingOption(option(['on', 'high'], 'high')),
+    option(['on'], 'on'));
+  assert.deepEqual(normalizeThinkingOption(option(['low', 'high', 'max', 'on'], 'on')),
+    option(['low', 'high', 'max'], 'low'));
+  const native = option(['low', 'high', 'future-effort'], 'high');
+  assert.strictEqual(normalizeThinkingOption(native), native, 'preserve native future effort IDs');
+  const toggle = option(['off', 'on'], 'on');
+  assert.strictEqual(normalizeThinkingOption(toggle), toggle);
+});
 
 const isolatedKimiHome = mkdtempSync(join(tmpdir(), 'gian-kimi-service-home-'));
 mkdirSync(join(isolatedKimiHome, '.kimi-code'), { recursive: true });
@@ -1812,6 +1844,7 @@ test('Kimi gian.proxy/2 projects Agent, file edits, and plan-file writes semanti
 
 test('Kimi config updates cannot emit Turn activity before turn.started', async () => {
   let remote!: AgentSideConnection;
+  let rejectConfig = false;
   const runtime = new KimiAcpClient({
     binaryPath: fakeKimiCli,
     transportFactory: transportFactory((client) => {
@@ -1820,6 +1853,7 @@ test('Kimi config updates cannot emit Turn activity before turn.started', async 
         initialize: async () => initializeResponse(),
         newSession: async () => ({ sessionId: 'native-pre-turn', configOptions: MODE_CONFIG_OPTIONS }),
         setSessionConfigOption: async () => {
+          if (rejectConfig) { rejectConfig = false; throw new Error('fixture config rejected'); }
           await remote.sessionUpdate({
             sessionId: 'native-pre-turn',
             update: {
@@ -1851,6 +1885,22 @@ test('Kimi config updates cannot emit Turn activity before turn.started', async 
     workspace: { cwd: '/tmp', roots: ['/tmp'] },
     config: {},
   })) as { session: { streamId: string } };
+  rejectConfig = true;
+  await assert.rejects(adapter.handle(v2Request('config-rejected', 'turn.start', {
+    sessionId: 'host-pre-turn', streamId: created.session.streamId,
+    turnId: 'failed-config-turn', input: [{ type: 'text', text: 'not submitted' }], config: { mode: 'auto' },
+  })), /fixture config rejected|Internal error/);
+  const attached = (adapter as unknown as { sessions: Map<string, { turnOrdinal: number }> }).sessions.get('host-pre-turn')!;
+  assert.equal(attached.turnOrdinal, 0, 'failed config must not consume a replay ordinal');
+  await assert.rejects(adapter.handle(v2Request('input-rejected', 'turn.start', {
+    sessionId: 'host-pre-turn', streamId: created.session.streamId,
+    turnId: 'failed-input-turn', input: [{ type: 'localImage', path: '/missing-kimi-fixture/image.png' }], config: {},
+  })));
+  assert.equal(attached.turnOrdinal, 0, 'failed input preparation must not reserve a replay identity');
+  assert.equal(notifications.some(item => item.method === 'turn.started'), false);
+  await assert.rejects(adapter.handle(v2Request('rename-not-supported', 'session.rename', {
+    sessionId: 'host-pre-turn', streamId: created.session.streamId, name: 'native name',
+  })), (error: unknown) => (error as { domainCode?: string }).domainCode === 'CAPABILITY_NOT_SUPPORTED');
   await adapter.handle(v2Request('3', 'turn.start', {
     sessionId: 'host-pre-turn',
     streamId: created.session.streamId,
@@ -1863,6 +1913,7 @@ test('Kimi config updates cannot emit Turn activity before turn.started', async 
     'Kimi pre-turn config scenario did not complete',
   );
   const turnScoped = notifications.filter(item => 'turnId' in item.params);
+  assert.equal(attached.turnOrdinal, 1);
   assert.equal(turnScoped[0]?.method, 'turn.started');
   assert.equal(
     turnScoped.some(item => (
@@ -2060,6 +2111,47 @@ test('Kimi gian.proxy/2 validates turn config before touching the runtime', asyn
   assert.deepEqual(duplicate, { accepted: true, turnId: 't-cfg' });
   assert.equal(promptCalls, 1, 'an idempotent duplicate must not start another prompt');
   await service.close();
+});
+
+test('K2.7 catalog.resolve rejects K3 high retained by native model switching', async () => {
+  const staleSnapshot = (model: string) => configOptionsForModel(model).map(option => (
+    option.id === 'thinking' && model === 'kimi-code/kimi-for-coding'
+      ? { ...option, currentValue: 'high', options: [
+          { value: 'off', name: 'Thinking Off' },
+          { value: 'on', name: 'Thinking On' },
+          { value: 'high', name: 'Thinking High' },
+        ] }
+      : option
+  ));
+  const runtime = new KimiAcpClient({
+    binaryPath: fakeKimiCli,
+    transportFactory: transportFactory(() => ({
+      initialize: async () => initializeResponse(),
+      newSession: async () => ({ sessionId: 'native-stale-thinking', configOptions: staleSnapshot('kimi-code/k3') }),
+      setSessionConfigOption: async (params: { value: string }) => ({ configOptions: staleSnapshot(params.value) }),
+      cancel: async () => undefined,
+    } as unknown as Agent)),
+  });
+  const service = new KimiProxyService({ runtime });
+  const adapter = new KimiProtocolV2Adapter(service, '0.3.2', () => undefined);
+  try {
+    await adapter.handle(v2Request('init', 'initialize', {
+      protocol: { name: 'gian.proxy', versions: ['2.3'] }, host: { name: 'Gian', version: '0.6.2' },
+    }));
+    const catalog = await adapter.handle(v2Request('cat', 'catalog.list', {})) as { catalogRevision: string };
+    const params = { catalogRevision: catalog.catalogRevision, sessionConfig: {}, turnConfig: { model: 'kimi-code/kimi-for-coding' } };
+    const resolved = await adapter.handle(v2Request('resolve', 'catalog.resolve', params)) as {
+      configOptions: Array<{ id: string; choices?: Array<{ value: unknown }> }>;
+      resolvedDefaults: { turnConfig: Record<string, unknown> };
+    };
+    assert.deepEqual(effortValues(resolved.configOptions), ['off', 'on']);
+    assert.equal(resolved.resolvedDefaults.turnConfig.thinking, 'off');
+    await assert.rejects(adapter.handle(v2Request('bad', 'catalog.resolve', {
+      ...params, turnConfig: { ...params.turnConfig, thinking: 'high' },
+    })), /advertised choices/);
+  } finally {
+    await service.close();
+  }
 });
 
 test('Kimi gian.proxy/2 advertises catalog.resolve and rebuilds thinking per model', async () => {
@@ -2709,7 +2801,7 @@ test('Kimi gian.proxy/2 keeps fact-derived IDs stable across noisy live events a
       sessionId,
       update: {
         sessionUpdate: 'user_message_chunk',
-        content: { type: 'text', text: 'hello stable id' },
+        content: { type: 'text', text: 'hello stable id<system-reminder>Native date reminder</system-reminder>' },
       },
     });
     await remote.sessionUpdate({
@@ -3250,6 +3342,11 @@ test('Kimi gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
     parentStreamId: parent.session.streamId,
     sidechatId: 'side-1',
   })));
+  for (const id of ['resume-created', 'resume-created-again']) {
+    assert.deepEqual(await adapter.handle(v2Request(id, 'sidechat.resume', {
+      parentSessionId: 'parent', sidechatId: 'side-1', resumeRef: sidechat.sidechat.resumeRef,
+    })), sidechat);
+  }
   assert.deepEqual(sidechat.sidechat.anchor, {
     type: 'turn',
     turnId: 'host-turn-1',

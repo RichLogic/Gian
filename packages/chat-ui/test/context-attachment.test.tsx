@@ -13,6 +13,9 @@ const pasted: MessageContextItem = {
 };
 const folder: MessageContextItem = { id: 'c2', type: 'folder', path: '/repo/src', name: 'src' };
 const file: MessageContextItem = { id: 'c3', type: 'file', path: '/repo/src/index.ts', name: 'index.ts' };
+const conversation: MessageContextItem = {
+  id: 'c4', type: 'session', sessionId: 'sess-9', title: 'Refactor plan', workspaceName: 'Gian',
+};
 
 describe('ContextCards', () => {
   it('renders nothing for an empty list', () => {
@@ -44,6 +47,14 @@ describe('ContextCards', () => {
     const card = container.querySelector('.context-card')!;
     expect(card.querySelector('.context-card-label')!.textContent).toBe('index.ts');
     expect(card.querySelector('.context-card-meta')!.textContent).toBe('/repo/src/index.ts');
+    expect(card.querySelector('button.context-card-main')).toBeNull();
+  });
+
+  it('session cards show the conversation title and workspace and never expand', () => {
+    const { container } = render(<ContextCards items={[conversation]} />);
+    const card = container.querySelector('.context-card')!;
+    expect(card.querySelector('.context-card-label')!.textContent).toBe('Refactor plan');
+    expect(card.querySelector('.context-card-meta')!.textContent).toBe('Gian');
     expect(card.querySelector('button.context-card-main')).toBeNull();
   });
 
@@ -152,6 +163,47 @@ describe('InlineReferenceDocument', () => {
     expect(chip.querySelector('.mir-label')!.textContent).toBe('gone.ts');
   });
 
+  it('session context chips carry a chat glyph and preview title + workspace on hover', async () => {
+    const user = userEvent.setup();
+    const sessionDoc = {
+      version: 1 as const,
+      segments: [
+        { type: 'text' as const, text: 'apply ' },
+        { type: 'reference' as const, id: 'c4', referenceType: 'context' as const, label: 'Refactor plan', kind: 'session' as const },
+      ],
+    };
+    const { container } = render(
+      <InlineReferenceDocument document={sessionDoc} contextItems={[conversation]} />,
+    );
+    const chip = container.querySelector('button.message-inline-reference')!;
+    expect(chip.getAttribute('data-reference-kind')).toBe('session');
+    expect(chip.querySelector('.mir-glyph')).not.toBeNull();
+    expect(chip.querySelector('.mir-label')!.textContent).toBe('Refactor plan');
+    expect(chip.getAttribute('title')).toBe('Gian');
+
+    await user.hover(chip);
+    await vi.waitFor(() => expect(document.body.querySelector('.ref-pop')).not.toBeNull());
+    const pop = document.body.querySelector('.ref-pop')!;
+    expect(pop.querySelector('.ref-pop-title')!.textContent).toBe('Refactor plan');
+    expect(pop.querySelector('.ref-pop-body')!.textContent).toContain('Gian');
+  });
+
+  it('a dangling session reference still renders the chat glyph from the segment kind', () => {
+    const sessionDoc = {
+      version: 1 as const,
+      segments: [
+        { type: 'reference' as const, id: 'missing', referenceType: 'context' as const, label: 'Old chat', kind: 'session' as const },
+      ],
+    };
+    const { container } = render(
+      <InlineReferenceDocument document={sessionDoc} contextItems={[]} />,
+    );
+    const chip = container.querySelector('.message-inline-reference')!;
+    expect(chip.getAttribute('data-reference-kind')).toBe('session');
+    expect(chip.querySelector('.mir-glyph')).not.toBeNull();
+    expect(chip.querySelector('.mir-label')!.textContent).toBe('Old chat');
+  });
+
   it('image attachment chip: click routes activation (zoom) directly; hover opens the popover (2026-09-10 owner call)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const onAttachmentActivate = vi.fn().mockReturnValue(true);
@@ -177,6 +229,38 @@ describe('InlineReferenceDocument', () => {
       expect(pop).not.toBeNull();
       expect(pop.querySelector('.ref-pop-title')!.textContent).toBe('spec.png');
       expect(pop.querySelector('.ref-pop-meta')!.textContent).toBe('64 B');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('image preview popover carries the document-order attachment number badge', () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const mixedDoc = {
+        version: 1 as const,
+        segments: [
+          { type: 'reference' as const, id: 'a1', referenceType: 'attachment' as const, label: 'notes.txt' },
+          { type: 'text' as const, text: ' ' },
+          { type: 'reference' as const, id: 'a2', referenceType: 'attachment' as const, label: 'image2' },
+        ],
+      };
+      const { container } = render(
+        <InlineReferenceDocument
+          document={mixedDoc}
+          attachments={[
+            { name: 'notes.txt', mime: 'text/plain', url: '/api/x/notes.txt' },
+            { name: 'shot.png', mime: 'image/png', url: '/api/x/shot.png' },
+          ]}
+        />,
+      );
+      const chips = container.querySelectorAll('[data-reference-type="attachment"]');
+      // The file counts as attachment 1, so the image badge reads 2 — the
+      // same N the Host compile emits as [Attached resource 2].
+      fireEvent.mouseEnter(chips[1]!);
+      act(() => { vi.advanceTimersByTime(350); });
+      const badge = document.body.querySelector('.ref-pop .ref-pop-badge')!;
+      expect(badge.textContent).toBe('2');
     } finally {
       vi.useRealTimers();
     }

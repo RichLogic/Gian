@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -62,6 +62,15 @@ const PLUGIN_VERSION = (() => {
   }
   throw new Error('Proxy package.json not found for the version assertion');
 })();
+
+test('DSH self-test reports the package version without starting a Runtime', () => {
+  const result = JSON.parse(execFileSync(process.execPath, [resolve('dist/src/cli/spawn.js'), '--self-test'], {
+    encoding: 'utf8', timeout: 5000,
+  }));
+  assert.equal(result.pluginVersion, PLUGIN_VERSION);
+  assert.equal(result.id, 'ai.deepseek.harness');
+  assert.equal(result.ok, true);
+});
 
 class MockGianCore {
   readonly child: ChildProcessWithoutNullStreams;

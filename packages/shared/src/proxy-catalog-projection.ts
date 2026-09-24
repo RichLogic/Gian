@@ -33,6 +33,11 @@ export type CatalogProxyAction =
   | 'create_agent';
 
 export interface ProxyCatalogItem {
+  localizations?: Partial<Record<'en' | 'zh-CN', {
+    displayName: string;
+    tagline: string;
+    documentation: ProxyCatalogItem['documentation'];
+  }>>;
   pluginId: string;
   displayName: string;
   tagline: string;

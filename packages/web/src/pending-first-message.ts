@@ -10,7 +10,7 @@ export interface PendingFirstAttachment {
 }
 
 export interface PendingFirstMessage {
-  scope: { kind: 'workspace' | 'task'; id: string };
+  scope: { kind: 'workspace' | 'task'; id: string; environmentId?: string };
   text: string;
   attachments: PendingFirstAttachment[];
   contextItems?: MessageContextItem[];
@@ -27,6 +27,7 @@ export function pendingFirstMessageForCreatedSession(
 ): PendingFirstMessage | null {
   if (!value || origin === 'native-adopt' || origin === 'session-fork' || origin === 'tool-create') return null;
   if (typeof value === 'string') {
+    if (session.remote_execution) return null;
     const scope = session.task_id
       ? { kind: 'task' as const, id: session.task_id }
       : session.workspace_id
@@ -41,10 +42,11 @@ export function pendingFirstMessageForCreatedSession(
       composerDocument: undefined,
     };
   }
+  if (value.scope.environmentId !== session.remote_execution?.environment_id) return null;
   if (value.scope.kind === 'task') {
     if (origin && origin !== 'task-create') return null;
     return session.task_id === value.scope.id ? value : null;
   }
   if (origin === 'task-create') return null;
-  return session.workspace_id === value.scope.id && !session.task_id ? value : null;
+  return (session.remote_execution?.repository_id ?? session.workspace_id) === value.scope.id && !session.task_id ? value : null;
 }

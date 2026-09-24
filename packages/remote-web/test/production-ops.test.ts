@@ -54,6 +54,7 @@ function emptyState(): RemoteUiState {
     catalogRevision: 'rev-0',
     catalog: null,
     catalogInvalidated: false,
+    logos: {},
     snapshotReceivedAt: null,
     view: { kind: 'empty' },
     mobilePage: 'chat',
@@ -69,6 +70,42 @@ function emptyState(): RemoteUiState {
 }
 
 describe('production controller operations', () => {
+  it('restores remembered Hosts without GitHub even when the cookie exposes only one Host', async () => {
+    const requests: string[] = [];
+    const { controller } = await pairedController({ extraHosts: [hostB], directoryHostIds: [hostId],
+      autoRestore: true, onRequest: path => requests.push(path) });
+    try {
+      await viWait(async () => controller.state.hosts.length === 2);
+      expect(controller.state.hosts.map(host => host.id)).toEqual([hostId, hostB]);
+      expect(controller.state.account?.status).toBe('signed_out');
+      expect(requests.some(path => path.startsWith('/api/v1/account/'))).toBe(false);
+    } finally { controller.close(); }
+  });
+  it('resolves relative paths before preview and reports an error even when the resolved label changed', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({ createRelay(input) {
+      const relay = new FakeRelay(input); relays.push(relay); return relay;
+    } });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      const handle = { id: './README.md:2', sessionId: generateCanonicalId(), label: 'README.md:2' };
+      controller.actions.openFile(handle);
+      await viWait(async () => relays[0]!.sent.some(message => message.method === 'file.resolve'));
+      const resolving = relays[0]!.sent.find(message => message.method === 'file.resolve')!;
+      expect(resolving.params).toEqual({ session_id: handle.sessionId, reference: handle.id });
+      const resolved = { ...handle, id: generateCanonicalId(), label: 'README.md' };
+      await relays[0]!.emit({ type: 'command.result', command_id: resolving.command_id, ok: true,
+        data: previewResult(resolved, generateCanonicalId(), 4).file });
+      await viWait(async () => relays[0]!.sent.some(message => message.method === 'file.preview'));
+      const preview = relays[0]!.sent.find(message => message.method === 'file.preview')!;
+      expect(preview.params).toEqual({ handle_id: resolved.id });
+      await relays[0]!.emit({ type: 'command.result', command_id: preview.command_id, ok: false,
+        error: { code: 'FILE_REFERENCE_EXPIRED', message: 'changed' } });
+      await viWait(async () => controller.state.fileViewer?.status === 'expired');
+      expect(controller.state.fileViewer?.handle.label).toBe('README.md');
+    } finally { controller.close(); }
+  });
   it('ignores an outstanding automatic restore after the user chooses Add computer', async () => {
     let release!: () => void;
     let reached = false;
@@ -1655,6 +1692,10 @@ describe('production controller operations', () => {
     };
     controller.actions.openFile(handle);
     await viWait(async () => Boolean(relays.get(hostId)?.sent.find((message) => (
+      message.type === 'command.request' && message.method === 'file.resolve'
+    ))));
+    await resolvePreviewHandle(relays.get(hostId)!, handle);
+    await viWait(async () => Boolean(relays.get(hostId)?.sent.find((message) => (
       message.type === 'command.request' && message.method === 'file.preview'
     ))));
     const previewCommand = relays.get(hostId)!.sent.find((message) => (
@@ -1706,6 +1747,7 @@ describe('production controller operations', () => {
       label: 'b.md',
     };
     controller.actions.openFile(handleA);
+    await resolvePreviewHandle(relays.get(hostId)!, handleA);
     await viWait(async () => Boolean(relays.get(hostId)?.sent.find((message) => (
       message.type === 'command.request' && message.method === 'file.preview'
     ))));
@@ -2401,6 +2443,15 @@ function previewResult(handle: RemoteFileHandle, transferId: string, size: numbe
   };
 }
 
+async function resolvePreviewHandle(relay: FakeRelay, handle: RemoteFileHandle) {
+  await viWait(async () => relay.sent.some(message => message.method === 'file.resolve'
+    && (message.params as { reference?: string })?.reference === handle.id));
+  const request = relay.sent.find(message => message.method === 'file.resolve'
+    && (message.params as { reference?: string })?.reference === handle.id)!;
+  await relay.emit({ type: 'command.result', command_id: request.command_id, ok: true,
+    data: previewResult(handle, generateCanonicalId(), 4).file });
+}
+
 function sampleSnapshot(id: string, name: string): RemoteStateSnapshot {
   return {
     type: 'state.snapshot',
@@ -2438,6 +2489,7 @@ async function pairedController(options: {
   hostSelection?: import('../src/host-selection.js').HostSelectionStore;
   pairingHost?: string;
   extraHosts?: string[];
+  directoryHostIds?: string[];
   autoRestore?: boolean;
   cache?: EncryptedHostCache;
   meFails?: boolean;
@@ -2454,6 +2506,9 @@ async function pairedController(options: {
 } = {}) {
   const identity = new MemoryBrowserIdentityStore();
   const cache = options.cache ?? new MemoryEncryptedHostCache();
+  await cache.put('__account__', { protocol: 'gian.remote.account/1', status: 'authorized', role: 'controller',
+    installation_id: generateCanonicalId(), account: { id: '42', login: 'fixture-owner' },
+    account_token: 'fixture-account-token', expires_at: Date.now() + 60_000 });
   await identity.createPending();
   await identity.bindPending(hostId);
   await cache.put(hostId, { type: 'state.snapshot', host: { id: hostId, name: 'Office' } });
@@ -2515,12 +2570,13 @@ async function pairedController(options: {
       throw new Error(path);
     },
     async get(path) {
+      if (path === '/api/v1/account/me') return { protocol: 'gian.remote.account/1', account: { id: '42', login: 'fixture-owner' } };
       await options.beforeGet?.();
       if (path === '/api/v1/me') {
         if (options.meFails) throw new RemoteProtocolError('AUTH_REQUIRED', 'refresh cookie unavailable');
         return {
           protocol: AUTH_PROTOCOL,
-          hosts: [hostId, ...(options.extraHosts ?? []), ...(pairClaimed && options.pairingHost ? [options.pairingHost] : [])].map((id) => ({
+          hosts: (options.directoryHostIds ?? [hostId, ...(options.extraHosts ?? []), ...(pairClaimed && options.pairingHost ? [options.pairingHost] : [])]).map((id) => ({
             host_id: id,
             name: id === hostB ? 'Laptop' : 'Office',
             online: true,

@@ -68,6 +68,7 @@ async function makeApp(
     catalog: ProxyCatalog,
     config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
   ) => Promise<ProxyCatalog>,
+  hasRunningSessionsForAgent?: (agentId: string) => number,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -101,6 +102,7 @@ async function makeApp(
       ? { resolveDefaultsCatalog: async (_kind, base, config) => resolveDefaultsCatalog(base, config) }
       : {}),
     ...(pickHome ? { pickHome } : {}),
+    ...(hasRunningSessionsForAgent ? { hasRunningSessionsForAgent } : {}),
   });
   return { app, agents, root, bins };
 }
@@ -217,6 +219,79 @@ test('POST /api/agents reuses an explicit GianDev runtime path without exposing 
   const body = await created.json() as { agent: UserAgentStatus };
   assert.equal(body.agent.cliPath, claude);
   assert.equal(body.agent.home?.kind, 'managed');
+});
+
+test('PATCH /api/agents/:id toggles enabled and rejects a non-boolean value', async t => {
+  const { app, bins } = await makeApp(t);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Toggle Codex', proxy: 'codex', cliPath: bins.codex }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  assert.equal(agent.enabled, undefined);
+
+  const bad = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: 'no' }),
+  });
+  assert.equal(bad.status, 400);
+
+  const disabled = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal((await disabled.json() as { agent: UserAgentStatus }).agent.enabled, false);
+
+  const enabled = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal((await enabled.json() as { agent: UserAgentStatus }).agent.enabled, true);
+});
+
+test('PATCH /api/agents/:id refuses to disable an Agent with sessions in progress', async t => {
+  const { app, bins } = await makeApp(t, undefined, undefined, undefined, undefined, () => 2);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Busy Codex', proxy: 'codex', cliPath: bins.codex }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+
+  const blocked = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  });
+  assert.equal(blocked.status, 409);
+  const blockedBody = await blocked.json() as {
+    error: string;
+    code?: string;
+    runningSessions?: number;
+  };
+  assert.equal(blockedBody.code, 'AGENT_HAS_RUNNING_SESSIONS');
+  assert.equal(blockedBody.runningSessions, 2);
+
+  // The failed disable left the Agent untouched.
+  const after = await app.request(`/api/agents/${agent.id}`);
+  assert.equal((await after.json() as UserAgentStatus).enabled, undefined);
+
+  // Enabling never trips the running-session guard.
+  const enabled = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal((await enabled.json() as { agent: UserAgentStatus }).agent.enabled, true);
 });
 
 test('PATCH /api/agents/:id renames; DELETE removes; 404 for unknown ids', async t => {

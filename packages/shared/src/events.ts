@@ -123,6 +123,15 @@ export interface FileChangeData {
   files: FileChangeSummary[];
   /** Raw unified diff when available (codex provides it; cc builds it from tool input). */
   diff?: string;
+  /**
+   * Absolute root the change was produced under (the session's launch cwd:
+   * its worktree, else the workspace checkout). Relative paths in `files` are
+   * produced under this root. Sessions are not tree-stable — an agent can
+   * `git worktree add` mid-session — so consumers must not assume the root
+   * is the tree they are currently viewing. Absent on events persisted
+   * before this field existed; readers fall back to path heuristics there.
+   */
+  cwd?: string;
 }
 
 export interface FileChangeSummary {

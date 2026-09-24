@@ -14,7 +14,7 @@
   align-items: center;
   gap: var(--sp-4);
   padding: 0 var(--sp-6) 0 var(--sp-5);
-  background: var(--bg);
+  background: transparent;
 }
 
 /* Runner */

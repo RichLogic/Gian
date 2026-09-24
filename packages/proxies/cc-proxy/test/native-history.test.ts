@@ -51,8 +51,12 @@ test('Claude native history forks exactly through a stable terminal turn without
   assert.ok(childLines.every((line) => line.sessionId === 'child'));
   assert.equal(childLines[0]?.message.content, 'one');
   assert.equal(replayClaudeNativeSession('host-child', 'child', cwd, home).events.some(
-    (event) => event.method === 'turn.completed',
+    (event) => event.method === 'turn.completed' && event.sourceTurnId === firstTurn,
   ), true);
+  forkClaudeNativeSession('child', 'grandchild', cwd, firstTurn, home);
+  const inherited = replayClaudeNativeSession('host-grandchild', 'grandchild', cwd, home);
+  assert.equal(inherited.events.find(event => event.method === 'turn.completed')?.sourceTurnId, firstTurn);
+  assert.doesNotMatch(JSON.stringify(inherited.events), /second/);
 });
 
 test('Claude native history uses Claude Code project-name sanitization', () => {

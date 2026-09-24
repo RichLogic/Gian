@@ -166,6 +166,7 @@ export interface CapabilitiesPayload {
 }
 
 export interface CreateSessionParams {
+  textOnly?: boolean;
   cwd: string;
   model?: string | null;
   thinking?: ThinkingLevel | null;

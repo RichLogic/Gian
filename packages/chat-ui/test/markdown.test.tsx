@@ -17,6 +17,15 @@ describe('MarkdownText', () => {
     expect(container.querySelector('code')?.textContent).toBe('foo()');
   });
 
+  it('wraps tables in a scroll container so wide tables scroll on their own', () => {
+    const { container } = render(
+      <MarkdownText>{'| a | b |\n| --- | --- |\n| 1 | 2 |'}</MarkdownText>,
+    );
+    const wrapper = container.querySelector('.md-table-scroll');
+    expect(wrapper).not.toBeNull();
+    expect(wrapper!.querySelector('table')).not.toBeNull();
+  });
+
   it('repairs a glued list/table and still renders the table', () => {
     const { container } = render(
       <MarkdownText>{'- item\n| a |\n| --- |\n| 1 |'}</MarkdownText>,

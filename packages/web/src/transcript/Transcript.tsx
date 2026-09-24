@@ -33,6 +33,8 @@ import {
   type TranscriptSelectionActionsConfig,
 } from './TranscriptSelectionActions.js';
 import { EventFeedRow } from './EventFeed.js';
+import type { TranslationController } from '../translation/use-translation.js';
+import { TranslationButton, TranslationResult } from '../translation/TranslationControls.js';
 
 // Pure transcript machinery re-exported for existing import paths.
 export {
@@ -74,6 +76,7 @@ export function Transcript({
   hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
   forkAtTurn, selectionActions, inlineEventDetails = false,
   scheduleFocus = null, onConsumeScheduleFocus,
+  translation,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -114,6 +117,7 @@ export function Transcript({
   /** Timer request to reveal the canonical message for one Schedule Run. */
   scheduleFocus?: { runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  translation?: TranslationController;
 }) {
   const t = useT();
   const selectionSourceIds = useMemo(
@@ -137,17 +141,19 @@ export function Transcript({
       onRetryHistory={onRetryHistory}
       renderItem={renderItem}
       workingIndicator={<GianMascot size={36} state="working" title={t('transcript.workingEllipsis')} />}
-      renderAssistantFooterActions={forkAtTurn
-        ? (item, turnEnd: StatusItem | undefined) => (
-          <ForkFromTurnControl
+      renderAssistantFooterActions={(item, turnEnd: StatusItem | undefined) => <>
+          {forkAtTurn && <ForkFromTurnControl
             sourceSessionId={forkAtTurn.sourceSessionId}
             turn={item.turn}
             turnId={turnEnd?.turn_id}
             sourceTurnId={turnEnd?.source_turn_id}
             state={forkAtTurn.state}
-          />
-        )
-        : undefined}
+          />}
+          {translation && <TranslationButton item={item} controller={translation} />}
+        </>}
+      renderAssistantTranslation={translation ? item => <TranslationResult
+        value={translation.result(`turn:${item.turn}`, item.text)}
+        onRetry={() => void translation.read(item.text, `turn:${item.turn}`)} /> : undefined}
       renderTurnEndFooter={forkAtTurn
         ? (item: StatusItem) => (
           <ForkFromTurnControl

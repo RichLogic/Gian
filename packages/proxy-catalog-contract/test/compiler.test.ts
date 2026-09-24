@@ -12,6 +12,8 @@ import {
   verifyCatalogAssetManifestWithPinnedKeys,
   verifyCatalogBundleFiles,
   verifyOfficialCatalogSource,
+  readCatalogLocalizations,
+  CATALOG_LOCALIZATIONS_FILE,
   type CatalogEntryV1,
 } from '../src/index.js';
 import { validCatalogEntry } from './fixtures.js';
@@ -108,6 +110,38 @@ test('compiler emits a signed bundle from source docs, logos, and Manifest sidec
     expectedSourceId: 'gian-official',
   });
   assert.equal(verified.sequence, 2);
+});
+
+test('localized text is signed without extending the strict v1 index and rejects tampering', () => {
+  const prepared = compileInput();
+  const documents = { overview: '# History', setup: '# Setup', usage: '# Usage', troubleshooting: '# Help' };
+  const input = {
+    sourceId: 'gian-official', sequence: 9, issuedAt: '2026-09-23T00:00:00Z',
+    allowedArtifactRepositories: ['RichLogic/Gian'], signingKey: prepared.signingKey,
+    plugins: [{ entry: prepared.entry, documents, logos: { light: PNG, dark: PNG }, manifestSidecar: prepared.sidecar }],
+    localizations: { [prepared.entry.pluginId]: {
+      en: { displayName: 'Fixture', tagline: 'English summary', documents },
+      'zh-CN': { displayName: 'Fixture', tagline: '中文简介', documents: { ...documents, overview: '# 版本日志' } },
+    } },
+  };
+  const bundle = compileCatalogBundle(input);
+  assert.equal(Object.hasOwn(bundle.index.plugins[0]!, 'localizations'), false);
+  assert.ok(bundle.assetManifest.files.some(f => f.path === CATALOG_LOCALIZATIONS_FILE));
+  const verified = verifyCatalogBundleFiles({ files: bundle.files,
+    pinnedPublicKeys: { [prepared.signingKey.keyId]: prepared.publicKeyHex } });
+  const localized = readCatalogLocalizations(bundle.files, verified)!;
+  assert.equal(localized.plugins[0]!.locales.en.tagline, 'English summary');
+  assert.equal(localized.plugins[0]!.locales['zh-CN'].tagline, '中文简介');
+  const tampered = new Map(bundle.files);
+  tampered.set(localized.plugins[0]!.locales.en.documentation.overview.path, Buffer.from('# Forged'));
+  assert.throws(() => verifyCatalogBundleFiles({ files: tampered,
+    pinnedPublicKeys: { [prepared.signingKey.keyId]: prepared.publicKeyHex } }), /mismatch/);
+  const unsafe = structuredClone(input.localizations);
+  unsafe[prepared.entry.pluginId]!.en.documents.setup = '<script>alert(1)</script>';
+  assert.throws(() => compileCatalogBundle({ ...input, localizations: unsafe }), /HTML/);
+  assert.throws(() => compileCatalogBundle({ ...input, localizations: { unknown: input.localizations[prepared.entry.pluginId]! } }), /Unknown/);
+  const legacy = compileCatalogBundle({ ...input, localizations: undefined });
+  assert.equal(readCatalogLocalizations(legacy.files, legacy.index), null);
 });
 
 test('compiler binds a certified managed Runtime artifact to the Proxy Manifest', () => {

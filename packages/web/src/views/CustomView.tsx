@@ -165,11 +165,13 @@ export function CustomView({
     return () => { cancelled = true; };
   }, []);
 
-  // Default/repair the selection: first ready Agent, else the first Agent.
+  // Default/repair the selection: first ready enabled Agent, else the first
+  // enabled Agent; a disabled Agent is never offered or auto-selected.
   useEffect(() => {
     if (!agents || agents.length === 0) return;
-    if (agentId && agents.some(a => a.id === agentId)) return;
-    setAgentId((agents.find(a => a.ready) ?? agents[0]!).id);
+    const selectable = agents.filter(a => a.enabled !== false);
+    if (agentId && selectable.some(a => a.id === agentId)) return;
+    setAgentId((selectable.find(a => a.ready) ?? selectable[0] ?? agents[0]!).id);
   }, [agents, agentId]);
 
   // Default scope: Global + first visible Workspace (design default).
@@ -481,7 +483,7 @@ export function CustomView({
         ) : <span className="custom-select-name">…</span>}
       >
         <div className="custom-pop-label">{t('custom.agents')}</div>
-        {(agents ?? []).map(candidate => (
+        {(agents ?? []).filter(candidate => candidate.enabled !== false).map(candidate => (
           <button
             key={candidate.id}
             type="button"

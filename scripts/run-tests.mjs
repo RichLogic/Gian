@@ -188,8 +188,8 @@ function executeSelected(selected, options, env) {
   if (selected.some(entry => entry.runner === 'host-node-tsx' || entry.runner === 'remote-protocol-node' || entry.runner === 'remote-server-node-tsx' || entry.runner === 'remote-web-vitest')) {
     runPnpm(['--filter', '@gian/remote-protocol', 'build'], env);
   }
-  // Web and chat-ui tests resolve @gian/chat-ui from its built declarations.
-  if (selected.some(entry => entry.runner === 'web-vitest' || entry.runner === 'chat-ui-vitest' || entry.runner === 'remote-web-vitest')) {
+  // Host Remote controller journeys also import the Web transcript projection.
+  if (selected.some(entry => entry.runner === 'host-node-tsx' || entry.runner === 'web-vitest' || entry.runner === 'chat-ui-vitest' || entry.runner === 'remote-web-vitest')) {
     runPnpm(['--filter', '@gian/chat-ui', 'build'], env);
   }
 

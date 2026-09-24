@@ -19,16 +19,24 @@ import { NativeJsonlWatcher } from '../native/watcher.js';
 import { AttentionDispatcher, attentionGateForPreferences } from '../session/attention.js';
 import { loadConfig } from '../storage/config.js';
 import { makeWsHandlers } from './ws-handler.js';
+import { RemoteControllerHub } from '../remote/controller-hub.js';
+import { RemoteReadOnlyGit } from '../remote/read-only-git.js';
+import { registerRemoteControllerRoutes } from '../remote/controller-routes.js';
 import { requireAuth, AUTH_REQUIRED } from '../auth/middleware.js';
 import { WorkbenchTerminalManager } from '../term/manager.js';
 import type { RuntimeControlPlane } from '../runtime/control-plane.js';
 import type { RuntimeResolver } from '../runtime/resolver.js';
 import type { ManagedRuntimeInstaller } from '../runtime/installer.js';
+import type { PluginStore } from '../plugin-store/index.js';
 import { ManagedRuntimeActivationService } from '../runtime/activation-service.js';
 import { ManagedRuntimeDeliveryService } from '../runtime/delivery-service.js';
 import type { AgentManager } from '../agents/manager.js';
+import { resolveProxyLogo } from '../agents/proxy-logo.js';
 import { ensureAuthConfigured, registerAuthRoutes } from './routes/auth.js';
 import { registerSettingsRoutes } from './routes/settings.js';
+import { registerTranslationRoutes } from './routes/translation.js';
+import { TranslationService } from '../translation/service.js';
+import { createTranslationModel } from '../translation/model.js';
 import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerProxyRoutes } from './routes/proxy.js';
@@ -38,6 +46,7 @@ import { registerNativeSessionRoutes } from './routes/native-sessions.js';
 import { registerWorkspaceFileRoutes } from './routes/workspace-files.js';
 import { registerWorkingTreeRoutes } from './routes/working-trees.js';
 import { registerAbsoluteFileRoutes } from './routes/absolute-files.js';
+import { registerLinkPreviewRoutes, type LinkPreviewRouteOptions } from './routes/link-preview.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import type { CatalogService } from '../catalog/service.js';
 import { registerCustomizationRoutes } from './routes/customizations.js';
@@ -78,6 +87,7 @@ export interface AppContext {
   runtimeResolver?: RuntimeResolver;
   runtimeControl?: RuntimeControlPlane;
   runtimeInstaller?: ManagedRuntimeInstaller;
+  pluginStore?: PluginStore;
   readinessCache?: import('../runtime/readiness-cache.js').RuntimeReadinessCache;
   agentManager?: AgentManager;
   catalogService?: CatalogService;
@@ -85,6 +95,8 @@ export interface AppContext {
   runtimeGuardianIntervalMs?: number;
   /** Test seam; production uses real operating-system application launchers. */
   applicationRouteOptions?: ApplicationRouteOptions;
+  /** Test seam for the link-preview fetchers/caches/rate limiter. */
+  linkPreviewOptions?: LinkPreviewRouteOptions;
   /** Test seam for the authenticated MCP request/wait bounds. */
   toolMcpLimits?: { requests?: number; waits?: number };
   /** Test seam for holding a Tool call while asserting concurrency bounds. */
@@ -214,9 +226,16 @@ export function createApp(ctx: AppContext): AppHandle {
             if (!sessionAllowsLegacyRuntimeFallback(session)) return bound;
             if (session.agent_id) {
               try {
-                ctx.agentManager!.getAgent(session.agent_id);
+                const agent = ctx.agentManager!.getAgent(session.agent_id);
+                if (agent.enabled === false) {
+                  throw Object.assign(
+                    new Error(`Agent is disabled: ${session.agent_name ?? session.agent_id}`),
+                    { code: 'AGENT_DISABLED' },
+                  );
+                }
                 return bound ?? ctx.agentManager!.agentRuntimePath(session.agent_id).cliPath;
-              } catch {
+              } catch (error) {
+                if ((error as { code?: unknown })?.code === 'AGENT_DISABLED') throw error;
                 throw Object.assign(
                   new Error(`Agent was deleted: ${session.agent_name ?? session.agent_id}`),
                   { code: 'AGENT_DELETED' },
@@ -250,6 +269,22 @@ export function createApp(ctx: AppContext): AppHandle {
     sessionBindingPlanner,
   );
   const tasks = new TaskManager(ctx.db);
+  const translations = new TranslationService(ctx.db, createTranslationModel(ctx.dataDir, async (id, preferences) => {
+    if (!ctx.agentManager || !sessionBindingPlanner) throw new Error('Translation Agent management is unavailable.');
+    const agent = ctx.agentManager.getAgent(preferences.agent_id);
+    if (agent.enabled === false) throw new Error('The translation Agent is disabled.');
+    const status = await ctx.agentManager.agentStatus(agent.id, false);
+    if (!status.ready) throw new Error('The translation Agent is not ready.');
+    const prepared = await sessionBindingPlanner.prepareCurrent({
+      agent, selectedPath: status.runtimeProfile?.path ?? status.cli.path ?? agent.cliPath,
+      runtimeProfile: status.runtimeProfile,
+    });
+    try {
+      const client = await proxy.acquireWithBinding(id, prepared.launchBinding, { acquireLease: prepared.acquireLease });
+      return { client, dispose: () => proxy.dispose(id) };
+    } finally { await prepared.releaseUnusedLease(); }
+  }));
+  sessions.setTranslationService(translations);
   const scheduleService = new ScheduleService({
     db: ctx.db,
     broadcaster,
@@ -279,7 +314,9 @@ export function createApp(ctx: AppContext): AppHandle {
     ...(ctx.browser ? { browser: ctx.browser } : {}),
   });
   const toolAccess = new GianToolAccessController(toolService, ctx.db);
+  const remoteGit = new RemoteReadOnlyGit(ctx.db, broadcaster);
   const remote = new RemoteRuntime({
+    gitRead: params => remoteGit.read(params),
     db: ctx.db,
     sessions,
     tasks,
@@ -297,10 +334,20 @@ export function createApp(ctx: AppContext): AppHandle {
         }))
       : undefined,
     hostEvents: broadcaster,
+    proxyLogo: ctx.agentManager
+      ? (proxy, variant) => resolveProxyLogo(
+          { agents: ctx.agentManager!, ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}) },
+          proxy,
+          variant,
+        )
+      : undefined,
   });
   void remote.start().catch((error) => {
     console.error('[remote] outbound connector failed to start', error);
   });
+  const remoteController = new RemoteControllerHub(ctx.db, broadcaster,
+    ctx.remoteIdentity ?? createRemoteIdentityFromEnv());
+  sessions.setRemoteController(remoteController);
 
   // Workbench terminal manager — standalone shell PTYs, independent of
   // any Gian session. The xterm tabs in the workbench pane are bound to
@@ -380,7 +427,7 @@ export function createApp(ctx: AppContext): AppHandle {
     );
   }
 
-  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db });
+  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db, remoteController });
 
   // The MCP capability token is its own local credential boundary. Register
   // this endpoint before Desktop/Web auth middleware so Provider runtimes do
@@ -419,9 +466,11 @@ export function createApp(ctx: AppContext): AppHandle {
   app.get('/health', c => c.json(buildHealthPayload()));
   registerAuthRoutes(app, ctx.db);
   registerSettingsRoutes(app, ctx.db);
+  registerTranslationRoutes(app, ctx.db, translations);
   registerRemoteSettingsRoutes(app, remote);
+  registerRemoteControllerRoutes(app, remoteController, broadcaster);
   registerWorkspaceRoutes(app, ctx.db);
-  registerTaskRoutes(app, { tasks, sessions, broadcaster });
+  registerTaskRoutes(app, { tasks, sessions, broadcaster, remoteController });
   registerProxyRoutes(
     app,
     ctx.db,
@@ -441,6 +490,7 @@ export function createApp(ctx: AppContext): AppHandle {
     dataDir: ctx.dataDir,
     ...ctx.applicationRouteOptions,
   });
+  registerLinkPreviewRoutes(app, ctx.linkPreviewOptions ?? {});
   registerReconnectRoutes(app, proxy);
   if (ctx.agentManager) {
     registerOnboardingRoutes(app, {
@@ -454,6 +504,12 @@ export function createApp(ctx: AppContext): AppHandle {
       ...(runtimeDelivery ? { runtimeDelivery } : {}),
       closeProxy: executor => proxy.closeByExecutor(executor),
       ...(ctx.catalogService ? { catalogService: ctx.catalogService } : {}),
+      ...(ctx.pluginStore ? { pluginStore: ctx.pluginStore } : {}),
+      ...(ctx.runtimeInstaller ? { runtimeInstaller: ctx.runtimeInstaller } : {}),
+      hasRunningSessionsForAgent: agentId => sessions.listSessions()
+        .filter(session => session.agent_id === agentId
+          && (session.status === 'running' || session.status === 'pending'))
+        .length,
       capabilities: async (executor, agentId) => agentId
         ? (await sessions.agentCapabilities(executor, agentId)).catalog
         : sessions.warmCapabilities(executor),
@@ -518,6 +574,7 @@ export function createApp(ctx: AppContext): AppHandle {
   // Timer ownership starts only after the app is fully assembled so boot
   // recovery never races route registration (contract K).
   scheduleOrchestrator.start();
+  remoteController.start();
 
   return {
     app,
@@ -528,9 +585,11 @@ export function createApp(ctx: AppContext): AppHandle {
     scheduleService,
     scheduleOrchestrator,
     shutdown: async () => {
+      await translations.shutdown();
       await scheduleOrchestrator.stop();
       sessionHostServices?.revokeAll();
       remote.close();
+      remoteController.close();
       toolService.close();
       watcher.stopAll();
       await term.closeAll();

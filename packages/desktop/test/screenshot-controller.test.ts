@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { describe, it } from 'node:test';
 import type { BrowserWindowConstructorOptions } from 'electron';
 import type { GianScreenshotCapture } from '@gian/shared';
+import { AppUpdateController } from '../src/app-updater.js';
 import {
   MAC_SCREENSHOT_SHORTCUT,
   MAX_SCREENSHOT_BYTES,
@@ -259,11 +261,26 @@ describe('screenshot geometry and validation', () => {
     assert.equal(screenshotShortcutForPlatform('linux'), OTHER_SCREENSHOT_SHORTCUT);
   });
 
-  it('requests enough pixels for mixed-DPI displays and finds negative-origin displays', () => {
-    assert.deepEqual(thumbnailSizeForDisplays(DISPLAYS), { width: 3024, height: 1964 });
+  it('requests enough pixels for mixed-DPI displays, capped on the long edge, and finds negative-origin displays', () => {
+    assert.deepEqual(thumbnailSizeForDisplays(DISPLAYS), { width: 2560, height: 1663 });
     assert.equal(displayContainingPoint(DISPLAYS, { x: -1, y: 1 })?.id, 11);
     assert.equal(displayContainingPoint(DISPLAYS, { x: 0, y: 1 })?.id, 22);
     assert.equal(displayContainingPoint(DISPLAYS, { x: 9999, y: 1 }), null);
+  });
+
+  it('caps a 5K desktop at the thumbnail edge and leaves small displays untouched', () => {
+    assert.deepEqual(thumbnailSizeForDisplays([
+      { id: 1, bounds: { x: 0, y: 0, width: 2560, height: 1440 }, scaleFactor: 2 },
+    ]), { width: 2560, height: 1440 });
+    assert.deepEqual(thumbnailSizeForDisplays([
+      { id: 1, bounds: { x: 0, y: 0, width: 1440, height: 2560 }, scaleFactor: 2 },
+    ]), { width: 1440, height: 2560 });
+    assert.deepEqual(thumbnailSizeForDisplays([
+      { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 },
+    ]), { width: 1920, height: 1080 });
+    assert.deepEqual(thumbnailSizeForDisplays([
+      { id: 1, bounds: { x: 0, y: 0, width: 1280, height: 800 }, scaleFactor: 2 },
+    ]), { width: 2560, height: 1600 });
   });
 
   it('matches sources only by an exact display id and fails closed', () => {
@@ -299,6 +316,24 @@ describe('screenshot geometry and validation', () => {
         { width: 1280, height: 800 },
       ),
       { x: 0, y: 0, width: 30, height: 20 },
+    );
+    // A capture capped below the display's physical pixels downscales the
+    // same way: DIP coordinates map onto the actual (smaller) image.
+    assert.deepEqual(
+      mapDipRectToImagePixels(
+        { x: 128, y: 72, width: 256, height: 144 },
+        { x: 0, y: 0, width: 2560, height: 1440 },
+        { width: 2560, height: 1440 },
+      ),
+      { x: 128, y: 72, width: 256, height: 144 },
+    );
+    assert.deepEqual(
+      mapDipRectToImagePixels(
+        { x: 128, y: 72, width: 256, height: 144 },
+        { x: 0, y: 0, width: 2560, height: 1440 },
+        { width: 1280, height: 720 },
+      ),
+      { x: 64, y: 36, width: 128, height: 72 },
     );
   });
 
@@ -506,6 +541,38 @@ describe('screenshot controller lifecycle', () => {
     assert.deepEqual(harness.captures, []);
     assert.deepEqual(harness.restores, ['clipboard']);
     assert.deepEqual(harness.errors, []);
+  });
+
+  it('destroys prewarmed non-closable panels before native update window closure', async () => {
+    const harness = createHarness();
+    await harness.controller.warmUp();
+    assert.equal(harness.windows.length, DISPLAYS.length);
+    assert.ok(harness.windows.every(window => window.options.closable === false && !window.shown));
+
+    let updaterController!: AppUpdateController;
+    const updater = Object.assign(new EventEmitter(), {
+      autoDownload: false,
+      allowPrerelease: false,
+      allowDowngrade: false,
+      autoInstallOnAppQuit: false,
+      checkForUpdates: async () => null,
+      quitAndInstall: () => {
+        // Electron/macOS cannot reach will-quit while a non-closable panel
+        // survives CloseAllWindows. Disposal in before-quit is too late.
+        assert.ok(harness.windows.every(window => window.destroyed));
+        updaterController.confirmInstallQuit();
+      },
+    });
+    updaterController = new AppUpdateController({
+      updater,
+      isPackaged: true,
+      signedRelease: true,
+      platform: 'darwin',
+      variant: 'production',
+      beforeInstall: () => harness.controller.dispose(),
+    });
+    updater.emit('update-downloaded', { version: '0.6.3' });
+    assert.equal(await updaterController.install(), true);
   });
 
   it('prewarms and reuses one hidden overlay window per display', async () => {

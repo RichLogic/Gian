@@ -44,6 +44,8 @@ export type {
  * send's retry affordance re-dispatches the SAME operation (proposal §9).
  */
 export interface MessageSendPayload {
+  sendId?: string;
+  translationId?: string;
   sessionId: string;
   text: string;
   exec: import('@gian/shared').Executor;

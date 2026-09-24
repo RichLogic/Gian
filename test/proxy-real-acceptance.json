@@ -137,7 +137,7 @@
       "cheapestConfig": {
         "model": "claude-gateway-claude-router-deepseek-v4-flash-1m",
         "effort": "low",
-        "permission_mode": "default"
+        "permission_mode": "$catalog-default"
       },
       "capabilities": [
         "input.localFile",
@@ -229,7 +229,6 @@
       "capabilities": [
         "input.localFile",
         "input.localImage",
-        "session.rename",
         "session.native.list",
         "session.replay",
         "sidechat",
@@ -407,7 +406,7 @@
       "methods": ["catalog.resolve"],
       "notifications": [],
       "steps": ["send current catalog revision", "resolve cheapest valid config", "send stale revision", "send invalid config"],
-      "providers": {"claude":"required","codex":"unsupported","kimi":"unsupported","grok":"unsupported","dsh":"required","zcode":"required"}
+      "providers": {"claude":"required","codex":"unsupported","kimi":"required","grok":"unsupported","dsh":"required","zcode":"required"}
     },
     {
       "id": "config.validation",

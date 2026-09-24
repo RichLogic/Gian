@@ -39,6 +39,7 @@ import {
   useDiffViewPreferences,
 } from './DiffViewControls.js';
 import { DiffBody } from './Sheet.js';
+import { matchChangedFilePath } from '../presentation/turn-diff.js';
 
 function Icon({ d, size = 13, stroke = 1.5 }: { d: string; size?: number; stroke?: number }) {
   return (
@@ -233,16 +234,30 @@ export function ChangesDiffBody({
   }, [anchor?.requestId, workingTreeId, ownerSessionId]);
 
   useEffect(() => {
-    if (!pendingAnchor) return;
-    const el = rootRef.current?.querySelector(`.cs-file[data-path="${CSS.escape(pendingAnchor.path)}"]`);
-    if (!el) {
-      setPendingAnchor(null);
+    if (!pendingAnchor || !workingTreeId) return;
+    // The chip sends the RAW transcript path (absolute for Claude, possibly
+    // `a/`-`b/` prefixed); the list carries host-normalized paths. Resolve
+    // before looking up blocks, patches, or collapse state.
+    const resolvedPath = matchChangedFilePath(
+      pendingAnchor.path,
+      state.files.map(file => file.path),
+    );
+    if (!resolvedPath) {
+      // The scope's list may still be loading; give up only once a ready
+      // list genuinely lacks the file.
+      if (state.status === 'ready') setPendingAnchor(null);
       return;
     }
+    if (state.collapsed[resolvedPath]) {
+      toggleChangesDiffCollapsed(workingTreeId, resolvedPath, ownerSessionId);
+      return;
+    }
+    const el = rootRef.current?.querySelector(`.cs-file[data-path="${CSS.escape(resolvedPath)}"]`);
+    if (!el) return;
     el.scrollIntoView({ block: 'start' });
-    const patch = state.patches[pendingAnchor.path];
+    const patch = state.patches[resolvedPath];
     if (patch && (patch.status === 'loaded' || patch.status === 'error')) setPendingAnchor(null);
-  }, [pendingAnchor, state.patches, state.files]);
+  }, [pendingAnchor, state.patches, state.files, state.status, state.collapsed, workingTreeId, ownerSessionId]);
 
   if (!workingTreeId) {
     return (

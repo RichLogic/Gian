@@ -266,7 +266,7 @@ export function applyRemoteTranscriptItem(
         attachments: item.attachments.map(attachment => ({
           name: attachment.name,
           mime: attachment.mime,
-          url: attachment.id,
+          url: attachment.reference ?? attachment.id,
           size: attachment.size,
         })),
       } : {}),

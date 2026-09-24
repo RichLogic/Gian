@@ -18,6 +18,22 @@ import { agentIdEntityKey } from '../operations/agents.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
 
+/** Section-heading ⓘ with a CSS hover/focus tooltip (the shared .help-hint
+ *  pattern from gian-v2.css — no positioning JS). */
+function HelpHint({ text }: { text: string }) {
+  return (
+    <span className="help-hint" tabIndex={0}>
+      <span className="help-hint-trigger" aria-label={text}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" />
+        </svg>
+      </span>
+      <span className="help-hint-pop" role="tooltip">{text}</span>
+    </span>
+  );
+}
+
 /** One saved Agent owns identity, HOME and defaults. Its shared Proxy + CLI
  * Runtime lifecycle belongs to the Agent Integrations surface, never here. */
 export function AgentDetailPanel({
@@ -27,6 +43,8 @@ export function AgentDetailPanel({
   errorNotice,
   onRename,
   onSetDefaults,
+  onSetEnabled,
+  onChangeHome,
   onDelete,
   onOpenProxy,
   onClose,
@@ -37,6 +55,10 @@ export function AgentDetailPanel({
   errorNotice: React.ReactNode;
   onRename: (name: string) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
+  onSetEnabled: (enabled: boolean) => Promise<boolean>;
+  /** Native HOME picker + patch, wired by the view; absent for external-App
+   *  Agents whose HOME is not Gian-managed. */
+  onChangeHome?: () => Promise<void>;
   onDelete: () => void;
   /** Present only when the Agent's pluginId has a Catalog entry. */
   onOpenProxy?: () => void;
@@ -46,6 +68,9 @@ export function AgentDetailPanel({
   const kind = agent.proxy;
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
   const busy = agentRuns.length > 0;
+  const [enabledPending, setEnabledPending] = useState(false);
+  const [homeChanging, setHomeChanging] = useState(false);
+  const enabled = agent.enabled !== false;
   const [name, setName] = useState(agent.name);
   const [capabilities, setCapabilities] = useState<unknown>(null);
   const [resolvedCapabilities, setResolvedCapabilities] = useState<unknown>(null);
@@ -86,6 +111,24 @@ export function AgentDetailPanel({
 
   const defaults = agent.defaults;
   const settingsCapabilities = resolvedCapabilities ?? capabilities;
+
+  async function toggleEnabled(next: boolean): Promise<void> {
+    setEnabledPending(true);
+    try {
+      await onSetEnabled(next);
+    } finally {
+      setEnabledPending(false);
+    }
+  }
+
+  async function changeHome(): Promise<void> {
+    setHomeChanging(true);
+    try {
+      await onChangeHome?.();
+    } finally {
+      setHomeChanging(false);
+    }
+  }
   const { models, thinkingLevels: catalogThinking, modes } =
     executorSettingsFromCapabilities(kind, settingsCapabilities);
   const baseCatalog = catalogFromCapabilities(capabilities);
@@ -319,6 +362,18 @@ export function AgentDetailPanel({
           }}
         />
         <span className="spacer" />
+        {onOpenProxy && (
+          <button type="button" className="btn icon ghost" disabled={busy}
+                  data-testid="agent-open-integration"
+                  title={t('agents.detail.viewInCatalog')}
+                  aria-label={t('agents.detail.viewInCatalog')}
+                  onClick={onOpenProxy}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M7 17 17 7" /><path d="M9 7h8v8" />
+            </svg>
+          </button>
+        )}
         <button type="button" className="btn icon ghost" aria-label={t('agents.detail.close')}
                 onClick={onClose}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -331,38 +386,36 @@ export function AgentDetailPanel({
         {errorNotice}
 
         <section className="ag-sec">
-          <span className="s2-subhead">{t('agents.integration')}</span>
-          <div className="sec-line">
-            <span className="rt-line">
-              <AgentLogo proxy={kind} logo={display.logo ?? undefined}
-                         fallback={display.name} size={20} />
-              <span className="catalog-name">{display.name}</span>
-              <span className="mono hint">{agent.pluginId}</span>
-            </span>
-            {onOpenProxy && (
-              <button type="button" className="btn xs secondary" disabled={busy}
-                      onClick={onOpenProxy}>
-                {t('agents.detail.viewInCatalog')}
-              </button>
-            )}
-          </div>
-        </section>
-
-        <section className="ag-sec">
-          <span className="s2-subhead">{externalHome ? t('agents.home.state') : 'HOME'}</span>
+          <span className="s2-subhead">
+            {externalHome ? t('agents.home.state') : 'HOME'}
+            <HelpHint text={t('agents.detail.homeHelp')} />
+          </span>
           {externalHome ? (
             <p className="s2-help">{t('agents.home.externalHelp')}</p>
           ) : (
             <div className="sec-line">
-              <span className="mono cli-path-val" data-testid="agent-home-path">
-                {agent.home?.path ?? '—'}
+              <span className="rt-line">
+                <span className="mono cli-path-val" data-testid="agent-home-path">
+                  {agent.home?.path ?? '—'}
+                </span>
+                {onChangeHome && (
+                  <button type="button" className="btn xs ghost"
+                          data-testid="agent-home-change"
+                          disabled={busy || homeChanging}
+                          onClick={() => { void changeHome(); }}>
+                    {t('agents.detail.changeHome')}
+                  </button>
+                )}
               </span>
             </div>
           )}
         </section>
 
         <section className="ag-sec">
-          <span className="s2-subhead">{t('agents.detail.defaults')}</span>
+          <span className="s2-subhead">
+            {t('agents.detail.defaults')}
+            <HelpHint text={t('agents.detail.defaultsHelp')} />
+          </span>
           {defaultsEditable ? (
               <div className="exec-defaults">
                 {models.length > 0 && (
@@ -482,6 +535,16 @@ export function AgentDetailPanel({
         </section>
       </div>
       <div className="p2-foot">
+        <label className="switch agent-enabled-switch" data-testid="agent-enabled-toggle">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={enabled}
+            disabled={busy || enabledPending}
+            onChange={event => { void toggleEnabled(event.target.checked); }}
+          />
+          <span>{t('agents.detail.enabled')}</span>
+        </label>
         <span className="spacer" />
         <button
           type="button"

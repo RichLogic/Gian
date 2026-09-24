@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -42,8 +43,8 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   }, identity);
 
   assert.equal(env.GIAN_HOST, '127.0.0.1');
-  assert.equal(env.GIAN_PORT, '8992');
-  assert.equal(env.GIAN_WEB_PORT, '5192');
+  assert.equal(env.GIAN_PORT, new URL(DEV_HOST_URL).port);
+  assert.equal(env.GIAN_WEB_PORT, new URL(DEV_WEB_URL).port);
   assert.equal(env.GIAN_DATA_DIR, '/tmp/gian-dev-test');
   assert.equal(env.GIAN_DESKTOP_HOST_URL, DEV_HOST_URL);
   assert.equal(env.GIAN_DESKTOP_WEB_URL, DEV_WEB_URL);
@@ -73,6 +74,50 @@ test('dev environment pins isolated GianDev services and desktop targets', () =>
   assert.equal(env.GIAN_DESKTOP_USER_DATA_DIR, '/tmp/gian-dev-electron-test');
   assert.equal(env.GIAN_DEV_PROXY_ENTRIES, undefined);
   assert.equal(env.PATH, '/usr/bin');
+});
+
+test('only release/ previews may explicitly reuse installed GianDev data', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-dev-policy-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const data = join(home, '.gian-dev');
+  const production = join(home, '.gian');
+  await mkdir(data);
+  await mkdir(production);
+  const devAlias = join(home, 'dev-alias');
+  const prodAlias = join(home, 'prod-alias');
+  await symlink(data, devAlias, 'dir');
+  await symlink(production, prodAlias, 'dir');
+  const identity = branch => ({
+    runtimeId: 'policy-test', worktree: join(home, 'worktree'),
+    branch, revision: 'fixture', label: 'GianDev policy fixture',
+  });
+  const resolveFor = (branch, path) => resolveDevEnvironment({
+    GIAN_DEV_DATA_DIR: path,
+    GIAN_DATA_DIR: production,
+    GIAN_DESKTOP_TOKEN: 'must-not-be-inherited',
+  }, identity(branch), home);
+
+  for (const branch of ['release/0.6.3', 'release/candidate']) {
+    for (const path of [data, devAlias]) {
+      const env = resolveFor(branch, path);
+      assert.equal(env.GIAN_DATA_DIR, path);
+      assert.equal(env.GIAN_DEV_DATA_DIR, path);
+      assert.equal(env.GIAN_DESKTOP_TOKEN, undefined);
+    }
+  }
+  for (const branch of ['main', 'feat/preview', 'detached', 'release', 'release/', 'release-candidate', 'feat/release/0.6.3']) {
+    for (const path of [data, devAlias]) {
+      assert.throws(() => resolveFor(branch, path), /Only release\/ branches/);
+    }
+  }
+  for (const branch of ['main', 'release/0.6.3']) {
+    for (const path of [production, prodAlias]) {
+      assert.throws(() => resolveFor(branch, path), /cannot use production Gian data/);
+    }
+    const env = resolveFor(branch, '');
+    assert.equal(env.GIAN_DATA_DIR, join(home, 'worktree', '.gian-runtime', 'data'));
+    assert.equal(env.GIAN_DESKTOP_USER_DATA_DIR, join(home, 'worktree', '.gian-runtime', 'desktop-profile'));
+  }
 });
 
 test('dev environment forwards explicit Proxy entry overrides', () => {

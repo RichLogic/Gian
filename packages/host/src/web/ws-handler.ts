@@ -13,6 +13,7 @@ import { loadConfig } from '../storage/config.js';
 import { deleteTaskCascade } from '../task/delete-cascade.js';
 import { updateTaskWithSessionArchive } from '../task/update-with-session-archive.js';
 import { redactErrorForLog } from '../logging/redact.js';
+import type { RemoteControllerHub } from '../remote/controller-hub.js';
 
 interface WsMessageEvent {
   data: WSMessageReceive;
@@ -25,6 +26,7 @@ interface WsCloseEvent {
 }
 
 export interface WsHandlerDeps {
+  remoteController?: RemoteControllerHub;
   sessions: SessionManager;
   tasks?: TaskManager;
   broadcaster: WsBroadcaster;
@@ -39,7 +41,7 @@ interface ClientState {
   mode: 'full' | 'attention';
 }
 
-export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db, remoteController }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   async function sendStateSync(ws: WSContext): Promise<void> {
@@ -153,7 +155,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         ? rawRequestId
         : null;
       try {
-        const dispatched = await dispatch(parsed, sessions, tasks, broadcaster, ws, term);
+        const dispatched = await dispatch(parsed, sessions, tasks, broadcaster, ws, term, remoteController);
         // §4.4 success result. ORDERING CONTRACT: the result must never
         // arrive before the canonical broadcast caused by the command.
         // `dispatch` is awaited, and the domain managers broadcast
@@ -266,7 +268,10 @@ async function dispatch(
   broadcaster: WsBroadcaster,
   ws: WSContext,
   term?: WorkbenchTerminalManager,
+  remoteController?: RemoteControllerHub,
 ): Promise<{ result?: import('@gian/shared').OperationResultMessage['result'] } | void> {
+  if (msg.type === 'events:subscribe') broadcaster.subscribeToEvents(ws, msg.session_id);
+  if (remoteController && await remoteController.handleMessage(msg)) return;
   switch (msg.type) {
     case 'events:subscribe': {
       broadcaster.subscribeToEvents(ws, msg.session_id);
@@ -274,6 +279,17 @@ async function dispatch(
       return;
     }
     case 'session:create': {
+      if (msg.remote_environment_id) {
+        if (!remoteController || !msg.agent_id) throw new Error('remote execution unavailable');
+        const session = msg.remote_session_id ? await remoteController.takeOver(msg.remote_environment_id, msg.remote_session_id)
+          : await remoteController.create({ environment_id: msg.remote_environment_id,
+          workspace_id: msg.workspace_id, agent_id: msg.agent_id, name: msg.name,
+          model: msg.model, thinking_effort: msg.thinking_effort, service_tier: msg.service_tier,
+          approval_mode: msg.approval_mode, session_config: msg.session_config,
+          turn_config: msg.turn_config }, msg.request_id ?? randomUUID());
+        broadcaster.send(ws, { type: 'session:created', session, origin: 'interactive-create' });
+        return;
+      }
       if (msg.agent_id === undefined && msg.executor === undefined) {
         throw Object.assign(
           new Error('session:create requires agent_id'),
@@ -389,6 +405,8 @@ async function dispatch(
         msg.context_items,
         msg.composer_document,
         msg.turn_config,
+        undefined,
+        msg.translation_id,
       );
       return;
     }

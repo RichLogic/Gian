@@ -7,8 +7,8 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type CSSProperties,
   type MutableRefObject,
-  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
@@ -57,6 +57,7 @@ import {
   LINK,
   ORDERED_LIST,
   QUOTE,
+  type ElementTransformer,
   type Transformer,
   UNORDERED_LIST,
 } from '@lexical/markdown';
@@ -66,6 +67,7 @@ import {
   setLexicalClipboardDataTransfer,
 } from '@lexical/clipboard';
 import {
+  $addUpdateTag,
   $applyNodeReplacement,
   $createNodeSelection,
   $createParagraphNode,
@@ -77,12 +79,23 @@ import {
   $isNodeSelection,
   $isParagraphNode,
   $isRangeSelection,
+  $isRootOrShadowRoot,
   $isTextNode,
   $setSelection,
+  COLLABORATION_TAG,
   COMMAND_PRIORITY_HIGH,
+  COMMAND_PRIORITY_LOW,
+  COMPOSITION_END_TAG,
   COPY_COMMAND,
   CUT_COMMAND,
   DecoratorNode,
+  HISTORIC_TAG,
+  HISTORY_PUSH_TAG,
+  INSERT_LINE_BREAK_COMMAND,
+  INSERT_PARAGRAPH_COMMAND,
+  IS_BOLD,
+  IS_CODE,
+  IS_ITALIC,
   KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_LEFT_COMMAND,
   KEY_ARROW_RIGHT_COMMAND,
@@ -91,7 +104,9 @@ import {
   KEY_DELETE_COMMAND,
   KEY_ENTER_COMMAND,
   KEY_ESCAPE_COMMAND,
+  KEY_TAB_COMMAND,
   PASTE_COMMAND,
+  SELECTION_CHANGE_COMMAND,
   type EditorState,
   type ElementNode,
   type LexicalEditor,
@@ -112,21 +127,24 @@ import {
 } from '@gian/shared';
 import { useT } from '../../i18n/index.js';
 import type { ComposerFileOption } from './capabilities.js';
+import { highlightMatch } from './highlight-match.js';
+import { upwardPopoverLayout } from './upward-popover.js';
 
 type SerializedReferenceNode = Spread<{
   referenceId: string;
   referenceType: ComposerReferenceSegment['referenceType'];
   label: string;
-  kind?: 'file';
+  kind?: 'file' | 'session';
 }, SerializedLexicalNode>;
 
 const REFERENCE_FILE_GLYPH_SVG = '<svg viewBox="0 0 16 16" fill="none"><path d="M4 1.75h5l3 3V14.25H4z" stroke="currentColor" stroke-width="1.2"/><path d="M9 1.75v3h3" stroke="currentColor" stroke-width="1.2"/></svg>';
+const REFERENCE_SESSION_GLYPH_SVG = '<svg viewBox="0 0 16 16" fill="none"><path d="M2.25 3.25h11.5v8H8.75l-3.5 3v-3h-3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
 
 class ReferenceNode extends DecoratorNode<null> {
   __referenceId: string;
   __referenceType: ComposerReferenceSegment['referenceType'];
   __label: string;
-  __kind: 'file' | undefined;
+  __kind: 'file' | 'session' | undefined;
 
   static override getType(): string {
     return 'composer-reference';
@@ -141,7 +159,7 @@ class ReferenceNode extends DecoratorNode<null> {
       id: serialized.referenceId,
       referenceType: serialized.referenceType,
       label: serialized.label,
-      ...(serialized.kind === 'file' ? { kind: 'file' as const } : {}),
+      ...(serialized.kind === 'file' || serialized.kind === 'session' ? { kind: serialized.kind } : {}),
     }).updateFromJSON(serialized);
   }
 
@@ -149,7 +167,7 @@ class ReferenceNode extends DecoratorNode<null> {
     referenceId: string,
     referenceType: ComposerReferenceSegment['referenceType'],
     label: string,
-    kind?: 'file',
+    kind?: 'file' | 'session',
     key?: NodeKey,
   ) {
     super(key);
@@ -196,13 +214,13 @@ class ReferenceNode extends DecoratorNode<null> {
     label.className = 'cir-label';
     label.textContent = this.__label;
     // Plain context chips get their '@' glyph from CSS ::before so the
-    // editor's text content stays clean; attachments and file references
-    // carry a real file icon (the file chip's CSS suppresses the '@').
-    if (this.__referenceType === 'attachment' || this.__kind === 'file') {
+    // editor's text content stays clean; attachments and file/session
+    // references carry a real icon (their chip CSS suppresses the '@').
+    if (this.__referenceType === 'attachment' || this.__kind === 'file' || this.__kind === 'session') {
       const glyph = document.createElement('span');
       glyph.className = 'cir-glyph';
       glyph.setAttribute('aria-hidden', 'true');
-      glyph.innerHTML = REFERENCE_FILE_GLYPH_SVG;
+      glyph.innerHTML = this.__kind === 'session' ? REFERENCE_SESSION_GLYPH_SVG : REFERENCE_FILE_GLYPH_SVG;
       element.append(glyph, label);
     } else {
       element.append(label);
@@ -286,6 +304,10 @@ const COMPOSER_TRANSFORMERS: Transformer[] = [
   ITALIC_UNDERSCORE,
   LINK,
 ];
+
+const COMPOSER_ELEMENT_TRANSFORMERS = COMPOSER_TRANSFORMERS.filter(
+  (transformer): transformer is ElementTransformer => transformer.type === 'element',
+);
 
 type DocPart =
   | { kind: 'text'; text: string }
@@ -490,6 +512,15 @@ function writeDocument(documentValue: ComposerDocument): void {
     const target = openContainer && !segment.text.startsWith('\n')
       ? $trailingInlineContainer()
       : null;
+    // Markdown parsing drops whitespace-only runs, but a run between chips
+    // (or the caret space after one) is part of the structured draft.
+    if (/^[ \t]+$/.test(segment.text)) {
+      const container = target ?? $createParagraphNode();
+      if (!target) root.append(container);
+      container.append($createTextNode(segment.text));
+      openContainer = true;
+      continue;
+    }
     const nodes = $generateNodesFromMarkdownString(segment.text, COMPOSER_TRANSFORMERS);
     nodes.forEach((node, index) => {
       if (index === 0 && target && $isParagraphNode(node)) {
@@ -549,6 +580,124 @@ function nativeClipboardData(event: ClipboardEvent | KeyboardEvent | null): Data
   return event && 'clipboardData' in event ? event.clipboardData : null;
 }
 
+// Inline formats the caret must be able to escape at a segment boundary.
+// Lexical syncs selection.format from the anchor text node on every native
+// selection change, so a caret parked at the edge of a bold/italic/code run
+// inherits its bits and typed text extends the run forever (the reported
+// bold/inline-code stickiness). When the caret sits at a boundary whose
+// neighbor does not continue the run (plain text, a reference chip, or the
+// block edge), strip the ending bits from selection.format: the next
+// insertion then takes Lexical's format-mismatch path and starts a plain
+// sibling node instead of splicing into the formatted one. Interior carets
+// keep the format; a caret at the very start of a block (no previous
+// sibling) also keeps it, since the run deliberately begins there. Code
+// fences own their text, so they are excluded.
+const BOUNDARY_ESCAPABLE_FORMAT = IS_BOLD | IS_ITALIC | IS_CODE;
+
+function BoundaryFormatPlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => editor.registerCommand(
+    SELECTION_CHANGE_COMMAND,
+    () => {
+      const selection = $getSelection();
+      if (!$isRangeSelection(selection) || !selection.isCollapsed()) return false;
+      const anchor = selection.anchor;
+      if (anchor.type !== 'text') return false;
+      const node = anchor.getNode();
+      const nodeMask = node.getFormat() & BOUNDARY_ESCAPABLE_FORMAT;
+      if (nodeMask === 0 || $isCodeNode(node.getParent())) return false;
+      let ending = 0;
+      if (anchor.offset === node.getTextContentSize()) {
+        const next = node.getNextSibling();
+        const nextMask = $isTextNode(next) ? next.getFormat() & BOUNDARY_ESCAPABLE_FORMAT : 0;
+        ending |= nodeMask & ~nextMask;
+      }
+      if (anchor.offset === 0 && node.getPreviousSibling() !== null) {
+        const prev = node.getPreviousSibling();
+        const prevMask = $isTextNode(prev) ? prev.getFormat() & BOUNDARY_ESCAPABLE_FORMAT : 0;
+        ending |= nodeMask & ~prevMask;
+      }
+      if (ending !== 0 && (selection.format & ending) !== 0) {
+        selection.setFormat(selection.format & ~ending);
+      }
+      return false;
+    },
+    COMMAND_PRIORITY_LOW,
+  ), [editor]);
+  return null;
+}
+
+// MarkdownShortcutPlugin only converts a trigger typed at the start of a
+// BLOCK (its element pass requires the anchor to be the block's first
+// child). The composer's editing newline is Shift+Enter — a soft line break
+// INSIDE the block — so a heading/quote/list trigger typed on a later visual
+// line stayed literal text (owner report: `# 1` … `###### 6` on Shift+Enter
+// lines never converted). This mirrors registerMarkdownShortcuts' typed-
+// character guards and, when the caret sits at the start of a soft-wrapped
+// line (the anchor's previous sibling is the line break), splits that line
+// into its own block and runs the same element-transformer replace ritual.
+function SoftLineElementMarkdownPlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => editor.registerUpdateListener(({ tags, dirtyLeaves, editorState, prevEditorState }) => {
+    if (tags.has(COLLABORATION_TAG) || tags.has(HISTORIC_TAG)) return;
+    if (editor.isComposing()) return;
+    const isCompositionEnd = tags.has(COMPOSITION_END_TAG);
+    const selection = editorState.read($getSelection);
+    const prevSelection = prevEditorState.read($getSelection);
+    if (
+      !$isRangeSelection(prevSelection)
+      || !$isRangeSelection(selection)
+      || !selection.isCollapsed()
+      || (selection.is(prevSelection) && !isCompositionEnd)
+    ) return;
+    const anchorKey = selection.anchor.key;
+    const anchorOffset = selection.anchor.offset;
+    const anchorNode = editorState._nodeMap.get(anchorKey);
+    if (
+      !$isTextNode(anchorNode)
+      || !dirtyLeaves.has(anchorKey)
+      || (!isCompositionEnd && anchorOffset !== 1 && anchorOffset > prevSelection.anchor.offset + 1)
+    ) return;
+    editor.update(() => {
+      if ($convertSoftLineElement(anchorNode, anchorOffset)) {
+        $addUpdateTag(HISTORY_PUSH_TAG);
+      }
+    });
+  }), [editor]);
+  return null;
+}
+
+function $convertSoftLineElement(anchorNode: TextNode, anchorOffset: number): boolean {
+  if (anchorNode.hasFormat('code')) return false;
+  const parentNode = anchorNode.getParent();
+  if (parentNode === null || $isCodeNode(parentNode)) return false;
+  if (!$isRootOrShadowRoot(parentNode.getParent())) return false;
+  // Only soft-wrapped line starts; block starts are MarkdownShortcutPlugin's
+  // job, and its listener is registered first.
+  const lineBreak = anchorNode.getPreviousSibling();
+  if (!$isLineBreakNode(lineBreak)) return false;
+  const textContent = anchorNode.getTextContent();
+  if (textContent[anchorOffset - 1] !== ' ') return false;
+  for (const { regExp, replace } of COMPOSER_ELEMENT_TRANSFORMERS) {
+    const match = textContent.match(regExp);
+    const expectedMatchLength = match && match[0].endsWith(' ')
+      ? anchorOffset
+      : anchorOffset - 1;
+    if (!match || match[0].length !== expectedMatchLength) continue;
+    const lineBlock = $createParagraphNode();
+    parentNode.insertAfter(lineBlock);
+    lineBlock.append(anchorNode, ...anchorNode.getNextSiblings());
+    lineBreak.remove();
+    const nextSiblings = anchorNode.getNextSiblings();
+    const [leadingNode, remainderNode] = anchorNode.splitText(anchorOffset);
+    const siblings = remainderNode ? [remainderNode, ...nextSiblings] : nextSiblings;
+    if (replace(lineBlock, siblings, match, false) === false) return false;
+    leadingNode?.remove();
+    return true;
+  }
+  return false;
+}
+
 function CommandPlugin({ onKeyDown, onPaste, namespace, fileMenuOpenRef }: CommandPluginProps & { namespace: string }) {
   const [editor] = useLexicalComposerContext();
   const keyRef = useRef(onKeyDown);
@@ -562,6 +711,10 @@ function CommandPlugin({ onKeyDown, onPaste, namespace, fileMenuOpenRef }: Comma
       KEY_ARROW_UP_COMMAND,
       KEY_ARROW_DOWN_COMMAND,
       KEY_ESCAPE_COMMAND,
+      // Tab is forwarded so the `/` menu can accept a row without focus ever
+      // leaving the editor; the handler returns false when no menu is open,
+      // keeping Lexical's default Tab behavior.
+      KEY_TAB_COMMAND,
     ].map(command => editor.registerCommand(
       command,
       event => {
@@ -574,24 +727,40 @@ function CommandPlugin({ onKeyDown, onPaste, namespace, fileMenuOpenRef }: Comma
       KEY_ENTER_COMMAND,
       event => {
         if (fileMenuOpenRef.current) return false;
-        // Enter inside a list item or code fence stays in the editor: it
-        // splits the list item (Lexical default, including exit-on-empty) or
-        // adds a code line instead of submitting. Plain Enter elsewhere still
-        // submits via onKeyDown, and ⌘/Ctrl+Enter always reaches onKeyDown.
+        if (!(event instanceof KeyboardEvent)) return false;
+        // Shift+Enter is the editing newline — it inherits what plain Enter
+        // used to do inside markdown blocks: in a list item it opens the NEXT
+        // item (INSERT_PARAGRAPH keeps the marker/numbering and the
+        // exit-on-empty escape), in a code fence it inserts a code line, and
+        // anywhere else Lexical's default Shift+Enter line break applies.
+        // IME compositions keep ownership of the key.
         if (
-          event instanceof KeyboardEvent
-          && !event.shiftKey
+          event.shiftKey
           && !event.metaKey
           && !event.ctrlKey
         ) {
+          // IME compositions keep ownership of the key — no continuation, no
+          // forwarding; Lexical's own composition layer handles the rest.
+          if (event.isComposing) return false;
           const selection = $getSelection();
-          if ($isRangeSelection(selection)) {
-            const anchor = selection.anchor.getNode();
-            const chain = [anchor, ...anchor.getParents()];
-            if (chain.some($isListItemNode) || chain.some($isCodeNode)) return false;
+          if (!$isRangeSelection(selection)) return false;
+          const anchor = selection.anchor.getNode();
+          const chain = [anchor, ...anchor.getParents()];
+          if (chain.some($isListItemNode)) {
+            event.preventDefault();
+            return editor.dispatchCommand(INSERT_PARAGRAPH_COMMAND, undefined);
           }
+          if (chain.some($isCodeNode)) {
+            event.preventDefault();
+            return editor.dispatchCommand(INSERT_LINE_BREAK_COMMAND, false);
+          }
+          return false;
         }
-        return event instanceof KeyboardEvent ? (keyRef.current?.(event) ?? false) : false;
+        // Enter submits from ANYWHERE — lists and code fences included (owner
+        // contract); ⌘/Ctrl+Enter reaches onKeyDown the same way and the
+        // container decides steer vs. send. onKeyDown owns the plain-Enter
+        // IME guard.
+        return keyRef.current?.(event) ?? false;
       },
       COMMAND_PRIORITY_HIGH,
     ));
@@ -770,6 +939,9 @@ function $appendTarget(): ElementNode {
 // `-` and `_` — all common in file paths — so use a reduced set here.
 const FILE_TRIGGER_PUNCTUATION = "\\,\\+\\*\\?\\$\\@\\|#{}\\(\\)\\^\\[\\]\\\\!%'\"~=<>_:;";
 
+// Mirrors the `.cmp-file-pop` CSS max-width; used for right-edge clamping.
+const FILE_POPOVER_MAX_WIDTH = 420;
+
 class FileTypeaheadOption extends MenuOption {
   readonly file: ComposerFileOption;
 
@@ -784,19 +956,6 @@ function ellipsizeMiddle(text: string, max: number): string {
   const head = Math.ceil((max - 1) / 2);
   const tail = Math.floor((max - 1) / 2);
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
-}
-
-function highlightMatch(text: string, query: string): ReactNode {
-  if (!query) return text;
-  const index = text.toLowerCase().indexOf(query.toLowerCase());
-  if (index === -1) return text;
-  return (
-    <>
-      {text.slice(0, index)}
-      <strong>{text.slice(index, index + query.length)}</strong>
-      {text.slice(index + query.length)}
-    </>
-  );
 }
 
 const FILE_ROW_ICON = (
@@ -820,6 +979,7 @@ function FileMentionMenu({
   loadingLabel,
   emptyLabel,
   hintLabel,
+  style,
 }: {
   loading: boolean;
   itemProps: FileMenuItemProps;
@@ -827,6 +987,7 @@ function FileMentionMenu({
   loadingLabel: string;
   emptyLabel: string;
   hintLabel: string;
+  style: CSSProperties;
 }) {
   const { selectedIndex, selectOptionAndCleanUp, setHighlightedIndex, options } = itemProps;
   // Repair the highlight after async loads: the library preselects only when
@@ -839,7 +1000,7 @@ function FileMentionMenu({
   }, [options, selectedIndex, setHighlightedIndex]);
 
   return (
-    <div className="cmp-file-pop">
+    <div className="cmp-file-pop" role="listbox" style={style}>
       {loading ? (
         <div className="cmp-file-empty">{loadingLabel}</div>
       ) : options.length === 0 ? (
@@ -977,6 +1138,28 @@ function FileMentionPlugin({
       menuRenderFn={(anchorElementRef, itemProps, matchingString) => {
         const anchor = anchorElementRef.current;
         if (!anchor) return null;
+        // The plugin parks its anchor div at the caret and would open the
+        // menu DOWNWARD from it (its built-in flip compares against the
+        // small contenteditable rect, so it never triggers for a composer
+        // pinned to the window bottom). Instead portal to the body and
+        // anchor UPWARD like the `+` and `/` menus: bottom edge just above
+        // the composer box top, left edge at the caret, height clamped to
+        // the space above. Read the caret from the live selection — the
+        // plugin positions its anchor div in a post-render effect, so its
+        // rect is stale on the first frame; fall back to it anyway.
+        const selection = window.getSelection();
+        const caretRect = selection && selection.rangeCount > 0
+          ? selection.getRangeAt(0).getBoundingClientRect()
+          : anchor.getBoundingClientRect();
+        const composer = editor.getRootElement()?.closest('.composer');
+        const composerTop = composer?.getBoundingClientRect().top ?? caretRect.top;
+        const layout = upwardPopoverLayout({
+          caretLeft: caretRect.left,
+          composerTop,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          popoverWidth: FILE_POPOVER_MAX_WIDTH,
+        });
         return createPortal(
           <FileMentionMenu
             loading={results === null}
@@ -985,8 +1168,9 @@ function FileMentionPlugin({
             loadingLabel={t('composer.fileMention.loading')}
             emptyLabel={t('composer.fileMention.empty')}
             hintLabel={t('composer.fileMention.hint')}
+            style={{ left: layout.left, bottom: layout.bottom, maxHeight: layout.maxHeight }}
           />,
-          anchor,
+          document.body,
         );
       }}
     />
@@ -1202,6 +1386,8 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
         <HistoryPlugin />
         <ListPlugin />
         <MarkdownShortcutPlugin transformers={COMPOSER_TRANSFORMERS} />
+        <SoftLineElementMarkdownPlugin />
+        <BoundaryFormatPlugin />
         <OnChangePlugin
           ignoreSelectionChange
           onChange={(state: EditorState, _editor: LexicalEditor) => {

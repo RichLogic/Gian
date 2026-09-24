@@ -677,7 +677,12 @@
   background: transparent; color: var(--text); cursor: pointer;
 }
 .catalog-item:hover { background: var(--surface-2); }
-.catalog-item.active { background: var(--accent-soft); }
+/* Selected = hover wash plus a left accent edge (Owner 2026-09-23). */
+.catalog-item.active,
+.catalog-item.active:hover {
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
 .catalog-name { font: 500 13px/1.2 var(--font-sans); }
 .catalog-sub { font: 12px/1.3 var(--font-sans); color: var(--text-3); margin-top: 2px; }
 

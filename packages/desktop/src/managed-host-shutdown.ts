@@ -136,10 +136,10 @@ export class ManagedHostReplacementGate {
 
   run(
     child: ChildProcess | null,
-    startReplacement: () => boolean,
+    startReplacement: () => boolean | Promise<boolean>,
   ): Promise<ManagedHostReplacementResult> {
-    if (this.phase === 'armed') return Promise.resolve('started');
     if (this.pending) return this.pending;
+    if (this.phase === 'armed') return Promise.resolve('started');
 
     this.phase = 'draining';
     const shutdown = !child
@@ -150,14 +150,14 @@ export class ManagedHostReplacementGate {
 
     let operation!: Promise<ManagedHostReplacementResult>;
     operation = shutdown.then(
-      result => {
+      async result => {
         if (result !== 'exited') {
           this.phase = 'idle';
           return 'blocked' as const;
         }
         this.phase = 'armed';
         try {
-          if (startReplacement()) return 'started' as const;
+          if (await startReplacement()) return 'started' as const;
         } catch {}
         this.phase = 'idle';
         return 'failed' as const;

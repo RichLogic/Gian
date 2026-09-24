@@ -37,7 +37,9 @@ import {
   finalizeProviderScenarioResults,
   providerCapabilityNames,
   realScenarioRequirement,
-  resolveCatalogCandidateValue,
+  resolveModelDependentAcceptanceConfig,
+  candidateProcessEnvironment,
+  runCustomizationAcceptance,
 } from './proxy-certification-policy.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -200,11 +202,11 @@ class ValidatedProxyClient extends EventEmitter {
       cwd: rootDir,
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
+      env: candidateProcessEnvironment(process.env, {
         [binaryEnvironment[this.provider]]: this.binaryPath,
         GIAN_RUNTIME_BIN: this.binaryPath,
         GIAN_PLUGIN_DATA_DIR: this.dataDir,
+        GIAN_PLUGIN_ID: this.providerConfig.pluginId ?? this.provider,
         ...this.environment,
         ...(this.provider === 'kimi' ? { KIMI_CODE_NO_AUTO_UPDATE: '1' } : {}),
         ...(this.provider === 'grok'
@@ -213,7 +215,7 @@ class ValidatedProxyClient extends EventEmitter {
               GIAN_PROTOCOL_VERSIONS: protocolOffers.join(','),
             }
           : {}),
-      },
+      }),
     });
     this.child = child;
     createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', line => {
@@ -527,37 +529,15 @@ async function prepareDshProfile(tempRoot, binaryPath) {
   };
 }
 
-async function prepareClaudeEnvironment(binaryPath, providerConfig) {
+async function prepareClaudeEnvironment(binaryPath) {
   const { resolveClaudeSettingsPath } = await import(
     '../packages/proxies/cc-proxy/dist/src/runtime/claude-mcp-runtime.js'
   );
-  const configuredWrapper = typeof providerConfig.binary === 'string'
-    ? providerConfig.binary.trim().replace(/^~(?=\/)/, homedir())
-    : '';
-  const settingsExecutable = configuredWrapper
-    ? await access(configuredWrapper, fsConstants.X_OK).then(
-        () => configuredWrapper,
-        () => binaryPath,
-      )
-    : binaryPath;
-  const settingsPath = resolveClaudeSettingsPath({ executable: settingsExecutable });
+  // Runtime executable and Agent Home are independent. An explicit
+  // CLAUDE_CONFIG_DIR selects the profile; do not borrow a legacy wrapper's
+  // Home when testing a different, explicitly selected Runtime.
+  const settingsPath = resolveClaudeSettingsPath({ executable: binaryPath });
   return settingsPath ? { CLAUDE_CONFIG_DIR: dirname(settingsPath) } : {};
-}
-
-function splitConfig(catalog, cheapestConfig) {
-  const options = new Map(catalog.configOptions.map(option => [option.id, option]));
-  const sessionConfig = {};
-  const turnConfig = {};
-  for (const [id, value] of Object.entries(cheapestConfig)) {
-    const option = options.get(id);
-    if (!option) throw new Error(`Current catalog has no cheapest config option ${id}.`);
-    const selectedValue = resolveCatalogCandidateValue(option, value);
-    if (option.choices && !option.choices.some(choice => Object.is(choice.value, selectedValue))) {
-      throw new Error(`Current catalog does not offer ${id}=${String(selectedValue)}.`);
-    }
-    (option.binding === 'session' ? sessionConfig : turnConfig)[id] = selectedValue;
-  }
-  return { sessionConfig, turnConfig };
 }
 
 async function createWorkspace(root) {
@@ -803,6 +783,15 @@ async function createAttachedSession(context, name = 'acceptance') {
     workspace: { cwd: context.workspace, roots: [context.workspace] },
     config: context.sessionConfig,
   });
+  if (context.initialized.capabilities['catalog.resolve']) {
+    await context.client.request('catalog.resolve', {
+      catalogRevision: context.runtimeCatalog.catalogRevision,
+      sessionId: created.session.id,
+      streamId: created.session.streamId,
+      sessionConfig: context.sessionConfig,
+      turnConfig: context.turnConfig,
+    });
+  }
   return created.session;
 }
 
@@ -1475,6 +1464,8 @@ async function runSidechatForkScenario(context) {
 }
 
 async function runControlScenario(context, scenario) {
+  if (scenario.id === 'customization.read_only_inventory') return runCustomizationAcceptance(context);
+  if (scenario.id === 'customization.lazy_detail') return runCustomizationAcceptance(context, true);
   if (scenario.id === 'catalog.resolve') return runCatalogResolveScenario(context, scenario);
   if (scenario.id === 'config.validation') return runConfigValidationScenario(context, scenario);
   if (scenario.id === 'session.lifecycle') return runSessionLifecycleScenario(context, scenario);
@@ -1507,6 +1498,13 @@ async function runProvider({
     const dataDir = join(tempRoot, 'data');
     await mkdir(dataDir, { recursive: true });
     const { workspace, skillDir } = await createWorkspace(tempRoot);
+    if (scenarios.some(scenario => scenario.category === 'customization')) {
+      for (const directory of ['.agents/skills', '.claude/skills']) {
+        const target = join(workspace, directory, 'proxy-acceptance-skill');
+        await mkdir(target, { recursive: true });
+        await copyFile(join(skillDir, 'SKILL.md'), join(target, 'SKILL.md'));
+      }
+    }
     const imagePath = scenarios.some(scenario => scenario.id === 'input.local_image')
       ? await createImageFixture(workspace)
       : null;
@@ -1518,7 +1516,7 @@ async function runProvider({
     const providerEnvironment = setup === 'dsh-profile'
       ? await prepareDshProfile(tempRoot, binaryPath)
       : setup === 'claude-settings'
-        ? await prepareClaudeEnvironment(binaryPath, providerConfig)
+        ? await prepareClaudeEnvironment(binaryPath)
         : {};
     if (setup === 'kimi-store' && scenarios.some(scenario => scenario.trigger.includes('real'))) {
       await activateSelectedKimiStore(binaryPath);
@@ -1583,7 +1581,7 @@ async function runProvider({
       protocol: { name: 'gian.proxy', versions: protocolOffers },
       host: { name: 'Gian Real Proxy Acceptance', version: '0.5.0' },
     });
-    const runtimeCatalog = await client.request('catalog.list', {});
+    let runtimeCatalog = await client.request('catalog.list', {});
     assert.deepEqual(
       providerCapabilityNames(initialized.capabilities),
       [...providerConfig.capabilities].sort(),
@@ -1596,13 +1594,15 @@ async function runProvider({
       initialized,
       catalog: runtimeCatalog,
     });
-    const { sessionConfig, turnConfig } = splitConfig(runtimeCatalog, providerConfig.cheapestConfig);
-    const optionById = new Map(runtimeCatalog.configOptions.map(option => [option.id, option]));
-    for (const [id, value] of Object.entries(configOverrides)) {
-      const option = optionById.get(id);
-      if (!option) throw new Error(`Current ${provider} catalog has no override option ${id}.`);
-      (option.binding === 'session' ? sessionConfig : turnConfig)[id] = value;
-    }
+    const selection = await resolveModelDependentAcceptanceConfig(
+      runtimeCatalog, providerConfig.cheapestConfig, configOverrides,
+      initialized.capabilities['catalog.resolve']
+        ? params => client.request('catalog.resolve', params)
+        : null,
+    );
+    const { sessionConfig, turnConfig } = selection;
+    runtimeCatalog = selection.catalog;
+    results[results.length - 1].selectedCatalog = runtimeCatalog;
     const context = {
       provider,
       providerConfig,

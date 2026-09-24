@@ -157,22 +157,44 @@ function validDisplay(display: ScreenshotDisplay): boolean {
     && display.scaleFactor > 0;
 }
 
+/** Upper bound for the requested capture thumbnail long edge. A 5K Retina
+ * desktop is 5120×2880 physical pixels; encoding, transferring and decoding
+ * that as a PNG froze the main process for seconds, so captures are capped at
+ * 2560 — still at or above the CSS pixel size of any supported display, which
+ * keeps the interactive overlay sharp while shrinking the bitmap ~4×. */
+export const MAX_CAPTURE_THUMBNAIL_EDGE = 2560;
+
 /** `desktopCapturer` accepts one thumbnail size for every source. Asking for
  * the largest physical width and height avoids downscaling any display in the
- * ordinary mixed-DPI case. The actual NativeImage size remains authoritative. */
+ * ordinary mixed-DPI case, capped at MAX_CAPTURE_THUMBNAIL_EDGE on the long
+ * edge so oversized desktops do not stall the main process. The actual
+ * NativeImage size remains authoritative. */
 export function thumbnailSizeForDisplays(
   displays: readonly ScreenshotDisplay[],
 ): { width: number; height: number } {
   if (displays.length === 0 || displays.some(display => !validDisplay(display))) {
     throw new Error('invalid screenshot display topology');
   }
-  return displays.reduce(
-    (size, display) => ({
-      width: Math.max(size.width, Math.ceil(display.bounds.width * display.scaleFactor)),
-      height: Math.max(size.height, Math.ceil(display.bounds.height * display.scaleFactor)),
+  const size = displays.reduce(
+    (largest, display) => ({
+      width: Math.max(largest.width, Math.ceil(display.bounds.width * display.scaleFactor)),
+      height: Math.max(largest.height, Math.ceil(display.bounds.height * display.scaleFactor)),
     }),
     { width: 1, height: 1 },
   );
+  if (size.width >= size.height && size.width > MAX_CAPTURE_THUMBNAIL_EDGE) {
+    return {
+      width: MAX_CAPTURE_THUMBNAIL_EDGE,
+      height: Math.max(1, Math.round(size.height * MAX_CAPTURE_THUMBNAIL_EDGE / size.width)),
+    };
+  }
+  if (size.height > MAX_CAPTURE_THUMBNAIL_EDGE) {
+    return {
+      width: Math.max(1, Math.round(size.width * MAX_CAPTURE_THUMBNAIL_EDGE / size.height)),
+      height: MAX_CAPTURE_THUMBNAIL_EDGE,
+    };
+  }
+  return size;
 }
 
 /** Match exclusively by the documented display identifier. Source names and
@@ -282,7 +304,7 @@ function cloneTarget(target: GianScreenshotTarget): GianScreenshotTarget {
     ? { kind: 'session', sessionId: target.sessionId, label: target.label }
     : {
         kind: 'new-session',
-        scope: { kind: target.scope.kind, id: target.scope.id },
+        scope: { ...target.scope },
         label: target.label,
       };
 }

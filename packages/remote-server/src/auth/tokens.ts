@@ -10,6 +10,7 @@ export interface AccessRecord {
   hostId: string;
   deviceId?: string;
   familyId?: string;
+  accountPeerId?: string;
   role: 'device' | 'host' | 'admin';
 }
 

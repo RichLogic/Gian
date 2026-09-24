@@ -285,7 +285,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     mockApi([]);
     await renderAgents();
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View Integration'));
+    fireEvent.click(within(card).getByTestId(/^catalog-open-/));
     const panel = await screen.findByTestId('proxy-detail-panel');
     expect(within(panel).queryByTestId('proxy-action-setup')).toBeNull();
     expect(within(panel).queryByTestId('runtime-path-input')).toBeNull();
@@ -466,7 +466,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     expect(api.discoverProxyRuntime).not.toHaveBeenCalled();
     // The product detail remains documentation-only.
     const card = await screen.findByTestId('catalog-item-io.acme.needs-app');
-    fireEvent.click(within(card).getByLabelText('View Integration'));
+    fireEvent.click(within(card).getByTestId(/^catalog-open-/));
     const detail = await screen.findByTestId('proxy-detail-panel');
     expect(within(detail).queryByTestId('runtime-path-input')).toBeNull();
     await waitFor(() => expect(api.loadCatalogDocument)
@@ -481,7 +481,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     mockApi([], [both]);
     await renderAgents();
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View Integration'));
+    fireEvent.click(within(card).getByTestId(/^catalog-open-/));
     const panel = await screen.findByTestId('proxy-detail-panel');
     expect(within(panel).queryByTestId('proxy-action-setup')).toBeNull();
     expect(within(panel).queryByTestId('runtime-path-input')).toBeNull();
@@ -569,7 +569,7 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     vi.mocked(api.updateCatalogProxy).mockResolvedValue({ pluginId: PLUGIN_ID, pluginVersion: '1.1.0' });
     await renderAgents();
     const card = await screen.findByTestId(`catalog-item-${PLUGIN_ID}`);
-    fireEvent.click(within(card).getByLabelText('View Integration'));
+    fireEvent.click(within(card).getByTestId(/^catalog-open-/));
     const panel = await screen.findByTestId('proxy-detail-panel');
     const updated = catalogItem({
       pluginId: PLUGIN_ID,

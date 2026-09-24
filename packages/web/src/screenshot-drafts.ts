@@ -21,11 +21,11 @@ export const NEW_SESSION_DRAFT_KEY_PREFIX = 'gian.new-session.draft.v2';
 export const NEW_SESSION_SCREENSHOT_EVENT = 'gian:new-session-screenshot';
 
 export function newSessionDraftStorageKey(scope: NewSessionScreenshotScope): string {
-  return `${NEW_SESSION_DRAFT_KEY_PREFIX}.${scope.kind}.${encodeURIComponent(scope.id)}`;
+  return `${NEW_SESSION_DRAFT_KEY_PREFIX}.${scope.kind}.${encodeURIComponent(scope.id)}${scope.environmentId ? '.' + encodeURIComponent(scope.environmentId) : ''}`;
 }
 
 function scopeKey(scope: NewSessionScreenshotScope): string {
-  return `${scope.kind}:${scope.id}`;
+  return `${scope.kind}:${scope.id}:${scope.environmentId ?? 'local'}`;
 }
 
 function blobKey(scope: NewSessionScreenshotScope, id: string): string {
@@ -33,7 +33,7 @@ function blobKey(scope: NewSessionScreenshotScope, id: string): string {
 }
 
 function sameScope(a: NewSessionScreenshotScope, b: NewSessionScreenshotScope): boolean {
-  return a.kind === b.kind && a.id === b.id;
+  return a.kind === b.kind && a.id === b.id && a.environmentId === b.environmentId;
 }
 
 function readDraftRecord(scope: NewSessionScreenshotScope): Record<string, unknown> {

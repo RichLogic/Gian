@@ -90,8 +90,38 @@ test('settings.json · UI saves rewrite atomically without exporting credentials
   }
 });
 
-test('settings.json · invalid external edits retain the last valid configuration', async () => {
+test('settings.json · appearance fields round-trip through the file', async () => {
   const ctx = await fixture();
+  try {
+    saveConfig(ctx.db, { theme: 'system', system_light_theme: 'light', frame_opacity: 72 });
+    ensureUserSettingsFile(loadConfig(ctx.db));
+    const document = JSON.parse(await readFile(ctx.path, 'utf8')) as Record<string, unknown>;
+    assert.equal(document.theme, 'system');
+    assert.equal(document.system_light_theme, 'light');
+    assert.equal(document.frame_opacity, 72);
+
+    // External edits of the new fields win over the DB on the next load.
+    document.system_light_theme = 'warm';
+    document.frame_opacity = 64;
+    await writeFile(ctx.path, `${JSON.stringify(document, null, 2)}\n`);
+    const config = loadConfig(ctx.db);
+    assert.equal(config.system_light_theme, 'warm');
+    assert.equal(config.frame_opacity, 64);
+
+    // Invalid external values never crash the load: the enum falls back to the
+    // stored value, the opacity to the default.
+    document.system_light_theme = 'blue';
+    document.frame_opacity = 'murky';
+    await writeFile(ctx.path, `${JSON.stringify(document, null, 2)}\n`);
+    const fallback = loadConfig(ctx.db);
+    assert.equal(fallback.system_light_theme, 'light');
+    assert.equal(fallback.frame_opacity, 100);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('settings.json · invalid external edits retain the last valid configuration', async () => {  const ctx = await fixture();
   try {
     ensureUserSettingsFile(loadConfig(ctx.db));
     const valid = JSON.parse(await readFile(ctx.path, 'utf8')) as Record<string, unknown>;

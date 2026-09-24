@@ -18,6 +18,9 @@ export type OperationPolicy = 'local' | 'optimistic' | 'pending';
  * below — that is the type-level completeness gate from proposal §4.2.
  */
 export type OperationName =
+  | 'translation.run'
+  | 'translation.cancel'
+  | 'translation.setAuto'
   // Session
   | 'session.create'
   | 'session.fork'
@@ -111,6 +114,7 @@ export type OperationName =
   | 'catalog.installRuntime'
   | 'catalog.updateProxy'
   | 'catalog.rollbackProxy'
+  | 'catalog.uninstallProxy'
   | 'catalog.discoverRuntime'
   | 'catalog.probeRuntime'
   | 'onboarding.saveProjectRoot'
@@ -136,6 +140,9 @@ export type OperationName =
  * submission. There is deliberately no fourth policy (proposal §2).
  */
 export const OPERATION_POLICIES = {
+  'translation.run': 'pending',
+  'translation.cancel': 'pending',
+  'translation.setAuto': 'pending',
   'session.create': 'pending',
   'session.fork': 'pending',
   // Protocol Fork is distinct from the legacy "Fork as executor" operation.
@@ -224,6 +231,7 @@ export const OPERATION_POLICIES = {
   'catalog.installRuntime': 'pending',
   'catalog.updateProxy': 'pending',
   'catalog.rollbackProxy': 'pending',
+  'catalog.uninstallProxy': 'pending',
   'catalog.discoverRuntime': 'pending',
   'catalog.probeRuntime': 'pending',
   'onboarding.saveProjectRoot': 'pending',

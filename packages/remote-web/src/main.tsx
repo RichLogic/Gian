@@ -18,6 +18,7 @@ import { LocaleProvider, resolveRemoteWebLocale } from './i18n/index.js';
 import { ViewportProvider } from './ui/viewport.js';
 import { FIXTURE_SCENARIOS } from './scenarios.js';
 import { preparePairingLink } from './pairing-link.js';
+import { EnrollmentPage } from './ui/enrollment.js';
 
 declare global {
   interface Window {
@@ -44,7 +45,9 @@ const boot = resolveRemoteWebBoot(window.location.search);
 const locale = resolveRemoteWebLocale(window.location.search);
 
 let content: React.ReactNode;
-if (boot !== 'production') {
+if (window.location.pathname === '/enrollment') {
+  content = <EnrollmentPage />;
+} else if (boot !== 'production') {
   const scenario: FixtureScenario | undefined = FIXTURE_SCENARIOS[boot.fixture];
   if (!scenario) {
     content = <BootGate reason={`Unknown fixture scenario "${boot.fixture}".`} />;

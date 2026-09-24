@@ -10,6 +10,7 @@ import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';
 
 export const CHAT_UI_MESSAGE_KEYS = [
+  'translation.sentLabel',
   'coding.status.interrupted',
   'common.cancel',
   'common.close',
@@ -20,6 +21,7 @@ export const CHAT_UI_MESSAGE_KEYS = [
   'composer.context.pastedText',
   'composer.context.quote',
   'composer.context.remove',
+  'composer.context.session',
   'links.unavailable',
   'message.attachment.download',
   'transcript.agent',
@@ -114,6 +116,7 @@ export const CHAT_UI_DEFAULT_EN: Record<ChatUiMessageKey, string> = {
   'composer.context.pastedText': 'Pasted text',
   'composer.context.quote': 'Quote',
   'composer.context.remove': 'Remove context',
+  'composer.context.session': 'Conversation',
   'links.unavailable': 'Opening this link is not available here',
   'message.attachment.download': 'Download',
   'transcript.agent': 'Agent',
@@ -177,6 +180,7 @@ export const CHAT_UI_DEFAULT_EN: Record<ChatUiMessageKey, string> = {
   'transcript.reasoning.full': 'Reasoning',
   'transcript.reasoning.summary': 'Reasoning summary',
   'transcript.retrySend': 'Retry',
+  'translation.sentLabel': 'The translated text sent to the LM is shown below',
   'schedule.sentBySchedule': 'Sent by a schedule',
   'transcript.sendUnknown': 'may not have been sent',
   'transcript.tool': 'Tool',

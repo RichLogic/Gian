@@ -237,7 +237,8 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     expect(document.querySelector('.cmp-slash-pop')).toBeNull();
 
     typeInlineComposer(textbox, 'p');
-    expect(await screen.findByText('/project-check')).toBeVisible();
+    expect(await screen.findByText((_text, element) => element?.classList.contains('cmp-slash-cmd') === true
+      && element.textContent === '/project-check')).toBeVisible();
   });
 
   it('closes an open popup and never dispatches a typed skill after hard-disable', async () => {
@@ -246,7 +247,8 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     const textbox = screen.getByRole('textbox');
 
     typeInlineComposer(textbox, '/p');
-    expect(await screen.findByText('/project-check')).toBeVisible();
+    expect(await screen.findByText((_text, element) => element?.classList.contains('cmp-slash-cmd') === true
+      && element.textContent === '/project-check')).toBeVisible();
 
     callbacks.rerenderGate({ disabled: true, disabledSubmitBehavior: 'block' });
 
@@ -255,5 +257,206 @@ describe('SLASH-003 Composer keyboard behavior', () => {
     expect(callbacks.onSendSkill).not.toHaveBeenCalled();
     expect(callbacks.onSend).not.toHaveBeenCalled();
     expect(callbacks.onQueueAdd).not.toHaveBeenCalled();
+  });
+});
+
+describe('SLASH-003 unified trigger-menu anatomy', () => {
+  beforeEach(() => {
+    clearSlashCache();
+    localStorage.clear();
+    apiMocks.loadSlashCommands.mockReset().mockResolvedValue(codexCommands);
+    apiMocks.loadSessionSlashCommands.mockReset().mockResolvedValue([]);
+  });
+
+  function slashRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>('.cmp-slash-pop .cmp-file-row')];
+  }
+
+  function rowFor(name: string): HTMLElement {
+    const row = slashRows().find(candidate => candidate.textContent?.includes(name));
+    if (!row) throw new Error(`no slash row for ${name}`);
+    return row;
+  }
+
+  it('renders icon + name + subtitle rows under source group headers with a hint footer', async () => {
+    renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await screen.findByText('/clear');
+
+    const sections = [...document.querySelectorAll('.cmp-slash-pop .cmp-slash-section')]
+      .map(el => el.textContent);
+    expect(sections).toEqual(['BUILTIN', 'REPO (.claude/commands)', 'USER (~/.claude/commands)']);
+
+    const rows = slashRows();
+    expect(rows).toHaveLength(3);
+    const clear = rowFor('/clear');
+    expect(clear.querySelector('.cmp-slash-icon svg')).not.toBeNull();
+    expect(clear.querySelector('.cmp-slash-cmd')!.textContent).toBe('/clear');
+    expect(clear.querySelector('.cmp-slash-desc')!.textContent).toBe('Clear');
+    expect(clear).toHaveAttribute('role', 'option');
+    expect(clear).toHaveAttribute('aria-selected', 'true');
+
+    expect(document.querySelector('.cmp-slash-pop .cmp-file-hint')!.textContent).toContain('↑↓');
+  });
+
+  it('bolds the matched substring in filtered results', async () => {
+    renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/pro');
+    await waitFor(() => expect(document.querySelector('.cmp-slash-cmd strong')).not.toBeNull());
+
+    const strong = document.querySelector('.cmp-slash-cmd strong')!;
+    expect(strong.textContent).toBe('/pro');
+    expect(strong.closest('.cmp-slash-cmd')!.textContent).toBe('/project-check');
+    expect(slashRows()).toHaveLength(1);
+  });
+
+  it('wraps arrow navigation around both ends and accepts with Tab', async () => {
+    const user = userEvent.setup();
+    const callbacks = renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await screen.findByText('/clear');
+    expect(rowFor('/clear')).toHaveClass('active');
+
+    await user.keyboard('{ArrowUp}');
+    expect(rowFor('/user-check')).toHaveClass('active');
+    await user.keyboard('{ArrowDown}');
+    expect(rowFor('/clear')).toHaveClass('active');
+
+    await user.keyboard('{ArrowDown}{Tab}');
+    expect(callbacks.onSendSkill).toHaveBeenCalledWith(
+      'project-check',
+      '/repo/.codex/skills/project-check/SKILL.md',
+    );
+    await waitFor(() => expect(document.querySelector('.cmp-slash-pop')).toBeNull());
+  });
+
+  it('keeps focus in the editor when Tab is pressed with no row to accept', async () => {
+    const user = userEvent.setup();
+    renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await screen.findByText('/clear');
+    await user.keyboard('{Tab}');
+
+    // The first row was accepted as text; the caret stays in the editor and
+    // focus never moved to another element.
+    expect(textbox).toHaveFocus();
+  });
+
+  it('inserts a text-path command with a trailing space', async () => {
+    const user = userEvent.setup();
+    renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await screen.findByText('/clear');
+    await user.keyboard('{Enter}');
+
+    expect(textbox.textContent).toBe('/clear ');
+    await waitFor(() => expect(document.querySelector('.cmp-slash-pop')).toBeNull());
+  });
+
+  it('shows a quiet empty state when no commands are available', async () => {
+    apiMocks.loadSlashCommands.mockResolvedValue([]);
+    renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await waitFor(() => {
+      expect(document.querySelector('.cmp-slash-pop .cmp-file-empty')?.textContent)
+        .toBe('No matching commands');
+    });
+    expect(slashRows()).toHaveLength(0);
+    expect(document.querySelector('.cmp-slash-pop .cmp-file-hint')!.textContent).toContain('↑↓');
+  });
+});
+
+describe('SLASH-003 disabled entries and inventory join id', () => {
+  const disabledSkill: SlashCommand = {
+    name: '/off-skill',
+    description: 'Configured but disabled',
+    source: 'project',
+    filePath: '/repo/.codex/skills/off-skill',
+    argHints: [],
+    disabled: true,
+    customizationId: 'ci1_0123456789abcdef0123456789abcdef',
+  };
+  const commandsWithDisabled: SlashCommand[] = [...codexCommands, disabledSkill];
+
+  beforeEach(() => {
+    clearSlashCache();
+    localStorage.clear();
+    apiMocks.loadSlashCommands.mockReset().mockResolvedValue(commandsWithDisabled);
+    apiMocks.loadSessionSlashCommands.mockReset().mockResolvedValue([]);
+  });
+
+  function slashRows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>('.cmp-slash-pop .cmp-file-row')];
+  }
+
+  function rowFor(name: string): HTMLElement {
+    const row = slashRows().find(candidate => candidate.textContent?.includes(name));
+    if (!row) throw new Error(`no slash row for ${name}`);
+    return row;
+  }
+
+  it('carries disabled and customizationId through the slash cache', async () => {
+    const commands = await fetchSlashCached('codex', 'workspace-join');
+    const row = commands.find(command => command.name === '/off-skill');
+    expect(row?.disabled).toBe(true);
+    expect(row?.customizationId).toBe('ci1_0123456789abcdef0123456789abcdef');
+    expect(getSlashCached('codex', 'workspace-join')?.find(command => command.name === '/off-skill')
+      ?.customizationId).toBe('ci1_0123456789abcdef0123456789abcdef');
+    const enabled = commands.find(command => command.name === '/clear');
+    expect(enabled?.disabled).toBeUndefined();
+    expect(enabled?.customizationId).toBeUndefined();
+  });
+
+  it('renders disabled rows dimmed with an aria flag and a suffix, and never dispatches them', async () => {
+    const user = userEvent.setup();
+    const callbacks = renderComposer(makeSession('codex'));
+    const textbox = screen.getByRole('textbox');
+
+    typeInlineComposer(textbox, '/');
+    await screen.findByText('/off-skill');
+
+    const row = rowFor('/off-skill');
+    expect(row).toHaveClass('disabled');
+    expect(row).toHaveAttribute('aria-disabled', 'true');
+    expect(row.querySelector('.cmp-slash-desc')!.textContent)
+      .toBe('Configured but disabled · disabled');
+
+    // Pointer pick is refused: no dispatch, no text change, popover stays.
+    await user.click(row);
+    expect(callbacks.onSendSkill).not.toHaveBeenCalled();
+    expect(callbacks.onSend).not.toHaveBeenCalled();
+    expect(textbox).toHaveTextContent('/');
+    expect(document.querySelector('.cmp-slash-pop')).not.toBeNull();
+
+    // Pointer hover already selected this row; keyboard acceptance must
+    // still refuse it without moving to a different command first.
+    expect(row).toHaveClass('active');
+    await user.keyboard('{Enter}');
+    expect(callbacks.onSendSkill).not.toHaveBeenCalled();
+    expect(callbacks.onSend).not.toHaveBeenCalled();
+    expect(textbox).toHaveTextContent('/');
+    expect(document.querySelector('.cmp-slash-pop')).not.toBeNull();
+    await user.keyboard('{Tab}');
+    expect(textbox).toHaveTextContent('/');
+    expect(document.querySelector('.cmp-slash-pop')).not.toBeNull();
+
+    // An enabled neighbor still dispatches normally.
+    await user.keyboard('{ArrowDown}{Enter}');
+    expect(callbacks.onSendSkill).toHaveBeenCalledWith(
+      'user-check',
+      '/users/me/.codex/skills/user-check/SKILL.md',
+    );
   });
 });

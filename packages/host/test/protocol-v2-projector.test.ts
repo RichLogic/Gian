@@ -202,6 +202,27 @@ test('protocol v2 file activities preserve adapter-supplied line counts', () => 
   }]);
 });
 
+test('protocol v2 file changes record the session launch cwd when provided', () => {
+  const [diff] = projectNotification('grok', v2Notification('diff.updated', {
+    diffId: 'diff-cwd',
+    diff: 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n',
+    truncated: false,
+    files: [{ path: 'a.txt', status: 'modified' }],
+  }), 'session-1', 1, undefined, '/repo/tree');
+  assert.equal(diff?.display?.type, 'activity.file-change');
+  assert.equal((diff?.display?.data as { cwd?: unknown }).cwd, '/repo/tree');
+
+  const [activity] = projectNotification('kimi', v2Notification('activity.updated', {
+    activityId: 'edit-cwd',
+    kind: 'file',
+    title: 'Edit',
+    status: 'succeeded',
+    presentation: { type: 'file', data: { path: 'src/a.ts', operation: 'write' } },
+  }), 'session-1', 1, undefined, '/repo/tree');
+  assert.equal(activity?.display?.type, 'activity.file-change');
+  assert.equal((activity?.display?.data as { cwd?: unknown }).cwd, '/repo/tree');
+});
+
 test('protocol v2 plan, diff, lifecycle, and errors retain their UI facts', () => {
   const [plan] = projectNotification('grok', v2Notification('plan.updated', {
     planId: 'plan-1',

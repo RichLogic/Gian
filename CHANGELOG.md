@@ -7,6 +7,48 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.3] - 2026-09-24
+
+### Added
+
+- Control another Gian from local conversations, with account-bound pairing,
+  remote execution, replicated history, same-account takeover, and remote
+  file, Diff and History browsing.
+- Translate outgoing messages, completed replies and selected text using a
+  separately configured local Agent/model. Original text is retained, and
+  each model translation runs in a fresh isolated conversation.
+- Follow the system theme and use adjustable macOS glass window frames.
+- Read Proxy descriptions, tutorials and version histories in English or Chinese.
+
+### Changed
+
+- Remote settings now separate controlling this Gian from connecting to other
+  Gian instances, with shared App-owned GitHub account confirmation and clearer
+  registration, pairing, reconnection and removal controls.
+- Improve Markdown/reference rendering, selected-row actions and transparent
+  frame appearance across light, warm and dark themes.
+- Use the independently published Proxy Protocol 1.0.1 and Remote Protocol 1.2.0.
+  Catalog 1.10.0 provides updated Claude, Codex, Kimi and DeepSeek integrations.
+
+### Fixed
+
+- Keep task selection and the actual message destination in sync.
+- Preserve streamed Side Chat content after completion and reopening.
+- Recover Remote connections after startup and interrupted requests without
+  silently repeating uncertain mutations or altering ordinary message text.
+- Preserve the original translation failure when temporary-thread cleanup fails;
+  closing an isolated Codex translation no longer attempts to read its history.
+- Correct composer reference whitespace, Remote Web model handling, and wide
+  table/code scrolling on narrow screens.
+
+### Notes
+
+- Native Remote peers need compatible Server and App versions and account
+  authorization; upgrading does not silently authorize legacy unbound devices.
+- Isolated model translation requires a supporting Proxy; this release supports
+  the published Codex Proxy 0.3.2. Other unsupported Proxies report an explicit error.
+- ZCode remains subject to its upstream standalone-runtime limitations.
+
 ## [0.6.2] - 2026-09-21
 
 ### Added

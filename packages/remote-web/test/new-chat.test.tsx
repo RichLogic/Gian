@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderApp } from './render-app.js';
-import { sampleCatalog } from '../src/controller/fixture.js';
+import { sampleCatalog, sampleTasks } from '../src/controller/fixture.js';
 
 function openNewChat() {
   return renderApp({
@@ -12,6 +12,30 @@ function openNewChat() {
 }
 
 describe('new chat (B4)', () => {
+  it('sends the selected catalog thinking level and resets it when the Agent changes', async () => {
+    const user = userEvent.setup();
+    const { controller } = openNewChat();
+    const create = vi.spyOn(controller.actions, 'createSession');
+    await user.click(screen.getByRole('radio', { name: 'Codex' }));
+    const thinking = screen.getByRole('combobox', { name: 'Thinking' });
+    await user.selectOptions(thinking, 'high');
+    await user.click(screen.getByRole('radio', { name: 'Claude' }));
+    expect(screen.getByRole('combobox', { name: 'Thinking' })).toHaveValue('');
+    const explicitHigh = Array.from((screen.getByRole('combobox', { name: 'Thinking' }) as HTMLSelectElement).options)
+      .find(option => option.value === 'high')!;
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking' }), explicitHigh);
+    await user.click(screen.getByRole('button', { name: '创建并开始' }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-claude', thinking: 'high' }));
+  });
+  it('accepts an Agent catalog without the optional model list without crashing', async () => {
+    const catalog = sampleCatalog();
+    catalog.agents = catalog.agents.map(({ models: _models, ...agent }) => agent);
+    renderApp({ scenario: { view: { kind: 'new-chat', presetTaskId: 'task-1' },
+      hostData: { 'host-home': { catalog, workspaces: catalog.workspaces, tasks: sampleTasks() } } }, viewport: 'wide' });
+    await userEvent.setup().click(screen.getByRole('radio', { name: 'Codex' }));
+    expect(screen.getByRole('button', { name: '创建并开始' })).toBeEnabled();
+    expect(screen.queryByRole('combobox', { name: 'Thinking' })).toBeNull();
+  });
   it('workspace + agent + Doing Task are required', async () => {
     const user = userEvent.setup();
     openNewChat();

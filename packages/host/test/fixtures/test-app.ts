@@ -15,6 +15,7 @@ import { loadConfig } from '../../src/storage/config.js';
 import { createApp, type AppHandle } from '../../src/web/app.js';
 import { MemoryRemoteIdentity } from '../../src/remote/identity.js';
 import type { OpenCommand } from '../../src/web/open-with.js';
+import type { LinkPreviewRouteOptions } from '../../src/web/routes/link-preview.js';
 import type { GianToolMethod } from '@gian/shared';
 
 export interface TestAppOptions {
@@ -23,6 +24,7 @@ export interface TestAppOptions {
   runOpen?: (command: OpenCommand, onError: (error: Error) => void) => void;
   toolMcpLimits?: { requests?: number; waits?: number };
   toolMcpBeforeCall?: (method: GianToolMethod) => Promise<void>;
+  linkPreviewOptions?: LinkPreviewRouteOptions;
   beforeCreateApp?: (db: Db) => void;
 }
 
@@ -72,6 +74,7 @@ export async function makeTestApp(options: TestAppOptions = {}): Promise<TestApp
     },
     ...(options.toolMcpLimits ? { toolMcpLimits: options.toolMcpLimits } : {}),
     ...(options.toolMcpBeforeCall ? { toolMcpBeforeCall: options.toolMcpBeforeCall } : {}),
+    ...(options.linkPreviewOptions ? { linkPreviewOptions: options.linkPreviewOptions } : {}),
   });
 
   async function fetch(path: string, init: RequestInit = {}): Promise<Response> {

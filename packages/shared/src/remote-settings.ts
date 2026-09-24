@@ -14,6 +14,15 @@ export interface RemoteSettingsPairing {
 }
 
 export interface RemoteSettingsSnapshot {
+  account?: {
+    status: 'pending' | 'authorized' | 'denied' | 'expired';
+    server_url: string;
+    user_code?: string;
+    verification_uri?: string;
+    expires_at: number;
+    interval_seconds?: number;
+    login?: string;
+  } | null;
   enrolled: boolean;
   host_id: string | null;
   host_name: string | null;

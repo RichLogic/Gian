@@ -210,6 +210,15 @@ export type WorktreeOutcome = 'merged' | 'discarded';
 export type ThinkingEffort = string;
 
 export interface Session {
+  remote_execution?: {
+    environment_id: string;
+    environment_name: string;
+    host_id: string;
+    remote_session_id: string;
+    repository_id: string;
+    repository_name: string;
+    worktree_root?: string;
+  };
   id: string;
   name: string | null;
   type: SessionType;
@@ -785,11 +794,18 @@ export interface TerminalOptions {
   shells: TerminalShellOption[];
 }
 
-export const THEME_DEFAULT_ACCENT: Record<'light' | 'warm' | 'dark', Accent> = {
-  light: 'azure',
-  warm: 'ember',
-  dark: 'plum',
-};
+/** The one accent used when no valid accent is stored. Accents are decoupled
+ *  from themes: switching theme never implies an accent change. */
+export const DEFAULT_ACCENT: Accent = 'plum';
+
+/** Light themes the 'system' theme may resolve to in OS light mode. */
+export const SYSTEM_LIGHT_THEMES = ['light', 'warm'] as const;
+
+/** Window frame opacity bounds in percent. The floor keeps a clearly visible
+ *  theme tint over the glass — the frame never goes fully see-through. */
+export const FRAME_OPACITY_MIN = 20;
+export const FRAME_OPACITY_MAX = 100;
+export const FRAME_OPACITY_DEFAULT = 100;
 
 /** User-level system-notification preferences, stored in the Host config and
  *  enforced by the Host BEFORE broadcasting `attention` — every delivery end
@@ -814,11 +830,18 @@ export const DEFAULT_NOTIFICATION_PREFERENCES: Readonly<NotificationPreferences>
 };
 
 export interface SystemConfig {
+  translation?: import('./translation.js').TranslationPreferences;
   host: string;
   port: number;
   workspace_root: string;
-  theme: 'light' | 'warm' | 'dark';
+  theme: 'light' | 'warm' | 'dark' | 'system';
   accent: Accent;
+  /** Light theme the 'system' theme resolves to in OS light mode. Optional so
+   *  older configs / test fixtures stay valid; loadConfig defaults to 'warm'. */
+  system_light_theme?: 'light' | 'warm';
+  /** Window frame opacity in percent (FRAME_OPACITY_MIN..MAX). Optional so
+   *  older configs stay valid; loadConfig defaults to FRAME_OPACITY_DEFAULT. */
+  frame_opacity?: number;
   /** @deprecated Fixed to `cozy`; retained for older API clients. */
   density: 'compact' | 'cozy' | 'roomy';
   /** @deprecated Fixed to `md`; retained for older API clients. */

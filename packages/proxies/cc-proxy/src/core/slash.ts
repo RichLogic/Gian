@@ -1,8 +1,13 @@
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { join, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import type { SlashCommand, SlashCommandSource } from '@gian/shared';
+
+import {
+  claudeConfigDir,
+  discoverAgentSkills,
+  discoverLegacyCommands,
+  type DiscoveredClaudeSkill,
+} from './skill-discovery.js';
 
 // ---------------------------------------------------------------------------
 // Native commands
@@ -72,91 +77,23 @@ function nativeToSlashCommand(rawName: string): SlashCommand {
   };
 }
 
-// ---------------------------------------------------------------------------
-// YAML frontmatter regex
-// Captures the block between the first `---` line and the closing `---` line.
-// ---------------------------------------------------------------------------
-
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
-const FRONTMATTER_DESCRIPTION_RE = /^description\s*:\s*(.+)$/m;
-
-/**
- * Parse the `description` field from YAML frontmatter.
- * Returns undefined when frontmatter is absent or has no description key.
- */
-function parseFrontmatterDescription(content: string): string | undefined {
-  const fmMatch = FRONTMATTER_RE.exec(content);
-  if (!fmMatch) return undefined;
-  const block = fmMatch[1];
-  if (!block) return undefined;
-  const descMatch = FRONTMATTER_DESCRIPTION_RE.exec(block);
-  if (!descMatch) return undefined;
-  return descMatch[1]?.trim() || undefined;
-}
-
-/**
- * Return the first non-empty, non-heading line of the markdown body (after
- * frontmatter).  Lines that start with one or more `#` characters are
- * headings and are skipped.
- */
-function fallbackDescription(content: string): string {
-  // Strip frontmatter block if present.
-  const body = FRONTMATTER_RE.test(content)
-    ? content.replace(FRONTMATTER_RE, '').trimStart()
-    : content;
-
-  for (const raw of body.split('\n')) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;          // skip blank lines
-    if (trimmed.startsWith('#')) continue;  // skip headings
-    return trimmed;
-  }
-  return '';
-}
-
-// ---------------------------------------------------------------------------
-// scanCommandsDir
-// ---------------------------------------------------------------------------
-
-/**
- * Scan a `commands/` directory for *.md custom commands.
- * Files starting with `_` are treated as drafts and skipped.
- */
-export function scanCommandsDir(dir: string, source: SlashCommandSource): SlashCommand[] {
-  if (!existsSync(dir)) return [];
-
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-
-  const commands: SlashCommand[] = [];
-
-  for (const entry of entries) {
-    if (!entry.endsWith('.md')) continue;
-    if (entry.startsWith('_')) continue;
-
-    const filePath = join(dir, entry);
-    const name = '/' + basename(entry, '.md');
-
-    let content: string;
-    try {
-      content = readFileSync(filePath, 'utf-8');
-    } catch {
-      continue;
-    }
-
-    const description =
-      parseFrontmatterDescription(content) ||
-      fallbackDescription(content) ||
-      name;
-
-    commands.push({ name, description, source, filePath, argHints: [] });
-  }
-
-  return commands;
+/** File-backed entries share their identity with the Customization
+ *  inventory: `customizationId` is the same stable `ci1_…` id the inventory
+ *  reports for the same file, and the name follows the inventory rule
+ *  (frontmatter `name:` for agent-skills, filename stem for commands). */
+function discoveredToSlashCommand(
+  discovered: DiscoveredClaudeSkill,
+  source: SlashCommandSource,
+): SlashCommand {
+  const name = `/${discovered.name}`;
+  return {
+    name,
+    description: discovered.description ?? name,
+    source,
+    filePath: discovered.entryPath,
+    argHints: [],
+    customizationId: discovered.customizationId,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +114,17 @@ export type ProbeFn = (cwd?: string) => Promise<string[]>;
 /**
  * Returns slash commands known without spending Agent SDK credit:
  *   - optional native + plugin/skill commands from an explicit probe
- *   - user-level file commands from ~/.claude/commands/
- *   - project-level file commands from <cwd>/.claude/commands/ (if cwd given)
+ *   - user-level agent-skills from <claude config dir>/skills/<name>/SKILL.md
+ *   - user-level file commands from <claude config dir>/commands/
+ *   - project-level skills + commands from <cwd>/.claude/ (if cwd given)
  *
- * Dedupes by name — file-scanned entries override probe entries (so user's
- * frontmatter description wins over our static map).
+ * Skills and commands come from the shared discovery module
+ * (skill-discovery.ts) so this list always matches the Customization
+ * inventory's membership, naming, and stable ids.
+ *
+ * Dedupes by name — last entry wins (project > user > native; within one
+ * scope a legacy command wins over a same-named agent-skill, matching the
+ * more specific user-authored invocation).
  */
 export async function listAllSlashCommands(
   cwd?: string,
@@ -193,10 +136,22 @@ export async function listAllSlashCommands(
 
   const probeNames = probe ? await probe(cwd) : [];
   const native = probeNames.map(nativeToSlashCommand);
+  const userRoot = claudeConfigDir();
+  const projectRoot = cwd ? join(cwd, '.claude') : null;
   const all: SlashCommand[] = [
     ...native,
-    ...scanCommandsDir(join(homedir(), '.claude', 'commands'), 'user'),
-    ...(cwd ? scanCommandsDir(join(cwd, '.claude', 'commands'), 'project') : []),
+    ...(await discoverAgentSkills(userRoot, 'user', null))
+      .map(discovered => discoveredToSlashCommand(discovered, 'user')),
+    ...(await discoverLegacyCommands(userRoot, 'user', null))
+      .map(discovered => discoveredToSlashCommand(discovered, 'user')),
+    ...(projectRoot
+      ? (await discoverAgentSkills(projectRoot, 'workspace', cwd ?? null))
+        .map(discovered => discoveredToSlashCommand(discovered, 'project'))
+      : []),
+    ...(projectRoot
+      ? (await discoverLegacyCommands(projectRoot, 'workspace', cwd ?? null))
+        .map(discovered => discoveredToSlashCommand(discovered, 'project'))
+      : []),
   ];
 
   // Dedupe by name — last entry wins (project > user > native).

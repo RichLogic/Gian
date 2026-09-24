@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-当前 Catalog 1.7.0 选择：Proxy **0.3.1**，Runtime **0.1.1-rc.2**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.2**，Runtime **0.1.5-rc.3**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.2
+
+首次公开发布：2026-09-24T09:39:31Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.2)：2026-09-24T09:39:31Z。
+- 对应 CLI：0.1.5-rc.3（Manifest 兼容声明，不是本机状态）。 Bridge：0.1.4（当前归档对应的源码包）。
+
+### 修复
+
+- 适配 DeepSeek Harness 0.1.5-rc.3，内置 Bridge 0.1.4，恢复流式文本与思考输出，并保持握手版本与发布包一致。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.2) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/4740fab7dc3370cc812984519b5e9509bbcad2c0/CHANGELOG.md)
 
 ## 0.3.1
 

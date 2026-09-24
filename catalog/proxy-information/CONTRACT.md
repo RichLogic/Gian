@@ -33,6 +33,10 @@ basic.md 是状态样例，不是需要发布的静态本机状态。目标展�
 
 ## 3. 教程内容
 
+中英文信息由 Catalog 维护，不在 Web 内按 Provider 硬编码。兼容 v1 的双语扩展使用可选的 `catalog-localizations-v1.json`，随原资产清单一起签名；其 `en` 和 `zh-CN` 条目声明名称、简介及四份文档的路径、大小和摘要。文件必须属于相同签名 generation，引用路径固定为 `docs/<pluginId>/<locale>/<document>.md`，禁止 HTML、越界路径、缺失语言及不匹配摘要。旧客户端继续读取原四文档，不向 strict v1 索引增加未知字段。
+
+Host 返回双语投影，文档端点以明确的 locale 参数选择已验签的内容。Web 直接跟随语言设置切换，不调用模型临时翻译；语言与 generation 都必须参与缓存隔离。旧 Catalog 无翻译时回退原内容，不能把没有发布的英文内容标为已提供。品牌名、版本、路径和证据 URL 不因语言发生变化。
+
 每个 tutorial.md 固定九个二级章节：
 
 1. 在 Gian 中做什么。

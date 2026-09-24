@@ -63,6 +63,59 @@ function latest(
   return notifications.findLast(notification => notification.method === method);
 }
 
+test('mock process restart reattaches the same native session with distinct live event identities', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-mock-restart-'));
+  const dataDir = join(root, 'data');
+  const hosts: ProtocolV2Host[] = [];
+  const version = await mockVersion('codex');
+  const makeHost = () => {
+    const host = new ProtocolV2Host({ executor: 'codex', entry: mockEntry('codex'), pluginId: 'codex',
+      pluginVersion: version, processScope: 'shared', dataDir, hostVersion: '0.6.3-test' });
+    hosts.push(host);
+    return host;
+  };
+  t.after(async () => {
+    for (const host of hosts) await host.shutdown().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const sessionId = 'persisted-host-session';
+  const firstHost = makeHost();
+  const first = firstHost.createSessionClient(sessionId);
+  const before: ProxyNotification[] = [];
+  first.onNotification(event => before.push(event));
+  const created = await first.createSession({ cwd: root });
+  const nativeSessionId = created.nativeSessionId;
+  assert.ok(nativeSessionId);
+  const firstStream = first.streamId();
+  await first.startTurn({ sessionId, turnId: 'before-restart', input: [{ type: 'text', text: 'before' }], config: { model: 'mock-sonnet' } });
+  await waitFor(() => latest(before, 'turn.completed'));
+  await control(dataDir, { action: 'catalog.changed' });
+  await waitFor(() => latest(before, 'catalog.changed'));
+  await first.shutdown();
+  await firstHost.shutdown();
+
+  const secondHost = makeHost();
+  const second = secondHost.createSessionClient(sessionId);
+  const after: ProxyNotification[] = [];
+  const faults: Error[] = [];
+  second.onNotification(event => after.push(event));
+  second.onSessionFault(error => faults.push(error));
+  const resumed = await second.createSession({ cwd: root, nativeSessionId });
+  assert.equal(resumed.session.id, created.session.id);
+  assert.equal(resumed.nativeSessionId, created.nativeSessionId, 'continue the original native execution, not a fork');
+  assert.notEqual(second.streamId(), firstStream);
+  await second.startTurn({ sessionId, turnId: 'after-restart', input: [{ type: 'text', text: 'after' }], config: { model: 'mock-sonnet' } });
+  await waitFor(() => latest(after, 'turn.completed'));
+  await control(dataDir, { action: 'catalog.changed' });
+  await waitFor(() => latest(after, 'catalog.changed'));
+  const priorIds = new Set(before.map(event => event.params.eventId));
+  assert.ok(before.some(event => event.method === 'content.completed'));
+  assert.ok(after.some(event => event.method === 'content.completed'));
+  for (const event of after) assert.equal(priorIds.has(event.params.eventId), false, `reused ${event.params.eventId}`);
+  assert.deepEqual(faults, []);
+  await second.shutdown();
+});
+
 test('controllable mock Proxy covers every gian.proxy/2 request and UI event family', async t => {
   const root = await mkdtemp(join(tmpdir(), 'gian-proxy-v2-mock-'));
   const dataDir = join(root, 'data');

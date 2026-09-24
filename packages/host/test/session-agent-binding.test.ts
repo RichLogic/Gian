@@ -50,6 +50,7 @@ function makeAgent(overrides: Partial<UserAgent> = {}): UserAgent {
     name: overrides.name ?? 'Codex Prime',
     pluginId: overrides.pluginId ?? pluginIdForExecutorId(proxy),
     proxy,
+    ...(overrides.enabled !== undefined ? { enabled: overrides.enabled } : {}),
     cliPath: overrides.cliPath ?? null,
     defaults: overrides.defaults ?? { model: '', thinking: '', mode: '' },
   };
@@ -258,6 +259,14 @@ function setup(options?: {
           throw Object.assign(
             new Error(`Agent was deleted: ${session.agent_name ?? session.agent_id}`),
             { code: 'AGENT_DELETED' },
+          );
+        }
+        // Mirrors the production wiring in web/app.ts.
+        const agent = agents.find(candidate => candidate.id === session.agent_id);
+        if (agent?.enabled === false) {
+          throw Object.assign(
+            new Error(`Agent is disabled: ${session.agent_name ?? session.agent_id}`),
+            { code: 'AGENT_DISABLED' },
           );
         }
         return bound ?? cliPaths[session.agent_id] ?? null;
@@ -581,6 +590,50 @@ test('a deleted Agent leaves the session readable but blocks new turns', async (
   }
 });
 
+test('a disabled Agent leaves the session readable but blocks new turns', async () => {
+  const agent = makeAgent({ proxy: 'claude', name: 'Paused Claude' });
+  const first = setup({ agents: [agent] });
+  const dir = first.dir;
+  try {
+    const session = await first.sessions.createSession({
+      workspace_id: first.wsId,
+      agent_id: agent.id,
+    });
+    agent.enabled = false;
+    // Simulate a Host restart after the Agent was disabled: a fresh
+    // SessionManager over the same DB with no cached bring-up.
+    const second = setup({ agents: [agent], dir });
+    try {
+      const readable = second.sessions.getSession(session.id);
+      assert.equal(readable.agent_name, 'Paused Claude');
+      await assert.rejects(
+        second.sessions.sendMessage(session.id, 'hello'),
+        (error: unknown) => (
+          error instanceof Error
+          && (error as { code?: unknown }).code === 'AGENT_DISABLED'
+        ),
+      );
+    } finally {
+      // Same dir as `first` — cleaned up by the outer finally.
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('session:create rejects a disabled Agent', async () => {
+  const agent = makeAgent({ proxy: 'codex', enabled: false });
+  const { dir, sessions, wsId } = setup({ agents: [agent] });
+  try {
+    await assert.rejects(
+      sessions.createSession({ workspace_id: wsId, agent_id: agent.id }),
+      /agent is disabled/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a deleted Agent can be rebound to a same-Proxy Agent without moving Session history', async () => {
   const deletedAgent = makeAgent({ id: 'agent-deleted', name: 'Old Codex', proxy: 'codex' });
   const replacement = makeAgent({ id: 'agent-replacement', name: 'Current Codex', proxy: 'codex' });
@@ -702,6 +755,39 @@ test('native adopt binds one Agent explicitly and never silently picks the first
       });
     } finally {
       rmSync(second.dir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('native adopt rejects a disabled Agent and never auto-binds one', async () => {
+  const disabled = makeAgent({ proxy: 'kimi', name: 'Kimi Off', enabled: false });
+  const active = makeAgent({ proxy: 'kimi', name: 'Kimi On' });
+  const { dir, sessions } = setup({ agents: [disabled, active] });
+  try {
+    await assert.rejects(
+      sessions.resolveAdoptAgent('kimi', disabled.id),
+      /agent is disabled/,
+    );
+    // The disabled Agent is excluded from the candidates, so the single
+    // remaining enabled Agent auto-binds without an AGENT_REQUIRED chooser.
+    const binding = await sessions.resolveAdoptAgent('kimi');
+    assert.equal(binding.agentId, active.id);
+    assert.equal(binding.agentName, 'Kimi On');
+
+    const solo = setup({
+      agents: [makeAgent({ proxy: 'codex', name: 'Off Codex', enabled: false })],
+    });
+    try {
+      assert.deepEqual(await solo.sessions.resolveAdoptAgent('codex'), {
+        agentId: null,
+        agentName: null,
+        cliPath: null,
+        runtimeProfile: null,
+      });
+    } finally {
+      rmSync(solo.dir, { recursive: true, force: true });
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

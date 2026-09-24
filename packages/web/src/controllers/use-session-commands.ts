@@ -23,6 +23,7 @@ export interface SessionCommands {
     sessionId: string,
     text: string,
     opts?: {
+      translationId?: string;
       oneShotBypass?: boolean;
       attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }>;
       contextItems?: MessageContextItem[];
@@ -100,6 +101,7 @@ export function useSessionCommands({
           sessionId,
           text,
           exec: executorOf(sessionId),
+          ...(opts?.translationId ? { translationId: opts.translationId } : {}),
           ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
           ...(opts?.attachments && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
           ...(opts?.contextItems && opts.contextItems.length > 0 ? { contextItems: opts.contextItems } : {}),

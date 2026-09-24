@@ -138,7 +138,17 @@ export function assertRuntimeManifest(manifest) {
   }
 }
 
-export async function buildProxyBundle(entryPoint, outfile) {
+export async function buildProxyBundle(entryPoint, outfile, packageIdentity) {
+  if (packageIdentity) {
+    if (!/^@gian\/[a-z0-9-]+-proxy$/.test(packageIdentity.name ?? '') || !SEMVER_RE.test(packageIdentity.version ?? '')) {
+      throw new Error('Invalid bundled Proxy package identity');
+    }
+    // The standalone archive must carry its own version, not fall back to a
+    // source default or inherit an unrelated App package higher in the path.
+    await writeFile(join(dirname(outfile), 'package.json'), `${JSON.stringify({
+      name: packageIdentity.name, version: packageIdentity.version, type: 'module',
+    }, null, 2)}\n`);
+  }
   await build({
     entryPoints: [entryPoint],
     outfile,
@@ -250,7 +260,9 @@ export async function main(argv = process.argv.slice(2)) {
     await rm(staging, { recursive: true, force: true });
     await mkdir(packageDir, { recursive: true });
     try {
-      await buildProxyBundle(definition.sourceEntry, proxyEntry);
+      await buildProxyBundle(definition.sourceEntry, proxyEntry, {
+        name: definition.packageName, version: pluginVersion,
+      });
       await chmod(proxyEntry, 0o755);
       for (const companion of definition.bundlePackages) {
         if (!/^[a-z][a-z0-9-]+$/.test(companion.directory ?? '')

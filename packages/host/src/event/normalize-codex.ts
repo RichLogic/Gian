@@ -36,6 +36,7 @@ export function projectCodexNotification(
   raw: ProxyNotification,
   sessionId: string,
   turn: number,
+  cwd?: string,
 ): DisplayEvent[] {
   const data = (raw.params.data ?? {}) as Record<string, unknown>;
 
@@ -147,7 +148,10 @@ export function projectCodexNotification(
           call_id: diffId,
           ts: Date.now(),
           type: 'activity.file-change',
-          data: { files, diff: diffText },
+          // `files` paths are relative to the codex process cwd; record it so
+          // last-turn attribution does not guess the viewed tree (sessions
+          // are not tree-stable).
+          data: { files, diff: diffText, ...(cwd ? { cwd } : {}) },
         },
       ];
     }

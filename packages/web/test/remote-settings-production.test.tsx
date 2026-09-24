@@ -21,6 +21,40 @@ function deferred<T>() {
 }
 
 describe('Remote Settings real Host adapter', () => {
+  it.each(['remote_auth_required', 'enrollment_rejected', 'remote_unavailable', 'invalid_url', 'invalid_host_name'])(
+    'preserves the safe %s category without replaying enrollment or retaining its token', async category => {
+      let posts = 0;
+      const controller = createRemoteSettingsController({ authorizeAccount: async () => {}, fetchFn: vi.fn(async (_path, init) => {
+        if (init?.method === 'POST') {
+          posts += 1;
+          return new Response(JSON.stringify({ error: category, details: 'secret-token' }), { status: 400 });
+        }
+        return response({ ...connected(), enrolled: false });
+      }) });
+      try {
+        await controller.refresh?.();
+        await controller.enroll({ serverUrl: 'https://remote.test', enrollmentToken: 'secret-token' });
+        expect(controller.getState().error).toBe(category);
+        expect(controller.getState().enrollment.kind).toBe('not-enrolled');
+        expect(JSON.stringify(controller.getState())).not.toContain('secret-token');
+        expect(posts).toBe(1);
+      } finally { controller.dispose?.(); }
+    },
+  );
+
+  it('never renders an arbitrary server error or credential-bearing message', async () => {
+    const controller = createRemoteSettingsController({ authorizeAccount: async () => {}, fetchFn: vi.fn(async (_path, init) =>
+      init?.method === 'POST'
+        ? new Response(JSON.stringify({ error: 'private-token transport details' }), { status: 400 })
+        : response({ ...connected(), enrolled: false })) });
+    try {
+      await controller.refresh?.();
+      await controller.enroll({ serverUrl: 'https://remote.test', enrollmentToken: 'private-token' });
+      expect(controller.getState().error).toBe('operation_failed');
+      expect(JSON.stringify(controller.getState())).not.toContain('private-token');
+    } finally { controller.dispose?.(); }
+  });
+
   it('renders the actual Host status, creates and restores its real code, and requests only local Host routes', async () => {
     let backend = connected();
     const requests: Array<[string, RequestInit | undefined]> = [];
@@ -44,8 +78,7 @@ describe('Remote Settings real Host adapter', () => {
       expect(screen.getByText('Loading Remote connection status…')).toBeTruthy();
       await screen.findByText('This Mac');
       expect(screen.getByTestId('remote-link-status').textContent).toBe('Online');
-      expect((screen.getByLabelText('Remote Web browser URL') as HTMLInputElement).value).toBe('https://phone.example.test');
-      fireEvent.click(screen.getByRole('button', { name: 'Generate QR + code' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Add' }));
       await screen.findByText('ABCD-1234');
       view.unmount();
       const restored = createRemoteSettingsController({ fetchFn, pollIntervalMs: 60_000 });
@@ -79,7 +112,7 @@ describe('Remote Settings real Host adapter', () => {
   it('recovers committed state after a lost mutation response without replaying the action or exposing the token', async () => {
     let backend = { ...connected(), enrolled: false };
     let posts = 0;
-    const controller = createRemoteSettingsController({ fetchFn: vi.fn(async (_path, init) => {
+    const controller = createRemoteSettingsController({ authorizeAccount: async () => {}, fetchFn: vi.fn(async (_path, init) => {
       if (init?.method === 'POST') { ++posts; backend = connected(); throw new Error('secret-token transport detail'); }
       return response(backend);
     }) });
@@ -90,6 +123,39 @@ describe('Remote Settings real Host adapter', () => {
       expect(controller.getState().error).toBe('operation_failed');
       expect(JSON.stringify(controller.getState())).not.toContain('secret-token');
       expect(posts).toBe(1);
+    } finally { controller.dispose?.(); }
+  });
+
+  it('waits for App-owned account confirmation before sending enrollment, then resumes the intent exactly once', async () => {
+    const authorization = deferred<void>();
+    const authorizeAccount = vi.fn(() => authorization.promise);
+    const writes: string[] = [];
+    const controller = createRemoteSettingsController({ authorizeAccount, fetchFn: vi.fn(async (path, init) => {
+      if (init?.method === 'POST') writes.push(String(path));
+      return response(connected());
+    }) });
+    try {
+      await controller.refresh?.();
+      const pending = controller.enroll({ serverUrl: 'https://server.test', enrollmentToken: 'secret-enrollment-token' });
+      expect(authorizeAccount).toHaveBeenCalledWith('https://server.test', expect.any(AbortSignal));
+      expect(writes).toEqual([]);
+      expect(JSON.stringify(controller.getState())).not.toContain('secret-enrollment-token');
+      authorization.resolve();
+      await pending;
+      expect(writes).toEqual(['/api/remote/enroll']);
+    } finally { controller.dispose?.(); }
+  });
+
+  it('cancelling App-owned confirmation does not enroll, clear existing pairings, or report an operation failure', async () => {
+    let posts = 0;
+    const controller = createRemoteSettingsController({ authorizeAccount: async () => { throw new Error('cancelled'); },
+      fetchFn: vi.fn(async (_path, init) => { if (init?.method === 'POST') ++posts; return response(connected()); }) });
+    try {
+      await controller.refresh?.();
+      await controller.enroll({ serverUrl: 'https://server.test', enrollmentToken: 'fixture-token' });
+      expect(posts).toBe(0);
+      expect(controller.getState().error).toBeNull();
+      expect(controller.getState().enrollment.kind).toBe('connected');
     } finally { controller.dispose?.(); }
   });
 

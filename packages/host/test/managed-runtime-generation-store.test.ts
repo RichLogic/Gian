@@ -184,3 +184,27 @@ test('startup may complete a pending first activation without Session advancemen
   assert.equal(cold.hasPendingActivation('claude'), false);
   assert.equal(cold.activeCached('claude')?.generationId, candidate.generationId);
 });
+
+test('removePlugin drops every generation record and the active pointer, keeps payloads', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-runtime-remove-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new ManagedRuntimeGenerationStore(root);
+  await store.initialize();
+  const first = generation(root, 'claude-1', '1.0.0');
+  const second = generation(root, 'claude-2', '1.1.0');
+  await writeComponents(first);
+  await writeComponents(second);
+  await store.stage(first);
+  await store.stage(second);
+  await store.activate('claude', second.generationId, new Date('2026-09-10T01:00:00.000Z'));
+
+  assert.equal(await store.removePlugin('claude'), true);
+  assert.equal(await store.active('claude'), null);
+  assert.equal(store.activeCached('claude'), null);
+  assert.deepEqual(await store.list('claude'), []);
+  assert.equal(await store.get('claude', first.generationId), null);
+  // Payload trees are shared and content-addressed: they stay on disk.
+  assert.equal(typeof await readFile(second.runtime!.entryPath, 'utf8'), 'string');
+  // Idempotent: nothing left to remove.
+  assert.equal(await store.removePlugin('claude'), false);
+});

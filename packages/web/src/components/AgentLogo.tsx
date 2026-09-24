@@ -6,7 +6,11 @@ export interface AgentLogoSource {
   dark: string;
 }
 
-export function proxyLogoSource(proxy: ProductExecutor): AgentLogoSource {
+export function proxyLogoSource(proxy: ProductExecutor, environmentId?: string): AgentLogoSource {
+  if (environmentId) return {
+    light: `/api/remote/environments/${encodeURIComponent(environmentId)}/logos/${encodeURIComponent(proxy)}/light`,
+    dark: `/api/remote/environments/${encodeURIComponent(environmentId)}/logos/${encodeURIComponent(proxy)}/dark`,
+  };
   return {
     light: `/api/proxies/${proxy}/logo/light`,
     dark: `/api/proxies/${proxy}/logo/dark`,
@@ -15,12 +19,14 @@ export function proxyLogoSource(proxy: ProductExecutor): AgentLogoSource {
 
 export function AgentLogo({
   proxy,
-  logo = proxy ? proxyLogoSource(proxy) : { light: '', dark: '' },
+  environmentId,
+  logo = proxy ? proxyLogoSource(proxy, environmentId) : { light: '', dark: '' },
   fallback,
   size = 24,
   className = '',
 }: {
   proxy: ProductExecutor | null;
+  environmentId?: string;
   logo?: AgentLogoSource;
   /** Fallback glyph source for open pluginIds without a legacy kind
    *  (WP4): the display name's first letter. */

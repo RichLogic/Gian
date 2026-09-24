@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import type { Executor } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 
-export type PathSegmentKind = 'workspace' | 'branch' | 'session';
+export type PathSegmentKind = 'environment' | 'workspace' | 'branch' | 'session';
 
 export interface PathSegment {
   kind: PathSegmentKind;

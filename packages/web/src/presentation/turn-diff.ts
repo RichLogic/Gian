@@ -41,3 +41,19 @@ export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
   const files = [...byPath.values()];
   return files.length > 0 ? { turn, files } : null;
 }
+
+/**
+ * Match a raw transcript diff path (Claude's absolute `file_path`, `a/`-`b/`
+ * diff prefixes) against the host-normalized changed-file list, so a
+ * TurnDiffChip click anchors the right inspector block even when the turn
+ * ran in a different worktree than the one being viewed. Mirrors the host's
+ * cleanEventPath + suffix fallback (working-trees.ts lastturn scope).
+ */
+export function matchChangedFilePath(anchorPath: string, paths: string[]): string | null {
+  if (paths.includes(anchorPath)) return anchorPath;
+  let cleaned = anchorPath.replaceAll('\\', '/');
+  if (!cleaned.startsWith('/') && /^(a|b)\//.test(cleaned)) cleaned = cleaned.slice(2);
+  return paths.find(path =>
+    path === cleaned || cleaned.endsWith(`/${path}`) || path.endsWith(`/${cleaned}`),
+  ) ?? null;
+}

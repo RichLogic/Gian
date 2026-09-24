@@ -15,7 +15,7 @@ describe('production boot wiring', () => {
     expect(resolveRemoteWebBoot('?fixture=online')).toEqual({ fixture: 'online' });
   });
 
-  it('production controller boots pairing instead of Transport not wired', () => {
+  it('production controller exposes pairing without GitHub and links separate Host registration', () => {
     const controller = createProductionController({
       baseUrl: 'https://remote.test',
       publicOrigin: 'https://remote.test',
@@ -39,6 +39,8 @@ describe('production boot wiring', () => {
     expect(screen.queryByText('Transport not wired')).toBeNull();
     expect(controller.state.auth.kind).toBe('pairing');
     expect(screen.getByRole('textbox', { name: '配对短码' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '使用 GitHub 登录' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Host 注册' })).toHaveAttribute('href', '/enrollment');
     controller.close();
   });
 });

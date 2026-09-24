@@ -3,6 +3,11 @@ import { createNodeWebSocket } from '@hono/node-ws';
 
 import {
   ACCESS_TOKEN_TTL_MS,
+  ACCOUNT_PROTOCOL,
+  accountLoginStartSchema,
+  accountLoginPollSchema,
+  accountLoginStartedSchema,
+  accountLoginResultSchema,
   AUTH_PROTOCOL,
   AUTH_SIGNED_AT_SKEW_MS,
   REFRESH_SLIDING_MS,
@@ -12,6 +17,7 @@ import {
   deviceLoginRequestSchema,
   generateCanonicalId,
   healthResultSchema,
+  identityFingerprint,
   hostConnectorChallengeRequestSchema,
   hostConnectorLoginRequestSchema,
   hostCreatePairingRequestSchema,
@@ -40,6 +46,9 @@ import { logError } from './logging.js';
 import { SlidingWindowLimiter } from './auth/rate-limit.js';
 import { clearRefreshCookie, readRefreshCookie, writeRefreshCookie } from './auth/cookies.js';
 import { TokenStore } from './auth/tokens.js';
+import { RemoteAccountPeers } from './auth/account-peers.js';
+import { GitHubUpstreamError, RemoteAccountLogin } from './auth/account-login.js';
+import { GitHubIdentityVerifier } from './auth/github-identity.js';
 import { loadOrCreateServerIdentity, type ServerIdentity } from './auth/identity.js';
 import { selfRevokePayload, verifyP256Signature } from './auth/signatures.js';
 import { generatePairingCode, normalizePairingCode } from './pairing/codes.js';
@@ -50,11 +59,13 @@ import { loadAndVerifyManifest, type StaticManifest } from './static/manifest.js
 import { serveRuntimeConfig, serveStaticArtifact } from './static/serve.js';
 import { openRemoteDatabase, type RemoteDb } from './storage/db.js';
 import { RemoteRepositories } from './storage/repositories.js';
+import { installEnrollmentRoutes } from './enrollment-routes.js';
 
 export interface RemoteAppServices {
   db: RemoteDb;
   repos: RemoteRepositories;
   tokens: TokenStore;
+  accounts: RemoteAccountPeers;
   presence: PresenceService;
   relay: RelayRouter;
   identity: ServerIdentity;
@@ -72,6 +83,14 @@ export interface RemoteAppHandle {
 }
 
 const AUTH_PATHS = new Set([
+  '/api/v1/account/start',
+  '/api/v1/account/poll',
+  '/api/v1/account/logout',
+  '/api/v1/enrollment/account/start',
+  '/api/v1/enrollment/account/poll',
+  '/api/v1/enrollment/account/logout',
+  '/api/v1/enrollment/account/cancel',
+  '/api/v1/enrollment/tokens',
   '/api/v1/admin/host-enrollments',
   '/api/v1/host-enrollments/claim',
   '/api/v1/host/connector-challenge',
@@ -112,6 +131,7 @@ function familyIdFromCookie(cookie: string | undefined): string | undefined {
 }
 
 function authenticateRefreshCookie(input: {
+  accounts: RemoteAccountPeers;
   repos: RemoteRepositories;
   tokens: TokenStore;
   cookie: string | undefined;
@@ -124,6 +144,10 @@ function authenticateRefreshCookie(input: {
   if (!family || family.revoked_at || family.absolute_expires_at <= input.now || family.sliding_expires_at <= input.now) {
     return undefined;
   }
+  try {
+    if (!family.account_peer_id) return undefined;
+    input.accounts.requirePeer('controller', family.account_peer_id);
+  } catch { return undefined; }
   if (!hashesEqual(hashSecret(input.cookie), family.current_refresh_hash)) {
     if (input.revokeOnMismatch) {
       input.repos.revokeFamily(family.id);
@@ -142,14 +166,41 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
   const presence = new PresenceService(repos, config);
   const relay = new RelayRouter(config, presence);
   const identity = await loadOrCreateServerIdentity(config.dataDir);
+  const accounts = new RemoteAccountPeers(db, identity.fingerprint, config.now,
+    new GitHubIdentityVerifier(config.githubFetch));
+  const accountLogin = new RemoteAccountLogin(accounts, config.now, config.githubClientId, config.githubFetch);
   const limiter = new SlidingWindowLimiter(config.now, config.authRateLimitPerMinute);
+  const accountPollLimiter = new SlidingWindowLimiter(config.now, Math.max(30, config.authRateLimitPerMinute));
   const manifest = config.staticDir ? loadAndVerifyManifest(config.staticDir) : undefined;
   const services = {
-    db, repos, tokens, presence, relay, identity, config, limiter, manifest,
+    db, repos, tokens, accounts, presence, relay, identity, config, limiter, manifest,
   };
 
   const app = new Hono();
   const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
+  const liveRoutes = new Map<string, { hostId: string; deviceId?: string; familyId?: string; close(): void }>();
+  const routeAllowed = (route: { hostId: string; deviceId?: string; familyId?: string }): boolean => {
+    try {
+      accounts.requireHost(route.hostId);
+      if (route.deviceId) {
+        const owner = accounts.requirePairing(route.deviceId);
+        const family = route.familyId ? repos.getSession(route.familyId) : undefined;
+        if (!family || family.revoked_at !== null || family.account_peer_id !== owner.installation_id
+          || family.absolute_expires_at <= config.now() || family.sliding_expires_at <= config.now()) return false;
+      }
+      return true;
+    } catch { return false; }
+  };
+  const closeUnauthorizedRoutes = () => {
+    for (const [id, route] of liveRoutes) {
+      if (routeAllowed(route)) continue;
+      route.close();
+      relay.detach(id);
+      liveRoutes.delete(id);
+    }
+  };
+  const accountLeaseTimer = setInterval(closeUnauthorizedRoutes, 1000);
+  accountLeaseTimer.unref();
 
   app.use('*', async (context, next) => {
     await next();
@@ -169,7 +220,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     const path = new URL(context.req.url).pathname;
     if (AUTH_PATHS.has(path) && context.req.method !== 'GET' && context.req.method !== 'OPTIONS') {
       const ip = clientIp(config, context.req.header('x-forwarded-for'));
-      if (!limiter.allow(`${ip}:${path}`)) {
+      const selectedLimiter = path.endsWith('/account/poll') ? accountPollLimiter : limiter;
+      if (!selectedLimiter.allow(`${ip}:${path}`)) {
         return context.json(jsonError('RATE_LIMITED'), 429);
       }
     }
@@ -182,6 +234,34 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     build_id: config.buildId,
   })));
 
+  const closeEnrollment = installEnrollmentRoutes(app, config, accounts, repos);
+
+  app.post('/api/v1/account/start', async context => {
+    context.header('Cache-Control', 'no-store');
+    const body = parseClosed(accountLoginStartSchema, await context.req.json());
+    return context.json(parseClosed(accountLoginStartedSchema, await accountLogin.start(body.peer)));
+  });
+  app.post('/api/v1/account/poll', async context => {
+    context.header('Cache-Control', 'no-store');
+    const body = parseClosed(accountLoginPollSchema, await context.req.json());
+    const result = await accountLogin.poll(body.login_id, body.signature);
+    closeUnauthorizedRoutes();
+    return context.json(parseClosed(accountLoginResultSchema, result));
+  });
+  app.get('/api/v1/account/me', context => {
+    context.header('Cache-Control', 'no-store');
+    const peer = accounts.requireToken(bearer(context.req.header('authorization')));
+    return context.json({ protocol: ACCOUNT_PROTOCOL, installation_id: peer.installation_id,
+      role: peer.role, account: { provider: 'github', id: peer.github_account_id, login: peer.github_login },
+      expires_at: peer.expires_at });
+  });
+  app.post('/api/v1/account/logout', context => {
+    const peer = accounts.requireToken(bearer(context.req.header('authorization')));
+    accounts.revoke(peer.role, peer.installation_id);
+    closeUnauthorizedRoutes();
+    return context.json({ protocol: ACCOUNT_PROTOCOL, ok: true });
+  });
+
   app.post('/api/v1/admin/host-enrollments', async (context) => {
     context.header('Cache-Control', 'no-store');
     const admin = bearer(context.req.header('authorization'));
@@ -189,8 +269,10 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       return context.json(jsonError('AUTH_REQUIRED'), 401);
     }
     const body = parseClosed(adminCreateEnrollmentRequestSchema, await context.req.json());
+    const accountId = body.github_account_id ?? (config.enrollmentGithubIds.length === 1 ? config.enrollmentGithubIds[0] : undefined);
+    if (!accountId || !config.enrollmentGithubIds.includes(accountId)) return context.json(jsonError('AUTH_REQUIRED'), 403);
     const token = randomSecret();
-    const created = repos.createEnrollment(token, body.label);
+    const created = repos.createEnrollment(token, accountId, body.label);
     return context.json({
       protocol: AUTH_PROTOCOL,
       enrollment_id: created.id,
@@ -201,13 +283,22 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   app.post('/api/v1/host-enrollments/claim', async (context) => {
     const body = parseClosed(hostEnrollmentClaimRequestSchema, await context.req.json());
-    const host = repos.claimEnrollment(body.enrollment_token, {
-      name: body.host_name,
-      public_key_jwk: JSON.stringify(body.host_public_key),
-    });
-    if (!host) return context.json(jsonError('AUTH_REQUIRED'), 401);
-    const refresh = randomSecret();
-    repos.setHostCredential(host.id, refresh);
+    const account = accounts.requireToken(context.req.header('x-gian-account-token'), 'host');
+    if (!config.enrollmentGithubIds.includes(account.github_account_id)) return context.json(jsonError('AUTH_REQUIRED'), 403);
+    if (account.public_key_fingerprint !== await identityFingerprint(body.host_public_key)) {
+      return context.json(jsonError('AUTH_REQUIRED'), 401);
+    }
+    const { host, refresh } = db.transaction(() => {
+      accounts.requirePeer('host', account.installation_id);
+      const host = repos.claimEnrollment(body.enrollment_token, {
+        name: body.host_name, public_key_jwk: JSON.stringify(body.host_public_key),
+      }, account.github_account_id);
+      if (!host) throw new RemoteProtocolError('AUTH_REQUIRED', 'enrollment required');
+      accounts.bindHost(host.id, account.installation_id);
+      const refresh = randomSecret();
+      repos.setHostCredential(host.id, refresh);
+      return { host, refresh };
+    })();
     return context.json({
       protocol: AUTH_PROTOCOL,
       host_id: host.id,
@@ -272,10 +363,19 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     if (!ok || !repos.consumeConnectorChallenge(body.challenge_id, body.host_id)) {
       return context.json(jsonError('AUTH_REQUIRED'), 401);
     }
+    const accountToken = context.req.header('x-gian-account-token');
+    if (accountToken) {
+      const peer = accounts.requireToken(accountToken, 'host');
+      if (peer.public_key_fingerprint !== await identityFingerprint(JSON.parse(host.public_key_jwk))) {
+        return context.json(jsonError('AUTH_REQUIRED'), 401);
+      }
+      accounts.bindHost(host.id, peer.installation_id);
+    }
+    const account = accounts.requireHost(host.id);
     const nextRefresh = randomSecret();
     if (matchesCurrent) repos.rotateHostCredential(host.id, nextRefresh);
     else repos.replaceCurrentRefreshHash(host.id, nextRefresh);
-    const access = tokens.issue({ role: 'host', hostId: host.id });
+    const access = tokens.issue({ role: 'host', hostId: host.id, accountPeerId: account.installation_id });
     presence.heartbeat(host.id);
     return context.json({
       protocol: AUTH_PROTOCOL,
@@ -289,6 +389,9 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     const token = bearer(context.req.header('authorization'));
     const record = token ? tokens.get(token) : undefined;
     if (!record || record.role !== 'host') return undefined;
+    try {
+      if (accounts.requireHost(record.hostId).installation_id !== record.accountPeerId) return undefined;
+    } catch { return undefined; }
     return record;
   };
 
@@ -296,6 +399,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     const token = bearer(context.req.header('authorization'));
     const record = token ? tokens.get(token) : undefined;
     if (!record || record.role !== 'device' || !record.deviceId || !record.familyId) return undefined;
+    if (!routeAllowed(record)) return undefined;
+    if (accounts.requirePairing(record.deviceId).installation_id !== record.accountPeerId) return undefined;
     return record;
   };
 
@@ -327,19 +432,31 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       return context.json(jsonError('AUTH_REQUIRED'), 401);
     }
     if (grant.failed_claims >= 5) return context.json(jsonError('AUTH_REQUIRED'), 401);
+    const deviceFingerprint = await identityFingerprint(body.device_public_key);
+    const owner = accounts.requireHost(grant.host_id);
+    const accountToken = context.req.header('x-gian-account-token');
+    const authenticated = accountToken !== undefined ? accounts.requireToken(accountToken, 'controller') : undefined;
+    if (authenticated) accounts.requireSameAccount(owner.installation_id, authenticated.installation_id);
+    repos.revokeExpiredOrUnboundPairings(grant.host_id);
     if (repos.countHostPairings(grant.host_id) >= config.maxDevicesPerHost) {
       return context.json(jsonError('RATE_LIMITED'), 429);
     }
-    repos.ensureBrowser(body.browser_installation_id);
-    const pairing = repos.claimGrantAndUpsertPairing({
-      grantId: grant.id,
-      browserInstallationId: body.browser_installation_id,
-      hostId: grant.host_id,
-      publicKeyJwk: JSON.stringify(body.device_public_key),
-      platform: body.platform,
-      userAgent: body.user_agent,
-    });
-    if (!pairing) return context.json(jsonError('AUTH_REQUIRED'), 401);
+    const { pairing, account } = db.transaction(() => {
+      repos.ensureBrowser(body.browser_installation_id);
+      const pairing = repos.claimGrantAndUpsertPairing({
+        grantId: grant.id,
+        browserInstallationId: body.browser_installation_id,
+        hostId: grant.host_id,
+        publicKeyJwk: JSON.stringify(body.device_public_key),
+        platform: body.platform,
+        userAgent: body.user_agent,
+      });
+      if (!pairing) throw new RemoteProtocolError('AUTH_REQUIRED', 'pairing unavailable');
+      const account = authenticated ?? accounts.createPendingBrowserDelegation(grant.host_id, deviceFingerprint);
+      db.prepare('UPDATE device_host_pairings SET account_peer_id = ? WHERE id = ?')
+        .run(account.installation_id, pairing.id);
+      return { pairing, account };
+    })();
     relay.notifyHost(grant.host_id, parseClosed(relayNoticeSchema, {
       protocol: 'gian.relay/1',
       type: 'pairing.claimed',
@@ -348,6 +465,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       grant_id: grant.id,
       crypto_connection_id: pairing.crypto_connection_id ?? undefined,
       device_public_key: body.device_public_key,
+      account_id: account.github_account_id,
       platform: body.platform,
       user_agent: body.user_agent,
       sent_at: config.now(),
@@ -368,10 +486,15 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     if (body.pairing_id !== context.req.param('id')) return context.json(jsonError('AUTH_REQUIRED'), 400);
     const pairing = repos.getPairing(body.pairing_id);
     if (!pairing || pairing.host_id !== hostAuth.hostId) return context.json(jsonError('AUTH_REQUIRED'), 401);
-    const grant = repos.confirmGrant(body.pairing_id, body.decision);
-    if (!grant) return context.json(jsonError('AUTH_REQUIRED'), 401);
-    if (body.decision === 'confirm') repos.confirmPairing(pairing.id);
-    else repos.deletePairing(pairing.id);
+    db.transaction(() => {
+      accounts.requirePairing(pairing.id);
+      const grant = repos.confirmGrant(body.pairing_id, body.decision);
+      if (!grant) throw new RemoteProtocolError('AUTH_REQUIRED', 'pairing unavailable');
+      if (body.decision === 'confirm') {
+        repos.confirmPairing(pairing.id);
+        accounts.confirmBrowserDelegation(pairing.id);
+      } else repos.deletePairing(pairing.id);
+    })();
     return context.json({
       protocol: AUTH_PROTOCOL,
       pairing_id: pairing.id,
@@ -418,16 +541,21 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     if (!ok || !repos.consumeDeviceChallenge(body.challenge_id, body.browser_installation_id, body.host_id)) {
       return context.json(jsonError('AUTH_REQUIRED'), 401);
     }
+    const accountToken = context.req.header('x-gian-account-token');
+    if (accountToken) accounts.rebindPairing(pairing.id, accountToken);
+    const account = accounts.requirePairing(pairing.id);
     const refreshSecret = randomSecret();
     const family = repos.createRefreshFamily(body.browser_installation_id, `${'pending'}.${refreshSecret}`);
     const cookie = `${family.id}.${refreshSecret}`;
     repos.db.prepare('UPDATE device_sessions SET current_refresh_hash = ? WHERE id = ?')
       .run(hashSecret(cookie), family.id);
+    db.prepare('UPDATE device_sessions SET account_peer_id = ? WHERE id = ?').run(account.installation_id, family.id);
     const access = tokens.issue({
       role: 'device',
       hostId: pairing.host_id,
       deviceId: pairing.id,
       familyId: family.id,
+      accountPeerId: account.installation_id,
     });
     writeRefreshCookie(context, cookie, config.publicOrigin.startsWith('https://'), REFRESH_SLIDING_MS / 1000);
     let cryptoConnectionId = pairing.crypto_connection_id;
@@ -455,6 +583,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     );
     const cookie = readRefreshCookie(context);
     const family = authenticateRefreshCookie({
+      accounts,
       repos,
       tokens,
       cookie,
@@ -475,7 +604,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       return context.json(jsonError('AUTH_REQUIRED'), 401);
     }
     const pairings = repos.listPairingsForBrowser(family.browser_installation_id)
-      .filter((row) => row.confirmed_at && !row.revoked_at);
+      .filter((row) => row.confirmed_at && !row.revoked_at
+        && row.account_peer_id === family.account_peer_id && accounts.pairingAllowed(row.id));
     const pairing = body.host_id
       ? pairings.find((row) => row.host_id === body.host_id)
       : pairings.length === 1
@@ -490,6 +620,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
       hostId: pairing.host_id,
       deviceId: pairing.id,
       familyId: family.id,
+      accountPeerId: family.account_peer_id!,
     });
     return context.json({
       protocol: AUTH_PROTOCOL,
@@ -502,6 +633,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     parseClosed(sessionLogoutRequestSchema, await context.req.json().catch(() => ({ protocol: AUTH_PROTOCOL })));
     const cookie = readRefreshCookie(context);
     const family = authenticateRefreshCookie({
+      accounts,
       repos,
       tokens,
       cookie,
@@ -661,7 +793,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   const hostsForFamily = (family: NonNullable<ReturnType<RemoteRepositories['getSession']>>) => (
     repos.listPairingsForBrowser(family.browser_installation_id)
-      .filter((row) => row.confirmed_at && !row.revoked_at)
+      .filter((row) => row.confirmed_at && !row.revoked_at
+        && row.account_peer_id === family.account_peer_id && accounts.pairingAllowed(row.id))
       .map((row) => {
         const host = repos.getHost(row.host_id);
         return {
@@ -675,6 +808,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   app.get('/api/v1/me', (context) => {
     const family = authenticateRefreshCookie({
+      accounts,
       repos,
       tokens,
       cookie: readRefreshCookie(context),
@@ -691,6 +825,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   app.get('/api/v1/hosts', (context) => {
     const family = authenticateRefreshCookie({
+      accounts,
       repos,
       tokens,
       cookie: readRefreshCookie(context),
@@ -740,12 +875,18 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
         const raw = typeof event.data === 'string' ? event.data : event.data.toString();
         const parsed = JSON.parse(raw) as { type?: string };
         if (parsed.type === 'ws.auth') {
+          if ((ws as unknown as { __remoteConnectionId?: string }).__remoteConnectionId) {
+            ws.close(4002, 'already_authenticated'); return;
+          }
           const auth = parseClosed(relayWsAuthSchema, parsed);
           const ticket = repos.consumeWsTicket(auth.ticket);
           if (!ticket) {
             ws.close(4001, 'auth_required');
             return;
           }
+          const route = { hostId: ticket.host_id, deviceId: ticket.device_id ?? undefined,
+            familyId: ticket.family_id ?? undefined, close: () => ws.close(4001, 'account_required') };
+          if (!routeAllowed(route)) { route.close(); return; }
           if (ticket.role === 'device') {
             const pairing = ticket.device_id ? repos.getPairing(ticket.device_id) : undefined;
             if (!pairing || pairing.revoked_at) {
@@ -764,6 +905,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
             routeId,
             connectionId,
             send(frame) {
+              if (!routeAllowed(route)) { route.close(); return; }
               ws.send(JSON.stringify(frame));
             },
             close(reason) {
@@ -778,6 +920,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
           socketState.__remoteConnectionId = connectionId;
           socketState.__remoteRole = ticket.role;
           socketState.__remoteHostId = ticket.host_id;
+          liveRoutes.set(connectionId, route);
           relay.attach(peer);
           ws.send(JSON.stringify({
             protocol: 'gian.relay/1',
@@ -818,6 +961,8 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
           ws.close(4001, 'auth_required');
           return;
         }
+        const route = liveRoutes.get(connectionId);
+        if (!route || !routeAllowed(route)) { ws.close(4001, 'account_required'); return; }
         if (parsed.type === 'crypto.offer' || parsed.type === 'crypto.accept') {
           relay.handleHandshake(connectionId, parseRelayHandshake(parsed));
           return;
@@ -847,7 +992,7 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
         __remoteHostId?: string;
       };
       const connectionId = socketState.__remoteConnectionId;
-      if (connectionId) relay.detach(connectionId);
+      if (connectionId) { relay.detach(connectionId); liveRoutes.delete(connectionId); }
       // A replaced Host socket must not mark the host offline while its
       // successor is already bound.
       if (
@@ -879,8 +1024,12 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
 
   app.onError((error, context) => {
     logError(config.logger, error);
+    if (error instanceof GitHubUpstreamError) {
+      context.header('Retry-After', String(error.retryAfterSeconds));
+      return context.json({ error: { code: 'UPSTREAM_FAILED' } }, 503);
+    }
     if (error instanceof RemoteProtocolError) {
-      return context.json(jsonError(error.code), 400);
+      return context.json(jsonError(error.code), error.code === 'AUTH_REQUIRED' ? 401 : 400);
     }
     return context.json(jsonError('INVALID_FRAME'), 400);
   });
@@ -892,6 +1041,12 @@ export async function createRemoteApp(config: RemoteServerConfig): Promise<Remot
     shutdown() {
       if (shuttingDown) return;
       shuttingDown = true;
+      clearInterval(accountLeaseTimer);
+      accountLogin.close();
+      closeEnrollment();
+      accounts.close();
+      for (const route of liveRoutes.values()) route.close();
+      liveRoutes.clear();
       relay.restart();
       db.close();
     },

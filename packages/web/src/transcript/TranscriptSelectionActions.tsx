@@ -7,6 +7,9 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { MAX_PASTED_TEXT_BYTES } from '@gian/shared';
+import type { TranslationRecord } from '@gian/shared';
+import { TranslationResult } from '../translation/TranslationControls.js';
+import type { ReadingTranslation } from '../translation/use-translation.js';
 
 import { useT } from '../i18n/index.js';
 import {
@@ -21,6 +24,11 @@ export interface TranscriptSelectionAction {
 }
 
 export interface TranscriptSelectionActionsConfig {
+  translate?: {
+    label: string;
+    enabled: boolean;
+    run: (selection: TranscriptTextSelection) => { promise: Promise<TranslationRecord>; cancel: () => void };
+  };
   addToChat: TranscriptSelectionAction;
   askInSideChat: TranscriptSelectionAction;
 }
@@ -101,6 +109,36 @@ export function TranscriptSelectionActions({
   const toolbarRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const [visible, setVisible] = useState<VisibleSelection | null>(null);
+  const [translated, setTranslated] = useState<{ selection: VisibleSelection; value: ReadingTranslation } | null>(null);
+  const translationRef = useRef<{ cancel: () => void } | null>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  function closeTranslation() {
+    translationRef.current?.cancel(); translationRef.current = null; setTranslated(null);
+  }
+  function translate(selection: VisibleSelection) {
+    if (!actions.translate?.enabled) return;
+    translationRef.current?.cancel();
+    const job = actions.translate.run(selection);
+    translationRef.current = job;
+    setTranslated({ selection, value: { pending: true } });
+    setVisible(null); clearNativeSelection();
+    void job.promise.then(record => {
+      if (translationRef.current === job) setTranslated({ selection, value: { pending: false, record } });
+    }, error => {
+      if (translationRef.current === job) setTranslated({ selection, value: { pending: false, error: String(error) } });
+    });
+  }
+  useEffect(() => () => { translationRef.current?.cancel(); translationRef.current = null; }, []);
+  useEffect(() => {
+    if (!translated) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') closeTranslation(); };
+    const pointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !popoverRef.current?.contains(event.target)) closeTranslation();
+    };
+    document.addEventListener('keydown', close);
+    document.addEventListener('pointerdown', pointer);
+    return () => { document.removeEventListener('keydown', close); document.removeEventListener('pointerdown', pointer); };
+  }, [translated]);
 
   const refresh = useCallback(() => {
     if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
@@ -145,6 +183,13 @@ export function TranscriptSelectionActions({
     if (visible && !validSourceIds.has(visible.sourceId)) setVisible(null);
   }, [validSourceIds, visible]);
 
+  if (translated) return createPortal(<div ref={popoverRef} className="translation-popover" role="dialog" aria-label={actions.translate?.label}
+    style={{ left: Math.min(window.innerWidth - 12 - Math.min(180, (window.innerWidth - 24) / 2),
+      Math.max(12 + Math.min(180, (window.innerWidth - 24) / 2), translated.selection.left)),
+      top: Math.max(12, Math.min(window.innerHeight - 180, translated.selection.top)) }}>
+    <button type="button" className="translation-close" onClick={closeTranslation} aria-label={t('common.close')} title={t('common.close')}>×</button>
+    <TranslationResult value={translated.value} onRetry={() => translate(translated.selection)} />
+  </div>, document.body);
   if (!visible) return null;
   const tooLarge = selectedTextByteSize(visible.text) > MAX_PASTED_TEXT_BYTES;
   const placement = visible.below ? 'below' : 'above';
@@ -184,6 +229,8 @@ export function TranscriptSelectionActions({
       >
         {t('transcript.selection.askInSideChat')}
       </button>
+      {actions.translate && <button type="button" disabled={!actions.translate.enabled || tooLarge}
+        onClick={() => translate(visible)}>{actions.translate.label}</button>}
     </div>,
     document.body,
   );

@@ -131,7 +131,6 @@
   min-height: 34px;
   gap: 8px;
 }
-.agents-integrations-refresh { margin-left: auto; }
 /* Block-axis margins only — the inline centering comes from the shared
    `.agents-view .page-body > *` column rule (a margin shorthand here used to
    silently win over it and pin the lists to the left edge). */
@@ -162,7 +161,7 @@
 .catalog-item-open:focus-visible { box-shadow: 0 0 0 2px var(--accent-ring); }
 .catalog-item-open .grow,
 button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.row-info { flex: none; }
+.catalog-item-open .st { flex: none; }
 
 .p2 .ag-sec > .s2-subhead { display: block; margin-bottom: 8px; }
 .p2 .s2-help { margin: 0 0 10px; }
@@ -227,6 +226,32 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
 .act-row .delta { min-width: 0; color: var(--text-2); font-size: var(--fz-12); }
 .act-row .delta.muted { color: var(--text-3); }
 
+.proxy-basic {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.proxy-basic-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--fz-12);
+}
+.proxy-basic-summary > .mono { color: var(--text); }
+.proxy-basic-sep { color: var(--text-3); }
+.proxy-basic-path { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.proxy-basic-path .cli-path-val { flex: 1; color: var(--text-3); }
+.p2-body .notice { margin-bottom: 10px; }
+.p2-foot { gap: 10px; }
+.p2-foot .delta { min-width: 0; color: var(--text-2); font-size: var(--fz-12); }
+.p2-foot .agent-enabled-switch { align-self: center; }
+.p2 .s2-subhead .help-hint { margin-left: 4px; vertical-align: -1px; }
+
 .tty {
   flex: none;
   overflow: hidden;
@@ -268,6 +293,10 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
 
 .proxy-document { scroll-behavior: smooth; }
 .ag-anchors {
+  /* Column-flex child of the scrollable .p2-body: without flex:none the bar
+   * absorbs all negative free space (its overflow-x makes min-height auto = 0)
+   * and collapses to its padding. */
+  flex: none;
   position: sticky;
   top: -12px;
   z-index: 2;

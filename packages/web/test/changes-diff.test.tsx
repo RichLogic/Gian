@@ -153,6 +153,9 @@ describe('ChangesDiffBody', () => {
       null,
       'session-card',
       7,
+      // No cross-tree root on these entries — the host falls back to the
+      // viewed tree, same as before.
+      null,
     ));
   });
 
@@ -355,5 +358,40 @@ describe('ChangesDiffBody', () => {
     fireEvent.click(screen.getByText('Retry'));
     await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
     expect(loadChanged).toHaveBeenCalledTimes(2);
+  });
+
+  // The TurnDiffChip sends the RAW transcript path (absolute for Claude);
+  // the inspector list carries host-normalized paths. The anchor must still
+  // expand and scroll the right block (matchChangedFilePath).
+  it('an anchor request with a raw absolute transcript path resolves to the normalized list path', async () => {
+    renderBody();
+    await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(2));
+    act(() => toggleChangesDiffCollapsed('ws:demo', 'src/b.ts'));
+    expect(document.querySelector('.cs-file[data-path="src/b.ts"]')).toHaveClass('collapsed');
+
+    act(() => requestChangesDiffAnchor('ws:demo', '/repo/task-worktree/src/b.ts'));
+    await waitFor(() => {
+      expect(document.querySelector('.cs-file[data-path="src/b.ts"]')).not.toHaveClass('collapsed');
+    });
+    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(getChangesDiffState('ws:demo').anchor).toBeNull();
+  });
+
+  // A last-turn entry produced under a different root carries `root`; the
+  // patch request must forward it so the host serves the persisted snapshot
+  // instead of a viewed-tree git fallback.
+  it('forwards a cross-tree entry\'s root when loading its last-turn patch', async () => {
+    loadChanged.mockResolvedValue([
+      { path: 'docs/new.md', kind: 'create', staged: false, added: 2, removed: 0, root: '/repo/task-tree', external: true },
+    ]);
+    renderBody();
+    act(() => applyChangesScopeRequest('ws:demo', 'lastturn', { sessionId: 's-1', turn: 3 }));
+    await waitFor(() => expect(document.querySelectorAll('.cs-file').length).toBe(1));
+
+    act(() => FakeIO.instances.at(-1)!.trigger());
+    await waitFor(() => expect(getChangesDiffState('ws:demo').patches['docs/new.md']?.status).toBe('loaded'));
+    expect(loadDiff).toHaveBeenCalledWith(
+      'ws:demo', 'docs/new.md', 'lastturn', null, null, 's-1', 3, '/repo/task-tree',
+    );
   });
 });

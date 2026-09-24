@@ -22,6 +22,17 @@ describe('remote settings (B9)', () => {
     expect(document.body.dataset.accent).toBe('rose');
   });
 
+  it('system theme resolves from the OS preference (jsdom stub reports light)', async () => {
+    const user = userEvent.setup();
+    renderApp({
+      scenario: { view: { kind: 'settings' }, settings: { theme: 'dark', accent: 'azure' } },
+      viewport: 'wide',
+    });
+    expect(document.body.dataset.theme).toBe('dark');
+    await user.click(screen.getByRole('radio', { name: '跟随系统' }));
+    expect(document.body.dataset.theme).toBe('light');
+  });
+
   it('lists host pairings; current host is badged', () => {
     renderApp({ scenario: { view: { kind: 'settings' } }, viewport: 'wide' });
     expect(screen.getAllByText('MacBook Pro · 家里').length).toBeGreaterThan(0);

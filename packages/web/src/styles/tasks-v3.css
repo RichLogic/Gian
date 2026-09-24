@@ -21,11 +21,15 @@
    so a glyph-carrying row must reserve its space or a long title runs under
    the glyph (2026-09-08 owner report: text/glyph overlap). */
 .tasks-rail .session-row.has-status .ri-row1 { padding-right: 26px; }
+/* Row-action cluster in the Tasks rail: no backdrop tile — the complete/
+   reopen check and lock glyphs read straight off the row tint beneath
+   (Owner 2026-09-23: 行内小图标一律透明底). The per-button hover veil
+   stays on .ri-act itself (gian-v2.css). */
 .tasks-rail .session-row:hover .ri-acts {
-  background: var(--surface);
+  background: transparent;
   border-radius: var(--r-1);
 }
-.tasks-rail .session-row.active:hover .ri-acts { background: var(--surface-2); }
+.tasks-rail .session-row.active:hover .ri-acts { background: transparent; }
 
 /* T2: while a row from another list is dragged, task group headers (and the
    未分配 section header for task-bound rows) hint that they accept the drop

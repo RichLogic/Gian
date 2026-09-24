@@ -1,10 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useEffect, useRef, useState } from 'react';
 import type { OpenAppPrefs } from '@gian/shared';
-import { LinkAnchor } from '@gian/chat-ui';
+import { MarkdownText } from '@gian/chat-ui';
 import { useT } from '../i18n/index.js';
-import { normalizeGfmTables } from '../markdown-tables.js';
 import { parseUnifiedDiff } from '../transcript/apply.js';
 import { AppIcon } from './AppIcon.js';
 import {
@@ -191,23 +188,20 @@ function FileBody({ lines, scrollLine }: { lines: Array<[string, string, string?
   );
 }
 
-/** Markdown renderer for file preview & plan bodies. Uses react-markdown +
- *  remark-gfm so GFM tables, ordered lists, task lists, links and blockquotes
- *  render properly — the previous hand-rolled parser knew only headings /
- *  paragraphs / bullet lists / code fences and flattened everything else
- *  (notably tables) into a run-on paragraph. Raw HTML stays disabled
- *  (react-markdown's default: no rehype-raw) so previewed file contents can't
- *  inject markup. Styling hangs off the shared `.md-preview` class. */
+/** Markdown renderer for file preview & plan bodies. Mounts chat-ui's
+ *  MarkdownText — the same enhanced pipeline the transcript uses (remark-gfm
+ *  + table repair, mermaid diagrams, remark-math/KaTeX, syntax highlighting,
+ *  LinkAnchor) — so a previewed file renders exactly like the same markdown
+ *  in chat. Raw HTML stays disabled (react-markdown's default: no
+ *  rehype-raw) so previewed file contents can't inject markup. File-ref
+ *  linkification stays off: FileRefRehypeContext is null here, and previewed
+ *  paths belong to the file, not the session's file index. Styling hangs off
+ *  the shared `.md-preview` class; KaTeX/highlight styles arrive with the
+ *  chat-ui stylesheet the app already loads. */
 function MarkdownPreview({ source }: { source: string }) {
-  const normalized = useMemo(() => normalizeGfmTables(source), [source]);
   return (
     <div className="md-preview">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{ a: LinkAnchor as never }}
-      >
-        {normalized}
-      </ReactMarkdown>
+      <MarkdownText>{source}</MarkdownText>
     </div>
   );
 }

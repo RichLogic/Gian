@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import type { RemoteAccountCredential } from '@gian/shared';
 
 interface StoredBlob {
   version: 1;
@@ -20,6 +21,8 @@ export type RemoteIdentityJwk = {
 export interface RemoteIdentitySecret {
   identity: RemoteIdentityJwk;
   refreshSecret: string | null;
+  accounts?: Record<string, RemoteAccountCredential>;
+  controllers?: Record<string, RemoteIdentityJwk>;
 }
 
 export interface RemoteIdentityStore {

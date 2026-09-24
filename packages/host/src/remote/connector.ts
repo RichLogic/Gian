@@ -155,6 +155,7 @@ export class RemoteConnector {
     _auth?: RemoteServerAuthClient,
     _hostId?: string,
     private readonly services?: {
+      authorize?: () => Promise<void>;
       hostVersion?: string;
       attachments?: RemoteAttachmentService;
       fileRefs?: RemoteFileRefService;
@@ -197,6 +198,7 @@ export class RemoteConnector {
   async sendControl(message: object): Promise<void> {
     await this.enqueueOutbound(async () => {
       if (this.closed) return;
+      await this.checkAuthorization();
       assertFrameClassMatchesInner('control', (message as { type?: string }).type);
       const sealed = await this.crypto.seal(new TextEncoder().encode(JSON.stringify(message)));
       const ciphertextBytes = utf8ByteLength(sealed.ciphertext);
@@ -350,6 +352,7 @@ export class RemoteConnector {
         void this.enqueueCommands(async () => {
           try {
             if (this.closed) return;
+            await this.checkAuthorization();
             const result = await this.onCommand(this.device, command, hooks);
             await this.sendControl({
               type: 'command.result',
@@ -372,10 +375,12 @@ export class RemoteConnector {
         return;
       }
       if (message.type === 'attachment.begin' || message.type === 'attachment.chunk' || message.type === 'attachment.complete') {
+        await this.checkAuthorization();
         await this.receiveUpload(message);
         return;
       }
       if (message.type === 'download.request') {
+        await this.checkAuthorization();
         void this.receiveDownload(message).catch(async (error) => {
           await this.sendTransferFailure(transferId, error);
         });
@@ -574,10 +579,13 @@ export class RemoteConnector {
   }
 
   private async sendContentMessage(message: object): Promise<void> {
+    await this.checkAuthorization();
     assertFrameClassMatchesInner('content', (message as { type?: string }).type);
     assertInnerContentPlaintext(message);
     await this.waitForContentWindow();
     await this.enqueueOutbound(async () => {
+      if (this.closed) return;
+      await this.checkAuthorization();
       const sealed = await this.crypto.seal(new TextEncoder().encode(JSON.stringify(message)));
       const ciphertextBytes = utf8ByteLength(sealed.ciphertext);
       await this.ciphertextPacer.wait(ciphertextBytes);
@@ -597,6 +605,11 @@ export class RemoteConnector {
       this.transport.send(frame);
       this.ciphertextPacer.note(ciphertextBytes);
     });
+  }
+
+  private async checkAuthorization(): Promise<void> {
+    try { await this.services?.authorize?.(); }
+    catch (error) { this.close(); throw error; }
   }
 
   private async waitForTransferWindow(transferId: string, sentOffset: number, windowBytes: number): Promise<void> {

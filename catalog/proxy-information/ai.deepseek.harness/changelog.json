@@ -1,8 +1,56 @@
 {
   "schemaVersion": 1,
   "pluginId": "ai.deepseek.harness",
-  "currentVersion": "0.3.1",
+  "currentVersion": "0.3.2",
   "entries": [
+    {
+      "version": "0.3.2",
+      "firstPublishedAt": "2026-09-24T09:39:31Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-dsh-v0.3.2",
+          "publishedAt": "2026-09-24T09:39:31Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.2/gian-proxy-dsh-0.3.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "19b17ca7b8a1dbeecfb7ec42fec37e3629c939b88df0ea1b73281d26a0b9a7dd",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.2/gian-proxy-dsh-0.3.2-darwin-arm64.tar.gz",
+            "sha256": "f10acd052797a9e65007155c33a888b1ca863421f579ff6884bcdb4d4234bf44",
+            "size": 145847
+          },
+          "runtimeDeclaration": {
+            "id": "deepseek-harness",
+            "versions": [
+              "0.1.5-rc.3"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.4",
+              "basis": "bundled-package-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "适配 DeepSeek Harness 0.1.5-rc.3，内置 Bridge 0.1.4，恢复流式文本与思考输出，并保持握手版本与发布包一致。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.2",
+            "https://github.com/RichLogic/Gian-Proxies/blob/4740fab7dc3370cc812984519b5e9509bbcad2c0/CHANGELOG.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.1",
       "firstPublishedAt": "2026-09-17T00:57:06Z",

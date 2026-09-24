@@ -649,6 +649,14 @@ function contextItems(value: unknown, label: string): void {
       string(entry['id'], `${label}[${index}].id`);
       string(entry['path'], `${label}[${index}].path`);
       string(entry['name'], `${label}[${index}].name`);
+    } else if (type === 'session') {
+      exact(entry, ['type', 'id', 'sessionId', 'title', 'workspaceName'], `${label}[${index}]`);
+      string(entry['id'], `${label}[${index}].id`);
+      string(entry['sessionId'], `${label}[${index}].sessionId`);
+      string(entry['title'], `${label}[${index}].title`);
+      if (entry['workspaceName'] !== undefined) {
+        string(entry['workspaceName'], `${label}[${index}].workspaceName`);
+      }
     } else if (type === 'browserElement') {
       if (typeof entry['id'] !== 'string') invalid(`${label}[${index}].id must be a string`);
     } else {

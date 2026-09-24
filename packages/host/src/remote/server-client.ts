@@ -1,5 +1,13 @@
 import {
   AUTH_PROTOCOL,
+  ACCOUNT_PROTOCOL,
+  accountLoginStartedSchema,
+  accountLoginResultSchema,
+  remoteAccountChallengePayload,
+  remoteAccountIdentitySchema,
+  generateCanonicalId,
+  type AccountLoginStarted,
+  type AccountLoginResult,
   hostConnectorChallengeResultSchema,
   hostEnrollmentClaimResultSchema,
   isRemoteErrorCode,
@@ -9,6 +17,16 @@ import {
 } from '@gian/remote-protocol';
 import type { RemoteServerAuthClient } from './connector.js';
 import type { RemoteIdentityMaterial } from './identity.js';
+import type { RemoteAccountCredential } from '@gian/shared';
+
+export class RemoteAccountRetryError extends Error {
+  constructor(readonly retryAfterSeconds: number) { super('remote_account_unavailable'); }
+}
+
+/** Rejected locally, before an enrollment token can reach the Server. */
+export class RemoteAccountRequiredError extends RemoteProtocolError {
+  constructor() { super('AUTH_REQUIRED', 'Remote GitHub login required'); }
+}
 
 export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
   private accessToken: string | null = null;
@@ -22,6 +40,66 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
 
   currentAccessToken(): string | null {
     return this.accessToken;
+  }
+
+  async existingAccount(role: 'host' | 'controller'): Promise<RemoteAccountCredential | null> {
+    const origin = new URL(this.baseUrl).origin;
+    await this.identity.ensurePublic();
+    const saved = await this.identity.getAccountSession?.(origin, role);
+    if (!saved || saved.expiresAt <= Date.now()) return null;
+    if (saved.serverOrigin !== origin || saved.role !== role) throw new RemoteProtocolError('AUTH_REQUIRED', 'account scope mismatch');
+    // pollAccountLogin stores result.account_token, minted with randomSecret()
+    // by RemoteAccountPeers. Only return that opaque Gian secret to its issuer;
+    // Host never receives or forwards the App's GitHub OAuth credential.
+    const opaqueRemoteSessionToken = saved.token;
+    let result: Record<string, unknown>;
+    try { result = await this.request('/api/v1/account/me', {}, opaqueRemoteSessionToken, 'GET'); }
+    catch (error) {
+      if (error instanceof RemoteProtocolError && error.code === 'AUTH_REQUIRED') return null;
+      throw error;
+    }
+    const account = parseClosed(remoteAccountIdentitySchema, result.account, 'AUTH_REQUIRED');
+    if (result.protocol !== ACCOUNT_PROTOCOL || result.installation_id !== saved.installationId
+      || result.role !== role || account.id !== saved.accountId
+      || typeof result.expires_at !== 'number' || result.expires_at <= Date.now()) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'account binding mismatch');
+    }
+    return { ...saved, accountLogin: account.login, expiresAt: Math.min(saved.expiresAt, result.expires_at) };
+  }
+
+  async startAccountLogin(role: 'host' | 'controller' = 'host'): Promise<AccountLoginStarted> {
+    const identity = await this.identity.ensurePublic();
+    const started = parseClosed(accountLoginStartedSchema, await this.request('/api/v1/account/start', {
+      protocol: ACCOUNT_PROTOCOL,
+      peer: { role, installation_id: generateCanonicalId(), public_key: identity.public_key },
+    }));
+    const saved = await this.identity.getAccountSession?.(new URL(this.baseUrl).origin, role);
+    if (saved && saved.serverFingerprint !== started.challenge.server_identity_fingerprint) {
+      throw new RemoteProtocolError('AUTH_REQUIRED', 'Server identity changed');
+    }
+    return started;
+  }
+
+  async pollAccountLogin(started: AccountLoginStarted): Promise<AccountLoginResult> {
+    const signature = await this.identity.sign(new TextEncoder().encode(remoteAccountChallengePayload(started.challenge)));
+    const result = parseClosed(accountLoginResultSchema, await this.request('/api/v1/account/poll', {
+      protocol: ACCOUNT_PROTOCOL, login_id: started.login_id, signature,
+    }));
+    if (result.status === 'authorized') {
+      if (!this.identity.setAccountSession || result.installation_id !== started.challenge.peer.installation_id
+        || result.role !== started.challenge.peer.role) throw new RemoteProtocolError('AUTH_REQUIRED', 'account binding mismatch');
+      const origin = new URL(this.baseUrl).origin;
+      const previous = await this.identity.getAccountSession?.(origin, result.role);
+      await this.identity.setAccountSession(origin, {
+        role: result.role, serverOrigin: origin, serverFingerprint: started.challenge.server_identity_fingerprint,
+        installationId: result.installation_id, accountId: result.account.id, accountLogin: result.account.login,
+        token: result.account_token, expiresAt: result.expires_at,
+      }, result.role);
+      if (previous && previous.token !== result.account_token) {
+        await this.request('/api/v1/account/logout', { protocol: ACCOUNT_PROTOCOL }, previous.token).catch(() => undefined);
+      }
+    }
+    return result;
   }
 
   async claimEnrollment(input: {
@@ -155,8 +233,16 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
     path: string,
     body: Record<string, unknown>,
     accessToken?: string,
+    method: 'GET' | 'POST' = 'POST',
   ): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (!path.startsWith('/api/v1/account/')) {
+      const account = await this.identity.getAccountSession?.(new URL(this.baseUrl).origin, 'host');
+      if (account && account.expiresAt > Date.now()) headers['x-gian-account-token'] = account.token;
+      else if (path !== '/api/v1/host/connector-challenge') {
+        throw new RemoteAccountRequiredError();
+      }
+    }
     if (accessToken) headers.authorization = `Bearer ${accessToken}`;
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), this.timeoutMs);
@@ -164,18 +250,24 @@ export class HttpRemoteServerAuthClient implements RemoteServerAuthClient {
     let response: Response;
     try {
       response = await this.fetchFn(new URL(path, this.baseUrl.endsWith('/') ? this.baseUrl : `${this.baseUrl}/`).toString(), {
-        method: 'POST',
+        method,
+        redirect: 'error',
         headers,
-        body: JSON.stringify(body),
+        body: method === 'GET' ? undefined : JSON.stringify(body),
         signal: abort.signal,
       });
-    } catch (error) {
-      if (abort.signal.aborted) {
-        throw new RemoteProtocolError('HOST_OFFLINE', 'remote server request timed out');
-      }
-      throw error;
+    } catch {
+      throw new RemoteProtocolError('HOST_OFFLINE', abort.signal.aborted
+        ? 'remote server request timed out' : 'remote server connection failed');
     } finally {
       clearTimeout(timeout);
+    }
+    if (response.status >= 500 || response.status === 429) {
+      if (path.startsWith('/api/v1/account/')) {
+        const delay = Number(response.headers.get('retry-after'));
+        throw new RemoteAccountRetryError(Number.isFinite(delay) ? Math.min(60, Math.max(5, delay)) : 5);
+      }
+      throw new RemoteProtocolError('HOST_OFFLINE', 'remote server temporarily unavailable');
     }
     const json = await response.json() as Record<string, unknown> & { error?: { code?: string } };
     if (!response.ok) {

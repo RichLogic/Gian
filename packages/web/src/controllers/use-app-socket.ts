@@ -491,15 +491,22 @@ export function useAppSocket(input: UseAppSocketInput): void {
             ...previous.filter(session => session.id !== message.session.id),
           ]);
           if (nativeAdopt) return;
+          const selectCreatedSession = () => {
+            current.setActiveSessionId(message.session.id);
+            if (message.session.type === 'subtask' && message.session.task_id) {
+              current.setActiveTaskId(message.session.task_id);
+              current.setActiveSubtaskId(message.session.id);
+            }
+          };
           if (sessionFork) {
             // Fork broadcasts are global, but selection is window-local. Only
             // the tab that minted this exact target id follows the child.
             if (consumeForkNavigation(message.session.id)) {
-              current.setActiveSessionId(message.session.id);
+              selectCreatedSession();
             }
             return;
           }
-          current.setActiveSessionId(message.session.id);
+          selectCreatedSession();
           // The creating/forking busy state is driven by the pending
           // operation run in App and ends on operation:result — nothing to
           // clear here.

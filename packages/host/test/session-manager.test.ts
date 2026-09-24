@@ -39,6 +39,8 @@ import {
   type ReplayEvent,
 } from '@gian/proxy-protocol';
 import { EMPTY_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
+import { TranslationService } from '../src/translation/service.js';
+import { saveConfig } from '../src/storage/config.js';
 
 function liveNotification(value: {
   method: string;
@@ -690,6 +692,53 @@ test('new Codex sessions persist Fast before their first turn starts', async () 
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('translation sends translated input but persists the original user bubble and exact translation', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude', name: 'Translation test' });
+    const service = new TranslationService(db, async () => '{"translations":["Check the code"]}');
+    sessions.setTranslationService(service);
+    const record = await service.translate({ sessionId: session.id, requestId: 'translation-send', text: '检查代码', purpose: 'send' },
+      { agent_id: 'translator', model: 'luna', sending_language: 'en', reading_language: 'zh-CN' });
+    await sessions.sendMessage(session.id, '检查代码', undefined, undefined, undefined, undefined, undefined, undefined, undefined, record.id);
+    assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.input, [{ type: 'text', text: 'Check the code' }]);
+    const original = sessions.listEvents(session.id).find(event => event.event === 'user_message');
+    assert.equal((original?.data as any).text, '检查代码');
+    assert.equal((original?.data as any).translation.text, 'Check the code');
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('automatic send translation fails closed and explicit original bypass makes no model call', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude', name: 'Translation failure' });
+    let calls = 0;
+    const service = new TranslationService(db, async () => { calls++; throw new Error('translation unavailable'); });
+    sessions.setTranslationService(service);
+    saveConfig(db, { translation: { agent_id: 'translator', model: 'luna', sending_language: 'en', reading_language: 'zh-CN' } });
+    service.setEnabled(session.id, true);
+    await assert.rejects(sessions.sendMessage(session.id, 'source'), /translation unavailable/);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal(sessions.listEvents(session.id).filter(event => event.event === 'user_message').length, 0);
+    await sessions.sendMessage(session.id, 'source', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'original');
+    assert.equal(calls, 1);
+    assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.input, [{ type: 'text', text: 'source' }]);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a translation receipt cannot be reused for a different original message', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude', name: 'Translation receipt' });
+    const service = new TranslationService(db, async () => '{"translations":["translated"]}');
+    sessions.setTranslationService(service);
+    const record = await service.translate({ sessionId: session.id, requestId: 'translation', text: 'original', purpose: 'send' },
+      { agent_id: 'translator', model: 'luna', sending_language: 'en', reading_language: 'zh-CN' });
+    await assert.rejects(sessions.sendMessage(session.id, 'changed', undefined, undefined, undefined, undefined, undefined, undefined, undefined, record.id), /does not match/);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('blank session titles are normalized to null so auto-title remains enabled', async () => {

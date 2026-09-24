@@ -17,12 +17,12 @@
   display: grid;
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100vh;
-  background: var(--bg);
+  background: transparent;
 }
 .body {
   display: flex;
   min-height: 0;
-  background: var(--bg);
+  background: transparent;
 }
 .body.wb-only .sheet { flex: 1; min-width: 0; width: auto; }
 
@@ -73,7 +73,7 @@
   /* Right inset centers the trailing panel-3 toggle over the dock column
      below it (dock-w 38px → center at 19px; tb-toggle is 26px → 19−13=6). */
   padding: 0 6px 0 8px;
-  background: var(--bg);
+  background: transparent;
 }
 
 /* Hairline between the window-chrome button cluster and the path breadcrumb —
@@ -236,7 +236,7 @@
   width: 272px;
   flex: none;
   display: flex; flex-direction: column;
-  background: var(--bg);
+  background: transparent;
   min-height: 0;
   overflow: hidden;
 }
@@ -317,7 +317,7 @@
   padding-left: 6px;
   border-radius: var(--r-1);
 }
-.sb-section:hover .sb-section-acts { background: var(--bg); }
+.sb-section:hover .sb-section-acts { background: var(--bg-frame); }
 
 /* Project group header — Codex-style: sans label with a folder glyph, plain
    count, hover as a soft rounded row (no mono eyebrow / count pill). */
@@ -389,13 +389,20 @@
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-soft);
 }
-.rail-item:hover { background: var(--surface); }
+.rail-item:hover { background: var(--row-hover); }
 /* Session rows: the title aligns exactly with the group header's name text
    (2px group margin + 10px padding + 18px icon slot + 7px gap = 37px,
    airy rail scale). Hover/active backgrounds stay full-width. */
 .rail-item.session-row { padding-left: 37px; }
-.rail-item.active { background: var(--surface-2); }
-.rail-item.active .ri-title { color: var(--text); }
+/* Selected = the hover tint one step deeper plus a left accent edge (Owner
+ * 2026-09-23: "选中的和 Hover 同一个底色，只是多那个小造型"). */
+.rail-item.active {
+  background: var(--row-active);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.rail-item.active .ri-title { color: var(--text); font-weight: 600; }
+/* Row-action buttons keep a visible hover backdrop on the selected wash. */
+.rail-item.active .ri-act:hover { background: var(--surface-2); }
 .ri-body {
   min-width: 0; display: flex; flex-direction: column; gap: 2px;
 }
@@ -1088,14 +1095,16 @@
   font-weight: 600;
 }
 /* Context chips read as @-mentions; the glyph lives in CSS so it never
- * pollutes text content, copy, or selection. File-reference chips carry a
- * real file icon instead (rendered by the node), so the '@' is suppressed. */
+ * pollutes text content, copy, or selection. File- and session-reference
+ * chips carry a real icon instead (rendered by the node), so the '@' is
+ * suppressed. */
 .composer-inline-reference[data-reference-type="context"]::before {
   content: '@';
   color: var(--text-3);
   font-weight: 600;
 }
-.composer-inline-reference[data-reference-kind="file"]::before {
+.composer-inline-reference[data-reference-kind="file"]::before,
+.composer-inline-reference[data-reference-kind="session"]::before {
   content: none;
 }
 .cir-glyph svg { width: 11px; height: 11px; }
@@ -1998,7 +2007,7 @@
   align-items: center;
   padding: 6px 2px;
   gap: 2px;
-  background: var(--bg);
+  background: transparent;
   /* Slim seam to the neighbouring panel — tighter than the 4px splitter gap,
      since the dock's transparent strip already adds ~3px of optical space
      before the first icon. */

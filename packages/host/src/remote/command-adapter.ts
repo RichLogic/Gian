@@ -1,6 +1,7 @@
 import {
   COMMAND_RETENTION_MS,
   COMMAND_TIMESTAMP_SKEW_MS,
+  MAX_PROXY_LOGO_BYTES,
   REMOTE_METHODS,
   RemoteProtocolError,
   SNAPSHOT_PART_BYTES,
@@ -38,6 +39,7 @@ import type { RemoteAuditCategory, RemoteMutationAudit } from './audit.js';
 import type { RemoteAttachmentService } from './attachment-stream.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import type { RemoteFileRefService } from './file-ref.js';
+import type { RemoteExecutionJournal } from './execution-journal.js';
 import { RemoteProjector, assertNoLeak, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues } from './projection.js';
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -47,6 +49,8 @@ export function hostServiceTier(value: 'standard' | 'fast'): 'fast' | null {
 }
 
 export interface RemoteCommandAdapterDeps {
+  gitRead?: (params: unknown) => Promise<unknown>;
+  executions?: RemoteExecutionJournal;
   db: Db;
   access: GianToolAccessController;
   tool: GianToolService;
@@ -59,8 +63,15 @@ export interface RemoteCommandAdapterDeps {
   snapshot: (device: RemoteDeviceRecord) => unknown;
   /** Oversized state.refresh payloads follow a pending snapshot receipt. */
   pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
-  listAgents?: () => Array<{ id: string }>;
+  listAgents?: () => Array<{ id: string; proxy?: string }>;
   onSubscribe?: (deviceId: string, sessionId: string) => void;
+  /** Branding bytes for one Proxy (manifest branding.logo). Null when the
+   *  Proxy or the variant is unknown. Read-only; carries no device grant. */
+  proxyLogo?: (proxy: string, variant: 'light' | 'dark') => Promise<{
+    bytes: Uint8Array;
+    mediaType: 'image/png' | 'image/webp';
+    sha256: string;
+  } | null>;
 }
 
 export class RemoteCommandAdapter {
@@ -91,7 +102,7 @@ export class RemoteCommandAdapter {
       }
       return { ok: true, data };
     } catch (error) {
-      const mapped = mapError(error);
+      const mapped = asRemoteError(mapError(error));
       if (isMutation(command.method)) {
         this.upsertLedger(device.id, command, mapped.code === 'UNKNOWN_OUTCOME' ? 'unknown_outcome' : 'failed', undefined, mapped);
         this.record(device, command, categoryFor(mapped.code));
@@ -117,7 +128,8 @@ export class RemoteCommandAdapter {
     }
     const params = parseRemoteMethodParams(command.method, command.params);
     this.rejectCraftedFields(command.params);
-    if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read' && command.method !== 'proxy.logo') {
+    if (command.method !== 'command.status' && command.method !== 'state.refresh' && command.method !== 'catalog.read'
+      && command.method !== 'proxy.logo' && command.method !== 'execution.list' && command.method !== 'execution.sync') {
       this.upsertLedger(device.id, command, 'accepted');
     }
     return { kind: 'accepted', params };
@@ -161,6 +173,26 @@ export class RemoteCommandAdapter {
   ): Promise<unknown> {
     const method = command.method;
     switch (method) {
+      case 'execution.create':
+        return this.createExecution(device, command, params as Record<string, unknown>);
+      case 'catalog.agent':
+        return this.agentCatalog(device, params as Record<string, unknown>);
+      case 'execution.configure': {
+        const input = params as { session_id: string; session_revision: string; option_id: string;
+          value: import('@gian/shared').ConfigValue; binding: 'session' | 'turn' };
+        this.deps.executions?.authorize(input.session_id, device);
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution unavailable');
+        this.assertSessionRevision(input.session_id, input.session_revision);
+        await this.toolCall(device, command, 'session.update', { session_id: input.session_id,
+          expected_session_revision: input.session_revision, config: { [input.binding]: { [input.option_id]: input.value } } });
+        return this.deps.executions.session(input.session_id, device);
+      }
+      case 'execution.list':
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is unavailable');
+        return this.deps.executions.list(device, (params as { after?: string }).after);
+      case 'execution.sync':
+        if (!this.deps.executions) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'execution is unavailable');
+        return this.deps.executions.sync(device, params as { session_id: string; after: number; stream_id?: string });
       case 'catalog.read':
         return this.catalog(device, command);
       case 'state.refresh':
@@ -188,9 +220,29 @@ export class RemoteCommandAdapter {
         return this.respond(device, command, params as Record<string, unknown>);
       case 'file.preview':
         return this.preview(device, params as { handle_id: string });
+      case 'file.resolve': {
+        const input = params as { session_id: string; reference: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.resolveFile({ deviceId: device.id, sessionId: input.session_id, reference: input.reference });
+      }
+      case 'file.tree': {
+        const input = params as { session_id: string; directory: string; after?: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.tree({ sessionId: input.session_id, directory: input.directory, after: input.after });
+      }
+      case 'file.list': {
+        const input = params as { session_id: string; after?: string };
+        this.assertVisibleSession(input.session_id, device);
+        return this.deps.fileRefs.listFiles(input.session_id, input.after);
+      }
+      case 'git.read': {
+        const input = params as { session_id: string };
+        if (!this.deps.executions || !this.deps.gitRead) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'remote Git unavailable');
+        this.deps.executions.authorize(input.session_id, device);
+        return this.deps.gitRead(params);
+      }
       case 'proxy.logo':
-        // Logo serving is not in this App release; newer clients keep their fallback.
-        throw new RemoteProtocolError('INVALID_FRAME', 'unsupported method proxy.logo');
+        return this.proxyLogo(params as { proxy: string; variant: 'light' | 'dark' });
       default: {
         const _exhaustive: never = method;
         throw new RemoteProtocolError('INVALID_FRAME', `unsupported method ${String(_exhaustive)}`);
@@ -207,12 +259,69 @@ export class RemoteCommandAdapter {
     return this.deps.projector.projectCatalog({ ...data, tasks });
   }
 
+  private async proxyLogo(params: { proxy: string; variant: 'light' | 'dark' }): Promise<unknown> {
+    const logo = await this.deps.proxyLogo?.(params.proxy, params.variant);
+    if (!logo || logo.bytes.length === 0 || logo.bytes.length > MAX_PROXY_LOGO_BYTES) {
+      throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'proxy logo not found');
+    }
+    return {
+      media_type: logo.mediaType,
+      data_base64: Buffer.from(logo.bytes).toString('base64'),
+      sha256: logo.sha256,
+    };
+  }
+
+  private async createExecution(device: RemoteDeviceRecord, command: CommandRequest, params: Record<string, unknown>): Promise<unknown> {
+    if (!device.accountId || !this.deps.executions) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified execution account required');
+    if (params['catalog_revision'] !== this.deps.projector.catalogRevision()) {
+      throw precondition('catalog_revision', this.deps.projector.catalogRevision());
+    }
+    const result = await this.toolCall(device, command, 'session.create', {
+      workspace_id: params['workspace_id'], agent_id: this.resolveAgentId(String(params['agent_id'])),
+      ...(params['name'] ? { name: params['name'] } : {}),
+      config: {
+        ...(params['session_config'] ? { session: params['session_config'] } : {}),
+        ...(params['turn_config'] ? { turn: params['turn_config'] } : {}),
+        ...(params['model'] ? { model: params['model'] } : {}),
+        ...(params['thinking'] ? { thinking_effort: params['thinking'] } : {}),
+        ...(params['service_tier'] ? { service_tier: hostServiceTier(params['service_tier'] as 'standard' | 'fast') } : {}),
+        ...(params['approval_mode'] ? { approval_mode: params['approval_mode'] } : {}),
+      },
+    });
+    const sessionId = (result.data as { session: { id: string } }).session.id;
+    this.deps.executions.register(sessionId, device);
+    return this.deps.executions.session(sessionId, device);
+  }
+
+  private async agentCatalog(device: RemoteDeviceRecord, params: Record<string, unknown>): Promise<unknown> {
+    if (!device.accountId) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified account required');
+    const id = this.resolveAgentId(String(params['agent_id']));
+    const agent = this.deps.listAgents?.().find(item => item.id === id);
+    if (!agent?.proxy) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
+    const inspected = await this.deps.sessions.agentCapabilities(agent.proxy, id);
+    const resolveSupported = inspected.capabilities['catalog.resolve'] !== undefined;
+    const catalog = params['catalog_revision'] && resolveSupported
+      ? await this.deps.sessions.resolveAgentCatalog(agent.proxy, id, {
+        catalogRevision: String(params['catalog_revision']),
+        sessionConfig: (params['session_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,
+        turnConfig: (params['turn_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,
+      }) : inspected.catalog;
+    return {
+      ...(catalog.catalogRevision ? { catalogRevision: catalog.catalogRevision } : {}),
+      configOptions: (catalog.configOptions ?? []).filter(option => !option.presentation?.sensitive),
+      input: catalog.input ?? [], specialCatalogs: catalog.specialCatalogs,
+      actions: (catalog.actions ?? []).map(action => ({ ...action,
+        ...(action.id === 'sidechat.create' ? { supported: false, reason: 'Remote Sidechat is unavailable' } : {}) })),
+      resolveSupported: false,
+    };
+  }
+
   private subscribe(
     device: RemoteDeviceRecord,
     command: CommandRequest,
     params: { session_id: string },
   ): { session: RemoteSession; cursor: string } {
-    this.assertVisibleSession(params.session_id);
+    this.assertVisibleSession(params.session_id, device);
     this.deps.db.prepare(
       `DELETE FROM remote_file_refs WHERE device_id = ? AND session_id != ?`,
     ).run(device.id, params.session_id);
@@ -226,7 +335,7 @@ export class RemoteCommandAdapter {
     device: RemoteDeviceRecord,
     params: { session_id: string; turns?: number; cursor?: string },
   ): unknown {
-    this.assertVisibleSession(params.session_id);
+    this.assertVisibleSession(params.session_id, device);
     return this.deps.projector.transcriptPage(params.session_id, params.turns ?? 3, {
       cursor: params.cursor,
       deviceId: device.id,
@@ -291,7 +400,7 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: Record<string, unknown>,
   ): Promise<RemoteSession> {
-    this.assertVisibleSession(String(params['session_id']));
+    this.assertVisibleSession(String(params['session_id']), device);
     this.assertSessionRevision(String(params['session_id']), String(params['session_revision']));
     await this.toolCall(device, command, 'session.update', {
       session_id: params['session_id'],
@@ -314,10 +423,10 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: Record<string, unknown>,
   ): Promise<unknown> {
-    this.assertVisibleSession(String(params['session_id']));
+    this.assertVisibleSession(String(params['session_id']), device);
     const sessionId = String(params['session_id']);
     const items = [
-      ...(this.resolveItems(device, params['items'], sessionId) ?? []),
+      ...(await this.resolveItems(device, params['items'], sessionId) ?? []),
       ...await this.resolveContextFiles(device, params['context_items'], sessionId),
     ];
     const contextItems = this.resolveContext(device, params['context_items'], sessionId);
@@ -337,8 +446,12 @@ export class RemoteCommandAdapter {
       throw error;
     }
     this.pinResolved(items);
+    const delivery = result.data as import('@gian/shared').GianToolDelivery;
     return {
       session: this.deps.projector.projectSession(this.deps.sessions.getSession(String(params['session_id']))),
+      ...(delivery.state ? { delivery_state: delivery.state } : {}),
+      ...(delivery.queue_id ? { queue_id: delivery.queue_id } : {}),
+      ...(delivery.turn_number ? { turn_number: delivery.turn_number } : {}),
       ...((result.data as { delivery_id?: string }).delivery_id
         ? { delivery_id: (result.data as { delivery_id: string }).delivery_id }
         : {}),
@@ -350,7 +463,7 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: Record<string, unknown>,
   ): Promise<unknown> {
-    this.assertVisibleSession(String(params['session_id']));
+    this.assertVisibleSession(String(params['session_id']), device);
     this.assertSessionRevision(String(params['session_id']), String(params['session_revision']));
     const result = await this.toolCall(device, command, 'session.stop', {
       session_id: params['session_id'],
@@ -369,7 +482,7 @@ export class RemoteCommandAdapter {
     params: Record<string, unknown>,
   ): Promise<unknown> {
     const sessionId = String(params['session_id']);
-    this.assertVisibleSession(sessionId);
+    this.assertVisibleSession(sessionId, device);
     const unpinIds = method === 'queue.remove'
       ? this.queueAttachmentIds(sessionId, String(params['queue_id']))
       : method === 'queue.clear'
@@ -380,13 +493,16 @@ export class RemoteCommandAdapter {
       expected_queue_revision: params['expected_queue_revision'],
     });
     for (const uploadId of unpinIds) this.deps.attachments.unpin(uploadId);
-    const data = result.data as { queue: unknown[]; queue_revision: string; mode?: string };
+    const data = result.data as { queue: unknown[]; queue_revision: string; mode?: string;
+      affected?: Array<{ queue_id: string; state: 'started' | 'steered'; turn_number: number }> };
     return {
       queue: this.deps.sessions.getQueue(sessionId).map(entry => (
         this.deps.projector.projectQueueEntry(entry, device.id)
       )),
       queue_revision: data.queue_revision,
       ...(data.mode ? { mode: data.mode } : {}),
+      ...(data.affected ? { affected: data.affected.map(item => ({ queue_id: item.queue_id,
+        state: item.state, turn_number: item.turn_number })) } : {}),
     };
   }
 
@@ -403,7 +519,7 @@ export class RemoteCommandAdapter {
     if (!sessionId || !pending) {
       throw new RemoteProtocolError('PRECONDITION_FAILED', 'interaction is not pending');
     }
-    this.assertVisibleSession(sessionId);
+    this.assertVisibleSession(sessionId, device);
     const currentRevision = String(interaction?.resource_revision ?? 0);
     if (currentRevision !== String(params['interaction_revision'])) {
       throw precondition('interaction_revision', currentRevision);
@@ -498,7 +614,11 @@ export class RemoteCommandAdapter {
     };
   }
 
-  private assertVisibleSession(sessionId: string): void {
+  private assertVisibleSession(sessionId: string, device: RemoteDeviceRecord): void {
+    if (this.deps.executions?.contains(sessionId)) {
+      this.deps.executions.authorize(sessionId, device);
+      return;
+    }
     const session = this.deps.sessions.getSession(sessionId);
     if (!this.deps.projector.isSessionVisible(session)) {
       throw new RemoteProtocolError(
@@ -513,9 +633,9 @@ export class RemoteCommandAdapter {
     if (current !== expected) throw precondition('session_revision', current);
   }
 
-  private resolveItems(device: RemoteDeviceRecord, items: unknown, sessionId: string): InputItem[] | undefined {
+  private async resolveItems(device: RemoteDeviceRecord, items: unknown, sessionId: string): Promise<InputItem[] | undefined> {
     if (!Array.isArray(items)) return undefined;
-    return items.map(item => {
+    return Promise.all(items.map(async item => {
       const record = item as { type?: string; text?: string; attachment_id?: string };
       if (record.type === 'text' && typeof record.text === 'string') {
         return { type: 'text' as const, text: record.text };
@@ -525,8 +645,16 @@ export class RemoteCommandAdapter {
         if (!resolved) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'attachment handle is not usable');
         return resolved;
       }
+      if (record.type === 'compiled_text' && record.attachment_id) {
+        if (!device.accountId || !this.deps.executions?.contains(sessionId)) throw new RemoteProtocolError('REMOTE_CAPABILITY_DENIED', 'compiled input requires execution authorization');
+        this.deps.executions.authorize(sessionId, device);
+        if (!this.deps.attachments.resolveHandle(device.id, record.attachment_id, sessionId)) throw new RemoteProtocolError('ATTACHMENT_NOT_FOUND', 'compiled input missing');
+        const read = await this.deps.attachments.readBytes(device.id, record.attachment_id);
+        if (!read || read.bytes.length > 2 * 1024 * 1024) throw new RemoteProtocolError('FILE_TOO_LARGE', 'compiled input too large');
+        return { type: 'text' as const, text: new TextDecoder('utf-8', { fatal: true }).decode(read.bytes) };
+      }
       throw new RemoteProtocolError('INVALID_FRAME', 'Remote send items must be text or Host attachment handles');
-    });
+    }));
   }
 
   private pinResolved(items: InputItem[]): void {
@@ -727,7 +855,7 @@ export class RemoteCommandAdapter {
     return {
       ok: false,
       error: row.error_json
-        ? JSON.parse(row.error_json) as { code: string; message: string }
+        ? asRemoteError(JSON.parse(row.error_json) as { code: string; message: string })
         : { code: 'UNKNOWN_OUTCOME', message: 'command outcome is unknown' },
     };
   }
@@ -754,7 +882,7 @@ interface LedgerRow {
 }
 
 function isMutation(method: RemoteMethod): boolean {
-  return method === 'session.create'
+  return method === 'execution.create' || method === 'execution.configure' || method === 'session.create'
     || method === 'session.update'
     || method === 'session.send'
     || method === 'session.stop'
@@ -766,6 +894,7 @@ function isMutation(method: RemoteMethod): boolean {
 }
 
 function asRemoteError(error: { code: string; message: string }): { code: RemoteErrorCode; message: string } {
+  if (error.code === 'PROTOCOL_VIOLATION') return { code: 'UNKNOWN_OUTCOME', message: error.message };
   if (isRemoteErrorCode(error.code)) return { code: error.code, message: error.message };
   if (error.code === 'PERMISSION_DENIED' || error.code === 'FORBIDDEN') {
     return { code: 'REMOTE_CAPABILITY_DENIED', message: error.message };

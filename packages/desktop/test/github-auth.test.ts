@@ -293,6 +293,9 @@ test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 3
       return Response.json([
         { tag_name: 'catalog-v1.1.0', assets: [] },
         { tag_name: 'unrelated-v9.0.0', assets: [] },
+        { tag_name: 'proxy-kimi-v0.3.2', assets: [] },
+        { tag_name: 'catalog-v1.99.0', draft: true, assets: [] },
+        { tag_name: 'catalog-v1.98.0', prerelease: true, assets: [] },
         {
           tag_name: 'catalog-v1.3.0',
           assets: [{ name: 'catalog-v1.json', size: 10 }],
@@ -302,7 +305,7 @@ test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 3
   });
 
   const latest = await service.fetchReleaseMetadata({
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian-Proxies',
     operation: 'latest-catalog',
   });
   assert.equal(latest.status, 200);
@@ -313,12 +316,13 @@ test('latest Catalog lookup selects the highest catalog-v1 sequence and honors 3
   });
 
   const cached = await service.fetchReleaseMetadata({
-    repository: 'RichLogic/Gian-Proxy-Catalog',
+    repository: 'RichLogic/Gian-Proxies',
     operation: 'latest-catalog',
     ifNoneMatch: '"seq-3"',
   });
   assert.equal(cached.status, 304);
   assert.equal(calls.length, 2);
+  assert.ok(calls.every(call => call.url === 'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=100'));
 });
 
 test('catalog asset download refuses unapproved redirects and never forwards Authorization', async () => {

@@ -9,6 +9,7 @@ import { AUTH_INVALID_CREDENTIALS } from '../operations/auth.js';
 import { useOperationDispatch, useOperationRun } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
 import { OnboardingSteps } from './OnboardingView.js';
+import { GitHubDeviceAuthorization as GitHubDeviceAuthorizationPanel } from '../components/GitHubDeviceAuthorization.js';
 
 /**
  * Login surfaces. Phase 3b (UI Operation Layer): both login paths dispatch
@@ -34,7 +35,6 @@ function GitHubLoginView() {
   const [unavailable, setUnavailable] = useState<GitHubAuthUnavailableReason | null>(null);
   const [error, setError] = useState<GitHubAuthError | null>(null);
   const [phase, setPhase] = useState<'checking' | 'idle' | 'starting' | 'waiting'>('checking');
-  const [copied, setCopied] = useState(false);
   // The in-flight auth.githubLogin run + the attempt that dispatched it.
   const [loginRun, setLoginRun] = useState<{ runId: string; attempt: number } | null>(null);
   const run = useOperationRun(loginRun?.runId);
@@ -74,7 +74,6 @@ function GitHubLoginView() {
     if (!githubAuth) return;
     const attempt = ++attemptRef.current;
     setError(null);
-    setCopied(false);
     setAuthorization(null);
     setPhase('starting');
     const dispatched = dispatch('auth.githubLogin', {
@@ -95,16 +94,6 @@ function GitHubLoginView() {
     setPhase('idle');
   }
 
-  async function copyCode() {
-    if (!authorization) return;
-    try {
-      await navigator.clipboard.writeText(authorization.userCode);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-    }
-  }
-
   const unavailableText = unavailable
     ? t(`login.github.unavailable.${unavailable}`)
     : null;
@@ -119,26 +108,7 @@ function GitHubLoginView() {
         <p className="login-intro">{t('login.github.intro')}</p>
 
         {authorization ? (
-          <div className="login-device">
-            <p>{t('login.github.code.help')}</p>
-            <button
-              className="login-device-code"
-              type="button"
-              onClick={() => void copyCode()}
-              aria-label={t('login.github.code.copy')}
-            >
-              {authorization.userCode}
-            </button>
-            <span className="login-device-copy">
-              {copied ? t('login.github.code.copied') : t('login.github.waiting')}
-            </span>
-            <a href={authorization.verificationUri} target="_blank" rel="noreferrer">
-              {t('login.github.openAgain')}
-            </a>
-            <button className="login-cancel" type="button" onClick={cancelLogin}>
-              {t('common.cancel')}
-            </button>
-          </div>
+          <GitHubDeviceAuthorizationPanel authorization={authorization} onCancel={cancelLogin} />
         ) : (
           <button
             className="login-submit login-github-submit"

@@ -1,4 +1,5 @@
 import { open } from 'node:fs/promises';
+import { constants } from 'node:fs';
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
@@ -19,11 +20,12 @@ class FileContractError extends Error {
  * stat→read TOCTOU gap: a file that grows after stat is rejected as soon as
  * the read crosses the cap, and callers build Content-Length from real bytes.
  */
-export async function readBoundedFile(path: string, maxBytes: number): Promise<Buffer> {
-  const handle = await open(path, 'r');
+export async function readBoundedFile(path: string, maxBytes: number, expected?: { dev: number; ino: number }): Promise<Buffer> {
+  const handle = await open(path, expected ? constants.O_RDONLY | constants.O_NOFOLLOW : 'r');
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new FileContractError('not-file');
+    if (expected && (info.dev !== expected.dev || info.ino !== expected.ino)) throw new FileContractError('not-file');
     if (info.size > maxBytes) throw new FileContractError('too-large');
 
     const chunks: Buffer[] = [];

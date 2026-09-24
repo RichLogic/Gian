@@ -13,9 +13,65 @@ import { createProductionController } from '../../remote-web/src/controller/crea
 import { MemoryEncryptedHostCache } from '../../remote-web/src/cache/encrypted-cache.js';
 import { MemoryBrowserIdentityStore } from '../../remote-web/src/transport/identity.js';
 import { createRemoteSettingsController } from '../../web/src/remote-settings/production.js';
-import { HttpRemoteServerAuthClient } from '../src/remote/server-client.js';
+import { HttpRemoteServerAuthClient, RemoteAccountRetryError } from '../src/remote/server-client.js';
 import { MemoryRemoteIdentity } from '../src/remote/identity.js';
 import { makeTestApp } from './fixtures/test-app.js';
+
+test('cached Remote account confirmation sends only its issuer-bound opaque Gian token, without another GitHub flow', async () => {
+  const identity = new MemoryRemoteIdentity();
+  const origin = 'https://remote.test';
+  const credential = { role: 'host' as const, serverOrigin: origin, serverFingerprint: 'a'.repeat(64),
+    installationId: generateCanonicalId(), accountId: '42', accountLogin: 'owner',
+    token: 'opaque-remote-session-fixture', expiresAt: Date.now() + 60_000 };
+  await identity.setAccountSession(origin, credential);
+  const calls: string[] = [];
+  const client = new HttpRemoteServerAuthClient(origin, identity, (async (url, init) => {
+    calls.push(String(url));
+    assert.equal(init?.method, 'GET');
+    assert.equal(init?.redirect, 'error');
+    assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer opaque-remote-session-fixture');
+    return Response.json({ protocol: 'gian.remote.account/1', installation_id: credential.installationId,
+      role: 'host', account: { provider: 'github', id: '42', login: 'renamed-owner' }, expires_at: credential.expiresAt });
+  }) as typeof fetch);
+  assert.equal((await client.existingAccount('host'))?.accountLogin, 'renamed-owner');
+  assert.deepEqual(calls, ['https://remote.test/api/v1/account/me']);
+  assert.equal(await client.existingAccount('controller'), null);
+  assert.equal(calls.length, 1, 'a different role cannot reuse the Host session');
+});
+
+test('cached account lookup refuses another issuer and does not discard authorization on a network outage', async () => {
+  const identity = new MemoryRemoteIdentity();
+  const credential = { role: 'host' as const, serverOrigin: 'https://other.test', serverFingerprint: 'a'.repeat(64),
+    installationId: generateCanonicalId(), accountId: '42', accountLogin: 'owner',
+    token: 'opaque-issuer-token', expiresAt: Date.now() + 60_000 };
+  let calls = 0;
+  identity.getAccountSession = async () => credential;
+  const client = new HttpRemoteServerAuthClient('https://remote.test', identity, (async () => {
+    calls += 1;
+    return new Response('{}', { status: 503, headers: { 'retry-after': '20' } });
+  }) as typeof fetch);
+  await assert.rejects(client.existingAccount('host'), /scope mismatch/);
+  assert.equal(calls, 0, 'never send an opaque credential to a different issuer');
+  credential.serverOrigin = 'https://remote.test';
+  await assert.rejects(client.existingAccount('host'), error => error instanceof RemoteAccountRetryError && error.retryAfterSeconds === 20);
+  assert.equal((await identity.getAccountSession('https://remote.test'))?.token, credential.token);
+});
+
+test('revoked and mismatched cached Remote identities fail closed', async () => {
+  const identity = new MemoryRemoteIdentity();
+  const origin = 'https://remote.test';
+  const credential = { role: 'host' as const, serverOrigin: origin, serverFingerprint: 'a'.repeat(64),
+    installationId: generateCanonicalId(), accountId: '42', accountLogin: 'owner', token: 'opaque-remote-token', expiresAt: Date.now() + 60_000 };
+  await identity.setAccountSession(origin, credential);
+  let revoked = true;
+  const client = new HttpRemoteServerAuthClient(origin, identity, (async () => revoked
+    ? Response.json({ error: { code: 'AUTH_REQUIRED' } }, { status: 401 })
+    : Response.json({ protocol: 'gian.remote.account/1', installation_id: credential.installationId,
+      role: 'host', account: { provider: 'github', id: '99', login: 'owner' }, expires_at: credential.expiresAt })) as typeof fetch);
+  assert.equal(await client.existingAccount('host'), null);
+  revoked = false;
+  await assert.rejects(client.existingAccount('host'), /binding mismatch/);
+});
 
 async function until<T>(read: () => T | Promise<T>): Promise<NonNullable<T>> {
   for (let i = 0; i < 250; i++) {
@@ -52,6 +108,8 @@ async function setup() {
   });
   const unsubscribe = controller.subscribe(() => {});
   await until(() => controller.getState().enrollment.kind === 'not-enrolled');
+  await controller.startAccountLogin!(listener.url);
+  await controller.pollAccountLogin!();
   const issued = await (await server.fetch('/api/v1/admin/host-enrollments', {
     method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'Content-Type': 'application/json' },
     body: JSON.stringify({ protocol: AUTH_PROTOCOL }),
@@ -67,6 +125,30 @@ async function setup() {
     },
   };
 }
+
+async function signInBrowser(controller: ReturnType<typeof createProductionController>) {
+  controller.actions.startGitHubLogin!();
+  await until(() => controller.state.account?.userCode);
+  controller.actions.pollGitHubLogin!();
+  await until(() => controller.state.account?.status === 'signed_in');
+}
+
+test('account confirmation does not reconnect a deliberately disconnected Host until the original action continues', async () => {
+  const context = await setup();
+  try {
+    await context.controller.disconnect();
+    assert.equal(context.host.app.remote.enrollment.current()?.connectorEnabled, false);
+    await context.host.remoteIdentity.setAccountSession(context.listener.url, null, 'host');
+    await context.controller.startAccountLogin!(context.listener.url);
+    assert.equal(context.controller.getState().account?.status, 'pending');
+    await context.controller.pollAccountLogin!();
+    assert.equal(context.controller.getState().account?.status, 'authorized');
+    assert.equal(context.host.app.remote.enrollment.current()?.connectorEnabled, false);
+    assert.equal(context.host.app.remote.settingsState().connection, 'disconnected');
+    await context.controller.reconnect();
+    assert.equal(context.host.app.remote.settingsState().connection, 'online');
+  } finally { await context.close(); }
+});
 
 test('remote rename propagates through Settings to Server without replacing enrollment', async () => {
   const context = await setup();
@@ -121,6 +203,7 @@ for (const pairingMode of ['code', 'qr'] as const) test(`live Settings adapter p
       autoRestore: false, platform: 'iOS', userAgent: 'Version/26.0 Mobile Safari/605.1.15',
       ...(pairingMode === 'qr' ? { pairingNonce: new URLSearchParams(qr.hash.slice(1)).get('nonce')! } : {}),
     });
+    await signInBrowser(browser);
     if (pairingMode === 'qr') {
       assert.equal(browser.state.auth.kind, 'pairing');
       assert.equal(host.app.remote.pairings.latest()?.status, 'pending_claim');
@@ -168,6 +251,7 @@ test('device revoke reauthenticates once after an expired Host access token', as
       platform: 'iOS',
       userAgent: 'Version/26.0 Mobile Safari/605.1.15',
     });
+    await signInBrowser(browser);
     browser.actions.submitPairingCode(grant.code);
     await until(() => controller.getState().pairing.kind === 'claimed');
     await controller.confirmPairingClaim('allow');

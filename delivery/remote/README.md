@@ -56,8 +56,17 @@ See [pnpm's supported package sources](https://pnpm.io/cli/add#supported-package
 
 ## Connect a Gian computer
 
-With the Remote Server running, create a one-time enrollment token inside its
-service environment:
+Configure `GIAN_REMOTE_GITHUB_CLIENT_ID` (GitHub Device Flow enabled) and
+`GIAN_REMOTE_ENROLLMENT_GITHUB_IDS` (comma-separated numeric GitHub account IDs)
+in `runtime.env`. An empty allowlist disables new registrations. Obtain your
+own numeric ID using authenticated `gh api user --jq .id`.
+
+Open `https://YOUR_SERVER/enrollment`, sign in with an allowlisted GitHub
+account and generate an enrollment token. The existing remote-control page
+remains at `/` and does not require browser GitHub login: it uses a short-lived
+invitation, explicit Host confirmation and the paired device's private key.
+
+The administrator CLI remains available inside the service environment:
 
 ```sh
 gian-remote-server enrollment create --label 'Home Mac'
@@ -66,10 +75,14 @@ docker compose exec remote gian-remote-server enrollment create --label 'Home Ma
 ```
 
 The command prints the Server URL, token and expiry. Enter these in Gian's
-Settings → Remote within 10 minutes. The token is single-use; normal reconnects
+Settings → Remote within 5 minutes. The verified Gian GitHub account must
+match the token issuer. The token is single-use; normal reconnects
 do not need another. The CLI uses the existing local admin API and the server's
 `GIAN_REMOTE_ADMIN_TOKEN`, without printing the admin key. Run it inside the
 container/service environment; public proxies should keep the admin API blocked.
+With several allowlisted accounts, supply `--account-id NUMERIC_GITHUB_ID`.
+Old unbound unused tokens are invalidated on upgrade. Allow `/enrollment` and
+`/api/v1/enrollment/*` through the proxy; never expose the admin master key.
 
 Once connected, rename the computer in Gian if needed and generate a device
 pairing QR/link. A browser may pair with several computers independently and

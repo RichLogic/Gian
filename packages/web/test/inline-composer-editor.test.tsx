@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { createRef } from 'react';
+import type { ComposerDocument } from '@gian/shared';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -18,7 +19,10 @@ import {
   KEY_ENTER_COMMAND,
   KEY_ESCAPE_COMMAND,
   PASTE_COMMAND,
+  SELECTION_CHANGE_COMMAND,
   type LexicalEditor,
+  type LexicalNode,
+  type TextNode,
   UNDO_COMMAND,
 } from 'lexical';
 
@@ -28,6 +32,11 @@ import {
   type InlineComposerEditorHandle,
 } from '../src/components/composer/InlineComposerEditor.js';
 import type { ComposerFileOption } from '../src/components/composer/capabilities.js';
+import {
+  UPWARD_POPOVER_GAP,
+  UPWARD_POPOVER_MARGIN,
+  UPWARD_POPOVER_MIN_HEIGHT,
+} from '../src/components/composer/upward-popover.js';
 
 const rangeRect = Object.getOwnPropertyDescriptor(Range.prototype, 'getBoundingClientRect');
 const textRect = Object.getOwnPropertyDescriptor(Text.prototype, 'getBoundingClientRect');
@@ -519,7 +528,7 @@ describe('InlineComposerEditor markdown', () => {
     });
   });
 
-  it('Enter inside a list splits the item, exits on an empty item, then submits', async () => {
+  it('Enter inside a list item submits instead of splitting', async () => {
     const onKeyDown = vi.fn(() => true);
     render(
       <InlineComposerEditor
@@ -532,31 +541,112 @@ describe('InlineComposerEditor markdown', () => {
     const root = screen.getByRole('textbox');
     const editor = renderedEditor();
     placeCaretAtDocumentEnd(editor);
-    const enter = () => act(() => editor.dispatchCommand(
+    act(() => editor.dispatchCommand(
       KEY_ENTER_COMMAND,
       new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
     ));
+    // Enter ALWAYS sends (owner contract) — the list is not split.
+    expect(onKeyDown).toHaveBeenCalledTimes(1);
+    expect(root.querySelectorAll('li')).toHaveLength(1);
+  });
 
-    // Enter inside the item splits the list instead of submitting.
-    enter();
-    expect(onKeyDown).not.toHaveBeenCalled();
-    await waitFor(() => expect(root.querySelectorAll('li')).toHaveLength(2));
+  it('Shift+Enter inside an ordered list creates the next numbered item', async () => {
+    const onKeyDown = vi.fn(() => true);
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '1. first' }] }}
+        placeholder="Message"
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }),
+    ));
 
-    // Enter on the empty trailing item exits the list into a paragraph.
-    enter();
+    // The editing newline inherits old-Enter: a new list item whose "2."
+    // marker comes from the <ol>/<li> structure (CSS ::marker), never text.
     expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => expect(root.querySelectorAll('ol li')).toHaveLength(2));
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
+      version: 1,
+      segments: [{ type: 'text', text: '1. first\n2. ' }],
+    }));
+    editor.getEditorState().read(() => {
+      const list = $getRoot().getFirstChild();
+      expect(list?.getType()).toBe('list');
+      expect($isElementNode(list) ? list.getChildren().map(node => node.getType()) : [])
+        .toEqual(['listitem', 'listitem']);
+    });
+
+    // Marker CSS contract: the composer list classes must NOT suppress
+    // ::marker (only the nested-list wrapper row may).
+    const css = readFileSync('src/styles/gian-v2.css', 'utf8');
+    const containers = css.match(/\.composer-md-ul,\s*\n\.composer-md-ol\s*\{([^}]*)\}/);
+    expect(containers).not.toBeNull();
+    expect(containers![1]).not.toContain('list-style');
+    const item = css.match(/\.composer-md-li\s*\{([^}]*)\}/);
+    expect(item).not.toBeNull();
+    expect(item![1]).not.toContain('list-style');
+  });
+
+  it('Shift+Enter on an empty list item exits the list into a paragraph', async () => {
+    const onKeyDown = vi.fn(() => true);
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '- one' }] }}
+        placeholder="Message"
+        onChange={() => {}}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    const shiftEnter = () => act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }),
+    ));
+    shiftEnter();
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('textbox').querySelectorAll('li')).toHaveLength(2));
+    // Same exit-on-empty as old Enter: the empty trailing item becomes a paragraph.
+    shiftEnter();
     await waitFor(() => {
       editor.getEditorState().read(() => {
         expect($getRoot().getChildren().map(node => node.getType())).toEqual(['list', 'paragraph']);
       });
     });
-
-    // Enter in that paragraph submits again.
-    enter();
-    expect(onKeyDown).toHaveBeenCalledTimes(1);
+    expect(onKeyDown).not.toHaveBeenCalled();
   });
 
-  it('Enter inside a code fence adds a line instead of submitting', async () => {
+  it('Shift+Enter during IME composition is left to the editor default', async () => {
+    const onKeyDown = vi.fn(() => true);
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '- one' }] }}
+        placeholder="Message"
+        onChange={() => {}}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    const composing = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true });
+    Object.defineProperty(composing, 'isComposing', { value: true });
+    act(() => editor.dispatchCommand(KEY_ENTER_COMMAND, composing));
+    // No submission, and no list continuation either — the composition owns Enter.
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(root.querySelectorAll('li')).toHaveLength(1);
+  });
+
+  it('Enter inside a code fence submits instead of adding a line', async () => {
     const onKeyDown = vi.fn(() => true);
     const onChange = vi.fn();
     render(
@@ -573,11 +663,62 @@ describe('InlineComposerEditor markdown', () => {
       KEY_ENTER_COMMAND,
       new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
     ));
+    expect(onKeyDown).toHaveBeenCalledTimes(1);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    // No line was added — the fence is exactly as it was.
+    const root = screen.getByRole('textbox');
+    expect(root.querySelector('code.composer-md-codeblock')).toHaveTextContent(/^first$/);
+  });
+
+  it('Shift+Enter inside a code fence adds a code line', async () => {
+    const onKeyDown = vi.fn(() => true);
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '```\nfirst\n```' }] }}
+        placeholder="Message"
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }),
+    ));
     expect(onKeyDown).not.toHaveBeenCalled();
     await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
       version: 1,
       segments: [{ type: 'text', text: '```\nfirst\n\n```' }],
     }));
+  });
+
+  it('Shift+Enter in a paragraph inserts a plain newline', async () => {
+    const onKeyDown = vi.fn(() => true);
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: 'hello' }] }}
+        placeholder="Message"
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }),
+    ));
+    expect(onKeyDown).not.toHaveBeenCalled();
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[0]).toEqual({
+      version: 1,
+      segments: [{ type: 'text', text: 'hello\n' }],
+    }));
+    editor.getEditorState().read(() => {
+      expect($getRoot().getChildren().map(node => node.getType())).toEqual(['paragraph']);
+    });
   });
 
   it('transforms a heading shortcut while typing', async () => {
@@ -660,6 +801,368 @@ describe('InlineComposerEditor markdown', () => {
     }));
     await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('/model fast'));
     expect(screen.getByRole('textbox').querySelector('h1, ul, blockquote, pre')).toBeNull();
+  });
+});
+
+describe('InlineComposerEditor soft-line markdown shortcuts', () => {
+  function renderedEditor(): LexicalEditor {
+    const root = screen.getByRole('textbox');
+    const editor = (root as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
+    if (!editor) throw new Error('expected lexical editor on contenteditable');
+    return editor;
+  }
+
+  function placeCaretAtDocumentEnd(editor: LexicalEditor): void {
+    act(() => editor.update(() => {
+      let node = $getRoot().getLastChild();
+      while (node && $isElementNode(node) && node.getChildrenSize() > 0) {
+        node = node.getLastChild();
+      }
+      if ($isTextNode(node)) node.selectEnd();
+      else if ($isElementNode(node)) node.selectEnd();
+    }, { discrete: true }));
+  }
+
+  // One update per character: the shortcut guards expect the caret to
+  // advance a single character per update, exactly like real keystrokes.
+  function typeText(editor: LexicalEditor, text: string): void {
+    for (const char of text) {
+      act(() => editor.update(() => {
+        const selection = $getSelection();
+        if ($isRangeSelection(selection)) selection.insertText(char);
+      }, { discrete: true }));
+    }
+  }
+
+  function shiftEnter(editor: LexicalEditor): void {
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, cancelable: true }),
+    ));
+  }
+
+  const HEADING_LEVELS: Array<[string, number]> = [
+    ['#', 1],
+    ['##', 2],
+    ['###', 3],
+    ['####', 4],
+    ['#####', 5],
+    ['######', 6],
+  ];
+
+  it.each(HEADING_LEVELS)(
+    'converts %s typed on a Shift+Enter line into a themed h%i with content intact',
+    async (hashes, level) => {
+      const onChange = vi.fn();
+      render(
+        <InlineComposerEditor
+          initialDocument={{ version: 1, segments: [{ type: 'text', text: 'intro' }] }}
+          placeholder="Message"
+          onChange={onChange}
+        />,
+      );
+      const root = screen.getByRole('textbox');
+      const editor = renderedEditor();
+      placeCaretAtDocumentEnd(editor);
+      shiftEnter(editor);
+      await waitFor(() => expect(root.querySelector('br')).not.toBeNull());
+
+      typeText(editor, `${hashes} `);
+      await waitFor(() => expect(root.querySelector(`h${level}.composer-md-h.composer-md-h${level}`)).not.toBeNull());
+      typeText(editor, 'Title');
+      // No swallowed or mangled characters: the heading is exactly "Title".
+      await waitFor(() => expect(root.querySelector(`h${level}`)).toHaveTextContent(/^Title$/));
+
+      // The trigger line became its own block; the previous line keeps its
+      // paragraph, and the export re-emits literal markdown.
+      editor.getEditorState().read(() => {
+        expect($getRoot().getChildren().map(node => node.getType())).toEqual(['paragraph', 'heading']);
+      });
+      await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe(`intro\n\n${hashes} Title`));
+    },
+  );
+
+  it('converts every heading level across consecutive Shift+Enter lines (owner scenario)', async () => {
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+
+    for (const [hashes, level] of HEADING_LEVELS) {
+      if (level > 1) shiftEnter(editor);
+      typeText(editor, `${hashes} `);
+      await waitFor(() => expect(root.querySelector(`h${level}`)).not.toBeNull());
+      typeText(editor, String(level));
+    }
+
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe(
+      '# 1\n\n## 2\n\n### 3\n\n#### 4\n\n##### 5\n\n###### 6',
+    ));
+    editor.getEditorState().read(() => {
+      const children = $getRoot().getChildren();
+      expect(children.map(node => node.getType())).toEqual([
+        'heading', 'heading', 'heading', 'heading', 'heading', 'heading',
+      ]);
+    });
+    for (const [, level] of HEADING_LEVELS) {
+      expect(root.querySelector(`h${level}.composer-md-h${level}`)).toHaveTextContent(new RegExp(`^${level}$`));
+    }
+  });
+
+  it('keeps a heading trigger typed mid-line as literal text', async () => {
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: 'intro' }] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    shiftEnter(editor);
+    await waitFor(() => expect(root.querySelector('br')).not.toBeNull());
+
+    typeText(editor, 'x # 7');
+    // Give the shortcut pass a beat to wrongly fire.
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(root.querySelector('h1, h2, h3, h4, h5, h6')).toBeNull();
+    expect(onChange.mock.calls.at(-1)?.[1]).toBe('intro\nx # 7');
+  });
+
+  it('plain Enter inside a heading submits instead of splitting the block', async () => {
+    const onKeyDown = vi.fn(() => true);
+    render(
+      <InlineComposerEditor
+        initialDocument={{ version: 1, segments: [{ type: 'text', text: '# Title' }] }}
+        placeholder="Message"
+        onChange={() => {}}
+        onKeyDown={onKeyDown}
+      />,
+    );
+    const root = screen.getByRole('textbox');
+    const editor = renderedEditor();
+    placeCaretAtDocumentEnd(editor);
+    act(() => editor.dispatchCommand(
+      KEY_ENTER_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+    ));
+    // Enter ALWAYS sends (owner contract) — the heading is not split.
+    expect(onKeyDown).toHaveBeenCalledTimes(1);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(root.querySelectorAll('h1')).toHaveLength(1);
+    editor.getEditorState().read(() => {
+      expect($getRoot().getChildren().map(node => node.getType())).toEqual(['heading']);
+    });
+  });
+
+  it('restores a soft-wrapped multi-line heading draft into heading nodes', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    // Drafts persisted while lines were soft-wrapped carry single newlines;
+    // the restore parse still recovers one heading per line.
+    act(() => handle.current?.setDocument({
+      version: 1,
+      segments: [{ type: 'text', text: '# 1\n## 2\n### 3' }],
+    }));
+    const root = screen.getByRole('textbox');
+    await waitFor(() => {
+      expect(root.querySelector('h1.composer-md-h1')).toHaveTextContent(/^1$/);
+      expect(root.querySelector('h2.composer-md-h2')).toHaveTextContent(/^2$/);
+      expect(root.querySelector('h3.composer-md-h3')).toHaveTextContent(/^3$/);
+    });
+    await waitFor(() => expect(onChange.mock.calls.at(-1)?.[1]).toBe('# 1\n\n## 2\n\n### 3'));
+  });
+});
+
+describe('InlineComposerEditor format boundary escape', () => {
+  function renderedEditor(): LexicalEditor {
+    const root = screen.getByRole('textbox');
+    const editor = (root as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
+    if (!editor) throw new Error('expected lexical editor on contenteditable');
+    return editor;
+  }
+
+  function $findTextNode(predicate: (node: TextNode) => boolean): TextNode | null {
+    const stack: LexicalNode[] = [$getRoot()];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if ($isTextNode(node) && predicate(node)) return node;
+      if ($isElementNode(node)) stack.push(...node.getChildren());
+    }
+    return null;
+  }
+
+  // Places a collapsed caret the way a native selectionchange does: Lexical's
+  // onSelectionChange inherits the anchor text node's format into
+  // selection.format and then dispatches SELECTION_CHANGE_COMMAND. jsdom
+  // never fires that event, so the sequence is replayed explicitly.
+  function placeCaret(
+    editor: LexicalEditor,
+    match: (node: TextNode) => boolean,
+    offset: number | 'end',
+  ): void {
+    act(() => editor.update(() => {
+      const node = $findTextNode(match);
+      if (!node) throw new Error('expected a matching text node');
+      const at = offset === 'end' ? node.getTextContentSize() : offset;
+      node.select(at, at);
+      const selection = $getSelection();
+      if (!$isRangeSelection(selection)) throw new Error('expected a range selection');
+      selection.setFormat(node.getFormat());
+      editor.dispatchCommand(SELECTION_CHANGE_COMMAND, undefined);
+    }, { discrete: true }));
+  }
+
+  function typeText(editor: LexicalEditor, text: string): void {
+    act(() => editor.update(() => {
+      const selection = $getSelection();
+      if ($isRangeSelection(selection)) selection.insertText(text);
+    }, { discrete: true }));
+  }
+
+  function lastDocument(onChange: ReturnType<typeof vi.fn>) {
+    return onChange.mock.calls.at(-1)?.[0];
+  }
+
+  async function renderDocument(text: string) {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument({ version: 1, segments: [{ type: 'text', text }] }));
+    return { editor: renderedEditor(), onChange };
+  }
+
+  it('typing after a bold segment at the end of a paragraph escapes bold', async () => {
+    const { editor, onChange } = await renderDocument('**bold**');
+    const root = screen.getByRole('textbox');
+    placeCaret(editor, node => node.hasFormat('bold'), 'end');
+    // Two separate insertions: the escape must hold for everything typed
+    // afterwards, not just the first character.
+    typeText(editor, 'a');
+    typeText(editor, 'b');
+
+    await waitFor(() => expect(lastDocument(onChange).segments).toEqual([
+      { type: 'text', text: '**bold**ab' },
+    ]));
+    expect(root.querySelector('.composer-md-bold')).toHaveTextContent(/^bold$/);
+  });
+
+  it('typing right after an inline-code segment escapes the code format', async () => {
+    const { editor, onChange } = await renderDocument('run `web_fetch` 是怎么实现的');
+    const root = screen.getByRole('textbox');
+    placeCaret(editor, node => node.hasFormat('code'), 'end');
+    typeText(editor, 'X');
+
+    await waitFor(() => expect(lastDocument(onChange).segments).toEqual([
+      { type: 'text', text: 'run `web_fetch`X 是怎么实现的' },
+    ]));
+    expect(root.querySelector('.composer-md-inline-code')).toHaveTextContent(/^web_fetch$/);
+  });
+
+  it('typing in the middle of a formatted segment keeps the format', async () => {
+    const { editor, onChange } = await renderDocument('**bold**');
+    placeCaret(editor, node => node.hasFormat('bold'), 2);
+    typeText(editor, 'X');
+
+    await waitFor(() => expect(lastDocument(onChange).segments).toEqual([
+      { type: 'text', text: '**boXld**' },
+    ]));
+  });
+
+  it('typing before a formatted segment preceded by plain text escapes the format', async () => {
+    const { editor, onChange } = await renderDocument('plain **bold**');
+    placeCaret(editor, node => node.hasFormat('bold'), 0);
+    typeText(editor, 'X');
+
+    await waitFor(() => expect(lastDocument(onChange).segments).toEqual([
+      { type: 'text', text: 'plain X**bold**' },
+    ]));
+  });
+
+  it('typing at the very start of a formatted block keeps the format', async () => {
+    const { editor, onChange } = await renderDocument('**bold**');
+    placeCaret(editor, node => node.hasFormat('bold'), 0);
+    typeText(editor, 'X');
+
+    await waitFor(() => expect(lastDocument(onChange).segments).toEqual([
+      { type: 'text', text: '**Xbold**' },
+    ]));
+  });
+
+  it('typing between a bold segment and a reference chip escapes bold', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(
+      <InlineComposerEditor
+        ref={handle}
+        initialDocument={{ version: 1, segments: [] }}
+        placeholder="Message"
+        onChange={onChange}
+      />,
+    );
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    act(() => handle.current?.setDocument({
+      version: 1,
+      segments: [
+        { type: 'text', text: '**bold**' },
+        { type: 'reference', id: 'ctx-1', referenceType: 'context', label: 'src' },
+        { type: 'text', text: ' ' },
+      ],
+    }));
+    const editor = renderedEditor();
+    placeCaret(editor, node => node.hasFormat('bold'), 'end');
+    typeText(editor, 'X');
+
+    await waitFor(() => expect(lastDocument(onChange)).toEqual({
+      version: 1,
+      segments: [
+        { type: 'text', text: '**bold**X' },
+        { type: 'reference', id: 'ctx-1', referenceType: 'context', label: 'src' },
+        { type: 'text', text: ' ' },
+      ],
+    }));
+  });
+
+  it('preserves literal whitespace-only draft segments between and after reference chips', async () => {
+    const handle = createRef<InlineComposerEditorHandle>();
+    const onChange = vi.fn();
+    render(<InlineComposerEditor ref={handle} initialDocument={{ version: 1, segments: [] }}
+      placeholder="Message" onChange={onChange} />);
+    await waitFor(() => expect(handle.current).not.toBeNull());
+    const document: ComposerDocument = { version: 1, segments: [
+      { type: 'reference', id: 'ctx-1', referenceType: 'context', label: 'one' },
+      { type: 'text', text: ' \t ' },
+      { type: 'reference', id: 'ctx-2', referenceType: 'context', label: 'two' },
+      { type: 'text', text: ' ' },
+    ] };
+    act(() => handle.current?.setDocument(document));
+    await waitFor(() => expect(lastDocument(onChange)).toEqual(document));
   });
 });
 
@@ -752,6 +1255,26 @@ describe('InlineComposerEditor @ file mention', () => {
     expect(chip.getAttribute('data-reference-kind')).toBe('file');
     expect(chip.querySelector('.cir-glyph')).not.toBeNull();
     expect(chip.querySelector('.cir-label')!.textContent).toBe('index.ts');
+  });
+
+  it('opens upward above the composer box, not downward from the caret', async () => {
+    const onFileQuery = vi.fn(async () => FILES);
+    renderMentionEditor({ onFileQuery, onFileReference: vi.fn() });
+    const editor = renderedEditor();
+    openPopover(editor, 'ind');
+
+    await waitFor(() => expect(document.body.querySelector('.cmp-file-pop')).not.toBeNull());
+    const pop = document.body.querySelector<HTMLElement>('.cmp-file-pop')!;
+    // Portaled straight to the body (escapes the Lexical typeahead anchor,
+    // whose caret-relative geometry opens downward) and anchored bottom-up
+    // like the `+` menu: `bottom` carries the position, `top` stays unset.
+    expect(pop.parentElement).toBe(document.body);
+    expect(pop.style.bottom).toBe(`${window.innerHeight + UPWARD_POPOVER_GAP}px`);
+    expect(pop.style.top).toBe('');
+    // jsdom rects are all-zero, so the space-above clamp floors the height.
+    expect(pop.style.maxHeight).toBe(`${UPWARD_POPOVER_MIN_HEIGHT}px`);
+    // Zero caret x clamps to the viewport margin.
+    expect(pop.style.left).toBe(`${UPWARD_POPOVER_MARGIN}px`);
   });
 
   it('moves the highlight with the arrow keys and accepts it with Enter', async () => {

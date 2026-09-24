@@ -64,6 +64,15 @@ export interface SlashCommand {
   filePath?: string;
   /** Hints for arg autocomplete. Empty array = command takes no args. */
   argHints?: SlashCommandArgHint[];
+  /** The command is configured but currently not invocable (e.g. a disabled
+   *  Codex skill). UI renders it dimmed and refuses dispatch. Absent on
+   *  proxies that predate the field — treated as enabled. */
+  disabled?: boolean;
+  /** Stable `ci1_…` Customization inventory id, set when this slash entry is
+   *  the same Provider definition as an inventory item. The seam that lets UI
+   *  deep-link a `/` row to its Custom entry. Absent for built-ins and on
+   *  proxies that predate the field. */
+  customizationId?: string;
 }
 
 export interface CcCapabilities {

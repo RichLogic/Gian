@@ -219,7 +219,7 @@ export function HistoryInspector({
   }, [fetchNote]);
 
   function runFetch(): void {
-    if (!workingTreeId || fetchPending) return;
+    if (!workingTreeId || fetchPending || workingTreeId.startsWith('remote:')) return;
     setFetchNote(null);
     const run = dispatch('git.historyFetch', { workingTreeId });
     setFetchAttempt({ ownerKey, runId: run.id });
@@ -338,7 +338,7 @@ export function HistoryInspector({
         <span className="label">{t('dock.history')}</span>
         <button className="iconbtn" title={t('history.sync.title')} aria-label={t('history.sync.title')}
                 data-testid="history-sync"
-                onClick={runSync} disabled={!workingTreeId || fetchPending}>
+                onClick={runSync} disabled={!workingTreeId || fetchPending || workingTreeId.startsWith('remote:')}>
           <Icon d={I.refresh} />
           {state.moved && <span className="nudge" />}
         </button>

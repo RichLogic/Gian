@@ -26,6 +26,7 @@ test('built remote server CLI includes migrations, listens, and shuts down on SI
       GIAN_REMOTE_DATA_DIR: dataDir,
       GIAN_REMOTE_PUBLIC_ORIGIN: 'http://127.0.0.1',
       GIAN_REMOTE_ADMIN_TOKEN: 'cli-smoke-admin',
+      GIAN_REMOTE_ENROLLMENT_GITHUB_IDS: '42',
       GIAN_REMOTE_STATIC_DIR: staticDir,
       GIAN_REMOTE_HOST: '127.0.0.1',
       GIAN_REMOTE_PORT: '0',

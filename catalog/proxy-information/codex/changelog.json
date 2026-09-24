@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "codex",
-  "currentVersion": "0.3.1",
+  "currentVersion": "0.3.2",
   "entries": [
+    {
+      "version": "0.3.2",
+      "firstPublishedAt": "2026-09-24T09:39:25Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-codex-v0.3.2",
+          "publishedAt": "2026-09-24T09:39:25Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.2",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.2/gian-proxy-codex-0.3.2-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "0ce5b510e61e060c9afbffd5a523dfc6452ecc32ad325bf9896f2b6d394def23",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.2/gian-proxy-codex-0.3.2-darwin-arm64.tar.gz",
+            "sha256": "894a488ac953795a2db48cb062c45f2b6ee1193d5de3f04e91fb891db03f01ce",
+            "size": 193337
+          },
+          "runtimeDeclaration": {
+            "id": "codex",
+            "versions": [
+              "0.156.1"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "适配 Codex CLI 0.156.1 的历史与 Fork 格式，修复运行进程清理；独立翻译对话关闭时不再读取临时历史。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.2",
+            "https://github.com/RichLogic/Gian-Proxies/blob/4740fab7dc3370cc812984519b5e9509bbcad2c0/CHANGELOG.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.1",
       "firstPublishedAt": "2026-09-17T00:56:25Z",

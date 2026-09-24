@@ -1,9 +1,13 @@
 import { request as requestHttp } from 'node:http';
 import { isAbsolute } from 'node:path';
 import type { RemoteIdentityMaterial, RemotePublicIdentity } from './identity.js';
+import type { RemoteAccountCredential } from '@gian/shared';
 
 const BROKER_PATH = '/v1/remote-identity';
-const DEFAULT_TIMEOUT_MS = 2_000;
+/** Must stay well under the device handshake's 8s crypto.accept budget, but
+ *  tolerate a busy Desktop main loop (packaging, GC) without failing the
+ *  whole handshake — one stall used to wedge the route until the next offer. */
+const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 
 export class RemoteIdentityBrokerClient implements RemoteIdentityMaterial {
@@ -43,6 +47,25 @@ export class RemoteIdentityBrokerClient implements RemoteIdentityMaterial {
 
   async setRefreshSecret(secret: string): Promise<void> {
     await this.call({ op: 'secret.set', refresh_secret: secret });
+  }
+
+  async getAccountSession(origin: string, role: 'host' | 'controller' = 'host'): Promise<RemoteAccountCredential | null> {
+    const data = await this.call({ op: 'account.get', origin, role });
+    return (data.account as RemoteAccountCredential | null) ?? null;
+  }
+
+  async ensureControllerIdentity(scope: string): Promise<RemotePublicIdentity> {
+    const data = await this.call({ op: 'controller.ensure', scope });
+    return { public_key: data.public_key as RemotePublicIdentity['public_key'], fingerprint: String(data.fingerprint) };
+  }
+
+  async signControllerIdentity(scope: string, bytes: Uint8Array): Promise<string> {
+    const data = await this.call({ op: 'controller.sign', scope, bytes_b64: Buffer.from(bytes).toString('base64url') });
+    return String(data.signature);
+  }
+
+  async setAccountSession(origin: string, account: RemoteAccountCredential | null, role: 'host' | 'controller' = 'host'): Promise<void> {
+    await this.call({ op: 'account.set', origin, role, account });
   }
 
   private call(body: Record<string, unknown>): Promise<Record<string, unknown>> {

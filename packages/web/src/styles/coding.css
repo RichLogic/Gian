@@ -794,14 +794,19 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
 
 /* Slash command popover — portaled to body, positioned via inline style.
  * `position: fixed` so it floats above scrolling content; the React side
- * computes left/bottom/width from the composer's bounding rect. */
+ * computes left/bottom/width from the composer's bounding rect. Rows share
+ * the `@` file popover's `.cmp-file-*` anatomy; only the frame, the source
+ * group headers, and the slash family icon tint are specific here. All
+ * composer popovers share one frame: the `.popover` base tokens used by the
+ * `+` menu (surface / r-3 / shadow-2). */
 .cmp-slash-pop {
   position: fixed;
-  background: var(--surface-2);
-  border-radius: var(--r-2);
-  box-shadow: 0 0 0 1px var(--hairline), 0 4px 16px oklch(0 0 0 / 0.15);
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
   overflow-y: auto;
-  max-height: 60vh;
+  /* ~7.5 rows + the hint footer — the 8th row peeks to signal scrollability */
+  max-height: 300px;
   z-index: 100;
   animation: slash-in 100ms var(--ease);
 }
@@ -810,53 +815,54 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   to   { opacity: 1; transform: none; }
 }
 
-.cmp-slash-row {
-  display: flex; align-items: baseline; gap: 10px;
-  width: 100%;
-  padding: 7px 10px;
-  border: 0; background: transparent;
-  text-align: left; cursor: pointer;
-  transition: background 60ms;
-}
-.cmp-slash-row:hover,
-.cmp-slash-row.active { background: var(--surface-3); }
+/* Slash rows reuse `.cmp-file-row`; the command name keeps its mono face. */
+.cmp-slash-cmd { font-family: var(--font-mono); }
 
-.cmp-slash-cmd {
-  font-family: var(--font-mono);
-  font-size: 12px; font-weight: 600;
-  color: var(--text);
-  flex-shrink: 0;
-}
-.cmp-slash-row.active .cmp-slash-cmd { color: var(--accent-text); }
-
-.cmp-slash-desc {
-  font-size: 11px;
-  color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+/* Disabled entries (configured but not invocable, e.g. a disabled Codex
+ * skill) stay visible for Custom-inventory parity but are dimmed and never
+ * dispatch — the pointer cursor would promise an action. */
+.cmp-slash-row.disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
-/* Slash command source section headers */
+/* Slash trigger family icon: a quiet accent tint, distinct from the muted
+ * file glyph in the `@` popover. */
+.cmp-slash-icon {
+  width: 18px;
+  height: 18px;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+.cmp-slash-icon svg { width: 11px; height: 11px; }
+
+/* Slash source group headers — small muted caps. */
 .cmp-slash-section {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  text-transform: none;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-3);
-  padding: 4px 10px 2px;
+  padding: 6px 10px 2px;
 }
-.cmp-slash-row[data-source="project"] .cmp-slash-cmd { color: var(--accent-text, var(--accent)); }
-.cmp-slash-row[data-source="user"] .cmp-slash-cmd { color: var(--ok); }
 
-/* `@` file-reference typeahead (rendered inside the Lexical #typeahead-menu
- * anchor, which the plugin positions at the caret). */
+/* `@` file-reference typeahead — portaled to body and positioned via inline
+ * style (left/bottom/maxHeight from upwardPopoverLayout): fixed so it floats
+ * above scrolling content, anchored bottom-up above the composer box like the
+ * `+` and `/` popovers. */
 .cmp-file-pop {
+  position: fixed;
+  z-index: 100;
   min-width: 280px;
   max-width: 420px;
-  background: var(--surface-2);
-  border-radius: var(--r-2);
-  box-shadow: 0 0 0 1px var(--hairline), 0 4px 16px oklch(0 0 0 / 0.15);
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
   overflow-y: auto;
-  /* ~7.5 rows + the hint footer — the 8th row peeks to signal scrollability */
+  /* ~7.5 rows + the hint footer — the 8th row peeks to signal scrollability;
+   * the inline maxHeight clamps below this when the space above is short. */
   max-height: 288px;
   animation: slash-in 100ms var(--ease);
 }
@@ -901,6 +907,46 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   color: var(--text-3);
   opacity: 0.5;
   border-top: 1px solid var(--hairline);
+}
+
+/* "Reference conversation" picker (composer + menu). Rows reuse the
+ * .cmp-file-* popover row styles; only the frame, search input, and the
+ * trailing time stamp are new. The frame uses the same `.popover` base tokens
+ * as the `+` menu (surface / r-3 / shadow-2) and is fixed-positioned like the
+ * other portaled composer popovers. */
+.cmp-session-pop {
+  position: fixed;
+  z-index: 100;
+  background: var(--surface);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  animation: slash-in 100ms var(--ease);
+}
+.cmp-session-search {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 6px 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+.cmp-session-search:focus { border-color: var(--accent-ring); }
+.cmp-session-list {
+  overflow-y: auto;
+  /* ~7.5 rows — the 8th row peeks to signal scrollability */
+  max-height: 288px;
+}
+.cmp-session-list .cmp-file-row { gap: 8px; }
+.cmp-session-time {
+  flex: none;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-3);
 }
 
 .composer-attachments {
@@ -1149,7 +1195,7 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   align-items: center;
   justify-content: center;
   height: 100vh;
-  background: var(--bg);
+  background: var(--bg-frame);
 }
 
 .login-card {

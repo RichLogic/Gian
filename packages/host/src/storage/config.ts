@@ -10,19 +10,24 @@ import type {
   ToolPreferences,
 } from '@gian/shared';
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_TRANSLATION_PREFERENCES, parseTranslationPreferences } from '@gian/shared';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  DEFAULT_ACCENT,
   DEFAULT_CHAT_FONT_SIZE,
   DEFAULT_LAYOUT_PREFERENCES,
   DEFAULT_NOTIFICATION_PREFERENCES,
   DEFAULT_TERMINAL_PREFERENCES,
   DEFAULT_TOOL_PREFERENCES,
+  FRAME_OPACITY_DEFAULT,
+  FRAME_OPACITY_MAX,
+  FRAME_OPACITY_MIN,
   KEYMAP_COMMANDS,
   MAX_CHAT_FONT_SIZE,
   MIN_CHAT_FONT_SIZE,
   SHORTCUT_ACTIONS,
-  THEME_DEFAULT_ACCENT,
+  SYSTEM_LIGHT_THEMES,
   isValidKeymapBinding,
   isValidShortcutCombo,
 } from '@gian/shared';
@@ -58,7 +63,8 @@ const KEYMAP_COMMAND_SET: ReadonlySet<string> = new Set(KEYMAP_COMMANDS);
 const VALID_ACCENTS: ReadonlySet<Accent> = new Set([
   'rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum',
 ]);
-const VALID_THEMES: ReadonlySet<SystemConfig['theme']> = new Set(['light', 'warm', 'dark']);
+const VALID_THEMES: ReadonlySet<SystemConfig['theme']> = new Set(['light', 'warm', 'dark', 'system']);
+const VALID_SYSTEM_LIGHT_THEMES: ReadonlySet<string> = new Set(SYSTEM_LIGHT_THEMES);
 const VALID_TERMINAL_FONT_FAMILIES = new Set<TerminalPreferences['font_family']>([
   'jetbrains-mono', 'system-mono', 'sf-mono', 'menlo',
 ]);
@@ -83,6 +89,13 @@ function sanitizeChatFontFamily(raw: string | undefined): SystemConfig['chat_fon
   return raw && VALID_CHAT_FONT_FAMILIES.has(raw as SystemConfig['chat_font_family'])
     ? (raw as SystemConfig['chat_font_family'])
     : 'system';
+}
+
+function sanitizeFrameOpacity(raw: string | undefined): number {
+  const value = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isInteger(value) && value >= FRAME_OPACITY_MIN && value <= FRAME_OPACITY_MAX
+    ? value
+    : FRAME_OPACITY_DEFAULT;
 }
 
 /** Keep only known actions with valid combo strings. Mirrors the load-side
@@ -235,6 +248,13 @@ function parseUserSettingsFile(): Partial<SystemConfig> {
     if (typeof raw.accent === 'string' && VALID_ACCENTS.has(raw.accent as Accent)) {
       parsed.accent = raw.accent as Accent;
     }
+    if (typeof raw.system_light_theme === 'string'
+      && VALID_SYSTEM_LIGHT_THEMES.has(raw.system_light_theme)) {
+      parsed.system_light_theme = raw.system_light_theme as SystemConfig['system_light_theme'];
+    }
+    if (raw.frame_opacity !== undefined) {
+      parsed.frame_opacity = sanitizeFrameOpacity(String(raw.frame_opacity));
+    }
     if (raw.chat_font_size !== undefined) {
       parsed.chat_font_size = sanitizeChatFontSize(String(raw.chat_font_size));
     }
@@ -242,6 +262,7 @@ function parseUserSettingsFile(): Partial<SystemConfig> {
       parsed.chat_font_family = sanitizeChatFontFamily(String(raw.chat_font_family));
     }
     if (raw.locale === 'zh-CN' || raw.locale === 'en') parsed.locale = raw.locale;
+    if (raw.translation !== undefined) parsed.translation = parseTranslationPreferences(raw.translation);
     if (raw.keymap !== undefined) parsed.keymap = sanitizeKeymap(raw.keymap);
     if (raw.layout !== undefined) parsed.layout = sanitizeLayoutPreferences(raw.layout);
     if (raw.tools !== undefined) parsed.tools = sanitizeToolPreferences(raw.tools);
@@ -266,7 +287,10 @@ function userSettingsDocument(config: SystemConfig): Record<string, unknown> {
     workspace_root: config.workspace_root,
     theme: config.theme,
     accent: config.accent,
+    system_light_theme: config.system_light_theme ?? 'warm',
+    frame_opacity: config.frame_opacity ?? FRAME_OPACITY_DEFAULT,
     locale: config.locale,
+    translation: config.translation ?? { ...DEFAULT_TRANSLATION_PREFERENCES },
     chat_font_size: config.chat_font_size,
     chat_font_family: config.chat_font_family,
     keymap: config.keymap ?? sanitizeKeymap(undefined),
@@ -292,6 +316,7 @@ function writeUserSettingsFile(config: SystemConfig): void {
     layout: config.layout,
     tools: config.tools,
     notifications: config.notifications,
+    translation: config.translation,
     terminal: config.terminal,
   };
 }
@@ -404,6 +429,10 @@ export function sanitizeTerminalPreferences(raw: unknown): TerminalPreferences {
 export function saveConfig(db: Db, partial: Partial<SystemConfig>): void {
   const stmt = db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`);
   for (const [key, value] of Object.entries(partial) as [keyof SystemConfig, SystemConfig[keyof SystemConfig]][]) {
+    if (key === 'translation') {
+      stmt.run(key, JSON.stringify(parseTranslationPreferences(value)));
+      continue;
+    }
     // Kept in the wire model for backward compatibility, but these appearance
     // choices were retired in 0.3.0. Ignore stale clients and always render
     // Cozy with MD interface/code text. `font_scale_chat` joined them when the
@@ -547,14 +576,26 @@ export function loadConfig(db: Db): SystemConfig {
   const rawAccent = map.get('accent') ?? '';
   const accent: Accent = VALID_ACCENTS.has(rawAccent as Accent)
     ? (rawAccent as Accent)
-    : THEME_DEFAULT_ACCENT[theme];
+    : DEFAULT_ACCENT;
+  const rawSystemLightTheme = map.get('system_light_theme') ?? '';
+  const systemLightTheme: NonNullable<SystemConfig['system_light_theme']> =
+    VALID_SYSTEM_LIGHT_THEMES.has(rawSystemLightTheme)
+      ? (rawSystemLightTheme as NonNullable<SystemConfig['system_light_theme']>)
+      : 'warm';
+  const frameOpacity = sanitizeFrameOpacity(map.get('frame_opacity'));
 
   const stored: SystemConfig = {
+    translation: (() => {
+      try { return parseTranslationPreferences(JSON.parse(map.get('translation') ?? 'null')); }
+      catch { return { ...DEFAULT_TRANSLATION_PREFERENCES }; }
+    })(),
     host: process.env.GIAN_HOST ?? map.get('host') ?? '127.0.0.1',
     port: Number(process.env.GIAN_PORT ?? map.get('port') ?? 8990),
     workspace_root: map.get('workspace_root') ?? '~/Coding',
     theme,
     accent,
+    system_light_theme: systemLightTheme,
+    frame_opacity: frameOpacity,
     density: 'cozy',
     font_scale_chrome: 'md',
     font_scale_chat: 'md',
@@ -577,11 +618,11 @@ export function loadConfig(db: Db): SystemConfig {
     open_apps: openApps,
   };
   const file = parseUserSettingsFile();
-  const effectiveTheme = file.theme ?? stored.theme;
   return {
     ...stored,
     ...file,
-    theme: effectiveTheme,
-    accent: file.accent ?? (file.theme ? THEME_DEFAULT_ACCENT[effectiveTheme] : stored.accent),
+    // Accents are decoupled from themes: a theme-only override never implies
+    // an accent change.
+    accent: file.accent ?? stored.accent,
   };
 }

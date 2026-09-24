@@ -643,6 +643,9 @@ export function applyEnvelope(
     // stripping is a render-time concern).
     const item: MsgItem = {
       kind: 'user', id: env.call_id, text: stripGianRolePrefix(text), exec: executor,
+      ...(data.translation && typeof data.translation === 'object'
+        && typeof (data.translation as Record<string, unknown>).text === 'string'
+        ? { translation: data.translation as import('@gian/shared').TranslationRecord } : {}),
       ts: env.ts, turn: env.turn,
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(contextItems.length > 0 ? { contextItems } : {}),
@@ -666,6 +669,7 @@ export function applyEnvelope(
       if (
         cand.kind === 'user' && cand.pending
         && !cand.sendCanonical
+        && (typeof data.send_id !== 'string' || cand.sendRetry?.sendId === data.send_id)
         && (cand.text === item.text || cand.text === strippedItemText)
         && (cand.attachments?.length ?? 0) === attachments.length
         && (cand.contextItems?.length ?? 0) === contextItems.length

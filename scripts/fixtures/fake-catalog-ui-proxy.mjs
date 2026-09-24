@@ -7,6 +7,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { randomUUID } from 'node:crypto';
 
 const pluginId = process.env.GIAN_PLUGIN_ID ?? 'grok';
 const certificationProvider = process.env.GIAN_E2E_PROXY_PROVIDER ?? pluginId;
@@ -54,6 +55,9 @@ const sessions = new Map();
 let catalogRevision = 1;
 let processEventSequence = 0;
 let streamSequence = 0;
+// Reattaching the same native session after a process restart creates a new
+// live stream; its reset sequence must not reuse persisted event identities.
+const processInstanceId = randomUUID();
 let negotiatedProtocol = '2.0';
 
 const model = {
@@ -296,7 +300,7 @@ function emitProcess(method, data) {
     jsonrpc: '2.0',
     method,
     params: {
-      eventId: `process-${processEventSequence}-${method.replaceAll('.', '-')}`,
+      eventId: `process-${processInstanceId}-${processEventSequence}-${method.replaceAll('.', '-')}`,
       emittedAt: timestamp(processEventSequence),
       data,
     },
@@ -921,7 +925,7 @@ for await (const line of input) {
       const session = {
         id: request.params.sessionId,
         nativeSessionId: request.params.nativeSession?.id ?? `native-${pluginId}-${request.params.sessionId}`,
-        streamId: `stream-${pluginId}-${++streamSequence}`,
+        streamId: `stream-${pluginId}-${processInstanceId}-${++streamSequence}`,
         state: 'idle',
         sessionConfig: request.params.config ?? {},
         lastError: null,

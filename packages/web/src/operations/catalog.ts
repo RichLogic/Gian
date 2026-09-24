@@ -20,8 +20,10 @@ import {
   probeProxyRuntime,
   rollbackCatalogProxy,
   syncProxyCatalog,
+  uninstallIntegration,
   updateCatalogProxy,
   type CatalogMutationReceipt,
+  type IntegrationUninstallReceipt,
 } from '../api.js';
 import { registry } from './registry.js';
 import type { OperationDefinition } from './types.js';
@@ -111,6 +113,13 @@ const catalogRollbackProxy: OperationDefinition<CatalogPluginInput, CatalogMutat
   timeoutMs: INSTALL_TIMEOUT_MS,
 };
 
+const catalogUninstallProxy: OperationDefinition<CatalogPluginInput, IntegrationUninstallReceipt> = {
+  policy: 'pending',
+  entityKey: input => catalogEntityKey(input.pluginId),
+  execute: input => uninstallIntegration(input.pluginId),
+  timeoutMs: REST_TIMEOUT_MS,
+};
+
 interface RuntimeProbeInput extends CatalogPluginInput {
   /** Raw absolute path as typed/picked by the user. The Host canonicalizes
    *  and validates it; Web never pre-judges the filesystem. */
@@ -136,5 +145,6 @@ registry.register('catalog.installProxy', catalogInstallProxy);
 registry.register('catalog.installRuntime', catalogInstallRuntime);
 registry.register('catalog.updateProxy', catalogUpdateProxy);
 registry.register('catalog.rollbackProxy', catalogRollbackProxy);
+registry.register('catalog.uninstallProxy', catalogUninstallProxy);
 registry.register('catalog.discoverRuntime', catalogDiscoverRuntime);
 registry.register('catalog.probeRuntime', catalogProbeRuntime);

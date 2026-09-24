@@ -17,8 +17,9 @@ export interface ComposerReferenceSegment {
   referenceType: 'attachment' | 'context';
   label: string;
   /** Optional chip discriminator. 'file' marks a working-tree file reference
-   *  so renderers can show a file glyph instead of the generic '@' mention. */
-  kind?: 'file';
+   *  and 'session' a referenced Gian conversation, so renderers can show a
+   *  dedicated glyph instead of the generic '@' mention. */
+  kind?: 'file' | 'session';
 }
 
 export interface ComposerDocument {
@@ -30,12 +31,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function normalizeReferenceKind(value: unknown): 'file' | 'session' | undefined {
+  return value === 'file' || value === 'session' ? value : undefined;
+}
+
 /** Closed, bounded message-document parser shared by Web and Host. */
 export function normalizeComposerDocument(value: unknown): ComposerDocument | null {
   if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.segments)) return null;
   if (value.segments.length > MAX_COMPOSER_DOCUMENT_SEGMENTS) return null;
   const segments: ComposerDocument['segments'] = [];
-  const referencesById = new Map<string, { referenceType: ComposerReferenceSegment['referenceType']; label: string; kind?: 'file' }>();
+  const referencesById = new Map<string, { referenceType: ComposerReferenceSegment['referenceType']; label: string; kind?: 'file' | 'session' }>();
   let textBytes = 0;
   for (const raw of value.segments) {
     if (!isRecord(raw) || typeof raw.type !== 'string') return null;
@@ -56,11 +61,11 @@ export function normalizeComposerDocument(value: unknown): ComposerDocument | nu
       || raw.id.length > 128
       || (raw.referenceType !== 'attachment' && raw.referenceType !== 'context')
       || typeof raw.label !== 'string'
-      || (raw.kind !== undefined && raw.kind !== 'file')
+      || (raw.kind !== undefined && raw.kind !== 'file' && raw.kind !== 'session')
     ) return null;
     const label = raw.label.replace(/\s+/g, ' ').trim().slice(0, MAX_COMPOSER_REFERENCE_LABEL_CHARS);
     if (!label) return null;
-    const kind = raw.kind === 'file' ? 'file' as const : undefined;
+    const kind = normalizeReferenceKind(raw.kind);
     const existing = referencesById.get(raw.id);
     if (existing && (existing.referenceType !== raw.referenceType || existing.label !== label || existing.kind !== kind)) return null;
     referencesById.set(raw.id, { referenceType: raw.referenceType, label, ...(kind ? { kind } : {}) });
@@ -85,6 +90,47 @@ export function composerDocumentPlainText(document: ComposerDocument): string {
 /** User-authored text only, used for slash filtering and empty-state logic. */
 export function composerDocumentUserText(document: ComposerDocument): string {
   return document.segments.flatMap(segment => segment.type === 'text' ? [segment.text] : []).join('');
+}
+
+/**
+ * Per-message attachment numbering: every attachment reference is numbered
+ * 1-based in document order (first appearance per id), counting ALL
+ * attachment references — images and files alike. This is exactly the N the
+ * Host's compile emits as `[Attached resource N: "label"]`, so UI labels and
+ * badges derive from it instead of inventing a second numbering.
+ */
+export function attachmentReferenceNumbers(document: ComposerDocument): Map<string, number> {
+  const numbers = new Map<string, number>();
+  for (const segment of document.segments) {
+    if (segment.type !== 'reference' || segment.referenceType !== 'attachment') continue;
+    if (!numbers.has(segment.id)) numbers.set(segment.id, numbers.size + 1);
+  }
+  return numbers;
+}
+
+/**
+ * Send-time label rewrite: image attachment references display as `image<N>`
+ * (N from `attachmentReferenceNumbers`) so the chip the user reads matches
+ * the `[Attached resource N]` marker in the compiled prompt. Non-image
+ * attachments keep their labels. Pure: returns the input unchanged (same
+ * reference) when no image reference is present.
+ */
+export function numberImageAttachmentLabels(
+  document: ComposerDocument,
+  isImage: (referenceId: string) => boolean,
+): ComposerDocument {
+  const numbers = attachmentReferenceNumbers(document);
+  let changed = false;
+  const segments = document.segments.map(segment => {
+    if (segment.type !== 'reference' || segment.referenceType !== 'attachment') return segment;
+    const n = numbers.get(segment.id);
+    if (n === undefined || !isImage(segment.id)) return segment;
+    const label = `image${n}`;
+    if (segment.label === label) return segment;
+    changed = true;
+    return { ...segment, label };
+  });
+  return changed ? { ...document, segments } : document;
 }
 
 interface MessageContextItemBase {
@@ -125,7 +171,20 @@ export interface BrowserElementContextItem extends MessageContextItemBase, GianB
   type: 'browserElement';
 }
 
-export type MessageContextItem = PastedTextContextItem | FolderContextItem | FileContextItem | BrowserElementContextItem;
+/** Reference to another Gian session's conversation. The transcript is never
+ *  embedded by the client; at send time the Host resolves the session and
+ *  inlines a bounded slice of its user/assistant text turns into the compiled
+ *  prompt (see the Host's session compile caps). A session that was deleted
+ *  before compile degrades to a note — it never fails the send. */
+export interface SessionContextItem extends MessageContextItemBase {
+  type: 'session';
+  sessionId: string;
+  title: string;
+  /** Display-only workspace label captured when the chip was picked. */
+  workspaceName?: string;
+}
+
+export type MessageContextItem = PastedTextContextItem | FolderContextItem | FileContextItem | BrowserElementContextItem | SessionContextItem;
 
 export interface PickedFileResource {
   type: 'file';

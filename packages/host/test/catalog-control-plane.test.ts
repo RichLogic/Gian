@@ -12,7 +12,7 @@ import {
   type CatalogEntryV1,
   type CompiledCatalogBundle,
 } from '@gian/proxy-catalog-contract';
-import type { OfficialCatalogSourcePolicy } from '@gian/shared';
+import { officialCatalogSourcePolicy, type OfficialCatalogSourcePolicy } from '@gian/shared';
 
 import {
   createCatalogAnonymousNetwork,
@@ -144,6 +144,7 @@ function compileSequence(
   sequence: number,
   tagline = 'Unknown reverse-domain Catalog fixture',
   keys = makeSigningKeys(),
+  artifactRepository = 'RichLogic/Gian',
 ) {
   const entry: CatalogEntryV1 = {
     schemaVersion: 1,
@@ -165,13 +166,13 @@ function compileSequence(
       stable: {
         pluginVersion: '0.1.0',
         manifest: {
-          url: 'https://github.com/RichLogic/Gian/releases/download/proxy-fixture-v0.1.0/gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz.manifest.json',
+          url: `https://github.com/${artifactRepository}/releases/download/proxy-fixture-v0.1.0/gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz.manifest.json`,
           sha256: 'a'.repeat(64),
           size: 1,
         },
         artifacts: {
           'darwin-arm64': {
-            url: 'https://github.com/RichLogic/Gian/releases/download/proxy-fixture-v0.1.0/gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz',
+            url: `https://github.com/${artifactRepository}/releases/download/proxy-fixture-v0.1.0/gian-proxy-fixture-0.1.0-darwin-arm64.tar.gz`,
             sha256: 'b'.repeat(64),
             size: 1234,
           },
@@ -186,7 +187,7 @@ function compileSequence(
     sourceId: 'gian-official',
     sequence,
     issuedAt: '2026-09-02T00:00:00.000Z',
-    allowedArtifactRepositories: ['RichLogic/Gian'],
+    allowedArtifactRepositories: [artifactRepository],
     signingKey: { keyId: 'gian-official-catalog-2026', privateKey: keys.privateKey },
     plugins: [{
       entry,
@@ -306,6 +307,60 @@ test('concurrent Catalog sync callers share the initial signed generation', asyn
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('repository cutover retains the old signed cache and watermark until a newer trusted Catalog arrives', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-catalog-repository-cutover-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const old = compileSequence(6);
+  await new CatalogStore({ rootDir: root, policy: old.policy }).ingest(old.bundle.files, '"old-source"');
+  const policy: OfficialCatalogSourcePolicy = {
+    ...officialCatalogSourcePolicy(), pinnedPublicKeys: old.policy.pinnedPublicKeys,
+  };
+  const store = new CatalogStore({ rootDir: root, policy });
+  assert.equal((await store.open()).sequence, 6);
+  const unavailable = new CatalogSourceClient({ store, policy, network: {
+    async latest() { throw new Error('New signed Catalog is not published yet'); },
+    async download() { throw new Error('No download is authorized'); },
+  } });
+  const retained = await unavailable.sync();
+  assert.equal(retained.sequence, 6);
+  assert.equal(retained.state, 'stale');
+  assert.equal(await readFile(join(root, 'watermark'), 'utf8'), '6\n');
+
+  const next = compileSequence(7, 'New repository', old.keys, 'RichLogic/Gian-Proxies');
+  const updated = await new CatalogSourceClient({ store, policy,
+    network: memoryNetwork(new Map([[7, next.bundle]])),
+  }).sync();
+  assert.equal(updated.sequence, 7);
+  assert.equal(updated.state, 'ready');
+  assert.ok(updated.index?.plugins[0]?.stable.manifest?.url.startsWith('https://github.com/RichLogic/Gian-Proxies/'));
+  await assert.rejects(store.ingest(old.bundle.files), /rollback/);
+  const wrongKey = compileSequence(8);
+  const rejected = await new CatalogSourceClient({ store, policy,
+    network: memoryNetwork(new Map([[8, wrongKey.bundle]])),
+  }).sync();
+  assert.equal(rejected.sequence, 7);
+  assert.equal(rejected.error?.code, 'CATALOG_SIGNATURE_INVALID');
+  assert.equal(await readFile(join(root, 'watermark'), 'utf8'), '7\n');
+});
+
+test('anonymous Catalog discovery selects only published Catalog tags in the mixed Proxy repository', async () => {
+  const network = createCatalogAnonymousNetwork({
+    policy: officialCatalogSourcePolicy(),
+    fetchImpl: async input => {
+      assert.equal(String(input), 'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=100');
+      return Response.json([
+        { tag_name: 'proxy-codex-v0.3.1', assets: [] },
+        { tag_name: 'catalog-v1.99.0', draft: true, assets: [] },
+        { tag_name: 'catalog-v1.98.0', prerelease: true, assets: [] },
+        { tag_name: 'catalog-v1.7.0', draft: false, prerelease: false, assets: [{ name: 'catalog-v1.json', size: 10 }] },
+      ]);
+    },
+  });
+  const latest = await network.latest({});
+  assert.equal(latest.status, 200);
+  if (latest.status === 200) assert.equal(latest.release.sequence, 7);
 });
 
 test('signature, rollback, same-sequence conflict, and network failure keep last-known-good', async () => {

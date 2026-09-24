@@ -14,6 +14,31 @@ import {
 } from '@gian/proxy-protocol';
 
 import { DshV2Adapter } from '../src/protocol/v2-adapter.js';
+import { DshProxyService } from '../src/core/service.js';
+
+test('DSH transient stream chunk identities are separate from durable sequence numbers', () => {
+  const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const service = new DshProxyService({ emit: event => events.push(event), pluginVersion: '0.3.2' });
+  service.attach({ sessionId: 's-live', nativeSessionId: 'native-live', cwd: '/tmp', roots: ['/tmp'], sessionConfig: {}, createFingerprint: 'fixture' });
+  service.prepareTurn('s-live', 'turn-live');
+  for (const [type, data, nativeSeq] of [
+    ['turn/start', { turn: 0 }, 0], ['step/start', { turn: 0, step: 0 }, 1],
+  ] as const) {
+    service.handleBridgeNotification({ method: 'session.event', params: { sessionId: 's-live', type, data, nativeSeq } });
+  }
+  for (const index of [0, 1]) {
+    service.handleBridgeNotification({ method: 'session.event', params: {
+      sessionId: 's-live', type: 'assistant/chunk', data: {
+        turn: 0, step: 0, liveAttemptId: 'attempt-a', liveChunkIndex: index,
+        chunk: { type: 'text-delta', index: 0, text: 'ha' },
+      },
+    } });
+  }
+  const chunks = events.filter(event => event.method === 'content.delta');
+  assert.equal(chunks.length, 2);
+  assert.notEqual(chunks[0]?.params.eventId, chunks[1]?.params.eventId);
+  assert.deepEqual(chunks.map(event => (event.params.data as { delta: string }).delta), ['ha', 'ha']);
+});
 import { PLUGIN_ID } from '../src/core/service.js';
 
 interface FakeBridge {
@@ -210,6 +235,26 @@ test('initialize: only accepts gian.proxy 2.1 and returns exact identity', async
   assert.equal(result.capabilities['event.step'], 1);
   assert.equal(result.capabilities['event.request'], 1);
   assert.equal(result.capabilities['session.create.hostBindingProof'], 1);
+});
+
+test('session.close is idempotent without re-closing a removed native session', async () => {
+  const bridge = fakeBridge();
+  const original = bridge.request.bind(bridge);
+  let closes = 0;
+  bridge.request = async (method, params) => {
+    if (method === 'session.close' && ++closes > 1) throw new Error('Native session already removed');
+    return original(method, params);
+  };
+  const { adapter } = adapterWith(bridge);
+  await call(adapter, 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'fixture', version: '1' } });
+  const created = await call(adapter, 'session.create', { sessionId: 'repeat-close', workspace: { cwd: '/tmp', roots: ['/tmp'] }, config: {} });
+  assert.equal(created.error, null);
+  const session = (created.result as { session: { id: string; streamId: string } }).session;
+  const params = { sessionId: session.id, streamId: session.streamId };
+  assert.equal((await call(adapter, 'session.close', params)).error, null);
+  assert.equal((await call(adapter, 'session.close', params)).error, null);
+  assert.equal(closes, 1);
+  assert.equal((await call(adapter, 'session.close', { ...params, streamId: 'stale' })).error?.data?.domainCode, 'SESSION_STALE');
 });
 
 test('initialize rejects non-2.1 versions', async () => {

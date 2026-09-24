@@ -411,6 +411,9 @@ async function loadPatch(
           state.baseBranch,
           state.lastTurn?.sessionId ?? state.sessionId,
           state.lastTurn?.turn,
+          // Cross-tree last-turn entries carry their producing root; the host
+          // uses it to pick the right snapshot and skip viewed-tree fallbacks.
+          state.files.find(file => file.path === path)?.root ?? null,
         )
       : await loadDiff(
           workingTreeId,
@@ -458,6 +461,25 @@ export function retryChangesDiffPatch(
   ownerSessionId?: string | null,
 ): void {
   void loadPatch(workingTreeId, path, ownerSessionId);
+}
+
+/** Load every listed file's patch for the current scope (attach-as-context).
+ *  In-flight/loaded patches are left alone — the IO-driven lazy loads dedupe
+ *  themselves. Resolves false when the scope identity changed while loading:
+ *  the store now describes a different comparison, so the caller must not
+ *  assemble from it. */
+export async function loadAllChangesDiffPatches(
+  workingTreeId: string,
+  ownerSessionId?: string | null,
+): Promise<boolean> {
+  const scopeKey = scopeKeyOf(getChangesDiffState(workingTreeId, ownerSessionId));
+  const { files } = getChangesDiffState(workingTreeId, ownerSessionId);
+  await Promise.all(files.map(file => {
+    const current = getChangesDiffState(workingTreeId, ownerSessionId).patches[file.path];
+    if (current && current.status !== 'idle') return Promise.resolve();
+    return loadPatch(workingTreeId, file.path, ownerSessionId);
+  }));
+  return scopeKeyOf(getChangesDiffState(workingTreeId, ownerSessionId)) === scopeKey;
 }
 
 // ─── Collapse state ─────────────────────────────────────────────────────────

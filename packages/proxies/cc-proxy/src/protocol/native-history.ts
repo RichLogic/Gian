@@ -10,6 +10,7 @@ import {
   readSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -202,6 +203,17 @@ function sessionPath(nativeSessionId: string, cwd: string, homeDir = homedir()):
   return join(projectDir(cwd, homeDir), `${nativeSessionId}.jsonl`);
 }
 
+function inheritedTurnIds(path: string): string[] {
+  const sidecar = `${path}.gian-turn-ids.json`;
+  if (!existsSync(sidecar)) return [];
+  if (statSync(sidecar).size > 4 * 1024 * 1024) throw new Error('Claude fork identity metadata exceeds its read limit.');
+  const ids: unknown = JSON.parse(readFileSync(sidecar, 'utf8'));
+  if (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^claude-turn-[a-f0-9]+$/.test(id))) {
+    throw new Error('Invalid Claude fork identity metadata.');
+  }
+  return ids;
+}
+
 /**
  * Clone Claude Code's durable JSONL conversation without starting `claude -p`.
  * This keeps Side Chat/Fork creation billing-safe. A turn boundary includes
@@ -223,6 +235,8 @@ export function forkClaudeNativeSession(
 
   const output: string[] = [];
   let replayableTurnIndex = 0;
+  const inherited = inheritedTurnIds(sourcePath);
+  const copiedIdentities: string[] = [];
   let copiedTurns = 0;
   let foundBoundary = throughSourceTurnId === undefined;
   for (const line of readFileSync(sourcePath, 'utf8').split('\n')) {
@@ -237,10 +251,12 @@ export function forkClaudeNativeSession(
       const message = value.message as { content?: unknown } | undefined;
       if (typeof message?.content === 'string' && !systemNoise(message.content)) {
         const prompt = normalizeNativePrompt(message.content);
-        const sourceTurnId = nativeTurnSourceId(sourceNativeSessionId, prompt, replayableTurnIndex);
+        const sourceTurnId = inherited[replayableTurnIndex]
+          ?? nativeTurnSourceId(sourceNativeSessionId, prompt, replayableTurnIndex);
         replayableTurnIndex += 1;
         if (throughSourceTurnId && foundBoundary) break;
         copiedTurns += 1;
+        copiedIdentities.push(sourceTurnId);
         if (sourceTurnId === throughSourceTurnId) foundBoundary = true;
       }
     }
@@ -255,6 +271,13 @@ export function forkClaudeNativeSession(
     flag: 'wx',
     mode: 0o600,
   });
+  try {
+    // Keep app-owned lineage separate from Claude's native JSONL grammar.
+    writeFileSync(`${targetPath}.gian-turn-ids.json`, JSON.stringify(copiedIdentities), { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    unlinkSync(targetPath); // only the new file created above, never the source
+    throw error;
+  }
   return { copiedTurns };
 }
 
@@ -391,6 +414,7 @@ export function replayClaudeNativeSession(
   const path = sessionPath(nativeSessionId, cwd, homeDir);
   if (!existsSync(path)) return { streamId: stableId('replay', { nativeSessionId, empty: true }), events: [] };
   const content = readFileSync(path, 'utf8');
+  const inherited = inheritedTurnIds(path);
   const fallback = new Date(0).toISOString();
   const turns: ReplayTurn[] = [];
   let turn: ReplayTurn | null = null;
@@ -511,7 +535,7 @@ export function replayClaudeNativeSession(
   };
 
   for (const [index, replayTurn] of turns.entries()) {
-    const sourceTurnId = nativeTurnSourceId(nativeSessionId, replayTurn.input, index);
+    const sourceTurnId = inherited[index] ?? nativeTurnSourceId(nativeSessionId, replayTurn.input, index);
     append(sourceTurnId, replayTurn.timestamp, turnStartedEventId(sourceTurnId), 'turn.started', {});
     append(sourceTurnId, replayTurn.timestamp, inputRecordedEventId(sourceTurnId), 'input.recorded', {
       input: [{ type: 'text', text: replayTurn.input }],

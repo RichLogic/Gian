@@ -8,6 +8,8 @@ import type {
   GianBrowserDownloadsSnapshot,
   GianBrowserExtension,
   GianBrowserExtensionsSnapshot,
+  GianBrowserPageSnapshotCapture,
+  GianBrowserPageScreenshotCapture,
   GianBrowserPreferences,
   GianBrowserPermissionDecision,
   GianBrowserPermissionsSnapshot,
@@ -34,10 +36,12 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     appVariant,
     appVersion,
+    platform: process.platform,
     retryConnection: () => ipcRenderer.invoke('desktop:retry-connection'),
     openLogs: () => ipcRenderer.invoke('desktop:open-logs'),
     restartApp: () => ipcRenderer.invoke('desktop:restart-app'),
     setDockIcon: (dataUrl: string) => ipcRenderer.invoke('desktop:set-dock-icon', dataUrl),
+    setFrameVibrancy: (theme: string, system: boolean) => ipcRenderer.invoke('desktop:set-frame-vibrancy', theme, system),
     resources: Object.freeze({
       pick: () => ipcRenderer.invoke('desktop:resources:pick') as Promise<PickComposerResourcesResult | null>,
     }),
@@ -134,6 +138,10 @@ contextBridge.exposeInMainWorld(
         ipcRenderer.invoke('desktop:browser:set-layout', tabId, bounds, visible),
       captureFrame: (tabId: string) =>
         ipcRenderer.invoke('desktop:browser:capture-frame', tabId) as Promise<string | null>,
+      capturePageSnapshot: (tabId: string) =>
+        ipcRenderer.invoke('desktop:browser:capture-page-snapshot', tabId) as Promise<GianBrowserPageSnapshotCapture | null>,
+      capturePageScreenshot: (tabId: string) =>
+        ipcRenderer.invoke('desktop:browser:capture-page-screenshot', tabId) as Promise<GianBrowserPageScreenshotCapture | null>,
       setBackground: (tabId: string, cssColor: string) =>
         ipcRenderer.invoke('desktop:browser:set-background', tabId, cssColor),
       setZoom: (tabId: string, factor: number) =>

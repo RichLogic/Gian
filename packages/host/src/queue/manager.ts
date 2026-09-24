@@ -6,6 +6,7 @@ import {
   type MessageContextItem,
 } from '@gian/shared';
 import type { Db } from '../storage/db.js';
+import { compileContextIntoInput, decompileContextFromText } from '../session/context-items.js';
 
 export interface QueueEntry {
   id: string;
@@ -161,9 +162,15 @@ export class QueueManager {
     return this.mutate(sessionId, expectedRevision, () => {
       const current = this.get(sessionId, queueId);
       if (!current) return null;
-      this.db.prepare('UPDATE queue_entries SET text = ? WHERE session_id = ? AND id = ?')
-        .run(text, sessionId, queueId);
-      return { ...current, text };
+      const items = current.items?.map(item => {
+        if (item.type !== 'text' || !('text' in item) || typeof item.text !== 'string') return item;
+        const compiled = decompileContextFromText(item.text);
+        if (compiled) return compileContextIntoInput(text, undefined, compiled.contextItems)[0]!;
+        return item.text === current.text ? { ...item, text } : item;
+      });
+      this.db.prepare('UPDATE queue_entries SET text = ?, items_json = ? WHERE session_id = ? AND id = ?')
+        .run(text, items ? JSON.stringify(items) : null, sessionId, queueId);
+      return { ...current, text, ...(items ? { items } : {}) };
     }, result => result !== null);
   }
 

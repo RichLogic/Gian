@@ -57,6 +57,25 @@ it('renders unsupported image formats as download chips', () => {
   expect(link.querySelector('img')).toBeNull();
 });
 
+it('renders user message text through the shared markdown pipeline', () => {
+  render(
+    <LocaleProvider locale="en">
+      <UserMessage item={{
+        kind: 'user',
+        id: 'message-md',
+        text: 'ship **it** now',
+        exec: 'claude',
+        ts: 0,
+        turn: 1,
+      }} />
+    </LocaleProvider>,
+  );
+
+  const text = document.querySelector('.user-text')!;
+  expect(text.classList.contains('user-md')).toBe(true);
+  expect(text.querySelector('strong')).toHaveTextContent('it');
+});
+
 it('renders structured references inline at their original message positions', async () => {
   render(
     <LocaleProvider locale="en">

@@ -306,6 +306,7 @@ export class GitHubAuthService {
     let selected: { tag: string; sequence: number; assets: Array<{ name: string; size: number }> } | null = null;
     for (const item of parsed) {
       if (!isRecord(item) || typeof item.tag_name !== 'string') continue;
+      if (item.draft === true || item.prerelease === true) continue;
       const match = /^catalog-v1\.([1-9]\d*)\.0$/.exec(item.tag_name);
       if (!match) continue;
       const sequence = Number(match[1]);

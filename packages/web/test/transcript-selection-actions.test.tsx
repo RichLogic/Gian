@@ -83,6 +83,24 @@ function renderTranscript(actions: TranscriptSelectionActionsConfig, items = ITE
   );
 }
 
+it('selected-text translation opens a reading-only overlay and cancels on close', async () => {
+  const { actions, add, ask } = enabledActions();
+  const cancel = vi.fn();
+  const translate = vi.fn((_selection: import('../src/transcript/selection-context.js').TranscriptTextSelection) => ({ promise: new Promise<import('@gian/shared').TranslationRecord>(() => {}), cancel }));
+  actions.translate = { enabled: true, label: 'Translate to Chinese', run: translate };
+  const { container } = renderTranscript(actions);
+  const source = container.querySelector<HTMLElement>('[data-transcript-source-kind="assistant"]')!;
+  selectBetween(source, 0, source, 9);
+  fireEvent.click(screen.getByRole('button', { name: 'Translate to Chinese' }));
+  expect(translate).toHaveBeenCalledTimes(1);
+  expect(translate.mock.calls[0]?.[0]).toMatchObject({ text: 'Assistant' });
+  expect(screen.getByRole('dialog', { name: 'Translate to Chinese' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(add).not.toHaveBeenCalled();
+  expect(ask).not.toHaveBeenCalled();
+});
+
 beforeEach(() => {
   // Commit the RAF-driven toolbar and its effects before dispatching UI events.
   vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] });

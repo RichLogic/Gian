@@ -1,0 +1,58 @@
+name: Publish Catalog Documentation
+on:
+  workflow_dispatch:
+    inputs:
+      base_catalog_tag:
+        description: Already signed published Catalog whose executables remain unchanged
+        required: true
+        type: string
+      sequence:
+        description: New monotonic Catalog sequence
+        required: true
+        type: string
+      issued_at:
+        description: Explicit ISO-8601 issue time
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: catalog-publication
+  cancel-in-progress: false
+jobs:
+  sign-publish:
+    if: github.repository == 'RichLogic/Gian-Proxies' && github.ref == 'refs/heads/main'
+    environment: catalog-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/verify-source.mjs
+      - run: pnpm --filter @gian/shared build
+      - run: pnpm --filter @gian/proxy-catalog-contract test
+      - run: node --test catalog/proxy-information/project.test.mjs scripts/catalog-docs-policy.test.mjs
+      - name: Download the existing signed Catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_TAG: ${{ inputs.base_catalog_tag }}
+        run: |
+          [[ "$BASE_TAG" =~ ^catalog-v1\.[1-9][0-9]*\.0$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$BASE_TAG" | jq -e '(.draft == false) and (.prerelease == false)'
+          gh release download "$BASE_TAG" --repo "$GITHUB_REPOSITORY" --dir previous-catalog
+      - name: Verify retained executables, sign and publish localized documents
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIAN_CATALOG_SIGNING_KEY_PEM: ${{ secrets.GIAN_CATALOG_SIGNING_KEY_PEM }}
+          BASE_CATALOG_TAG: ${{ inputs.base_catalog_tag }}
+          SEQUENCE: ${{ inputs.sequence }}
+          ISSUED_AT: ${{ inputs.issued_at }}
+        run: node scripts/release-product.mjs catalog-docs previous-catalog "$SEQUENCE" "$ISSUED_AT"

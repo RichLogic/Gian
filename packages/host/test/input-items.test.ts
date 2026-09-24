@@ -18,8 +18,11 @@ import {
   FILE_CONTEXT_TRUNCATED_MARKER,
   MAX_FILE_CONTEXT_BYTES,
   MAX_FILE_CONTEXT_LINES,
+  MAX_SESSION_CONTEXT_BYTES,
   normalizeMessageComposerDocument,
   normalizeMessageContextItems,
+  SESSION_CONTEXT_TRUNCATED_MARKER,
+  type SessionTranscriptSlice,
 } from '../src/session/context-items.js';
 
 function withDataDir(): { cleanup: () => void } {
@@ -599,6 +602,159 @@ test('decompile reconstructs a file chip with its kind from inlined content', ()
   } finally {
     rmSync(tree, { recursive: true, force: true });
   }
+});
+
+test('session context normalizes identifiers and strips compile-time fields', () => {
+  const [normalized] = normalizeMessageContextItems([
+    {
+      type: 'session',
+      id: 'ref-1',
+      sessionId: 'sess-abc',
+      title: '  Refactor   plan ',
+      workspaceName: ' Gian ',
+      // Leftovers from a replayed metadata head must not survive.
+      messages: 12,
+      truncated: true,
+      omittedMessages: 3,
+    },
+  ]);
+  assert.deepEqual(normalized, {
+    type: 'session',
+    id: 'ref-1',
+    sessionId: 'sess-abc',
+    title: 'Refactor plan',
+    workspaceName: 'Gian',
+  });
+
+  assert.throws(() => normalizeMessageContextItems([
+    { type: 'session', id: 'ref-2', sessionId: '', title: 'x' },
+  ]), /sessionId/);
+  assert.throws(() => normalizeMessageContextItems([
+    { type: 'session', id: 'ref-3', sessionId: 'sess-abc', title: '   ' },
+  ]), /title/);
+});
+
+test('session context compiles the transcript slice with a metadata head', () => {
+  const context = normalizeMessageContextItems([
+    { type: 'session', id: 'ref-1', sessionId: 'sess-abc', title: 'Refactor plan', workspaceName: 'Gian' },
+  ]);
+  const resolver = (sessionId: string): SessionTranscriptSlice | null => {
+    assert.equal(sessionId, 'sess-abc');
+    return {
+      title: 'Refactor plan',
+      entries: [
+        { role: 'user', text: 'how should we split the module?' },
+        { role: 'assistant', text: 'split by ownership' },
+        { role: 'user', text: 'do it' },
+      ],
+    };
+  };
+  const document = normalizeMessageComposerDocument({
+    version: 1,
+    segments: [
+      { type: 'text', text: 'apply ' },
+      { type: 'reference', id: 'ref-1', referenceType: 'context', label: 'Refactor plan', kind: 'session' },
+    ],
+  }, undefined, context);
+  assert.ok(document);
+
+  const compiled = compiledTextOf(compileContextIntoInput('ignored', undefined, context, document, resolver));
+  assert.match(compiled, /<GianReference label="Refactor plan">/);
+  assert.match(compiled, /\{"type":"session","id":"ref-1","sessionId":"sess-abc","title":"Refactor plan","workspaceName":"Gian","messages":3\}/);
+  assert.ok(compiled.indexOf('User:\nhow should we split the module?') < compiled.indexOf('Assistant:\nsplit by ownership'));
+  assert.ok(compiled.indexOf('Assistant:\nsplit by ownership') < compiled.indexOf('User:\ndo it'));
+  assert.doesNotMatch(compiled, /truncated/);
+
+  // History replay reconstructs the chip with its kind; the metadata head's
+  // compile-time fields (messages count) are stripped.
+  const decompiled = decompileContextFromText(compiled);
+  assert.ok(decompiled);
+  assert.equal(decompiled.text, 'apply ');
+  assert.deepEqual(decompiled.contextItems, context);
+  assert.deepEqual(decompiled.document, document);
+  const segment = decompiled.document?.segments.find(entry => entry.type === 'reference');
+  assert.equal(segment?.type === 'reference' ? segment.kind : undefined, 'session');
+});
+
+test('session context keeps the most recent messages within the byte cap', () => {
+  const context = normalizeMessageContextItems([
+    { type: 'session', id: 'ref-1', sessionId: 'sess-big', title: 'Long chat' },
+  ]);
+  const entries = Array.from({ length: 30 }, (_, index) => ({
+    role: (index % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+    text: `m${index}-${'x'.repeat(4096)}`,
+  }));
+  const totalBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(`User:\n${entry.text}`, 'utf8'), 0);
+  assert.ok(totalBytes > MAX_SESSION_CONTEXT_BYTES);
+  const resolver = (): SessionTranscriptSlice | null => ({ title: 'Long chat', entries });
+
+  const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context,
+    normalizeMessageComposerDocument({
+      version: 1,
+      segments: [{ type: 'reference', id: 'ref-1', referenceType: 'context', label: 'Long chat', kind: 'session' }],
+    }, undefined, context)!, resolver));
+  assert.match(compiled, /"truncated":true,"omittedMessages":\d+\}/);
+  assert.match(compiled, new RegExp(`\\n${SESSION_CONTEXT_TRUNCATED_MARKER.replace('[', '\\[').replace(']', '\\]')}\\n`));
+  // The newest message survives; the oldest were omitted.
+  assert.match(compiled, /m29-/);
+  assert.doesNotMatch(compiled, /m0-/);
+  // The inlined body stays within the byte budget (plus metadata overhead).
+  assert.ok(compiled.length < MAX_SESSION_CONTEXT_BYTES + 4096 + 512);
+});
+
+test('session context truncates a single oversized newest message', () => {
+  const context = normalizeMessageContextItems([
+    { type: 'session', id: 'ref-1', sessionId: 'sess-huge', title: 'Huge' },
+  ]);
+  const resolver = (): SessionTranscriptSlice | null => ({
+    title: 'Huge',
+    entries: [{ role: 'assistant', text: 'y'.repeat(MAX_SESSION_CONTEXT_BYTES + 8192) }],
+  });
+  const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context,
+    normalizeMessageComposerDocument({
+      version: 1,
+      segments: [{ type: 'reference', id: 'ref-1', referenceType: 'context', label: 'Huge', kind: 'session' }],
+    }, undefined, context)!, resolver));
+  assert.match(compiled, /"messages":1,"truncated":true,"omittedMessages":0\}/);
+  assert.ok(compiled.length < MAX_SESSION_CONTEXT_BYTES + 4096);
+});
+
+test('session context degrades to an item note when the session is unresolvable', () => {
+  const context = normalizeMessageContextItems([
+    { type: 'session', id: 'ref-1', sessionId: 'sess-gone', title: 'Deleted chat' },
+    { type: 'session', id: 'ref-2', sessionId: 'sess-empty', title: 'Empty chat' },
+  ]);
+  // Unknown session, empty transcript, and a throwing resolver all degrade.
+  const resolver = (sessionId: string): SessionTranscriptSlice | null => {
+    if (sessionId === 'sess-empty') return { title: 'Empty chat', entries: [] };
+    throw new Error('db gone');
+  };
+  const document = normalizeMessageComposerDocument({
+    version: 1,
+    segments: [
+      { type: 'reference', id: 'ref-1', referenceType: 'context', label: 'Deleted chat', kind: 'session' },
+      { type: 'text', text: ' ' },
+      { type: 'reference', id: 'ref-2', referenceType: 'context', label: 'Empty chat', kind: 'session' },
+    ],
+  }, undefined, context);
+  assert.ok(document);
+
+  const compiled = compiledTextOf(compileContextIntoInput('go', undefined, context, document, resolver));
+  // Generic pretty-JSON embed — no metadata head, no transcript, no crash.
+  assert.doesNotMatch(compiled, /"messages"/);
+  assert.match(compiled, /"type": "session"/);
+  assert.match(compiled, /"sessionId": "sess-gone"/);
+  assert.match(compiled, /"sessionId": "sess-empty"/);
+
+  // Without a resolver at all the same degradation applies.
+  const unresolved = compiledTextOf(compileContextIntoInput('go', undefined, context, document));
+  assert.match(unresolved, /"type": "session"/);
+
+  // Replay still reconstructs both chips after the session is gone.
+  const decompiled = decompileContextFromText(compiled);
+  assert.ok(decompiled);
+  assert.deepEqual(decompiled.contextItems, context);
+  assert.deepEqual(decompiled.document, document);
 });
 
 test('assertLocalFilesBelongToSession requires a real session-store file', () => {

@@ -4,7 +4,7 @@ import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   RemoteIdentityBroker,
   resolveRemoteIdentityBrokerSocketPath,
@@ -95,4 +95,47 @@ test('Remote identity broker expose sign and refresh secret without returning th
 test('broker socket path stays short and namespaced', () => {
   const path = resolveRemoteIdentityBrokerSocketPath('gian-instance');
   assert.match(path, /gian-remote-[a-f0-9]{24}\.sock$/);
+});
+
+test('broker binds account credentials to the Desktop login and keeps controller keys isolated', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-remote-account-broker-'));
+  const socketPath = join(directory, 'broker.sock');
+  const store = new MemoryStore();
+  let accountId: string | null = '42';
+  const broker = new RemoteIdentityBroker({ socketPath, store, githubAccountId: async () => accountId });
+  const call = (body: unknown) => requestBroker({ socketPath, body });
+  const revoked: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+    revoked.push(new Headers(init?.headers).get('authorization') ?? '');
+    return Response.json({ ok: true });
+  });
+  try {
+    await broker.start();
+    await call({ op: 'ensure' });
+    const origin = 'https://remote.example';
+    const credential = { role: 'controller', serverOrigin: origin, serverFingerprint: 'a'.repeat(64),
+      installationId: randomUUID(), accountId: '42', accountLogin: 'owner', token: 'fixture-opaque-token', expiresAt: Date.now() + 60_000 };
+    assert.equal((await call({ op: 'account.set', origin, role: 'controller', account: credential })).status, 200);
+    const firstScope = randomUUID();
+    const secondScope = randomUUID();
+    const [first, second] = await Promise.all([
+      call({ op: 'controller.ensure', scope: firstScope }), call({ op: 'controller.ensure', scope: secondScope }),
+    ]);
+    assert.equal(first.status, 200); assert.equal(second.status, 200);
+    assert.notEqual(JSON.parse(first.body).fingerprint, JSON.parse(second.body).fingerprint);
+    assert.equal(first.body.includes('"d"'), false);
+    assert.equal(Object.keys(store.secret!.controllers!).length, 2);
+    assert.equal(store.secret!.accounts![origin + '#controller']!.token, credential.token);
+    accountId = '99';
+    assert.equal(JSON.parse((await call({ op: 'account.get', origin, role: 'controller' })).body).account, null);
+    assert.equal((await call({ op: 'account.set', origin, role: 'controller', account: credential })).status, 403);
+    accountId = '42';
+    await broker.revokeAccountSessions();
+    assert.deepEqual(revoked, ['Bearer fixture-opaque-token']);
+    assert.deepEqual(store.secret!.accounts, {});
+    assert.equal((await call({ op: 'controller.sign', scope: firstScope, bytes_b64: 'YWJj' })).status, 500);
+    broker.resumeAccountSessions();
+    accountId = null;
+    assert.equal((await call({ op: 'controller.ensure', scope: firstScope })).status, 500);
+  } finally { await broker.close(); await rm(directory, { recursive: true, force: true }); }
 });

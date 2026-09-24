@@ -48,7 +48,7 @@ const task = {
   updated_at: '2026-09-04T08:00:00.000Z',
 } as Task;
 
-function renderPage(options: { collapsed?: boolean; mode?: 'agents' | 'tasks'; sessions?: Session[] } = {}) {
+function renderPage(options: { collapsed?: boolean; mode?: 'agents' | 'tasks' | 'sessions'; sessions?: Session[] } = {}) {
   const onSetMode = vi.fn();
   const onSetListMode = vi.fn();
   const onNewWorkspace = vi.fn();
@@ -239,6 +239,22 @@ describe('persistent primary sidebar', () => {
     }
   });
 
+  it('marks only the selected session row with the active class', () => {
+    const other = { ...session, id: 'session-2', name: 'Other chat' } as Session;
+    renderPage({ sessions: [session, other], mode: 'sessions' });
+    // The CSS hooks the selected treatment (hover wash + accent edge) on
+    // this class; hover styling must never set it.
+    expect(screen.getByTestId(`session-row-${session.id}`)).toHaveClass('active');
+    expect(screen.getByTestId('session-row-session-2')).not.toHaveClass('active');
+  });
+
+  it('clears the rail selection highlight on non-session pages (agents/custom/timer)', () => {
+    // Owner 2026-09-24: opening Agents selects the page nav, so the session
+    // row must not keep its active class — only one selection shows at a time.
+    renderPage({ mode: 'agents' });
+    expect(screen.getByTestId(`session-row-${session.id}`)).not.toHaveClass('active');
+  });
+
   it('project group ⋯ menu: Edit opens the Repo dialog, Reveal posts, Remove confirms first', async () => {
     __resetFeedback();
     const calls: Array<{ url: string; method: string; body: unknown }> = [];
@@ -404,7 +420,15 @@ describe('persistent primary sidebar', () => {
       .not.toMatch(/margin-left/);
     const sticky = nav.match(/\.sb-scroll > \.sb-listswitch\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(sticky).toMatch(/position:\s*sticky/);
-    expect(sticky).toMatch(/background:\s*var\(--bg\)/);
+    // Tasks/Repos is a transparent text control, including while hovered or
+    // expanded. Backdrop blur would still create a visible rectangular tile.
+    expect(sticky).toMatch(/background:\s*transparent/);
+    expect(sticky).toMatch(/backdrop-filter:\s*none/);
+    expect(sticky).toMatch(/-webkit-backdrop-filter:\s*none/);
+    expect(sticky).toMatch(/box-shadow:\s*none/);
+    const states = nav.match(/\.sb-scroll > \.sb-listswitch:hover,\s*\.sb-scroll > \.sb-listswitch:active,\s*\.sb-scroll > \.sb-listswitch\[aria-expanded="true"\]\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(states).toMatch(/background:\s*transparent/);
+    expect(states).toMatch(/box-shadow:\s*none/);
     const gianV2 = readFileSync('src/styles/gian-v2.css', 'utf8');
     expect(gianV2).not.toMatch(/\.sb-toprow/);
   });

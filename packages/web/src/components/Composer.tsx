@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ApprovalMode, ComposerDocument, ComposerReferenceSegment, ConfigOption, ConfigValue, Executor, MessageContextItem, PickComposerResourcesResult, NativeConfigValue, ProductExecutor, ProxyModeCapabilities, Session, SlashCommand, ThinkingEffort } from '@gian/shared';
-import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
+import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES, attachmentReferenceNumbers, composerDocumentUserText, isApprovalMode, normalizeBrowserElementCapture, normalizeComposerDocument, numberImageAttachmentLabels, usesCliCapabilitySurface, usesNativeExecutorConfig } from '@gian/shared';
 import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime, servedAttachmentUrl } from '../attachments.js';
 import type { UploadedAttachment } from '../api.js';
 import {
@@ -22,7 +22,7 @@ import {
 } from '../operations/use-operations.js';
 import '../operations/context.js';
 import { ImageZoomContext } from '../transcript/items.js';
-import { publishScreenshotTarget } from '../screenshot-target.js';
+import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { AgentLogo } from './AgentLogo.js';
 import { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 import {
@@ -41,6 +41,12 @@ import {
   InlineComposerEditor,
   type InlineComposerEditorHandle,
 } from './composer/InlineComposerEditor.js';
+import {
+  SessionReferencePicker,
+  SESSION_PICKER_WIDTH,
+  type SessionReferenceChoice,
+} from './composer/session-reference-picker.js';
+import { SlashCommandMenu } from './composer/slash-menu.js';
 import {
   applyResolvedDefaults,
   claudeModelFamily,
@@ -76,6 +82,7 @@ import {
 } from './composer/capabilities.js';
 import type { ProxyModel } from './composer/capabilities.js';
 import { NativeOptionDrop, useUpDrop } from './composer/option-drops.js';
+import { rightAlignedPopoverLeft } from './composer/upward-popover.js';
 export { ContextUsageIndicator } from './composer/context-usage-indicator.js';
 
 /** v4 adds an ordered text/reference document to v3 resources. */
@@ -117,9 +124,16 @@ const EMPTY_DRAFT: ComposerDraft = {
 function contextReferenceLabel(item: MessageContextItem): string {
   if (item.type === 'folder') return item.name;
   if (item.type === 'file') return item.name;
+  if (item.type === 'session') return item.title;
   if (item.type === 'browserElement') return item.name || item.selector;
   const preview = item.text.replace(/\s+/g, ' ').trim();
   return preview.slice(0, 80) || 'Pasted text';
+}
+
+/** Chip discriminator kept on the composer segment so file/session chips
+ *  keep their glyph through drafts, injection, and history replay. */
+function contextReferenceKind(item: MessageContextItem): 'file' | 'session' | undefined {
+  return item.type === 'file' || item.type === 'session' ? item.type : undefined;
 }
 
 function composerReferenceIds(document: ComposerDocument): Set<string> {
@@ -146,6 +160,7 @@ function legacyDocument(
       id: item.id,
       referenceType: 'context' as const,
       label: contextReferenceLabel(item),
+      ...(contextReferenceKind(item) ? { kind: contextReferenceKind(item) } : {}),
     })),
   ];
   references.forEach((reference, index) => {
@@ -190,6 +205,17 @@ function draftContextItems(value: unknown): MessageContextItem[] {
       && typeof candidate.lineCount === 'number'
       && typeof candidate.byteSize === 'number') {
       return [candidate as unknown as MessageContextItem];
+    }
+    if (candidate.type === 'session'
+      && typeof candidate.sessionId === 'string'
+      && typeof candidate.title === 'string') {
+      return [{
+        type: 'session',
+        id: candidate.id,
+        sessionId: candidate.sessionId,
+        title: candidate.title,
+        ...(typeof candidate.workspaceName === 'string' ? { workspaceName: candidate.workspaceName } : {}),
+      }];
     }
     if (candidate.type === 'browserElement') {
       const capture = normalizeBrowserElementCapture(candidate);
@@ -342,6 +368,7 @@ export function injectComposerContextItems(
       id: item.id,
       referenceType: 'context',
       label: contextReferenceLabel(item),
+      ...(contextReferenceKind(item) ? { kind: contextReferenceKind(item) } : {}),
     }), existing.document),
   });
   pendingComposerFocusSessionId = sessionId;
@@ -491,7 +518,7 @@ export function Composer({
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
     },
-  ) => void;
+  ) => void | Promise<void>;
   /** Dispatch a skill invocation directly (used for codex user/project skills
    *  — bypasses the input box so the skill runs as a structured input item
    *  rather than being sent as text). */
@@ -555,7 +582,9 @@ export function Composer({
   const t = useT();
   const fixed = variant !== 'full';
   const configurableSidechat = variant === 'sidechat';
-  const hardDisabled = disabled && disabledSubmitBehavior === 'block';
+  const [preparingSend, setPreparingSend] = useState(false);
+  const preparingSendRef = useRef(false);
+  const hardDisabled = preparingSend || (disabled && disabledSubmitBehavior === 'block');
   const cliExecutor = usesCliCapabilitySurface(executor) ? executor : null;
   const zoomImage = useContext(ImageZoomContext);
   // Restore text AND already-uploaded attachments from the per-session draft —
@@ -600,6 +629,7 @@ export function Composer({
   // next send so it never persists across turns.
   const [oneShotBypass, setOneShotBypass] = useState(false);
   const addDrop = useUpDrop(220, { align: 'right' });
+  const [sessionPickerAnchor, setSessionPickerAnchor] = useState<{ left: number; bottom: number } | null>(null);
   const [activeReference, setActiveReference] = useState<{
     id: string;
     anchor: ReferenceAnchor;
@@ -1029,6 +1059,7 @@ export function Composer({
             id: item.id,
             referenceType: 'context',
             label: contextReferenceLabel(item),
+            ...(contextReferenceKind(item) ? { kind: contextReferenceKind(item) } : {}),
           });
         }
       } else {
@@ -1190,6 +1221,13 @@ export function Composer({
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [slashOpen, session.id, text]);
 
+  // Keep the keyboard-active row in view while the popover scrolls.
+  useEffect(() => {
+    if (!slashOpen) return;
+    const active = popRef.current?.querySelector('.cmp-file-row.active');
+    (active as HTMLElement | null | undefined)?.scrollIntoView?.({ block: 'nearest' });
+  }, [slashIdx, slashOpen, filteredGroups]);
+
   // Position the slash popover relative to the composer's bounding rect.
   // Portaled to body so it escapes `.composer { overflow: hidden }`.
   useLayoutEffect(() => {
@@ -1205,6 +1243,10 @@ export function Composer({
   }, [slashOpen]);
 
   function pickCommand(cmd: SlashCommand) {
+    // Disabled entries (e.g. a configured-but-disabled Codex skill) are
+    // visible for parity with the Custom inventory but never dispatch:
+    // keep the popover open and the input untouched.
+    if (cmd.disabled) return;
     // Codex typed skills bypass submit(), so a popup that was open when the
     // session became completed needs an explicit fail-closed guard.
     if (hardDisabled) {
@@ -1233,7 +1275,8 @@ export function Composer({
     requestAnimationFrame(() => editorRef.current?.focus());
   }
 
-  function submit() {
+  async function submit() {
+    if (preparingSendRef.current) return;
     const trimmed = composerDocumentUserText(composerDocument).trim();
     const referenceIds = composerReferenceIds(composerDocument);
     const referencedPendingFiles = pendingFiles.filter(file => referenceIds.has(file.id));
@@ -1252,6 +1295,14 @@ export function Composer({
       size: f.size,
       previewUrl: f.previewUrl,
     }));
+    // Image chips go out labelled image<N>, N = the attachment's document
+    // position — the same N the Host compile emits as [Attached resource N].
+    // The stored file keeps its original name; this is presentation/compile
+    // level only, so drafts are untouched.
+    const imageIds = new Set(referencedPendingFiles.filter(f => isNativeImageMime(f.mime)).map(f => f.id));
+    const outgoingDocument = hasReferences
+      ? numberImageAttachmentLabels(composerDocument, id => imageIds.has(id))
+      : undefined;
     if (disabled) {
       if (disabledSubmitBehavior === 'block') return;
       const queuedAttachments = attachments.map(({ path, name, mime, size }) => ({ path, name, mime, size }));
@@ -1259,7 +1310,7 @@ export function Composer({
         trimmed,
         queuedAttachments,
         referencedContextItems.length > 0 ? referencedContextItems : undefined,
-        hasReferences ? composerDocument : undefined,
+        outgoingDocument,
       );
       // Queue path doesn't transfer ownership — revoke previews now.
       for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
@@ -1273,8 +1324,15 @@ export function Composer({
       if (oneShotBypass) opts.oneShotBypass = true;
       if (attachments.length > 0) opts.attachments = attachments;
       if (referencedContextItems.length > 0) opts.contextItems = referencedContextItems;
-      if (hasReferences) opts.composerDocument = composerDocument;
-      onSend(trimmed, Object.keys(opts).length > 0 ? opts : undefined);
+      if (outgoingDocument) opts.composerDocument = outgoingDocument;
+      preparingSendRef.current = true;
+      try {
+        const sent = onSend(trimmed, Object.keys(opts).length > 0 ? opts : undefined);
+        if (sent) { setPreparingSend(true); await sent; }
+      } catch {
+        // Translation cancelled/failed before dispatch: retain the entire draft.
+        return;
+      } finally { preparingSendRef.current = false; setPreparingSend(false); }
       if (oneShotBypass) setOneShotBypass(false);
       // App owns the sent attachments' previewUrls now — revoke only the
       // unsent ones (failed uploads / still in flight when user pressed
@@ -1310,10 +1368,14 @@ export function Composer({
       mime: f.mime,
       size: f.size,
     }));
+    const imageIds = new Set(referencedPendingFiles.filter(f => isNativeImageMime(f.mime)).map(f => f.id));
+    const outgoingDocument = hasReferences
+      ? numberImageAttachmentLabels(composerDocument, id => imageIds.has(id))
+      : undefined;
     const steerOptions = {
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(referencedContextItems.length > 0 ? { contextItems: referencedContextItems } : {}),
-      ...(hasReferences ? { composerDocument } : {}),
+      ...(outgoingDocument ? { composerDocument: outgoingDocument } : {}),
     };
     onSteer(trimmed, Object.keys(steerOptions).length > 0 ? steerOptions : undefined);
     for (const f of pendingFiles) URL.revokeObjectURL(f.previewUrl);
@@ -1429,6 +1491,58 @@ export function Composer({
   function removeContextItem(id: string) {
     editorRef.current?.removeReference(id);
     setContextItems(previous => previous.filter(item => item.id !== id));
+    setContextError(null);
+  }
+
+  async function startComposerScreenshot() {
+    addDrop.setOpen(false);
+    setContextError(null);
+    const result = await startScreenshotCapture();
+    if (result.ok) return;
+    // Other failures are broadcast through the bridge's screenshot error
+    // event and surface as an app-level toast.
+    if (result.error === 'busy') setContextError(t('screenshot.busy'));
+    else if (!result.error) setContextError(t('screenshot.startFailed'));
+  }
+
+  function openSessionReferencePicker() {
+    const rect = addDrop.btnRef.current?.getBoundingClientRect();
+    addDrop.setOpen(false);
+    if (!rect) return;
+    setSessionPickerAnchor({
+      // Right-align to the + button's right edge — the same anchor the + menu
+      // itself gets from useUpDrop(align: 'right'), so the picker reads as the
+      // same anchored sheet instead of opening shifted right.
+      left: rightAlignedPopoverLeft({
+        anchorRight: rect.right,
+        popoverWidth: SESSION_PICKER_WIDTH,
+        viewportWidth: window.innerWidth,
+      }),
+      bottom: window.innerHeight - rect.top + 6,
+    });
+  }
+
+  function handleSessionReference(choice: SessionReferenceChoice) {
+    setSessionPickerAnchor(null);
+    // The menu row disables at the context cap; the picker itself closes on
+    // selection. Referencing the same conversation twice is a no-op.
+    if (contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS) return;
+    if (contextItems.some(item => item.type === 'session' && item.sessionId === choice.sessionId)) return;
+    const item: MessageContextItem = {
+      type: 'session',
+      id: crypto.randomUUID(),
+      sessionId: choice.sessionId,
+      title: choice.title,
+      ...(choice.workspaceName ? { workspaceName: choice.workspaceName } : {}),
+    };
+    setContextItems(previous => [...previous, item]);
+    editorRef.current?.insertReference({
+      id: item.id,
+      referenceType: 'context',
+      label: item.title,
+      kind: 'session',
+    });
+    requestAnimationFrame(() => editorRef.current?.focus());
     setContextError(null);
   }
 
@@ -1609,17 +1723,23 @@ export function Composer({
     if (slashOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSlashIdx(i => filtered.length > 0 ? Math.min(i + 1, filtered.length - 1) : 0);
+        setSlashIdx(i => (filtered.length > 0 ? (i + 1) % filtered.length : 0));
         return true;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        setSlashIdx(i => Math.max(i - 1, 0));
+        setSlashIdx(i => (filtered.length > 0 ? (i - 1 + filtered.length) % filtered.length : 0));
         return true;
       }
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         if (filtered[slashIdx]) pickCommand(filtered[slashIdx]);
+        return true;
+      }
+      // Tab accepts like Enter; swallowing it keeps focus inside the editor.
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (!e.shiftKey && filtered[slashIdx]) pickCommand(filtered[slashIdx]);
         return true;
       }
       if (e.key === 'Escape') {
@@ -1657,6 +1777,11 @@ export function Composer({
   const activeFileReference = activeReference
     ? pendingFiles.find(file => file.id === activeReference.id) ?? null
     : null;
+  // The number an image attachment will carry once sent (image<N>) — the
+  // Host compile numbers attachment references in document order.
+  const activeFileNumber = activeFileReference && isNativeImageMime(activeFileReference.mime)
+    ? attachmentReferenceNumbers(composerDocument).get(activeFileReference.id)
+    : undefined;
 
   return (
     <div className={`composer-wrap${oneShotBypass ? ' is-bypass' : ''}`}>
@@ -1755,19 +1880,28 @@ export function Composer({
           >
             <ReferencePopoverHead
               icon={REFERENCE_ICONS.file}
-              title={activeFileReference.name}
+              title={activeFileNumber !== undefined
+                ? `image${activeFileNumber} · ${activeFileReference.name}`
+                : activeFileReference.name}
               onRemove={() => removeFile(activeFileReference.id)}
               removeLabel={t('composer.attachment.remove')}
               onClose={() => setActiveReference(null)}
             />
             <div className="ref-pop-body">
               {isNativeImageMime(activeFileReference.mime) && (
-                <img
-                  className="ref-pop-thumb"
-                  src={activeFileReference.previewUrl}
-                  alt={activeFileReference.name}
-                  onClick={() => zoomImage?.(activeFileReference.previewUrl, activeFileReference.name)}
-                />
+                <span className="ref-pop-thumb-wrap">
+                  <img
+                    className="ref-pop-thumb"
+                    src={activeFileReference.previewUrl}
+                    alt={activeFileReference.name}
+                    onClick={() => zoomImage?.(activeFileReference.previewUrl, activeFileReference.name)}
+                  />
+                  {activeFileNumber !== undefined && (
+                    <span className="ref-pop-badge" data-testid="composer-attachment-number">
+                      {activeFileNumber}
+                    </span>
+                  )}
+                </span>
               )}
               <span className="ref-pop-meta">
                 {activeFileReference.error ?? activeFileReference.sizeLabel}
@@ -1776,46 +1910,21 @@ export function Composer({
           </ReferencePopover>
         )}
 
-        {!fixed && !hardDisabled && slashOpen && slashPopPos && (slashLoading || filteredGroups.length > 0) && createPortal(
+        {!fixed && !hardDisabled && slashOpen && slashPopPos && createPortal(
           <div
             ref={popRef}
             className="cmp-slash-pop"
+            role="listbox"
             style={{ left: slashPopPos.left, bottom: slashPopPos.bottom, width: slashPopPos.width }}
           >
-            {slashLoading && filtered.length === 0 && (
-              <div className="cmp-slash-row" style={{ color: 'var(--text-3)', cursor: 'default' }}>
-                <span className="cmp-slash-desc">{t('composer.slash.loading')}</span>
-              </div>
-            )}
-            {filteredGroups.map(group => {
-              let baseIdx = 0;
-              for (const g of filteredGroups) {
-                if (g.source === group.source) break;
-                baseIdx += g.items.length;
-              }
-              return (
-                <div key={group.source}>
-                  <div className="cmp-slash-section">{t(`composer.slash.source.${group.source}`)}</div>
-                  {group.items.map((item, localIdx) => {
-                    const flatIdx = baseIdx + localIdx;
-                    return (
-                      <button
-                        key={item.name}
-                        type="button"
-                        className={`cmp-slash-row${flatIdx === slashIdx ? ' active' : ''}`}
-                        data-source={item.source}
-                        title={item.filePath}
-                        onPointerDown={e => { e.preventDefault(); pickCommand(item); }}
-                        onMouseEnter={() => setSlashIdx(flatIdx)}
-                      >
-                        <span className="cmp-slash-cmd">{item.name}</span>
-                        <span className="cmp-slash-desc">{item.description}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              );
-            })}
+            <SlashCommandMenu
+              groups={filteredGroups}
+              loading={slashLoading && filtered.length === 0}
+              query={slashPrefix === '/' ? '' : slashPrefix}
+              activeIndex={slashIdx}
+              onHover={setSlashIdx}
+              onPick={pickCommand}
+            />
           </div>,
           document.body,
         )}
@@ -1837,6 +1946,7 @@ export function Composer({
                 title={session.agent_name || session.executor}
               >
                 <AgentLogo
+                  environmentId={session.remote_execution?.environment_id}
                   proxy={session.executor as ProductExecutor | null}
                   fallback={session.agent_name || session.executor}
                   size={17}
@@ -1861,6 +1971,7 @@ export function Composer({
                   }}
                 >
                   <AgentLogo
+                    environmentId={session.remote_execution?.environment_id}
                     proxy={session.executor as ProductExecutor | null}
                     fallback={session.agent_name || session.executor}
                     size={17}
@@ -2354,9 +2465,48 @@ export function Composer({
                         )}
                       </span>
                     </button>
+                    <button
+                      type="button"
+                      className="mp-row"
+                      disabled={contextItems.length >= MAX_MESSAGE_CONTEXT_ITEMS}
+                      onClick={openSessionReferencePicker}
+                    >
+                      <span className="composer-add-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M2.25 3.25h11.5v8H8.75l-3.5 3v-3h-3z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <span className="mp-row-body">
+                        <span className="mp-row-title">{t('composer.context.referenceSession')}</span>
+                      </span>
+                    </button>
+                    {screenshotAvailable && (
+                      <button
+                        type="button"
+                        className="mp-row"
+                        onClick={() => { void startComposerScreenshot(); }}
+                      >
+                        <span className="composer-add-icon" aria-hidden="true">
+                          <svg viewBox="0 0 16 16" fill="none">
+                            <path d="M5 1.75v8.75a1.5 1.5 0 0 0 1.5 1.5h8.75M1.75 5h8.75a1.5 1.5 0 0 1 1.5 1.5v8.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                        <span className="mp-row-body">
+                          <span className="mp-row-title">{t('screenshot.capture')}</span>
+                        </span>
+                      </button>
+                    )}
                   </div>
                 </div>,
                 document.body,
+              )}
+              {sessionPickerAnchor && (
+                <SessionReferencePicker
+                  anchor={sessionPickerAnchor}
+                  excludeSessionId={session.id}
+                  onSelect={handleSessionReference}
+                  onClose={() => setSessionPickerAnchor(null)}
+                />
               )}
             </>
           )}

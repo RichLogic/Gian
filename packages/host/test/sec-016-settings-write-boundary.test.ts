@@ -76,6 +76,11 @@ test('SEC-016 · malformed, non-object, wrong-type, and out-of-range bodies retu
       { port: 8991.5 },
       { theme: 'galaxy' },
       { accent: 'violet' },
+      { system_light_theme: 'blue' },
+      { frame_opacity: 19 },
+      { frame_opacity: 101 },
+      { frame_opacity: 90.5 },
+      { frame_opacity: '85' },
       { density: 'dense' },
       { locale: 'fr' },
       { font_scale_chat: 'xxl' },
@@ -219,6 +224,29 @@ test('SEC-016 · retired appearance preferences normalize while current settings
     assert.deepEqual(stored.external_editors, payload.external_editors);
     assert.deepEqual(stored.open_apps, payload.open_apps);
     assert.deepEqual(stored.terminal, payload.terminal);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('SEC-016 · appearance system-theme, system light theme, and frame opacity round-trip', async () => {
+  const ctx = await makeTestApp();
+  try {
+    const response = await patchSettings(ctx, {
+      theme: 'system',
+      system_light_theme: 'light',
+      frame_opacity: 85,
+    });
+    assert.equal(response.status, 200);
+    const returned = await response.json() as Record<string, unknown>;
+    assert.equal(returned.theme, 'system');
+    assert.equal(returned.system_light_theme, 'light');
+    assert.equal(returned.frame_opacity, 85);
+
+    const stored = loadConfig(ctx.db);
+    assert.equal(stored.theme, 'system');
+    assert.equal(stored.system_light_theme, 'light');
+    assert.equal(stored.frame_opacity, 85);
   } finally {
     await ctx.cleanup();
   }

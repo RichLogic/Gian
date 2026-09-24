@@ -13,6 +13,7 @@ import type {
 } from './model.js';
 import { isProxyPluginId } from './plugin-id.js';
 import { isExecutorId, pluginIdForExecutorId } from './legacy-plugin-aliases.js';
+import { FRAME_OPACITY_MAX, FRAME_OPACITY_MIN, SYSTEM_LIGHT_THEMES } from './model.js';
 import { isSessionProxyBinding, isSessionRuntimeProfile } from './session-proxy-binding.js';
 import { normalizeBrowserElementCapture } from './browser-context.js';
 import { normalizeComposerDocument } from './context.js';
@@ -200,6 +201,11 @@ function isMessageContextItem(value: unknown): boolean {
   if (value.type === 'folder' || value.type === 'file') {
     return isString(value.path) && isString(value.name);
   }
+  if (value.type === 'session') {
+    return isString(value.sessionId)
+      && isString(value.title)
+      && isOptional(value, 'workspaceName', isString);
+  }
   if (value.type === 'browserElement') {
     const normalized = normalizeBrowserElementCapture(value);
     return normalized !== null
@@ -331,8 +337,16 @@ function isSystemConfig(value: unknown): value is SystemConfig {
   return isString(value.host)
     && isFiniteNumber(value.port)
     && isString(value.workspace_root)
-    && isOneOf(value.theme, ['light', 'warm', 'dark'])
+    && isOneOf(value.theme, ['light', 'warm', 'dark', 'system'])
     && isOneOf(value.accent, ['rose', 'ember', 'citron', 'moss', 'teal', 'azure', 'ink', 'plum'])
+    && isOptional(value, 'system_light_theme', candidate => (
+      isOneOf(candidate, SYSTEM_LIGHT_THEMES)
+    ))
+    && isOptional(value, 'frame_opacity', candidate => (
+      isFiniteNumber(candidate)
+      && candidate >= FRAME_OPACITY_MIN
+      && candidate <= FRAME_OPACITY_MAX
+    ))
     && isOneOf(value.density, ['compact', 'cozy', 'roomy'])
     && isOneOf(value.font_scale_chrome, ['sm', 'md', 'lg', 'xl'])
     && isOneOf(value.font_scale_chat, ['sm', 'md', 'lg', 'xl'])

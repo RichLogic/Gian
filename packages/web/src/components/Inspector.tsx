@@ -14,6 +14,7 @@ import {
   toggleChangesFolder,
   useChangesDiffState,
 } from '../controllers/use-changes-diff.js';
+import { attachChangesDiffContext } from '../controllers/changes-diff-context.js';
 import {
   filesInspectorOwnerKey,
   refreshFilesInspector,
@@ -502,8 +503,8 @@ function ChangeLeaf({ entry, name, depth, ctx }: { entry: ChangedEntry; name: st
         <button
           className="changes-stage"
           type="button"
-          disabled={ctx.busyPath === entry.path}
-          title={entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
+          disabled={ctx.workingTreeId.startsWith('remote:') || ctx.busyPath === entry.path}
+          title={ctx.workingTreeId.startsWith('remote:') ? ctx.t('remote.gitReadOnly') : entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
           onClick={e => ctx.onToggleStage(e, entry)}
         >
           {entry.staged ? ctx.t('changes.unstage') : ctx.t('changes.stage')}
@@ -642,7 +643,7 @@ function ChangesInspector({
 
   function toggleStage(e: ReactMouseEvent, c: ChangedEntry) {
     e.stopPropagation();
-    if (!workingTreeId) return;
+    if (!workingTreeId || workingTreeId.startsWith('remote:')) return;
     setStageRunId(dispatch(c.staged ? 'git.unstage' : 'git.stage', {
       workingTreeId,
       path: c.path,
@@ -655,6 +656,20 @@ function ChangesInspector({
   function fire(promptKey: string) {
     onComposePrompt(t(promptKey));
     setMenuOpen(false);
+  }
+
+  // Attach the current scope's diff as a pastedText context chip in the
+  // active session's composer (never auto-sent). Loads any per-file patches
+  // the lazy panel-2 view hasn't fetched yet.
+  const [attaching, setAttaching] = useState(false);
+  async function attachDiff() {
+    if (!workingTreeId || !activeSessionId) return;
+    setAttaching(true);
+    try {
+      await attachChangesDiffContext(workingTreeId, activeSessionId);
+    } finally {
+      setAttaching(false);
+    }
   }
 
   return (
@@ -865,6 +880,15 @@ function ChangesInspector({
               </>
             )}
           </div>
+          <button
+            className="btn secondary sm"
+            type="button"
+            disabled={!canCommit || attaching || changes.length === 0}
+            title={canCommit ? t('changes.attachDiffTitle') : t('changes.needSession')}
+            onClick={() => { void attachDiff(); }}
+          >
+            {t('changes.attachDiff')}
+          </button>
           <button
             className="btn secondary sm"
             type="button"

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
 
 const listenIndex = process.argv.indexOf('--listen');
 const listenUrl = listenIndex >= 0 ? process.argv[listenIndex + 1] : undefined;
@@ -48,6 +49,11 @@ input.on('line', (line) => {
   if (message.method === 'initialize' && typeof message.id === 'number') {
     send({ id: message.id, result: { fixture: true } }, true);
   } else if (message.method === 'initialized') {
+    if (process.env.GIAN_FAKE_CODEX_DESCENDANT === '1') {
+      const helper = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); process.stdout.write("ready\\n"); setInterval(()=>{},1000)'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      helper.stdout.once('data', () => send({ method: 'fixture/descendant', params: { pid: helper.pid } }));
+      return;
+    }
     process.stderr.write('fixture diagnostic on stderr\n');
     process.stdout.write(
       encode({ method: 'fixture/notification', params: { chunk: 'shared' } })

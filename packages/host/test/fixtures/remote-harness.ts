@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +26,12 @@ export const HARNESS_AGENT: UserAgent = {
   proxy: 'claude',
   cliPath: null,
   defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
+};
+
+/** Deterministic stand-in for the proxy's branding.logo bytes. */
+export const HARNESS_PROXY_LOGO = {
+  bytes: new TextEncoder().encode('harness-png-bytes'),
+  mediaType: 'image/png' as const,
 };
 
 class FakeProxyClient implements ProxyClient {
@@ -212,6 +219,11 @@ export function setupRemoteHarness() {
     now: () => new Date(clock.nowMs),
     listAgents: () => [HARNESS_AGENT],
     hostEvents: broadcaster,
+    proxyLogo: async (proxy, variant) => {
+      if (proxy !== HARNESS_AGENT.proxy || (variant !== 'light' && variant !== 'dark')) return null;
+      const sha256 = createHash('sha256').update(HARNESS_PROXY_LOGO.bytes).digest('hex');
+      return { bytes: HARNESS_PROXY_LOGO.bytes, mediaType: HARNESS_PROXY_LOGO.mediaType, sha256 };
+    },
   });
   return { dir, db, workspaceId, taskId, proxy, sessions, tasks, tool, access, runtime, identity, approvals, previousDataDir, clock };
 }
@@ -226,12 +238,14 @@ export function teardownRemoteHarness(context: ReturnType<typeof setupRemoteHarn
 }
 
 export function seedDevice(context: ReturnType<typeof setupRemoteHarness>, name = 'Phone') {
-  return context.runtime.devices.create({
+  const device = context.runtime.devices.create({
     publicKey: JSON.stringify({ kty: 'EC', crv: 'P-256', x: randomUUID().replaceAll('-', ''), y: randomUUID().replaceAll('-', '') }),
     name,
     platform: 'ios',
     grants: defaultRemoteDeviceGrants(),
   });
+  context.runtime.devices.bindAccount(device.id, '42');
+  return context.runtime.devices.get(device.id)!;
 }
 
 export function command(

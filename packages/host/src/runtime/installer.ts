@@ -125,6 +125,22 @@ export class ManagedRuntimeInstaller {
     }
   }
 
+  /** Remove every managed Runtime generation record of one plugin (active
+   *  pointer included) under the same claim family as installation. Returns
+   *  false when the plugin has no managed Runtime records at all — external-
+   *  App kinds simply have nothing to remove. */
+  async uninstall(pluginId: string): Promise<boolean> {
+    const id = parseProxyPluginId(pluginId);
+    const lease = await acquireAgentUpdateLock(
+      this.options.dataDir, `runtime-install-${id}`, 'Runtime uninstallation',
+    );
+    try {
+      return await this.options.store.removePlugin(id);
+    } finally {
+      await lease.release();
+    }
+  }
+
   private async installWithClaim(
     plan: ManagedRuntimeInstallPlan,
     signal?: AbortSignal,

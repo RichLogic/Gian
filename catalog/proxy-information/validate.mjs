@@ -27,11 +27,14 @@ function text(node) {
   return node.value ?? (node.children ?? []).map(text).join('');
 }
 
-export function tutorialChapters(markdown) {
+export function tutorialChapters(markdown, locale = 'zh-CN') {
   const ast = fromMarkdown(markdown);
   const headings = ast.children.filter(n => n.type === 'heading' && n.depth === 2).map(text);
-  const expected = ['在 Gian 中做什么', '支持的能力与限制', '运行原理与进程关系', '安装与依赖',
-    '第一次使用', 'HOME 与隔离', '反向代理与自定义端点', '操作注意事项', '故障排查'];
+  const expected = locale === 'en'
+    ? ['What it does in Gian', 'Capabilities and limitations', 'Runtime architecture', 'Installation and dependencies',
+      'First use', 'HOME and isolation', 'Reverse proxies and custom endpoints', 'Operational notes', 'Troubleshooting']
+    : ['在 Gian 中做什么', '支持的能力与限制', '运行原理与进程关系', '安装与依赖',
+      '第一次使用', 'HOME 与隔离', '反向代理与自定义端点', '操作注意事项', '故障排查'];
   assert.deepEqual(headings, expected.map((name, i) => `${i + 1}. ${name}`), 'Tutorial chapter contract differs');
   const positions = ast.children.flatMap((n, i) => n.type === 'heading' && n.depth === 2 ? [i] : []);
   for (let i = 0; i < positions.length; i++) {
@@ -52,7 +55,7 @@ export function tutorialChapters(markdown) {
 }
 
 function renderHistory(history, current) {
-  let md = `# ${current.displayName}：版本更新\n\n本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。\n\n当前 Catalog 1.7.0 选择：Proxy **${current.version}**，Runtime **${current.combination.runtime.version}**。这是发布目标，不表示当前机器已安装。\n\n`;
+  let md = `# ${current.displayName}：版本更新\n\n本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。\n\n本次发布组合快照：Proxy **${current.version}**，Runtime **${current.combination.runtime.version}**。这是发布目标，不表示当前机器已安装。\n\n`;
   for (const entry of history.entries) {
     md += `## ${entry.version}\n\n首次公开发布：${entry.firstPublishedAt}（UTC）。\n\n`;
     for (const d of entry.distributions) {
@@ -155,6 +158,8 @@ export function validateReview({ render = false } = {}) {
       versions++;
     }
     tutorialChapters(containedFile(join(root, id, 'tutorial.md')));
+    tutorialChapters(containedFile(join(root, id, 'tutorial.en.md')), 'en');
+    renderEnglishHistory(history, active);
     containedFile(join(root, id, 'basic.md'));
     const projection = renderHistory(history, active);
     const mdPath = join(root, id, 'changelog.md');
@@ -163,6 +168,42 @@ export function validateReview({ render = false } = {}) {
   }
   assert.equal(observed.size, releases.length, 'A retained public distribution was omitted');
   return { proxies: Object.keys(folders).length, versions, distributions: observed.size, metadataOnly };
+}
+
+export function renderEnglishHistory(history, current) {
+  const copy = json(join(root, 'history-copy.en.json'));
+  const translate = source => {
+    assert.ok(typeof copy[source] === 'string' && copy[source].trim(), `Missing English history translation: ${source}`);
+    return copy[source];
+  };
+  const headings = { added: 'Added', changed: 'Changed', fixed: 'Fixed', attention: 'Notes' };
+  let md = `# ${current.displayName}: Version history\n\nGenerated from the structured changelog, newest Proxy version first. Original publication and later repository distributions are recorded separately; missing historical details are not invented.\n\nRelease combination snapshot: Proxy **${current.version}**, Runtime **${current.combination.runtime.version}**. These are distribution targets, not this machine's installed state.\n\n`;
+  for (const entry of history.entries) {
+    md += `## ${entry.version}\n\nFirst published: ${entry.firstPublishedAt} (UTC).\n\n`;
+    for (const d of entry.distributions) {
+      const basis = d.runtimeDeclaration.basis === 'verified-declaration' ? 'Manifest compatibility declaration'
+        : d.runtimeDeclaration.basis === 'recommended-declaration' ? 'historical recommendation' : 'CLI version not recorded';
+      md += `- [${d.repository} distribution](${d.releaseUrl}): ${d.publishedAt}.\n`;
+      md += `- CLI: ${d.runtimeDeclaration.versions.join(', ') || 'not recorded'} (${basis}, not local installation state).`;
+      for (const bridge of d.companionDeclarations) md += ` Bridge: ${bridge.version} (${bridge.basis === 'bundled-package-source'
+        ? 'source package corresponding to this archive' : 'source package at this public tag'}).`;
+      md += '\n';
+    }
+    md += '\n';
+    for (const category of categories) {
+      const notes = entry.changes.filter(n => n.category === category);
+      if (!notes.length) continue;
+      md += `### ${headings[category]}\n\n`;
+      for (const note of notes) md += `- ${translate(note.text)} ${note.evidence.map((url, i) => `[Source ${i + 1}](${url})`).join(' ')}\n`;
+      md += '\n';
+    }
+    if (entry.unknowns.length) {
+      md += '### Historical evidence limits\n\n';
+      for (const note of entry.unknowns) md += `- ${translate(note)}\n`;
+      md += '\n';
+    }
+  }
+  return md + '## Withdrawn versions\n\n0.4.0 was withdrawn on 2026-09-20 and is not installable. Separating repositories does not justify assigning one shared version to all Proxies.\n';
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

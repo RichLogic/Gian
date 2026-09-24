@@ -17,12 +17,13 @@ import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian
 import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
 import { RuntimeControlError, type RuntimeControlPlane } from '../../runtime/control-plane.js';
 import { ManagedRuntimeDeliveryError, type ManagedRuntimeDeliveryService } from '../../runtime/delivery-service.js';
-import { ManagedRuntimeInstallError } from '../../runtime/installer.js';
+import { ManagedRuntimeInstallError, type ManagedRuntimeInstaller } from '../../runtime/installer.js';
 import { ManagedRuntimeActivationError } from '../../runtime/activation-service.js';
 import { isCanonicalAbsolutePath } from '@gian/shared';
 import { pickPath } from '../pick-path.js';
 import { isCatalogDocumentKey, type CatalogService } from '../../catalog/service.js';
 import { PluginStoreError } from '../../plugin-store/errors.js';
+import type { PluginStore } from '../../plugin-store/store.js';
 import { redactSensitiveText } from '../../logging/redact.js';
 
 function executor(raw: string): LegacyExecutorId | null {
@@ -426,6 +427,14 @@ export function registerAgentRoutes(
     catalogService?: CatalogService;
     /** Test seam around the native folder picker; production uses pickPath. */
     pickHome?: () => ReturnType<typeof pickPath>;
+    /** Count of in-flight Sessions (running/pending) bound to one Agent;
+     *  guards PATCH disable. */
+    hasRunningSessionsForAgent?: (agentId: string) => number;
+    /** Integration uninstall: Proxy package removal and managed Runtime
+     *  generation removal. Absent in minimal test apps — treated as
+     *  not-installed. */
+    pluginStore?: PluginStore;
+    runtimeInstaller?: ManagedRuntimeInstaller;
   },
 ): void {
   // ------------------------------------------------------------------
@@ -488,7 +497,11 @@ export function registerAgentRoutes(
     if (!isProxyPluginId(pluginId) || !isCatalogDocumentKey(document)) {
       return c.json({ error: 'documentation not found' }, 404);
     }
-    const body = await options.catalogService.documentation(pluginId, document);
+    const locale = c.req.query('locale');
+    if (locale !== undefined && locale !== 'en' && locale !== 'zh-CN') {
+      return c.json({ error: 'unsupported Catalog locale' }, 400);
+    }
+    const body = await options.catalogService.documentation(pluginId, document, locale);
     if (!body) return c.json({ error: 'documentation not found' }, 404);
     c.header('content-type', body.mediaType);
     c.header('x-content-type-options', 'nosniff');
@@ -623,6 +636,54 @@ export function registerAgentRoutes(
     }
   });
 
+  // Integration uninstall: refuse while any bound Agent has an in-flight
+  // Session, then cascade — Agents, managed Runtime generations, Proxy
+  // package. Idempotent: an absent Integration returns an all-zero receipt.
+  app.post('/api/proxies/:pluginId/uninstall', async c => {
+    const pluginId = decodeURIComponent(c.req.param('pluginId'));
+    let id: string;
+    try {
+      id = parseProxyPluginId(pluginId);
+    } catch {
+      return c.json({ error: 'invalid pluginId' }, 400);
+    }
+    try {
+      const boundAgents = options.agents.listAgents().filter(agent => agent.pluginId === id);
+      const conflicts = boundAgents
+        .map(agent => ({
+          agentId: agent.id,
+          name: agent.name,
+          runningSessions: options.hasRunningSessionsForAgent?.(agent.id) ?? 0,
+        }))
+        .filter(entry => entry.runningSessions > 0);
+      if (conflicts.length > 0) {
+        return c.json({
+          error: 'Integration has sessions in progress',
+          code: 'INTEGRATION_HAS_RUNNING_SESSIONS',
+          conflicts,
+        }, 409);
+      }
+      for (const agent of boundAgents) {
+        await options.agents.deleteAgent(agent.id);
+      }
+      const removedRuntime = options.runtimeInstaller
+        ? await options.runtimeInstaller.uninstall(id)
+        : false;
+      const removedProxy = options.pluginStore
+        ? await options.pluginStore.removePlugin(id)
+        : false;
+      return c.json({
+        receipt: {
+          removedAgents: boundAgents.length,
+          removedRuntime,
+          removedProxy,
+        },
+      });
+    } catch (error) {
+      return c.json(errorResponse(error), installErrorStatus(error));
+    }
+  });
+
   // ------------------------------------------------------------------
   // User Agents (saved identities in agents.json).
   // ------------------------------------------------------------------
@@ -703,6 +764,22 @@ export function registerAgentRoutes(
       if (body.name !== undefined) {
         if (typeof body.name !== 'string') return c.json({ error: 'name must be a string' }, 400);
         patch.name = body.name;
+      }
+      if (body.enabled !== undefined) {
+        if (typeof body.enabled !== 'boolean') {
+          return c.json({ error: 'enabled must be a boolean' }, 400);
+        }
+        if (body.enabled === false) {
+          const running = options.hasRunningSessionsForAgent?.(id) ?? 0;
+          if (running > 0) {
+            return c.json({
+              error: `Agent has ${running} session${running === 1 ? '' : 's'} in progress`,
+              code: 'AGENT_HAS_RUNNING_SESSIONS',
+              runningSessions: running,
+            }, 409);
+          }
+        }
+        patch.enabled = body.enabled;
       }
       if (body.cliPath !== undefined && managesRuntimePaths(options.agents)) {
         return c.json({

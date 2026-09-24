@@ -4,7 +4,7 @@
 // The mermaid module is mocked — jsdom never lays out a real SVG.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render } from '@testing-library/react';
 import { MarkdownText } from '../src/markdown.js';
 
 const mermaidMocks = vi.hoisted(() => ({
@@ -23,9 +23,10 @@ function mockClipboard() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  document.body.removeAttribute('data-theme');
   mermaidMocks.parse.mockResolvedValue({});
   mermaidMocks.render.mockImplementation(async (id: string) => ({
-    svg: `<svg id="${id}" data-diagram="yes"></svg>`,
+    svg: `<svg id="${id}" data-diagram="yes" data-theme="${mermaidMocks.initialize.mock.lastCall?.[0]?.theme ?? 'neutral'}"></svg>`,
   }));
 });
 
@@ -133,6 +134,95 @@ describe('MarkdownText mermaid', () => {
     });
     const ids = mermaidMocks.render.mock.calls.map(call => call[0]);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('MarkdownText mermaid theming', () => {
+  it('re-initializes mermaid with the dark theme + tuned surfaces when the app theme is dark', async () => {
+    document.body.setAttribute('data-theme', 'dark');
+    const source = 'erDiagram\n  T6_USER ||--o{ T6_ORDER : places';
+    const { container } = render(<MarkdownText>{'```mermaid\n' + source + '\n```'}</MarkdownText>);
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+    expect(mermaidMocks.parse).toHaveBeenCalledWith(source);
+    expect(container.querySelector('.mermaid-diagram svg')).toHaveAttribute('data-theme', 'dark');
+    // A cache miss initializes the renderer; a cache hit must restore the
+    // correctly themed SVG without requiring another global initialization.
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'light');
+    });
+    await vi.waitFor(() => {
+      expect(mermaidMocks.initialize).toHaveBeenLastCalledWith(
+        expect.objectContaining({ theme: 'neutral' }),
+      );
+      expect(container.querySelector('.mermaid-diagram svg')).toHaveAttribute('data-theme', 'neutral');
+    });
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'dark');
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).toHaveAttribute('data-theme', 'dark');
+    });
+    expect(mermaidMocks.initialize).toHaveBeenCalledWith(expect.objectContaining({
+      theme: 'dark', securityLevel: 'strict', suppressErrorRendering: true,
+      themeVariables: expect.objectContaining({ background: '#252629' }),
+    }));
+    // One layout per theme: the initial dark render plus the light one; the
+    // flip back to dark lands on the per-theme cache entry.
+    expect(mermaidMocks.render.mock.calls.filter(call => call[1] === source).length).toBe(2);
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+  });
+
+  it('caches rendered SVGs per theme: flipping back does not re-run layout', async () => {
+    const source = 'flowchart LR\n  T8 --> T8B';
+    const { container } = render(<MarkdownText>{'```mermaid\n' + source + '\n```'}</MarkdownText>);
+    await vi.waitFor(() => {
+      expect(mermaidMocks.render).toHaveBeenCalledTimes(1);
+    });
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'dark');
+    });
+    await vi.waitFor(() => {
+      expect(mermaidMocks.render).toHaveBeenCalledTimes(2);
+    });
+    // Flip back to light, then dark again: both land on cache entries, so
+    // the SVG reappears without another render call.
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'light');
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'dark');
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+    expect(mermaidMocks.render).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats warm like light: both share the neutral theme and one cache entry', async () => {
+    document.body.setAttribute('data-theme', 'warm');
+    const source = 'flowchart LR\n  T9 --> T9B';
+    const { container } = render(<MarkdownText>{'```mermaid\n' + source + '\n```'}</MarkdownText>);
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+    // Warm rendered under the neutral config; flipping to light changes
+    // nothing for mermaid — no re-initialize, no re-layout.
+    vi.clearAllMocks();
+    await act(async () => {
+      document.body.setAttribute('data-theme', 'light');
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('.mermaid-diagram svg')).not.toBeNull();
+    });
+    expect(mermaidMocks.initialize).not.toHaveBeenCalled();
+    expect(mermaidMocks.render).not.toHaveBeenCalled();
   });
 });
 

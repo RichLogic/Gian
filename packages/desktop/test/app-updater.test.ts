@@ -212,7 +212,7 @@ test('disabled controllers stay inert and report a structured manual result', as
   assert.equal((await subject.checkForUpdates('manual')).state.status, 'disabled');
   assert.equal(updater.checks, 0);
   assert.equal(updater.autoDownload, false);
-  assert.equal(subject.install(), false);
+  assert.equal(await subject.install(), false);
 });
 
 test('enabled controllers configure electron-updater safe release defaults', () => {
@@ -288,7 +288,7 @@ test('manual update flow publishes immutable states and never installs on downlo
   const statuses: string[] = [];
   const unsubscribe = subject.subscribe(state => statuses.push(state.status));
 
-  assert.equal(subject.install(), false);
+  assert.equal(await subject.install(), false);
   const result = await subject.checkForUpdates('manual');
 
   assert.equal(result.trigger, 'manual');
@@ -307,11 +307,64 @@ test('manual update flow publishes immutable states and never installs on downlo
     'downloaded',
   ]);
   assert.equal(updater.installs, 0, 'download completion must not force-quit');
-  assert.equal(subject.install(), true);
+  const installation = subject.install();
+  assert.strictEqual(subject.install(), installation, 'repeated clicks join native staging');
+  let settled = false;
+  void installation.then(() => { settled = true; });
+  await flushTasks();
+  assert.equal(settled, false, 'accepting quitAndInstall does not prove the app is quitting');
   assert.equal(updater.installs, 1);
   assert.deepEqual(updater.installArguments, [[false, true]]);
+  subject.confirmInstallQuit();
+  assert.equal(await installation, true);
 
   unsubscribe();
+});
+
+test('an asynchronous native install error releases the pending attempt and permits retry', async () => {
+  const updater = new FakeUpdater();
+  let preparations = 0;
+  const subject = controller(updater, { beforeInstall: () => { preparations += 1; } });
+  updater.emitDownloaded();
+
+  const first = subject.install();
+  await flushTasks();
+  updater.emitError(new Error('Cannot stage https://updates.example/app.zip?token=secret'));
+  assert.equal(await first, false);
+  assert.equal(subject.getState().status, 'error');
+  assert.equal(subject.getState().trigger, 'manual');
+  assert.doesNotMatch(subject.getState().error ?? '', /secret/u);
+
+  updater.check = async () => {
+    updater.emitDownloaded();
+    return checkResult(true);
+  };
+  await subject.checkForUpdates('manual');
+  const second = subject.install();
+  subject.confirmInstallQuit();
+  assert.equal(await second, true);
+  assert.equal(updater.installs, 2);
+  assert.equal(preparations, 2);
+});
+
+test('preparation exceptions and synchronous native errors fail installation', async () => {
+  const updater = new FakeUpdater();
+  const preparationFailure = controller(updater, {
+    beforeInstall: () => { throw new Error('Cannot release overlay'); },
+  });
+  updater.emitDownloaded();
+  assert.equal(await preparationFailure.install(), false);
+  assert.equal(updater.installs, 0, 'never install after failed preparation');
+  assert.equal(preparationFailure.getState().status, 'error');
+
+  const nativeUpdater = new FakeUpdater();
+  const subject = controller(nativeUpdater);
+  nativeUpdater.emitDownloaded();
+  nativeUpdater.quitAndInstall = () => { nativeUpdater.emitError(new Error('Native install failed')); };
+  assert.equal(await subject.install(), false);
+  nativeUpdater.emitDownloaded();
+  nativeUpdater.quitAndInstall = () => { throw new Error('Native install threw'); };
+  assert.equal(await subject.install(), false);
 });
 
 test('not-available checks resolve as up-to-date for the requesting caller', async () => {

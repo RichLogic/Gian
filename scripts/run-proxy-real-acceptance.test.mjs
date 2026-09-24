@@ -6,11 +6,76 @@ import {
   providerCapabilityNames,
   realScenarioRequirement,
   resolveCatalogCandidateValue,
+  resolveAcceptanceConfig,
+  resolveModelDependentAcceptanceConfig,
+  candidateProcessEnvironment,
+  runCustomizationAcceptance,
 } from './proxy-certification-policy.mjs';
 
 function scenario(id, trigger, status) {
   return { id, trigger, providers: { codex: status } };
 }
+
+test('Customization acceptance exercises all kinds, listed details and missing ids without turns', async () => {
+  const calls = [];
+  const client = { async request(method, params) {
+    calls.push(method);
+    if (method === 'customization.list') return { status: 'ok', completeness: 'configured', items: params.kind === 'skill'
+      ? [{ id: 'fixture', name: 'proxy-acceptance-skill' }] : [] };
+    return params.id === 'fixture' ? { status: 'ok', text: 'PROXY_SKILL_OK' } : { status: 'unavailable' };
+  } };
+  const result = await runCustomizationAcceptance({ client, provider: 'kimi', workspace: '/fixture' }, true);
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.inventory.length, 4);
+  assert.equal(calls.filter(method => method === 'customization.detail').length, 5);
+  assert.ok(calls.every(method => method.startsWith('customization.')));
+});
+
+test('Customization acceptance distinguishes unsupported DSH from missing supported inventory', async () => {
+  const client = { async request() { return { status: 'proxy_unsupported', completeness: 'none', items: [] }; } };
+  assert.equal((await runCustomizationAcceptance({ client, provider: 'dsh' })).status, 'PASS');
+  assert.equal((await runCustomizationAcceptance({ client, provider: 'claude' })).status, 'BEHAVIOR_FAIL');
+});
+
+test('candidate processes use their own identity and never inherit the calling Gian Session', () => {
+  assert.deepEqual(candidateProcessEnvironment({
+    HOME: '/test/home', PATH: '/bin', GIAN_PLUGIN_ID: 'codex',
+    GIAN_PLUGIN_DATA_DIR: '/production/data', GIAN_TOOL_TOKEN: 'fake-parent-secret',
+  }, { GIAN_PLUGIN_ID: 'com.zhipu.zcode', GIAN_PLUGIN_DATA_DIR: '/test/data' }), {
+    HOME: '/test/home', PATH: '/bin', GIAN_PLUGIN_ID: 'com.zhipu.zcode', GIAN_PLUGIN_DATA_DIR: '/test/data',
+  });
+});
+
+test('explicit model selection replaces a stale default before catalog validation', () => {
+  const catalog = { configOptions: [
+    { id: 'model', binding: 'turn', choices: [{ value: 'glm-flash' }] },
+    { id: 'effort', binding: 'turn', choices: [{ value: 'low' }] },
+  ] };
+  assert.deepEqual(resolveAcceptanceConfig(catalog,
+    { model: 'removed-deepseek-alias', effort: 'low' }, { model: 'glm-flash' }), {
+    sessionConfig: {}, turnConfig: { model: 'glm-flash', effort: 'low' },
+  });
+  assert.throws(() => resolveAcceptanceConfig(catalog, {}, { model: 'unknown' }), /does not offer/);
+  assert.throws(() => resolveAcceptanceConfig(catalog, {}, { invented: 'low' }), /no config option/);
+});
+
+test('real candidate thinking is validated after resolving the selected model', async () => {
+  const catalog = {
+    catalogRevision: 'k3', specialCatalogs: { model: 'model', thinking: 'thinking' },
+    configOptions: [
+      { id: 'model', binding: 'turn', defaultValue: 'k3', choices: [{ value: 'k3' }, { value: 'k2.7' }] },
+      { id: 'thinking', binding: 'turn', defaultValue: 'high', choices: [{ value: 'low' }, { value: 'high' }] },
+    ],
+  };
+  const result = await resolveModelDependentAcceptanceConfig(catalog, { model: 'k3' },
+    { model: 'k2.7', thinking: 'off' }, async request => {
+      assert.deepEqual(request, { catalogRevision: 'k3', sessionConfig: {}, turnConfig: { model: 'k2.7' } });
+      return { ...catalog, configOptions: [catalog.configOptions[0],
+        { id: 'thinking', binding: 'turn', choices: [{ value: 'off' }, { value: 'on' }] },
+      ] };
+    });
+  assert.deepEqual(result.turnConfig, { model: 'k2.7', thinking: 'off' });
+});
 
 test('real Provider completion fails closed for a missing required handler', () => {
   const scenarios = [scenario('turn.basic', 'real_prompt', 'required')];

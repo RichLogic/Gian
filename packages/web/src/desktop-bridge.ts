@@ -81,10 +81,12 @@ export interface GianDesktopZoomApi {
 export interface GianDesktopBridge {
   appVariant?: 'production' | 'development';
   appVersion?: string;
+  platform?: string;
   retryConnection?: () => Promise<boolean>;
   openLogs?: () => Promise<string>;
   restartApp?: () => Promise<boolean>;
   setDockIcon?: (dataUrl: string) => Promise<boolean>;
+  setFrameVibrancy?: (theme: 'light' | 'warm' | 'dark', system: boolean) => Promise<boolean>;
   navigation?: GianDesktopNavigationApi;
   notifications?: GianDesktopNotificationsApi;
   updater?: GianDesktopUpdaterApi;
