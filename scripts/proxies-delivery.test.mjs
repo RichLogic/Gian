@@ -1,6 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 import { proxiesExportPath, externalProxyLockfile } from './export-proxies.mjs';
+
+test('source Proxy packages use the workspace protocol dependency', () => {
+  const root = new URL('../packages/proxies/', import.meta.url);
+  for (const directory of readdirSync(root, { withFileTypes: true })) {
+    if (!directory.isDirectory()) continue;
+    const manifest = new URL(`${directory.name}/package.json`, root);
+    let metadata;
+    try {
+      metadata = JSON.parse(readFileSync(manifest, 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (metadata.dependencies?.['@gian/proxy-protocol']) {
+      assert.equal(metadata.dependencies['@gian/proxy-protocol'], 'workspace:*', directory.name);
+    }
+  }
+});
 
 test('Proxy product excludes App and private protocol source and reuses the exact runtime extractor', () => {
   for (const path of ['AGENTS.md', '.ai/MEMORY.md', 'packages/host/package.json', 'packages/desktop/src/main.ts',

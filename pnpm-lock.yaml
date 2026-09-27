@@ -275,9 +275,6 @@ importers:
 
   packages/proxies/kimi-proxy:
     dependencies:
-      '@agentclientprotocol/sdk':
-        specifier: ^0.23.0
-        version: 0.23.0(patch_hash=f6c793aced1f0bd3e72bf99d6adfb78ec2d95ba21b45c9629cac2724bc59d220)(zod@4.4.3)
       '@gian/proxy-protocol':
         specifier: workspace:*
         version: link:../../proxy-protocol
