@@ -182,6 +182,19 @@ test('translation routes use configured send/read targets and reject missing ses
   } finally { db.close(); }
 });
 
+test('translation route refuses to enable automatic mode without configured Agent and model', async () => {
+  const { db, service } = fixture(async () => '{"translations":["translated"]}');
+  try {
+    const app = new Hono();
+    registerTranslationRoutes(app, db, service);
+    const response = await app.request('/api/sessions/s1/translation/state', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{"enabled":true}',
+    });
+    assert.equal(response.status, 409);
+    assert.equal(service.enabled('s1'), false);
+  } finally { db.close(); }
+});
+
 test('translation model uses an isolated session and only returns completed text, never reasoning', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gian-translation-model-'));
   let notify!: NotificationHandler;

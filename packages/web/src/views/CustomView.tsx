@@ -476,7 +476,7 @@ export function CustomView({
         label={t('custom.selector.agent')}
         buttonContent={agent ? (
           <>
-            <AgentLogo proxy={agent.proxy} size={16} />
+            <AgentLogo proxy={agent.pluginId} size={16} />
             <span className="custom-select-name" title={agent.name}>{agent.name}</span>
             <span className={`custom-dot ${agent.ready ? 'ok' : 'warn'}`} title={agent.ready ? 'ready' : t('custom.agent.setupRequired')} />
           </>

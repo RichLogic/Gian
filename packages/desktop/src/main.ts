@@ -701,9 +701,9 @@ function revealMainWindow(window: BrowserWindow): void {
 async function showScreenPermissionHelp(): Promise<void> {
   const result = await dialog.showMessageBox({
     type: 'warning',
-    title: 'Screen Recording Permission Required',
-    message: 'Allow Gian to record the screen before taking a screenshot.',
-    detail: 'Open System Settings, enable Gian under Privacy & Security → Screen Recording, then try again.',
+    title: 'Screen Capture Unavailable',
+    message: 'Gian cannot capture the screen yet.',
+    detail: 'If Gian is disabled under Privacy & Security → Screen & System Audio Recording, enable it. If it is already enabled, quit Gian completely and reopen it before retrying.',
     buttons: ['Open System Settings', 'Cancel'],
     defaultId: 0,
     cancelId: 1,

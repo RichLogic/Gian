@@ -9,7 +9,7 @@ import type {
   ProductExecutor,
   ProxyCatalog,
 } from '@gian/shared';
-import { executorIdForPluginId, isApprovalMode, isProductExecutor, usesNativeExecutorConfig } from '@gian/shared';
+import { catalogModeSemantics, executorIdForPluginId, isApprovalMode, isProductExecutor } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError, mergeAgentProxyDefaults } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
@@ -215,8 +215,12 @@ function validateProxyDefaults(
   }
   const approvalModes = optionChoices(catalog, 'approval_mode');
   const executionModes = optionChoices(catalog, 'execution_mode');
+  // `catalog.modeSemantics`-gated: modeKind markers win; the legacy
+  // product-kind allowlist only covers Proxies below the gate. Binding is
+  // never consulted for the Gian-preset vs native distinction.
+  const nativeModeSemantics = catalogModeSemantics(executorId, catalog) === 'provider-native';
   if (defaults.mode) {
-    if (usesNativeExecutorConfig(executorId)) {
+    if (nativeModeSemantics) {
       const nativeModes = approvalModes.length > 0 ? approvalModes : executionModes;
       if (nativeModes.length > 0 && !nativeModes.includes(defaults.mode)) {
         throw new Error('mode is not advertised by the Proxy');
@@ -466,9 +470,10 @@ export function registerAgentRoutes(
     if (variant !== 'light' && variant !== 'dark') {
       return c.json({ error: 'logo not found' }, 404);
     }
-    const official = executor(raw);
-    if (official && isProductExecutor(official)) {
-      const logo = await options.agents.proxyLogo(official, variant);
+    // Signed Catalog first — the published sequence is the brand source of
+    // truth; the installed Proxy package is only the local fallback.
+    if (options.catalogService && isProxyPluginId(raw)) {
+      const logo = await options.catalogService.logo(raw, variant);
       if (logo) {
         c.header('content-type', logo.mediaType);
         c.header('cache-control', 'private, max-age=300');
@@ -477,8 +482,9 @@ export function registerAgentRoutes(
         return c.body(Uint8Array.from(logo.bytes).buffer);
       }
     }
-    if (options.catalogService && isProxyPluginId(raw)) {
-      const logo = await options.catalogService.logo(raw, variant);
+    const official = executor(raw);
+    if (official && isProductExecutor(official)) {
+      const logo = await options.agents.proxyLogo(official, variant);
       if (logo) {
         c.header('content-type', logo.mediaType);
         c.header('cache-control', 'private, max-age=300');
@@ -817,22 +823,20 @@ export function registerAgentRoutes(
         if ('error' in normalized) return c.json({ error: normalized.error }, 400);
         defaultsPatch = normalized;
         // Defaults stay write-through (no restart), but they must remain
-        // values the kind's Proxy actually advertises.
-        const kind = patch.proxy ?? current.proxy;
-        if (!kind) {
-          return c.json({ error: 'defaults require an official Agent' }, 400);
-        }
+        // values the Agent's Proxy actually advertises. Identity is the
+        // Agent's pluginId; the legacy proxy alias never gates defaults.
+        const pluginId = current.pluginId;
         const next = mergeAgentProxyDefaults(current.defaults, defaultsPatch);
-        const catalog = await options.capabilities(kind, id);
+        const catalog = await options.capabilities(pluginId, id);
         const hasOptionDefaults = Object.keys(next.options ?? {}).length > 0;
         const resolved = options.resolveDefaultsCatalog && (next.model || hasOptionDefaults)
-          ? await options.resolveDefaultsCatalog(kind, catalog, configsFromDefaults(catalog, next), id)
+          ? await options.resolveDefaultsCatalog(pluginId, catalog, configsFromDefaults(catalog, next), id)
           : null;
         const validationCatalog = resolved ?? catalog;
         if (resolved && 'resolvedDefaults' in resolved) {
           adoptResolvedInvalidations(defaultsPatch, next, validationCatalog);
         }
-        validateProxyDefaults(kind, next, defaultsPatch, validationCatalog);
+        validateProxyDefaults(pluginId, next, defaultsPatch, validationCatalog);
         patch.defaults = defaultsPatch;
       }
       const agent = await (async () => {
@@ -968,7 +972,10 @@ export function registerAgentRoutes(
     const existing = options.agents.listAgents().filter(agent => agent.proxy === kind);
     return c.json({
       name: options.agents.nextAgentName(kind),
-      home: kind === 'zcode' ? null : { kind: 'managed', path: null },
+      home: {
+        kind: 'default',
+        path: options.agents.defaultAgentHomePath(kind),
+      },
       // Read-only active Runtime path. Never PATH-scan or accept it back on
       // Agent create/update.
       cliPath: existing.find(agent => agent.cliPath !== null)?.cliPath

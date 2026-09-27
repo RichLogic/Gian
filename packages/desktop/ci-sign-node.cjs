@@ -45,7 +45,13 @@ function signBundledNode(appPath, { identity, keychain, projectDir }) {
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return;
   const { assertExecutionAllowed } = await import('../../scripts/execution-policy.mjs');
-  assertExecutionAllowed('package');
+  if (process.env.GIAN_ALLOW_LOCAL_DEV_PACKAGE === '1') {
+    const { assertLocalDevPackageContext } = require('../../scripts/local-dev-package-guard.cjs');
+    assertLocalDevPackageContext(context);
+    assertExecutionAllowed('dev-package-local');
+  } else {
+    assertExecutionAllowed('package');
+  }
   const appPath = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   signBundledNode(appPath, {
     identity: context.packager.platformSpecificBuildOptions.identity,

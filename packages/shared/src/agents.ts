@@ -34,8 +34,8 @@ export interface UserAgent {
   /** Absent means enabled; `false` blocks new Sessions and Turns while
    *  existing Session history stays readable. */
   enabled?: boolean;
-  /** Provider state/configuration root. ZCode is the external-App exception
-   *  and therefore has no Gian-managed HOME. */
+  /** Provider state/configuration root. For ZCode the path ends in .zcode;
+   *  the CLI receives its parent as process HOME. */
   home?: AgentHomeBinding | null;
   /** @deprecated Migration/development compatibility only. Production APIs
    *  reject this input and managed execution never resolves from it. */

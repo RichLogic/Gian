@@ -12,6 +12,13 @@ test('Proxy product excludes App and private protocol source and reuses the exac
   assert.equal(proxiesExportPath('delivery/proxies/.github/workflows/catalog.yml'), '.github/workflows/catalog.yml');
   assert.equal(proxiesExportPath('scripts/check-node.js'), 'scripts/check-node.cjs');
   assert.equal(proxiesExportPath('catalog/proxy-information/claude/tutorial.md'), 'catalog/proxy-information/claude/tutorial.md');
+  for (const path of ['scripts/build-zcode-runtime.mjs', 'scripts/zcode-runtime-source.mjs',
+    'scripts/verify-zcode-runtime-protocol.mjs',
+    'scripts/zcode-runtime-integration.mjs',
+    'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs',
+    'packages/proxies/zcode-proxy/src/runtime/source.json']) {
+    assert.equal(proxiesExportPath(path), path, 'Standalone release must retain ZCode source lock and build dependencies');
+  }
 });
 
 test('standalone lock retains exact registry snapshots and removes private protocol importers', () => {

@@ -73,6 +73,8 @@ export interface RemoteProjectionDeps {
     id: string;
     name?: string;
     proxy?: string;
+    /** Live identity; `proxy` above is only the legacy official-kind alias. */
+    pluginId?: string;
     defaults?: { model?: string | null; thinking?: string | null };
   }>;
   attachments?: RemoteAttachmentService;
@@ -197,7 +199,10 @@ export class RemoteProjector {
     const agents = (this.deps.listAgents?.() ?? []).map((agent) => ({
       id: agent.id,
       name: agent.name ?? null,
+      // `pluginId` is the live identity; `proxy` stays only as the legacy
+      // official-kind alias for old remote clients.
       proxy: agent.proxy ?? null,
+      pluginId: agent.pluginId ?? null,
       defaults: agent.defaults ?? null,
     }));
     const tasks = this.deps.tasks.listTasks()
@@ -258,6 +263,8 @@ export class RemoteProjector {
     const agent = {
       id: remoteStableUuid('agent', session.agent_id ?? session.executor),
       name: session.agent_name ?? session.executor,
+      // The live identity string (pluginId); the wire field keeps its name
+      // for remote-client compatibility.
       proxy: session.executor,
     };
     const active = this.deps.sessions.getActiveTurn(session.id);
@@ -309,6 +316,7 @@ export class RemoteProjector {
       id: string;
       name: string;
       proxy: string | null;
+      pluginId?: string;
       ready?: boolean;
       defaults?: { model?: string | null; thinking?: string | null };
       models?: Array<{
@@ -343,7 +351,9 @@ export class RemoteProjector {
       agents: raw.agents.map(agent => ({
         id: remoteStableUuid('agent', agent.id),
         name: agent.name,
-        proxy: agent.proxy ?? 'unknown',
+        // Wire field name kept for remote clients; the value is the live
+        // pluginId and never gates readiness.
+        proxy: agent.pluginId ?? agent.proxy ?? 'unknown',
         readiness: agent.ready === false ? 'unavailable' as const : 'ready' as const,
         ...(agent.defaults?.model || agent.defaults?.thinking ? {
           defaults: {

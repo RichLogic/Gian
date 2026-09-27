@@ -33,6 +33,9 @@ import { usePanel2Width } from '../components/RailLayout.js';
 import { agentProxyDisplay, catalogInstallationStatus } from '../agents/catalog-model.js';
 import { CatalogBadgeList } from '../agents/badges.js';
 import { AgentDetailPanel } from '../agents/AgentDetailPanel.js';
+import { AgentLoginTerminal } from '../agents/AgentLoginTerminal.js';
+import type { GianWs } from '../ws.js';
+import type { TerminalPreferences } from '@gian/shared';
 import {
   appendIntegrationInstallProgress,
   type IntegrationInstallTerminalState,
@@ -89,7 +92,10 @@ function RefreshIcon() {
   );
 }
 
-export function AgentsView() {
+export function AgentsView({ ws, terminalPreferences }: {
+  ws?: GianWs;
+  terminalPreferences?: TerminalPreferences;
+} = {}) {
   const t = useT();
   const locale = useLocale();
   const dispatch = useOperationDispatch();
@@ -105,6 +111,7 @@ export function AgentsView() {
   const [addDialogPluginId, setAddDialogPluginId] = useState<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
+  const [loginTerminal, setLoginTerminal] = useState<{ agentId: string; termId: string } | null>(null);
   const [integrationTerminals, setIntegrationTerminals] = useState<
     Record<string, IntegrationInstallTerminalState>
   >(() => Object.fromEntries(liveIntegrationTerminals));
@@ -173,6 +180,9 @@ export function AgentsView() {
   ): Promise<void> {
     setError('');
     const showsTerminal = name !== 'catalog.rollbackProxy';
+    const isUpdate = name === 'catalog.updateProxy'
+      || (name === 'catalog.installRuntime'
+        && catalog?.items.some(item => item.pluginId === pluginId && item.installation.updateAvailable));
     const terminalId = `${pluginId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const updateTerminal = (
       update: (current: IntegrationInstallTerminalState) => IntegrationInstallTerminalState,
@@ -187,7 +197,7 @@ export function AgentsView() {
     if (showsTerminal) {
       const terminal: IntegrationInstallTerminalState = {
         id: terminalId,
-        action: name === 'catalog.updateProxy' ? 'update' : 'install',
+        action: isUpdate ? 'update' : 'install',
         visible: true,
         status: 'running',
         events: [],
@@ -584,6 +594,13 @@ export function AgentsView() {
                   patch: { home: { kind: 'custom', path } },
                 });
               } : undefined}
+              onLogin={ws && selectedAgent.home?.path
+                && ['claude', 'codex', 'kimi', 'grok', 'zcode'].includes(selectedAgent.proxy ?? '')
+                ? () => setLoginTerminal({
+                  agentId: selectedAgent.id,
+                  termId: `agent-login-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                })
+                : undefined}
               onDelete={() => { void removeAgent(selectedAgent); }}
               onOpenProxy={integrationItems.some(item => item.pluginId === selectedAgent.pluginId)
                 ? () => { setSelection({ kind: 'proxy', pluginId: selectedAgent.pluginId }); }
@@ -605,6 +622,20 @@ export function AgentsView() {
           onClose={() => { if (!addSaving) setAddDialogPluginId(null); }}
         />
       )}
+      {ws && loginTerminal && (() => {
+        const agent = agents.find(candidate => candidate.id === loginTerminal.agentId);
+        return agent?.home?.path ? (
+          <AgentLoginTerminal
+            ws={ws}
+            agentId={agent.id}
+            agentName={agent.name}
+            homePath={agent.home.path}
+            termId={loginTerminal.termId}
+            preferences={terminalPreferences}
+            onClose={() => setLoginTerminal(null)}
+          />
+        ) : null;
+      })()}
     </div>
   );
 }

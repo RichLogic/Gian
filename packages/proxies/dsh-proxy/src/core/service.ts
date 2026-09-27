@@ -7,11 +7,11 @@
  * Terminal).
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.3.1';
+export const PLUGIN_VERSION = '0.3.4';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -205,7 +205,9 @@ export class DshProxyService {
     const session: AttachedSession = {
       id: params.sessionId,
       nativeSessionId: params.nativeSessionId,
-      streamId: `stream-${params.sessionId}-${createdAt}`,
+      // Wall-clock milliseconds can collide across a rapid Proxy restart;
+      // every attach generation must have a fresh stream identity.
+      streamId: `stream-${params.sessionId}-${randomUUID()}`,
       cwd: params.cwd,
       roots: params.roots,
       sessionConfig: params.sessionConfig,
@@ -242,6 +244,25 @@ export class DshProxyService {
     // session.close is a request whose success response is authoritative; the
     // Host validator deletes the attach on the response, so no session.updated
     // notification may follow it (10.11.4 step 7).
+  }
+
+  /**
+   * Side Chat close barrier (10.5.4): finalize the active turn and every open
+   * child lifecycle now — interactions settle as `turn_ended`, open work is
+   * cancelled, and the terminal turn event is emitted before the close
+   * response is written — then drop the route so no notification is ever
+   * projected for this Side Chat again.
+   */
+  closeSidechatRoute(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const turn = session.activeTurn !== null ? session.turnState.get(session.activeTurn) : undefined;
+    if (turn) {
+      this.terminalEvent(session, turn, 'turn.completed', { stopReason: 'cancelled' }, session.sequence + 1);
+    }
+    session.closed = true;
+    session.state = 'closed';
+    this.sessions.delete(sessionId);
   }
 
   /* ---------------- Notifications ---------------- */
@@ -323,8 +344,39 @@ export class DshProxyService {
       this.onSubagent(session, method, notification);
       return;
     }
+    if (method === 'subagent.activity') {
+      this.onSubagentActivity(session, notification);
+      return;
+    }
     if (method === 'session.event') {
       this.onSessionEvent(session, notification);
+    }
+  }
+
+  /**
+   * The shared DSH Host process exited. Every attached session's open turn
+   * fails with a durable terminal error and every pending interaction settles
+   * as `runtime_ended`; no session may stay open-ended across a crash.
+   */
+  handleRuntimeExited(): void {
+    for (const session of this.sessions.values()) {
+      if (session.closed) continue;
+      for (const turn of session.turnState.values()) {
+        this.terminalEvent(session, turn, 'turn.failed', {
+          error: {
+            domainCode: 'RUNTIME_ERROR',
+            message: 'The shared DSH runtime process exited before the turn reached a terminal state.',
+            retryable: false,
+            details: { runtimeExited: true },
+          },
+        }, session.sequence + 1, 'runtime_ended');
+      }
+      if (session.state !== 'closed' && session.state !== 'error') {
+        session.state = 'error';
+        session.updatedAt = nowIso();
+        session.sequence += 1;
+        this.emitSessionUpdated(session);
+      }
     }
   }
 
@@ -370,6 +422,14 @@ export class DshProxyService {
         return;
       case 'todo/write':
         this.onTodoWrite(session, data, nativeSeq);
+        return;
+      case 'approval/asked':
+      case 'approval/decided':
+      case 'session/end-seed':
+        // Durable audit/fork-lineage facts. Live approvals are projected from
+        // the dedicated interaction notifications; replay projects them from
+        // these same events (replayEventFor). The fork cut marker is native
+        // bookkeeping with no user-visible surface.
         return;
       default:
         // Inbox bookkeeping is an internal correlation fact; it never becomes
@@ -440,7 +500,14 @@ export class DshProxyService {
     this.startTurnEvent(session, turn, nativeSeq);
   }
 
-  private terminalEvent(session: AttachedSession, turn: TurnState, method: 'turn.completed' | 'turn.failed', data: Record<string, unknown>, nativeSeq: number): void {
+  private terminalEvent(
+    session: AttachedSession,
+    turn: TurnState,
+    method: 'turn.completed' | 'turn.failed',
+    data: Record<string, unknown>,
+    nativeSeq: number,
+    finalizeOutcome: 'turn_ended' | 'runtime_ended' = 'turn_ended',
+  ): void {
     if (turn.terminal) return;
     // Finalize open interactions, activities, steps, and content first.
     for (const [, interaction] of turn.interactions) {
@@ -455,7 +522,7 @@ export class DshProxyService {
           turnId: turn.gianTurnId,
           sourceTurnId: turn.sourceTurnId,
           emittedAt: nowIso(),
-          data: { interactionId: interaction.id, outcome: 'turn_ended' },
+          data: { interactionId: interaction.id, outcome: finalizeOutcome },
         });
       }
     }
@@ -823,6 +890,31 @@ export class DshProxyService {
         },
       },
     });
+    // dsh-tool-fs attaches its result-time contextual diff hunks on the
+    // tool/result meta (`FsDiffMeta`); each file becomes one diff.updated with
+    // a diffId derived from the durable call identity. No meta → no diff.
+    const diffs = diffsFromMeta(data.meta);
+    if (diffs !== null) {
+      for (const [fileIndex, file] of diffs.entries()) {
+        session.sequence += 1;
+        const diffId = hashId([session.nativeSessionId ?? session.id, 'diff', callId || String(nativeSeq), file.path, fileIndex]);
+        this.emit('diff.updated', {
+          eventId: this.nextEventId(session, 'diff-updated', nativeSeq, diffId),
+          sessionId: session.id,
+          streamId: session.streamId,
+          sequence: session.sequence,
+          turnId: turn.gianTurnId,
+          sourceTurnId: turn.sourceTurnId,
+          emittedAt: nowIso(),
+          data: {
+            diffId,
+            diff: unifiedDiff(file),
+            truncated: false,
+            files: [{ path: file.path, status: diffStatusFor(file) }],
+          },
+        });
+      }
+    }
   }
 
   private onUserMessage(session: AttachedSession, data: Record<string, unknown>, nativeSeq: number): void {
@@ -893,10 +985,16 @@ export class DshProxyService {
   private onTodoWrite(session: AttachedSession, data: Record<string, unknown>, nativeSeq: number): void {
     const turn = session.activeTurn ? session.turnState.get(session.activeTurn) : undefined;
     if (!turn) return;
-    const todos = Array.isArray(data.todos) ? data.todos : [];
+    const todos = Array.isArray(data.todos) ? data.todos as Array<Record<string, unknown>> : [];
+    // DSH `todo/write` is a whole-list snapshot with stable content lines and
+    // no per-item id, so step identity is derived from the durable facts
+    // (position + content) and the plan id from the native session — the same
+    // derivation replay uses.
+    const nativeSessionId = session.nativeSessionId ?? session.id;
+    const planId = `plan-${nativeSessionId}`;
     session.sequence += 1;
-    this.emit('activity.updated', {
-      eventId: this.nextEventId(session, 'activity-todo', nativeSeq),
+    this.emit('plan.updated', {
+      eventId: this.nextEventId(session, 'plan-updated', nativeSeq),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,
@@ -904,12 +1002,52 @@ export class DshProxyService {
       sourceTurnId: turn.sourceTurnId,
       emittedAt: nowIso(),
       data: {
-        activityId: `todo-${turn.sourceTurnId}`,
-        kind: 'todo',
-        title: 'Todos',
-        status: 'running',
-        presentation: { type: 'generic' },
-        details: { todos: todos as unknown },
+        planId,
+        title: 'Todo list',
+        steps: todos.map((todo, index) => ({
+          id: hashId([nativeSessionId, 'todo', index, String(todo.content ?? '')]),
+          text: String(todo.content ?? ''),
+          status: todoStatusFor(todo.status),
+        })),
+      },
+    });
+  }
+
+  private onSubagentActivity(session: AttachedSession, notification: BridgeNotification): void {
+    const turn = session.activeTurn ? session.turnState.get(session.activeTurn) : undefined;
+    if (!turn) return;
+    const agentId = typeof notification.params.agentId === 'string' ? notification.params.agentId : '';
+    if (agentId.length === 0) return;
+    const callId = typeof notification.params.callId === 'string' ? notification.params.callId : '';
+    const name = typeof notification.params.name === 'string' ? notification.params.name : 'tool';
+    const isCall = notification.params.kind === 'tool/call';
+    const status = isCall ? 'running' : notification.params.error === true ? 'failed' : 'succeeded';
+    const activityId = `child-${agentId}${callId.length > 0 ? `-${callId}` : ''}`;
+    const existing = turn.activities.get(activityId);
+    if (existing) existing.status = status;
+    else turn.activities.set(activityId, { id: activityId, status, enteredRunning: true });
+    session.sequence += 1;
+    this.emit('activity.updated', {
+      eventId: this.nextEventId(session, 'subagent-activity', session.sequence, activityId),
+      sessionId: session.id,
+      streamId: session.streamId,
+      sequence: session.sequence,
+      turnId: turn.gianTurnId,
+      sourceTurnId: turn.sourceTurnId,
+      emittedAt: nowIso(),
+      data: {
+        activityId,
+        kind: name,
+        title: name,
+        status,
+        presentation: {
+          type: 'tool',
+          data: { name, agentId },
+        },
+        details: {
+          subagent: agentId,
+          childNativeId: notification.params.childNativeId ?? null,
+        },
       },
     });
   }
@@ -950,6 +1088,7 @@ export class DshProxyService {
       inputs?: Array<Record<string, unknown>>;
       actions?: Array<{ id: string; label: string; style: string }>;
       turn?: number;
+      context?: Record<string, unknown>;
     };
     const turn = session.activeTurn ? session.turnState.get(session.activeTurn)
       : data.turn !== undefined ? this.turnForNative(session, data.turn) : undefined;
@@ -992,8 +1131,14 @@ export class DshProxyService {
     });
     session.state = 'waiting_interaction';
     session.sequence += 1;
+    // The bridge anchors the interaction identity on the durable ask event's
+    // native seq when it can observe one; otherwise the stream sequence is the
+    // only available (live-only) identity basis.
+    const identitySeq = typeof notification.params.nativeSeq === 'number'
+      ? notification.params.nativeSeq
+      : session.sequence;
     this.emit('interaction.requested', {
-      eventId: this.nextEventId(session, 'interaction-requested', session.sequence),
+      eventId: this.nextEventId(session, 'interaction-requested', identitySeq, interactionId),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,
@@ -1004,9 +1149,12 @@ export class DshProxyService {
         interactionId,
         ...(typeof data.title === 'string' ? { title: data.title } : {}),
         ...(typeof data.description === 'string' ? { description: data.description } : {}),
-        presentation: { kind: data.kind === 'approval' ? 'permission' : data.kind === 'question' ? 'question' : 'choice' },
+        presentation: { kind: data.kind === 'approval' ? 'permission' : data.kind === 'question' ? 'question' : data.kind === 'plan_review' ? 'confirmation' : 'choice' },
         inputs,
         actions,
+        ...(data.context !== null && typeof data.context === 'object'
+          ? { context: data.context as Record<string, never> }
+          : {}),
       },
     });
   }
@@ -1028,8 +1176,11 @@ export class DshProxyService {
     interaction.resolved = true;
     session.state = 'running';
     session.sequence += 1;
+    const identitySeq = typeof notification.params.nativeSeq === 'number'
+      ? notification.params.nativeSeq
+      : session.sequence;
     this.emit('interaction.resolved', {
-      eventId: this.nextEventId(session, 'interaction-resolved', session.sequence),
+      eventId: this.nextEventId(session, 'interaction-resolved', identitySeq, interactionId),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,
@@ -1040,6 +1191,9 @@ export class DshProxyService {
         interactionId,
         outcome,
         ...(outcome === 'submitted' && actionId !== undefined ? { actionId } : {}),
+        ...(typeof notification.params.displaySummary === 'string'
+          ? { displaySummary: notification.params.displaySummary }
+          : {}),
       },
     });
   }
@@ -1048,10 +1202,21 @@ export class DshProxyService {
     const turn = session.activeTurn ? session.turnState.get(session.activeTurn) : undefined;
     if (!turn) return;
     const agentId = (notification.params.agentId as string) ?? `child-${Date.now()}`;
-    const state = method === 'subagent.started' ? 'running' : notification.params.state === 'failed' ? 'failed' : 'completed';
+    const rawState = method === 'subagent.started'
+      ? 'running'
+      : typeof notification.params.state === 'string' ? notification.params.state : 'completed';
+    // Presentation state uses the protocol AGENT_STATES vocabulary; the
+    // activity status uses the ACTIVITY_STATUSES vocabulary.
+    const agentState = rawState === 'running' || rawState === 'completed'
+      || rawState === 'failed' || rawState === 'interrupted'
+      ? rawState
+      : rawState === 'cancelled' ? 'interrupted' : 'completed';
+    const activityStatus = agentState === 'running'
+      ? 'running'
+      : agentState === 'completed' ? 'succeeded' : agentState === 'failed' ? 'failed' : 'cancelled';
     session.sequence += 1;
     this.emit('activity.updated', {
-      eventId: this.nextEventId(session, `subagent-${method}`, session.sequence),
+      eventId: this.nextEventId(session, `subagent-${method}`, session.sequence, agentId),
       sessionId: session.id,
       streamId: session.streamId,
       sequence: session.sequence,
@@ -1062,8 +1227,11 @@ export class DshProxyService {
         activityId: agentId,
         kind: 'subagent',
         title: agentId,
-        status: state === 'running' ? 'running' : state === 'failed' ? 'failed' : 'succeeded',
-        presentation: { type: 'agent', data: { agentId, state } },
+        status: activityStatus,
+        presentation: { type: 'agent', data: { agentId, state: agentState } },
+        ...(typeof notification.params.stopReason === 'string'
+          ? { details: { stopReason: notification.params.stopReason } }
+          : {}),
       },
     });
   }
@@ -1090,4 +1258,70 @@ function stringField(data: Record<string, unknown>, key: string): string {
 
 function indexFromStepId(_stepId: string): number {
   return 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * Native diff / plan derivations shared by live projection and replay.
+ * ------------------------------------------------------------------ */
+
+export interface NativeFileDiff {
+  path: string;
+  oldText: string | null;
+  newText: string;
+}
+
+/**
+ * Narrow the opaque `tool/result.meta` to the `FsDiffMeta` shape
+ * (`@deepseek-ai/dsh-tool-fs` diff.d.ts). Absent or malformed metadata yields
+ * null — a diff is never guessed from tool arguments.
+ */
+export function diffsFromMeta(meta: unknown): NativeFileDiff[] | null {
+  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const raw = (meta as { diffs?: unknown }).diffs;
+  if (Array.isArray(raw) === false || raw.length === 0) return null;
+  const diffs: NativeFileDiff[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.path !== 'string' || candidate.path.length === 0) return null;
+    const oldText = candidate.oldText === null ? null
+      : typeof candidate.oldText === 'string' ? candidate.oldText : undefined;
+    if (oldText === undefined) return null;
+    if (typeof candidate.newText !== 'string') return null;
+    diffs.push({ path: candidate.path, oldText, newText: candidate.newText });
+  }
+  return diffs;
+}
+
+/** Protocol DIFF_FILE_STATUSES projection of one native hunk. */
+export function diffStatusFor(diff: NativeFileDiff): 'added' | 'modified' | 'deleted' {
+  if (diff.oldText === null) return 'added';
+  if (diff.newText.length === 0) return 'deleted';
+  return 'modified';
+}
+
+/**
+ * Render one native contextual hunk as a unified-diff-style patch. DSH
+ * exposes result-time hunks (3 context lines, no absolute line offsets), so
+ * the hunk header carries line COUNTS with hunk-relative starts rather than
+ * fabricated file offsets; the content lines are verbatim native data.
+ */
+export function unifiedDiff(diff: NativeFileDiff): string {
+  const lines: string[] = [`--- a/${diff.path}`, `+++ b/${diff.path}`];
+  const before = diff.oldText === null ? [] : diff.oldText.split('\n');
+  const after = diff.newText.split('\n');
+  if (before.length > 0 && before[before.length - 1] === '') before.pop();
+  if (after.length > 0 && after[after.length - 1] === '') after.pop();
+  lines.push(`@@ -1,${before.length} +1,${after.length} @@`);
+  for (const line of before) lines.push(`-${line}`);
+  for (const line of after) lines.push(`+${line}`);
+  return lines.join('\n');
+}
+
+/** Protocol PLAN_STEP_STATUSES projection of a native todo status. */
+export function todoStatusFor(status: unknown): 'pending' | 'in_progress' | 'completed' | 'failed' {
+  return status === 'in_progress' ? 'in_progress'
+    : status === 'completed' ? 'completed'
+    : status === 'failed' ? 'failed'
+    : 'pending';
 }

@@ -63,7 +63,7 @@ import { isGenericRuntimeProtocol } from '../runtime/launch-mode.js';
 import { openRuntimeIdentity, RuntimeResolver, RuntimeResolverError } from '../runtime/resolver.js';
 import type { PluginStore } from '../plugin-store/store.js';
 import { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
-import { ManagedRuntimeGenerationStore } from '../runtime/generation-store.js';
+import { ManagedRuntimeGenerationStore, ManagedRuntimeStoreError } from '../runtime/generation-store.js';
 import { assertSavedAbsoluteRuntimePath } from '../runtime/saved-path.js';
 import {
   launchFromPluginStore,
@@ -88,7 +88,7 @@ import {
   acquireAgentUpdateLock,
   type AgentUpdateLease,
 } from './update-lock.js';
-import { AgentHomeError, AgentHomeManager, providerRuntimeEnvironment } from './home.js';
+import { AgentHomeError, AgentHomeManager, agentLoginArgs, providerRuntimeEnvironment } from './home.js';
 
 const execFileAsync = promisify(execFile);
 const CONFIG_FILE = 'agents.json';
@@ -911,13 +911,13 @@ export class AgentManager {
   private constructor(private readonly options: AgentManagerOptions) {
     this.configPath = join(options.dataDir, CONFIG_FILE);
     this.homeDir = options.homeDir ?? homedir();
-    this.agentHomes = new AgentHomeManager(options.dataDir);
     this.kimiCodeHome = options.kimiCodeHome
       ?? process.env.KIMI_CODE_HOME
       ?? join(this.homeDir, '.kimi-code');
     if (!isAbsolute(this.kimiCodeHome)) {
       throw new Error('KIMI_CODE_HOME must be an absolute path.');
     }
+    this.agentHomes = new AgentHomeManager(options.dataDir, this.homeDir, this.kimiCodeHome);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.releaseVersion = safeReleaseValue(options.releaseVersion, 'release version');
     this.releaseRepository = normalizeRepository(
@@ -970,7 +970,15 @@ export class AgentManager {
       if (!this.agentHomes.supports(current.pluginId)) {
         home = null;
       } else if (current.home?.kind === 'custom') {
-        home = await this.agentHomes.validateCustom(current.home.path, used, current.id);
+        home = await this.agentHomes.validateCustom(current.home.path, used, current.id, current.pluginId);
+      } else if (!current.home && productExecutorForPluginId(current.pluginId) === 'zcode') {
+        try {
+          home = await this.agentHomes.useDefault(current.pluginId, used);
+        } catch (error) {
+          if (!(error instanceof AgentHomeError)) throw error;
+          home = null;
+        }
+        home ??= await this.agentHomes.createManaged(current.pluginId, current.id);
       } else {
         home = await this.agentHomes.createManaged(current.pluginId, current.id);
       }
@@ -1177,6 +1185,17 @@ export class AgentManager {
       };
     }
     if (this.options.managedProxies) {
+      const installed = await this.options.pluginStore?.inspect(input.pluginId);
+      const retained = installed?.versions.find(item => item.version === input.pluginVersion);
+      if (retained?.state === 'valid' && retained.receipt) {
+        return launchFromPluginStore(await this.options.pluginStore!.resolveExactLaunch(input));
+      }
+      if (retained && retained.state !== 'legacy') {
+        throw new TrustedLaunchError(
+          'TRUSTED_LAUNCH_PACKAGE',
+          `Official package ${input.pluginId}@${input.pluginVersion} failed validation.`,
+        );
+      }
       try {
         const directory = join(this.options.dataDir, 'plugins', official, input.pluginVersion);
         const launch = await validateStaticProxyPackage({
@@ -1188,7 +1207,7 @@ export class AgentManager {
         if (launch.manifestSha256 !== input.expectedManifestSha256) {
           throw new TrustedLaunchError(
             'TRUSTED_LAUNCH_DIGEST',
-            'Retained official package digest does not match the Session binding.',
+            'Official package digest does not match the requested generation.',
           );
         }
         return launch;
@@ -1196,7 +1215,7 @@ export class AgentManager {
         if (error instanceof TrustedLaunchError) throw error;
         throw new TrustedLaunchError(
           'TRUSTED_LAUNCH_PACKAGE',
-          `Retained official package ${input.pluginId}@${input.pluginVersion} is unavailable.`,
+          `Official package ${input.pluginId}@${input.pluginVersion} is unavailable.`,
         );
       }
     }
@@ -1466,6 +1485,17 @@ export class AgentManager {
     return this.options.managedProxies;
   }
 
+  activeRuntimeGeneration(pluginId: string): import('@gian/shared').ManagedRuntimeGeneration | null {
+    const id = parseProxyPluginId(pluginId);
+    if (this.options.generationStore?.hasPendingActivation(id)) {
+      throw new ManagedRuntimeStoreError(
+        'RUNTIME_ACTIVATION_PENDING',
+        'Runtime activation recovery must finish before the generation can be used.',
+      );
+    }
+    return this.options.generationStore?.activeCached(id) ?? null;
+  }
+
   async managedRuntimeStatus(pluginId: string): Promise<import('@gian/shared').ManagedRuntimeStatus> {
     const id = parseProxyPluginId(pluginId);
     const generations = await this.options.generationStore?.list(id) ?? [];
@@ -1493,7 +1523,11 @@ export class AgentManager {
     if (legacy) this.invalidateStatus(legacy);
   }
 
-  async prepareAgentCliTerminal(agentId: string): Promise<{
+  defaultAgentHomePath(kind: ProductExecutor): string | null {
+    return this.agentHomes.defaultPath(pluginIdForExecutorId(kind));
+  }
+
+  async prepareAgentCliTerminal(agentId: string, action: 'open' | 'login' = 'open'): Promise<{
     executable: string;
     args: string[];
     cwd: string;
@@ -1503,21 +1537,26 @@ export class AgentManager {
   }> {
     const agent = this.getAgent(agentId);
     const home = agent.home;
-    if (!home) {
+    if (!home?.path?.trim()) {
       throw new AgentHomeError(
         'AGENT_HOME_UNSUPPORTED',
         'This Agent does not expose a Gian-managed CLI HOME.',
       );
     }
-    const executable = this.agentRuntimePath(agentId).cliPath;
-    if (!executable) {
+    const loginArgs = action === 'login' ? agentLoginArgs(agent.pluginId) : [];
+    if (action === 'login' && !loginArgs) {
+      throw new AgentHomeError('AGENT_LOGIN_UNSUPPORTED', 'This Agent has no CLI login command.');
+    }
+    const cliPath = this.agentRuntimePath(agentId).cliPath;
+    if (!cliPath) {
       throw new AgentCreateError(
         'RUNTIME_NOT_INSTALLED',
         'The certified Runtime is not installed.',
         409,
       );
     }
-    await access(executable, constants.X_OK);
+    await access(cliPath, constants.X_OK);
+    const isZcode = productExecutorForPluginId(agent.pluginId) === 'zcode';
     const lease = await acquireAgentRuntimeUseLock(
       this.updateLockDataDir(),
       agent.pluginId,
@@ -1525,8 +1564,8 @@ export class AgentManager {
     );
     try {
       return {
-        executable,
-        args: [],
+        executable: isZcode ? process.execPath : cliPath,
+        args: isZcode ? [cliPath, ...(loginArgs ?? [])] : loginArgs ?? [],
         cwd: home.path,
         env: providerRuntimeEnvironment(agent.pluginId, home.path),
         reservation: await lease.reserveProcessGroup(),
@@ -1738,7 +1777,7 @@ export class AgentManager {
         if (input.home?.kind === 'custom') {
           throw new AgentCreateError(
             'AGENT_HOME_UNSUPPORTED',
-            'This external application owns its state directory.',
+            'This Proxy does not support a Gian-managed HOME.',
             400,
           );
         }
@@ -1749,9 +1788,23 @@ export class AgentManager {
           current.agents.flatMap(agent => agent.home
             ? [{ agentId: agent.id, path: agent.home.path }]
             : []),
+          undefined,
+          pluginId,
         );
-      } else {
+      } else if (input.home?.kind === 'managed') {
         home = await this.agentHomes.createManaged(pluginId, agentId);
+      } else {
+        const used = current.agents.flatMap(agent => agent.home
+          ? [{ agentId: agent.id, path: agent.home.path }]
+          : []);
+        let nativeDefault: AgentHomeBinding | null;
+        try {
+          nativeDefault = await this.agentHomes.useDefault(pluginId, used);
+        } catch (error) {
+          if (!(error instanceof AgentHomeError && error.code === 'AGENT_HOME_IN_USE')) throw error;
+          nativeDefault = null;
+        }
+        home = nativeDefault ?? await this.agentHomes.createManaged(pluginId, agentId);
       }
       if (generic && launch?.runtime.kind === 'none') {
         await this.publishNoneRuntime(pluginId, launch, agentId);
@@ -1825,7 +1878,7 @@ export class AgentManager {
         if (!this.agentHomes.supports(previous.pluginId)) {
           throw new AgentHomeError(
             'AGENT_HOME_UNSUPPORTED',
-            'This external application owns its state directory.',
+            'This Proxy does not support a Gian-managed HOME.',
           );
         }
         home = patch.home.kind === 'custom'
@@ -1835,6 +1888,7 @@ export class AgentManager {
               ? [{ agentId: candidate.id, path: candidate.home.path }]
               : []),
             id,
+            previous.pluginId,
           )
           : await this.agentHomes.createManaged(previous.pluginId, previous.id);
       }

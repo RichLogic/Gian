@@ -140,11 +140,17 @@ export function ProxyDetailPanel({
   // can still be uninstalled.
   const canInstall = installationStatus === 'not-installed'
     && (actions.includes('install_runtime') || actions.includes('install_proxy'));
+  const canUpdateRuntime = installationStatus !== 'not-installed'
+    && item.installation.state === 'installed'
+    && item.installation.updateAvailable
+    && actions.includes('install_runtime');
+  const canUpdateProxy = actions.includes('update_proxy');
   const canUninstall = item.installation.state !== 'not_installed'
     && installationStatus !== 'not-installed';
   const hasFooterAction = canInstall
+    || canUpdateRuntime
     || canUninstall
-    || actions.includes('update_proxy')
+    || canUpdateProxy
     || actions.includes('rollback_proxy');
   const development = !generation && developmentFallback?.plugin.source === 'development'
     ? developmentFallback : undefined;
@@ -292,7 +298,7 @@ export function ProxyDetailPanel({
       {hasFooterAction && (
         <div className="p2-foot" data-testid="proxy-actions">
           <span className="spacer" />
-          {actions.includes('update_proxy') && (
+          {(canUpdateRuntime || canUpdateProxy) && (
             <>
               <span className="delta mono">
                 {t('agents.runtime.proxyDelta')
@@ -300,7 +306,8 @@ export function ProxyDetailPanel({
                   .replace('{latest}', item.installation.latestVersion ?? '—')}
               </span>
               <button type="button" className="btn xs primary" disabled={busy}
-                      data-testid="proxy-action-update" onClick={() => onAction('update_proxy')}>
+                      data-testid="proxy-action-update"
+                      onClick={() => onAction(canUpdateRuntime ? 'install_runtime' : 'update_proxy')}>
                 {t('agents.catalog.action.update')}
               </button>
             </>

@@ -649,11 +649,16 @@
     {
       "id": "zcode-proxy-package",
       "patterns": [
-        "packages/proxies/zcode-proxy/**"
+        "packages/proxies/zcode-proxy/**",
+        "scripts/build-zcode-runtime.mjs",
+        "scripts/zcode-runtime-source.mjs",
+        "scripts/zcode-runtime-integration.mjs",
+        "scripts/verify-zcode-runtime-protocol.mjs"
       ],
       "modules": [
         "zcode-proxy",
-        "proxy-protocol"
+        "proxy-protocol",
+        "scripts"
       ],
       "scopes": [
         "unit",

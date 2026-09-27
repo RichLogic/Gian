@@ -1,16 +1,16 @@
 import { constants } from 'node:fs';
-import { access, stat } from 'node:fs/promises';
+import { access, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { runBoundedCommand } from '@gian/proxy-protocol/node';
+import source from './source.json' with { type: 'json' };
 
-const SETUP_URL = 'https://zcode.z.ai';
+const SETUP_URL = 'https://github.com/zai-org/ZCode';
 
 export const ZCODE_CLI_CONFIG_READINESS_ISSUE = {
   code: 'zcode_cli_config_missing',
-  message: 'ZCode model configuration is missing at ~/.zcode/cli/config.json. '
-    + 'Configure an explicit model provider in ZCode, then retry. '
-    + 'Gian will not create or modify this file.',
+  message: 'ZCode model configuration is missing. Configure a provider with the installed '
+    + 'ZCode CLI (login/TUI), then retry. Gian does not create or modify provider credentials.',
   repairable: true,
 } as const;
 
@@ -18,10 +18,13 @@ export const ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE = {
   code: 'zcode_builtin_provider_config_missing',
   message: 'ZCode builtin provider config (zcode-builtin.json) is not reachable from the CLI '
     + "entry's own lookup paths, so a standalone-spawned app-server exits at startup. "
-    + 'ZCode.app 3.12.3 (2026-09-16) ships it under Contents/Resources/config/provider/, '
-    + 'which the embedded CLI cannot resolve for bundle-path launches. '
-    + 'Select a ZCode build whose standalone CLI works, or retry after ZCode fixes standalone '
-    + 'embedding (Gian-Dev #163).',
+    + 'Reinstall the certified ZCode CLI Runtime package, including its provider directory.',
+  repairable: true,
+} as const;
+
+export const ZCODE_SOURCE_READINESS_ISSUE = {
+  code: 'zcode_runtime_source_mismatch',
+  message: 'ZCode CLI Runtime does not match this Proxy\'s pinned Git source. Install the matching Runtime from Gian.',
   repairable: true,
 } as const;
 
@@ -56,17 +59,6 @@ function homeDir(): string {
   return process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir();
 }
 
-async function existsFile(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) return false;
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function discoverZcodeRuntimes(): Promise<{
   candidates: Array<{ path: string; source: 'official-user' | 'official-system'; label?: string }>;
   setupActions: Array<
@@ -74,17 +66,13 @@ export async function discoverZcodeRuntimes(): Promise<{
     | { id: string; kind: 'select_file'; label: string }
   >;
 }> {
-  const home = homeDir();
-  const candidates: Array<{ path: string; source: 'official-user' | 'official-system'; label?: string }> = [];
-  const user = join(home, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  const system = join('/Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  if (await existsFile(user)) candidates.push({ path: user, source: 'official-user', label: 'ZCode.app' });
-  if (await existsFile(system)) candidates.push({ path: system, source: 'official-system', label: 'ZCode.app' });
+  // Host resolves its content-addressed managed installation. Do not silently
+  // substitute an App bundle or a floating PATH installation for this source pin.
   return {
-    candidates,
+    candidates: [],
     setupActions: [
-      { id: 'docs', kind: 'open_url', label: 'Open ZCode', url: SETUP_URL },
-      { id: 'pick-binary', kind: 'select_file', label: 'Choose ZCode entry' },
+      { id: 'docs', kind: 'open_url', label: 'ZCode CLI source', url: SETUP_URL },
+      { id: 'pick-binary', kind: 'select_file', label: 'Choose certified ZCode CLI entry' },
     ],
   };
 }
@@ -109,18 +97,31 @@ export async function probeZcodeRuntime(path: string): Promise<{
   await access(path, constants.X_OK);
   const version = await runVersion(path);
   const configHome = join(homeDir(), '.zcode');
-  const configPath = join(configHome, 'cli', 'config.json');
+  const runtimeRoot = resolve(dirname(path), '..');
+  let sourceMatches = false;
+  try {
+    const provenance: unknown = JSON.parse(await readFile(join(runtimeRoot, 'gian-source.json'), 'utf8'));
+    sourceMatches = version === source.cliVersion && typeof provenance === 'object' && provenance !== null
+      && Object.keys(provenance).length === Object.keys(source).length
+      && Object.entries(source).every(([key, value]) => (provenance as Record<string, unknown>)[key] === value);
+    const integration = JSON.parse(await readFile(join(runtimeRoot, 'gian-integration.json'), 'utf8')) as Record<string, unknown>;
+    sourceMatches = sourceMatches && integration.schemaVersion === source.integrationVersion
+      && integration.upstreamEntrypointSha256 === source.protocolEntrypointSha256
+      && typeof integration.integratedEntrypointSha256 === 'string' && /^[a-f0-9]{64}$/.test(integration.integratedEntrypointSha256)
+      && typeof integration.catalogProjectionSha256 === 'string' && /^[a-f0-9]{64}$/.test(integration.catalogProjectionSha256);
+  } catch { sourceMatches = false; /* A manual/old App entry has no certified source provenance. */ }
   let readinessIssue: { code: string; message: string; repairable: boolean } | undefined;
   // The builtin provider config gates startup itself: without it the
   // app-server exits before serving any request, so it outranks the
   // model-config check.
   if (await locateBuiltinProviderConfig(path) === null) {
     readinessIssue = { ...ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE };
+  } else if (!sourceMatches) {
+    readinessIssue = { ...ZCODE_SOURCE_READINESS_ISSUE };
   } else {
-    try {
-      const info = await stat(configPath);
-      if (!info.isFile()) readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
-    } catch {
+    const configPaths = [join(configHome, 'v2', 'provider_config.json'), join(configHome, 'cli', 'config.json')];
+    const configured = await Promise.all(configPaths.map(configPath => stat(configPath).then(info => info.isFile(), () => false)));
+    if (!configured.some(Boolean)) {
       readinessIssue = { ...ZCODE_CLI_CONFIG_READINESS_ISSUE };
     }
   }
@@ -130,7 +131,7 @@ export async function probeZcodeRuntime(path: string): Promise<{
     path,
     version,
     configHome,
-    contentRoots: [{ path, mode: 'file' }],
+    contentRoots: sourceMatches ? [{ path: runtimeRoot, mode: 'directory' }] : [{ path, mode: 'file' }],
     ...(readinessIssue ? { readinessIssue } : {}),
   };
 }

@@ -42,18 +42,6 @@ export interface ProjectorServices {
   /** Assign the next outer sequence for this session stream. */
   nextSequence: () => number;
   emit: (notification: OuterNotification) => void;
-  /** Called when the projector observes interaction requests. */
-  onInteractionRequested?: (request: {
-    interactionId: string;
-    turnId: string | null;
-    presentation: { kind: string; tone: string };
-    title?: string;
-    description?: string;
-    inputs: Array<{ id: string; type: string; label: string; required: boolean; choices?: Array<{ value: string; displayName: string }> }>;
-    actions: Array<{ id: string; label: string; style: string }>;
-    context: Record<string, unknown>;
-    native: { method: string; params: Record<string, unknown> };
-  }) => void;
 }
 
 function eventIdFor(parts: unknown[]): string {
@@ -112,8 +100,14 @@ interface OpenActivity {
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 }
 
-interface PendingInteraction {
+/** A pending interaction plus the exact native answer builder. The adapter
+ *  stores the transport request id; the projector owns the payload mapping
+ *  so the EXACT native response shape is preserved (§11.1). */
+export interface PendingInteractionEntry {
   interactionId: string;
+  /** Build the native answer for interaction.respond. Throws ServiceError
+   *  INTERACTION_ACTION_NOT_FOUND for unadvertised actionIds. */
+  respond: (actionId: string, values: Record<string, unknown>) => Record<string, unknown>;
 }
 
 interface ActiveTurn {
@@ -121,6 +115,71 @@ interface ActiveTurn {
   nativeTurnId: string;
   interruptAccepted: boolean;
   foregroundExecutionId: string | null;
+  /** turn.started for this gian turn has been emitted (the typed
+   *  turn-started can arrive once, but a duplicate must not double it). */
+  startedEmitted: boolean;
+}
+
+/** Native todo/plan statuses (contracts/src/tools/todo.ts:26-30). */
+const PLAN_STATUS_MAP: Record<string, string> = {
+  pending: 'pending',
+  in_progress: 'in_progress',
+  completed: 'completed',
+};
+
+/** Plan facts come from the TodoWrite/UpdatePlan tool (contracts/src/tools/todo.ts
+ *  TodoWriteInputSchema; session-mapper.ts:1124-1246 builds snapshot todos from
+ *  the same tool parts). */
+const PLAN_TOOL_NAMES = new Set(['TodoWrite', 'UpdatePlan']);
+
+interface NativeTodo {
+  content?: unknown;
+  status?: unknown;
+  priority?: unknown;
+}
+
+/** Normalize a native todos array into outer plan.updated steps. */
+export function mapTodoSteps(todos: NativeTodo[]): Array<{ id: string; text: string; status: string }> {
+  const steps: Array<{ id: string; text: string; status: string }> = [];
+  for (const [index, todo] of todos.entries()) {
+    const text = typeof todo.content === 'string' ? todo.content : '';
+    if (text === '') continue;
+    const status = typeof todo.status === 'string' ? PLAN_STATUS_MAP[todo.status] : undefined;
+    steps.push({
+      id: `step-${index}`,
+      text,
+      status: status ?? 'pending',
+    });
+  }
+  return steps;
+}
+
+/** jsdiff hunks (core/src/tool/diff.ts createStructuredPatch → DiffHunk[]). */
+interface NativePatchHunk {
+  oldStart?: unknown;
+  oldLines?: unknown;
+  newStart?: unknown;
+  newLines?: unknown;
+  lines?: unknown;
+}
+
+/** Render native structuredPatch hunks as a unified diff for outer
+ *  diff.updated (bounded by MAX_DIFF_UTF8_BYTES on the wire). */
+export function renderUnifiedDiff(path: string, hunks: NativePatchHunk[]): string {
+  const parts: string[] = [`--- a/${path}`, `+++ b/${path}`];
+  for (const hunk of hunks) {
+    const oldStart = typeof hunk.oldStart === 'number' ? hunk.oldStart : 0;
+    const oldLines = typeof hunk.oldLines === 'number' ? hunk.oldLines : 0;
+    const newStart = typeof hunk.newStart === 'number' ? hunk.newStart : 0;
+    const newLines = typeof hunk.newLines === 'number' ? hunk.newLines : 0;
+    parts.push(`@@ -${oldStart},${oldLines} +${newStart},${newLines} @@`);
+    if (Array.isArray(hunk.lines)) {
+      for (const line of hunk.lines) {
+        if (typeof line === 'string') parts.push(line);
+      }
+    }
+  }
+  return parts.join('\n');
 }
 
 const RESULT_TYPE_STOP_REASONS: Record<string, string> = {
@@ -136,11 +195,12 @@ export class SessionProjector {
   private lastNativeSeq = 0;
   private openContent = new Map<string, OpenContent>();
   private openActivities = new Map<string, OpenActivity>();
-  private readonly pendingInteractions = new Map<string, PendingInteraction>();
+  private readonly pendingInteractions = new Map<string, PendingInteractionEntry>();
   private activeTurn: ActiveTurn | null = null;
   private lastUsage: Record<string, unknown> | null = null;
   private terminalSent = false;
   private observedTextContent = false;
+  private lastPlanFingerprint: string | null = null;
 
   constructor(private readonly services: ProjectorServices) {}
 
@@ -150,9 +210,17 @@ export class SessionProjector {
       nativeTurnId,
       interruptAccepted: false,
       foregroundExecutionId: null,
+      startedEmitted: false,
     };
     this.terminalSent = false;
     this.observedTextContent = false;
+  }
+
+  /** Release the turn binding when no native turn was actually started
+   *  (e.g. the send was rejected): a later turn-started must not be
+   *  attributed to this gian turn. */
+  clearTurn(): void {
+    this.activeTurn = null;
   }
 
   markInterruptAccepted(): void {
@@ -237,7 +305,14 @@ export class SessionProjector {
       return;
     }
     if (eventType === 'session.updated') {
-      // Iteration/model bookkeeping is not a user-visible activity.
+      // Default-arm session.updated carries several internal facts. Subagent
+      // lifecycle arrives here (session-mapper.ts default mapping); the rest
+      // is iteration/model bookkeeping and not user-visible.
+      this.handleSubagentFact(nativeEventId, payload);
+      return;
+    }
+    if (eventType !== null && eventType.startsWith('turn.steer')) {
+      this.handleSteerEvent(eventType, nativeEventId, payload);
       return;
     }
     if (eventType !== null && INTERNAL_SESSION_EVENT_TYPES.has(eventType)) {
@@ -422,34 +497,48 @@ export class SessionProjector {
       : typeof payload.callID === 'string'
         ? payload.callID
         : null;
-    if (toolCallId === null) {
-      this.emitGenericActivity('tool:unidentified', nativeEventId, payload);
-      return;
-    }
-    const existing = this.openActivities.get(toolCallId);
     const toolName = typeof payload.toolName === 'string'
       ? payload.toolName
       : typeof payload.tool === 'string'
         ? payload.tool
         : typeof payload.name === 'string'
           ? payload.name
-          : existing?.toolName ?? 'tool';
+          : undefined;
+    if (toolCallId === null) {
+      this.emitGenericActivity('tool:unidentified', nativeEventId, payload);
+      return;
+    }
+    // Plan facts: TodoWrite/UpdatePlan carry the canonical todo list
+    // (input.todos). Project them to plan.updated instead of tool activity.
+    if (toolName !== undefined && PLAN_TOOL_NAMES.has(toolName)) {
+      const input = (payload.input ?? {}) as Record<string, unknown>;
+      const todos = Array.isArray(input.todos) ? input.todos as NativeTodo[] : [];
+      this.emitPlanUpdated(todos);
+      return;
+    }
+    const existing = this.openActivities.get(toolCallId);
     const status = typeof payload.status === 'string' ? payload.status : null;
     const sourceId = nativeEventId ?? `${toolCallId}:${this.lastNativeSeq}`;
 
     if (status === 'completed' || status === 'failed' || payload.result !== undefined) {
       const result = (payload.result ?? payload.output ?? {}) as Record<string, unknown>;
+      // Diff facts: Edit/Write results carry jsdiff structuredPatch hunks
+      // (core/src/tool/handlers/edit.ts:530-553, write.ts:154).
+      const patch = Array.isArray(result.structuredPatch) ? result.structuredPatch as NativePatchHunk[] : null;
+      if (patch !== null && patch.length > 0 && typeof result.filePath === 'string') {
+        this.emitDiffUpdated(toolCallId, result.filePath, patch, result);
+      }
       const success = status === 'failed' || result.success === false ? 'failed' : 'succeeded';
       const boundedOutput = bounded(result.content ?? result.output ?? result);
       this.emitTurnEvent('activity.updated', `${sourceId}:terminal`, {
         activityId: toolCallId,
-        kind: `tool:${toolName}`,
-        title: existing?.title ?? toolName,
+        kind: `tool:${toolName ?? existing?.toolName ?? 'tool'}`,
+        title: existing?.title ?? toolName ?? 'tool',
         status: success,
         presentation: {
           type: 'tool',
           data: {
-            name: toolName,
+            name: toolName ?? existing?.toolName ?? 'tool',
             ...(existing?.input !== undefined ? { input: existing.input } : {}),
             output: boundedOutput.value,
           },
@@ -464,22 +553,137 @@ export class SessionProjector {
     const input = payload.input !== undefined ? bounded(payload.input).value : existing?.input;
     this.openActivities.set(toolCallId, {
       activityId: toolCallId,
-      title: existing?.title ?? toolName,
-      toolName,
+      title: existing?.title ?? toolName ?? 'tool',
+      toolName: toolName ?? existing?.toolName ?? 'tool',
       input,
       output: existing?.output,
       status: 'running',
     });
     this.emitTurnEvent('activity.updated', sourceId, {
       activityId: toolCallId,
-      kind: `tool:${toolName}`,
-      title: toolName,
+      kind: `tool:${toolName ?? existing?.toolName ?? 'tool'}`,
+      title: toolName ?? existing?.title ?? 'tool',
       status: 'running',
       presentation: {
         type: 'tool',
         data: {
-          name: toolName,
+          name: toolName ?? existing?.toolName ?? 'tool',
           ...(input !== undefined ? { input } : {}),
+        },
+      },
+    });
+  }
+
+  /** Emit outer plan.updated from the canonical native todo list. Repeats
+   *  with identical content are collapsed (upstream re-emits todos on every
+   *  TodoWrite call, including no-op reads). */
+  private emitPlanUpdated(todos: NativeTodo[]): void {
+    const steps = mapTodoSteps(todos);
+    const fingerprint = JSON.stringify(steps);
+    if (fingerprint === this.lastPlanFingerprint) return;
+    this.lastPlanFingerprint = fingerprint;
+    if (this.activeTurn === null) return;
+    this.emitTurnEvent('plan.updated', `plan:${fingerprint.length}:${steps.length}:${steps.at(-1)?.id ?? 'none'}`, {
+      planId: `zcode:todos:${this.services.nativeSessionId}`,
+      title: 'Plan',
+      steps,
+    });
+  }
+
+  private emitDiffUpdated(
+    toolCallId: string,
+    filePath: string,
+    hunks: NativePatchHunk[],
+    result: Record<string, unknown>,
+  ): void {
+    if (this.activeTurn === null) return;
+    const diff = renderUnifiedDiff(filePath, hunks);
+    const truncated = Buffer.byteLength(diff, 'utf8') > MAX_ACTIVITY_BYTES;
+    const before = result.originalFile ?? result.oldString ?? result.before ?? '';
+    const status = (typeof before === 'string' && before === '') ? 'added' : 'modified';
+    this.emitTurnEvent('diff.updated', `${toolCallId}:diff:${hunks.length}:${diff.length}`, {
+      diffId: toolCallId,
+      diff: truncated ? diff.slice(0, 16_000) : diff,
+      truncated,
+      files: [{ path: filePath, status }],
+    });
+  }
+
+  /** Subagent lifecycle arrives on default-arm session.updated payloads
+   *  (core/src/subagent/runner.ts:231-245 spawn, 351-367 stop). */
+  private handleSubagentFact(nativeEventId: string | null, payload: Record<string, unknown>): void {
+    const childSessionId = typeof payload.childSessionId === 'string' ? payload.childSessionId : null;
+    if (childSessionId === null) return;
+    const agentId = typeof payload.agentId === 'string' ? payload.agentId : childSessionId;
+    const agentType = typeof payload.agentType === 'string' ? payload.agentType : 'subagent';
+    const title = typeof payload.description === 'string' && payload.description !== ''
+      ? payload.description
+      : agentType;
+    let state: string;
+    if (payload.status === 'running') {
+      state = 'running';
+    } else if (payload.status === 'completed' || payload.status === 'success') {
+      state = 'completed';
+    } else if (payload.status === 'failed' || payload.status === 'lost' || payload.status === 'error') {
+      state = 'failed';
+    } else if (payload.status === 'cancelled' || payload.status === 'interrupted') {
+      state = 'interrupted';
+    } else {
+      return;
+    }
+    const sourceId = nativeEventId ?? `${childSessionId}:${payload.status ?? ''}:${this.lastNativeSeq}`;
+    this.emitTurnEvent('activity.updated', `${sourceId}:subagent`, {
+      activityId: childSessionId,
+      kind: `subagent:${agentType}`,
+      title,
+      status: state === 'running' ? 'running' : state === 'completed' ? 'succeeded' : state === 'failed' ? 'failed' : 'cancelled',
+      presentation: {
+        type: 'agent',
+        data: {
+          agentId: childSessionId,
+          state,
+          ...(agentId !== childSessionId ? { nativeAgentId: agentId } : {}),
+          ...(typeof payload.parentToolCallId === 'string' ? { parentToolCallId: payload.parentToolCallId } : {}),
+        },
+      },
+    });
+  }
+
+  /** Native steer facts (contracts/src/events/session.events.ts:484-584):
+   *  turn.steerQueued / turn.steerDrained confirm the guide reached the
+   *  CURRENT turn; rejections and fallbacks surface as notice activities. */
+  private handleSteerEvent(eventType: string, nativeEventId: string | null, payload: Record<string, unknown>): void {
+    const messages: Record<string, { title: string; message: string }> = {
+      'turn.steerQueued': { title: 'Steer accepted', message: 'Guide input was queued onto the running turn.' },
+      'turn.steerDrained': { title: 'Steer delivered', message: 'Guide input was inlined into the running turn.' },
+      'turn.steerRejected': {
+        title: 'Steer rejected',
+        message: typeof payload.reason === 'string' ? `Guide input was rejected: ${payload.reason}.` : 'Guide input was rejected.',
+      },
+      'turn.steerDeliveryChanged': {
+        title: 'Steer re-routed',
+        message: typeof payload.fallbackReasonCode === 'string'
+          ? `Guide input fell back to the next turn (${payload.fallbackReasonCode}).`
+          : 'Guide input fell back to the next turn.',
+      },
+      'turn.steerDiscarded': { title: 'Steer discarded', message: 'Queued guide input was discarded.' },
+    };
+    const fact = messages[eventType];
+    if (fact === undefined) return;
+    const activityId = typeof payload.pendingInputId === 'string'
+      ? payload.pendingInputId
+      : nativeEventId ?? `steer:${this.lastNativeSeq}`;
+    this.emitTurnEvent('activity.updated', `${activityId}:${eventType}`, {
+      activityId,
+      kind: 'zcode:turn-steer',
+      title: fact.title,
+      status: eventType === 'turn.steerRejected' || eventType === 'turn.steerDiscarded' ? 'failed' : 'succeeded',
+      presentation: {
+        type: 'notice',
+        data: {
+          message: fact.message,
+          ...(typeof payload.delivery === 'string' ? { delivery: payload.delivery } : {}),
+          ...(typeof payload.targetTurnId === 'string' ? { targetTurnId: payload.targetTurnId } : {}),
         },
       },
     });
@@ -672,6 +876,12 @@ export class SessionProjector {
     const kind = typeof params.kind === 'string' ? params.kind : '';
     const nativeEventId = typeof params.eventId === 'string' ? params.eventId : null;
     const turnId = typeof params.turnId === 'string' ? params.turnId : null;
+    if (process.env.GIAN_ZCODE_TRACE_EVENTS === '1') {
+      this.services.emit({
+        method: 'debug',
+        params: { message: `[zcode] op-event kind=${kind} eventId=${nativeEventId} turnId=${turnId} activeTurn=${this.activeTurn ? `${this.activeTurn.gianTurnId}:${this.activeTurn.nativeTurnId || '-'}` : 'null'}` },
+      });
+    }
     if (kind === 'turn-completed' || kind === 'turn-failed' || kind === 'session-closed') {
       // The typed operation is emitted before the richer session/event and
       // intentionally shares its eventId. Do not consume the shared identity,
@@ -687,9 +897,29 @@ export class SessionProjector {
         // Runtime confirmation: only now may the outer stream claim
         // turn.started (contract §11.1; response barrier keeps ordering).
         if (this.activeTurn !== null && turnId !== null) {
-          if (this.activeTurn.nativeTurnId === '') {
-            this.activeTurn.nativeTurnId = turnId;
-            this.emitTurnStarted(this.activeTurn.gianTurnId, turnId, nativeEventId);
+          // The native identity may already be bound by a reverse request
+          // (interaction/requestPermission carries the native turnId and can
+          // precede the typed event). Emit exactly once per bound turn: the
+          // pre-ack arrival of the typed event must not swallow the fact,
+          // and a duplicate typed event must not double it.
+          if (this.activeTurn.nativeTurnId === '' || this.activeTurn.nativeTurnId === turnId) {
+            if (this.activeTurn.nativeTurnId === '') {
+              this.activeTurn.nativeTurnId = turnId;
+            }
+            if (this.activeTurn.startedEmitted !== true) {
+              this.activeTurn.startedEmitted = true;
+              this.emitTurnStarted(this.activeTurn.gianTurnId, turnId, nativeEventId);
+            } else if (process.env.GIAN_ZCODE_TRACE_EVENTS === '1') {
+              this.services.emit({
+                method: 'debug',
+                params: { message: `[zcode] duplicate turn-started ignored for ${this.activeTurn.gianTurnId}` },
+              });
+            }
+          } else if (process.env.GIAN_ZCODE_TRACE_EVENTS === '1') {
+            this.services.emit({
+              method: 'debug',
+              params: { message: `[zcode] turn-started for foreign turn ${turnId} ignored (activeTurn ${this.activeTurn.gianTurnId} bound to ${this.activeTurn.nativeTurnId})` },
+            });
           }
           return;
         }
@@ -699,6 +929,7 @@ export class SessionProjector {
           nativeTurnId: turnId,
           interruptAccepted: false,
           foregroundExecutionId: null,
+          startedEmitted: true,
         };
         this.emitTurnStarted(turnId, turnId, nativeEventId);
         return;
@@ -772,7 +1003,9 @@ export class SessionProjector {
     this.services.emit({ method: 'activity.updated', params });
   }
 
-  /** Handle an interaction reverse request surfaced by the adapter. */
+  /** Handle an interaction reverse request surfaced by the adapter. Returns
+   *  the pending entry (with the exact native answer builder) or null when
+   *  the request cannot be faithfully relayed. */
   handlePermissionRequest(request: {
     requestId: string;
     nativeTurnId?: string;
@@ -781,23 +1014,25 @@ export class SessionProjector {
     reason?: string;
     riskLevel?: string;
     input?: unknown;
+    origin?: Record<string, unknown>;
     options?: Array<{ optionId?: string; kind?: string; name?: string; description?: string; response?: Record<string, unknown> }>;
     raw: Record<string, unknown>;
-  }): boolean {
+  }): PendingInteractionEntry | null {
     const turn = this.activeTurn;
-    if (turn === null) return false;
+    if (turn === null) return null;
     // ZCode's permission reverse request carries the native turnId; bind it
     // when the typed turn-started has not arrived yet (WP0 G2 schema).
     if (turn.nativeTurnId === '' && typeof request.nativeTurnId === 'string' && request.nativeTurnId !== '') {
       turn.nativeTurnId = request.nativeTurnId;
     }
-    if (turn.nativeTurnId === '') return false; // no stable identity: fail closed
+    if (turn.nativeTurnId === '') return null; // no stable identity: fail closed
     const interactionId = `int:${request.requestId}`;
-    if (this.pendingInteractions.has(interactionId)) {
+    const existing = this.pendingInteractions.get(interactionId);
+    if (existing !== undefined) {
       // Desktop retries the same reverse request while the user is deciding.
       // Keep the newest transport request deferred in the adapter, but do not
       // emit duplicate interaction facts or consume outer sequence numbers.
-      return true;
+      return existing;
     }
     const options = request.options ?? [];
     const actions: Array<{ id: string; label: string; style: string }> = [];
@@ -814,7 +1049,7 @@ export class SessionProjector {
       });
       safeOptions.push({ optionId, response: option.response });
     }
-    if (actions.length === 0) return false;
+    if (actions.length === 0) return null;
 
     const tone = request.riskLevel === 'high' || request.riskLevel === 'critical' ? 'danger' : 'warning';
     const boundedInput = bounded(request.input).value;
@@ -844,19 +1079,175 @@ export class SessionProjector {
         [PLUGIN_ID]: { schemaVersion: 1, payload: { nativeMethod: 'interaction/requestPermission', requestId: request.requestId, riskLevel: request.riskLevel ?? '' } },
       },
     });
-    this.pendingInteractions.set(interactionId, { interactionId });
-    this.services.onInteractionRequested?.({
+    const entry: PendingInteractionEntry = {
       interactionId,
-      turnId: turn.gianTurnId,
-      presentation: { kind: 'permission', tone },
-      title: request.toolName ?? 'Permission required',
-      ...(request.reason !== undefined ? { description: request.reason } : {}),
-      inputs: [],
-      actions,
-      context: { toolCallId: request.toolCallId ?? '' },
-      native: { method: 'interaction/requestPermission', params: request.raw },
+      respond: (actionId: string) => {
+        const nativeResponse = safeOptions.find((option) => option.optionId === actionId)?.response;
+        if (nativeResponse === undefined) {
+          throw new SessionInteractionActionError(actionId);
+        }
+        return nativeResponse;
+      },
+    };
+    this.pendingInteractions.set(interactionId, entry);
+    return entry;
+  }
+
+  /** `interaction/requestUserInput` — AskUserQuestion and the ExitPlanMode
+   *  approval both surface here (interaction-broker.ts:195-345). Structured
+   *  questions keep their options; nothing is flattened into plain text. */
+  handleUserInputRequest(request: {
+    requestId: string;
+    nativeTurnId?: string;
+    toolCallId?: string;
+    toolName?: string;
+    prompt?: string;
+    questions?: Array<{
+      question?: string;
+      header?: string;
+      options?: Array<{ value?: string; label?: string; description?: string; preview?: string }>;
+      multiSelect?: boolean;
+    }>;
+    input?: unknown;
+    origin?: Record<string, unknown>;
+    schema?: Record<string, unknown>;
+    raw: Record<string, unknown>;
+  }): PendingInteractionEntry | null {
+    const turn = this.activeTurn;
+    if (turn === null) return null;
+    if (turn.nativeTurnId === '' && typeof request.nativeTurnId === 'string' && request.nativeTurnId !== '') {
+      turn.nativeTurnId = request.nativeTurnId;
+    }
+    if (turn.nativeTurnId === '') return null;
+    const interactionId = `int:${request.requestId}`;
+    const existing = this.pendingInteractions.get(interactionId);
+    if (existing !== undefined) return existing;
+
+    const questions = (request.questions ?? []).filter((question) => typeof question.question === 'string' && question.question !== '');
+    const isPlanApproval = request.schema?.interaction === 'plan_approval';
+    const inputs: Array<Record<string, unknown>> = [];
+    const actions: Array<{ id: string; label: string; style: string }> = [];
+    for (const [index, question] of questions.entries()) {
+      const choices = (question.options ?? [])
+        .filter((option) => typeof option.value === 'string' && option.value !== '')
+        .map((option) => ({
+          value: option.value as string,
+          displayName: typeof option.label === 'string' && option.label !== '' ? option.label : option.value as string,
+        }));
+      inputs.push({
+        id: `q${index}`,
+        type: question.multiSelect === true ? 'multi_select' : 'single_select',
+        label: question.question as string,
+        required: true,
+        ...(choices.length > 0 ? { choices } : {}),
+      });
+    }
+    if (isPlanApproval) {
+      actions.push({ id: 'approve', label: 'Approve plan', style: 'primary' });
+      actions.push({ id: 'feedback', label: 'Request changes', style: 'secondary' });
+      actions.push({ id: 'decline', label: 'Decline', style: 'danger' });
+      inputs.push({
+        id: 'feedback',
+        type: 'multiline_text',
+        label: 'Feedback for the plan (required for "Request changes")',
+        required: false,
+        multiline: true,
+      });
+    } else {
+      actions.push({ id: 'accept', label: 'Submit', style: 'primary' });
+      actions.push({ id: 'decline', label: 'Decline', style: 'danger' });
+    }
+    if (inputs.length === 0 || actions.length === 0) return null;
+
+    const boundedInput = bounded(request.input).value;
+    const boundedOrigin = bounded(request.origin).value;
+    this.services.emit({
+      method: 'interaction.requested',
+      params: {
+        eventId: eventIdFor([this.services.nativeSessionId, request.requestId, 'interaction.requested']),
+        sessionId: this.services.gianSessionId,
+        streamId: this.currentStreamId(),
+        sequence: this.services.nextSequence(),
+        turnId: turn.gianTurnId,
+        sourceTurnId: turn.nativeTurnId,
+        emittedAt: nowIso(),
+        data: {
+          interactionId,
+          title: isPlanApproval
+            ? 'Plan approval'
+            : typeof request.toolName === 'string' && request.toolName !== ''
+              ? request.toolName
+              : 'Question',
+          ...(typeof request.prompt === 'string' && request.prompt !== '' ? { description: request.prompt } : {}),
+          presentation: { kind: isPlanApproval ? 'plan_approval' : 'questions', tone: 'info' },
+          inputs,
+          actions,
+          context: {
+            ...(typeof request.toolName === 'string' ? { toolName: request.toolName } : {}),
+            ...(Array.isArray(request.questions) ? { questions: bounded(request.questions).value } : {}),
+            ...(boundedInput !== undefined ? { input: boundedInput } : {}),
+            ...(boundedOrigin !== undefined ? { origin: boundedOrigin } : {}),
+          },
+        },
+      },
+      extensions: {
+        [PLUGIN_ID]: {
+          schemaVersion: 1,
+          payload: {
+            nativeMethod: 'interaction/requestUserInput',
+            requestId: request.requestId,
+            interaction: isPlanApproval ? 'plan_approval' : 'askUserQuestion',
+          },
+        },
+      },
     });
-    return true;
+
+    // Native answer mapping (interaction-broker.ts):
+    // - AskUserQuestion accept -> {action:"accept", content:{answers:{questionText: value}}}
+    //   (normalizeAskUserQuestionAnswers: keyed by the question TEXT; arrays
+    //   join with ", " per normalizeAnswerValue).
+    // - Plan approval approve -> accept with answers["Review this implementation plan."]="approve";
+    //   feedback -> accept with content.answer (becomes plan_approval_feedback deny upstream);
+    //   decline -> {action:"decline"}.
+    const entry: PendingInteractionEntry = {
+      interactionId,
+      respond: (actionId: string, values: Record<string, unknown>) => {
+        if (isPlanApproval) {
+          if (actionId === 'approve') {
+            return {
+              action: 'accept',
+              content: { answers: { [PLAN_APPROVAL_QUESTION]: 'approve' } },
+            };
+          }
+          if (actionId === 'feedback') {
+            const feedback = readFeedbackValue(values);
+            if (feedback === null) {
+              throw new SessionInteractionActionError('feedback requires values.feedback text.');
+            }
+            return { action: 'accept', content: { answer: feedback } };
+          }
+          if (actionId === 'decline') return { action: 'decline' };
+          throw new SessionInteractionActionError(actionId);
+        }
+        if (actionId === 'accept') {
+          const answers: Record<string, string> = {};
+          for (const [index, question] of questions.entries()) {
+            const raw = values[`q${index}`];
+            const normalized = normalizeAnswerValue(raw);
+            if (normalized !== undefined) answers[question.question as string] = normalized;
+          }
+          return { action: 'accept', content: { answers } };
+        }
+        if (actionId === 'decline') return { action: 'decline' };
+        throw new SessionInteractionActionError(actionId);
+      },
+    };
+    this.pendingInteractions.set(interactionId, entry);
+    return entry;
+  }
+
+  pendingEntry(interactionId: string): PendingInteractionEntry | undefined {
+    return this.pendingInteractions.get(interactionId);
   }
 
   resolveInteraction(interactionId: string): void {
@@ -881,6 +1272,40 @@ export class SessionProjector {
 
 function numberOr(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Exact upstream ExitPlanMode approval question text
+ *  (interaction-broker.ts:39). */
+export const PLAN_APPROVAL_QUESTION = 'Review this implementation plan.';
+
+/** Thrown when interaction.respond names an unadvertised actionId; the
+ *  adapter maps it to INTERACTION_ACTION_NOT_FOUND. */
+export class SessionInteractionActionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionInteractionActionError';
+  }
+}
+
+/** Mirror of upstream normalizeAnswerValue
+ *  (interaction-broker.ts): strings trim; arrays join with ", ". */
+function normalizeAnswerValue(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0)
+      .join(', ');
+  }
+  return undefined;
+}
+
+function readFeedbackValue(values: Record<string, unknown>): string | null {
+  const normalized = normalizeAnswerValue(values.feedback ?? values.text ?? values.q0);
+  return normalized ?? null;
 }
 
 export type { InnerNativeEvent };

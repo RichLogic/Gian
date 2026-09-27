@@ -18,7 +18,7 @@ source export, not a copy of private Git history.
 
 ## Build and release
 
-Use Node 24 and the pinned pnpm version. `pnpm install --frozen-lockfile` followed
+Use Node 24.14.0 and the pinned pnpm version. `pnpm install --frozen-lockfile` followed
 by `pnpm build` builds the standalone product. No Provider credentials are needed.
 
 `release-selection.json` explicitly selects the Proxies to build, qualify and
@@ -50,9 +50,24 @@ generic latest release as a Proxy version. Proxy releases use `--latest=false`.
 
 Certificates bind actual bytes and explicitly exclude App/Desktop acceptance,
 Host/Web journeys and real Provider turns. Those are separate consumer checks,
-not invented successful stages in this product's certificate. ZCode remains
-an external-App exception; a published adapter does not repair upstream ZCode
-standalone embedding or certify execution of the current installed ZCode App.
+not invented successful stages in this product's certificate. ZCode's managed
+CLI is built from the full Git commit in its `src/runtime/source.json`, using
+the pinned toolchain and frozen dependency lock. Its complete distribution and
+source provenance are repacked as a Host-compatible archive. Qualification
+checks the extracted entry, Provider resources and app-server catalog boundary;
+an upstream protocol mismatch blocks publication even when `--version` works.
+Published Runtime archives are copied from qualification, never rebuilt by
+the publisher. Updating the source pin requires a new Proxy release.
+
+The 0.4.1 candidate pins CLI 0.16.9 and includes a versioned integration layer
+for model metadata and standalone authentication. Proxy requests use complete
+model/reasoning selections. The layer's input source hash and resulting source
+digests are checked/recorded; upstream changes require renewed review.
+This source candidate still requires hosted qualification and real-provider
+acceptance before it can be described as a verified usable combination.
+Before Catalog publication, capture the newly published release/Manifest and
+Runtime coordinate in `catalog/proxy-information/evidence/` and author its
+history entry. Historical snapshots must not be filled with invented hashes.
 
 ## Updates
 

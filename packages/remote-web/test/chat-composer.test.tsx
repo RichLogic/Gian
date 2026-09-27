@@ -63,6 +63,19 @@ describe('chat + composer (B5)', () => {
     expect(within(menu).getByRole('switch', { name: 'Fast' })).toHaveAttribute('aria-checked', 'false');
   });
 
+  it('keeps the narrow context ring beside the model icon before the action group', () => {
+    renderApp({ scenario: {}, viewport: 'narrow' });
+    const bar = document.querySelector('.composer-bar');
+    expect(bar).not.toBeNull();
+    const children = Array.from(bar!.children);
+    expect(children[0]).toHaveClass('composer-model', 'icon-only');
+    expect(children[1]).toHaveClass('rw-context-usage');
+    expect(children[2]).toHaveClass('spacer');
+    expect(children[3]).toHaveClass('rw-approval');
+    expect(children[4]).toHaveClass('composer-attach');
+    expect(children[5]).toHaveClass('composer-act', 'primary');
+  });
+
   it('opens the model list directly from the wide model chip and dispatches the selection', async () => {
     const user = userEvent.setup();
     const { controller } = renderApp({ scenario: {}, viewport: 'wide' });

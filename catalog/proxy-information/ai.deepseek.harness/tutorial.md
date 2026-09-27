@@ -50,8 +50,8 @@ Proxy 的进程范围为 shared。Bridge 运行在 DSH profile 中，负责把 D
 ## 5. 第一次使用
 
 1. 安装 DeepSeek Harness Integration，等待 Proxy、DSH Runtime 和必要依赖全部通过检查并激活。
-2. 添加 Agent，选择新的托管 HOME 或明确复用的已有 DSH HOME。
-3. 打开此 Agent 的 CLI 维护终端，按 DSH 当前版本支持的方式配置 Provider。不要把一个在其他 profile 中可用的配置自动视为 gian profile 已配置。
+2. 添加 Agent。默认 HOME 为 `~/.dsh`；需要隔离时可选择新建托管 HOME。
+3. 在此 HOME 对应的 DSH Web 设置中配置 Provider。DSH 当前没有通用的 CLI 登录命令；不要把其他 profile 中可用的配置视为 gian profile 已配置。
 4. 返回 Gian，确认 Provider、Model、Reasoning 和 Agent Preset 的实际选项；选项由运行中的 DSH/Bridge 提供。
 5. 在小范围工作区任务中检查工具、权限预设和完成事件。安装完成并不意味着 Provider 账号配置已完成。
 
@@ -59,7 +59,7 @@ Proxy 的进程范围为 shared。Bridge 运行在 DSH profile 中，负责把 D
 
 ## 6. HOME 与隔离
 
-Gian 使用 DSH_HOME 指向 Agent 状态目录：
+Gian 使用 DSH_HOME 指向 Agent 状态目录。默认目录为 `~/.dsh`；独立托管 HOME 为：
 
 ```text
 <dataDir>/homes/ai.deepseek.harness/<agentId>/
@@ -68,7 +68,7 @@ Gian 使用 DSH_HOME 指向 Agent 状态目录：
 
 DSH 的 HOME/profile 保存配置、认证和会话资料，具体文件由 DSH 版本管理。Bridge 所在的 Proxy 归档则属于程序组件。两者不能混放或通过互相复制来“修好依赖”。
 
-不同 Agent 默认有独立 HOME；同一已有 HOME 会共享对应厂商状态。Gian 不自动清空自定义 HOME；使用已有 HOME 前应明确它会被 CLI 和受控 profile 准备逻辑正常读写。HOME 隔离不替代工作区权限或 DSH 的执行策略。
+需要独立账号或配置时，请选择新建托管 HOME。Gian 不自动清空自定义 HOME；使用已有 HOME 前应明确它会被 CLI 和受控 profile 准备逻辑正常读写。HOME 隔离不替代工作区权限或 DSH 的执行策略。
 
 ## 7. 反向代理与自定义端点
 

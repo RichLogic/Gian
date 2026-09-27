@@ -119,20 +119,9 @@ const BASELINE = {
   },
   "packages/host/src/web/routes/native-sessions.ts": {
     "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
-      "count": 12,
+      "count": 1,
       "snippets": [
-        "executor === 'kimi'",
-        "executor === 'grok'",
-        "executor === 'zcode'",
-        "executor === 'kimi'",
-        "executor === 'kimi'",
-        "executor === 'zcode'",
-        "executor === 'grok'",
-        "executor === 'claude'",
-        "executor === 'codex'",
-        "executor === 'kimi'",
-        "executor === 'claude'",
-        "executor === 'codex'"
+        "executor === 'kimi'"
       ]
     }
   },

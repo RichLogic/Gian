@@ -3,7 +3,7 @@
  * com.zhipu.zcode — shared-scope gian.proxy/2.1 over ZCode Protocol v1.
  *
  * The Host spawns this entry with:
- *   GIAN_RUNTIME_BIN      path to the Runtime embedded in ZCode.app (zcode.cjs)
+ *   GIAN_RUNTIME_BIN      path to the managed ZCode CLI Runtime (zcode.cjs)
  *   GIAN_PLUGIN_DATA_DIR  plugin-owned data dir (identity mapping, 0600 files)
  *   GIAN_PLUGIN_ID        must equal com.zhipu.zcode
  *
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
 
   const runtimeBin = process.env.GIAN_RUNTIME_BIN;
   if (runtimeBin === undefined || runtimeBin === '') {
-    throw new Error('zcode-proxy requires GIAN_RUNTIME_BIN pointing at the Runtime embedded in ZCode.app.');
+    throw new Error('zcode-proxy requires GIAN_RUNTIME_BIN pointing at the managed ZCode CLI entry.');
   }
   if (process.env.GIAN_PLUGIN_ID !== undefined && process.env.GIAN_PLUGIN_ID !== PLUGIN_ID) {
     throw new Error(`zcode-proxy expects plugin id ${PLUGIN_ID}, received ${process.env.GIAN_PLUGIN_ID}.`);
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     const [near, up] = builtinProviderConfigCandidates(resolve(runtimeBin));
     process.stderr.write(
       `[zcode-proxy:runtime] builtin provider config not found (checked ${near}, ${up}); `
-      + 'the ZCode app-server will exit at startup. See Gian-Dev #163.\n',
+      + 'reinstall the complete certified ZCode CLI Runtime package.\n',
     );
   }
 

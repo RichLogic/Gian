@@ -294,6 +294,11 @@ export const configOptionSchema = z.strictObject({
   description: z.string().optional(),
   binding: z.enum(CONFIG_BINDINGS),
   role: nonEmptyStringSchema.optional(),
+  /** Version-gated (`catalog.modeSemantics` capability): distinguishes a Gian
+   *  approval preset (`gian-preset`) from a Proxy-native collaboration mode
+   *  (`provider-native`). Omitted by Proxies below the gate — consumers fall
+   *  back to the legacy product-kind allowlist. */
+  modeKind: z.enum(['gian-preset', 'provider-native']).optional(),
   control: z.enum(CONFIG_CONTROLS),
   required: z.boolean(),
   defaultValue: configValueSchema,

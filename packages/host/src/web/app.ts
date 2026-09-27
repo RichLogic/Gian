@@ -127,8 +127,9 @@ export function createApp(ctx: AppContext): AppHandle {
 
   const broadcaster = new WsBroadcaster();
   const sessionBindingPlanner = ctx.agentManager
-    ? new SessionBindingPlanner({
+      ? new SessionBindingPlanner({
         resolveCurrent: pluginId => ctx.agentManager!.trustedLaunch(pluginId),
+        resolveActiveGeneration: async pluginId => ctx.agentManager!.activeRuntimeGeneration(pluginId),
         resolveExact: input => ctx.agentManager!.resolveExactTrustedLaunch(input),
         ...(ctx.runtimeResolver ? { runtimeResolver: ctx.runtimeResolver } : {}),
       })
@@ -246,11 +247,12 @@ export function createApp(ctx: AppContext): AppHandle {
           },
           agentRuntime: agentId => {
             const agent = ctx.agentManager!.getAgent(agentId);
+            // Identity is pluginId; a null legacy proxy alias still resolves
+            // the managed runtime path (never the deprecated cliPath).
+            void agent.proxy;
             return {
               agent,
-              cliPath: agent.proxy
-                ? ctx.agentManager!.agentRuntimePath(agentId).cliPath
-                : agent.cliPath,
+              cliPath: ctx.agentManager!.agentRuntimePath(agentId).cliPath,
             };
           },
           agentRuntimeProfile: async agentId => {
@@ -260,7 +262,7 @@ export function createApp(ctx: AppContext): AppHandle {
           },
           agentsForKind: executor => (
             ctx.agentManager!.listAgents().filter(agent => (
-              agent.proxy === executor || (!agent.proxy && agent.pluginId === executor)
+              agent.pluginId === executor || agent.proxy === executor
             ))
           ),
         }
@@ -330,6 +332,7 @@ export function createApp(ctx: AppContext): AppHandle {
           id: agent.id,
           name: agent.name,
           proxy: agent.pluginId,
+          pluginId: agent.pluginId,
           defaults: agent.defaults,
         }))
       : undefined,
@@ -358,7 +361,7 @@ export function createApp(ctx: AppContext): AppHandle {
     ctx.agentManager
       ? target => {
         if (target.kind !== 'agent_cli') throw new Error('Unsupported terminal target.');
-        return ctx.agentManager!.prepareAgentCliTerminal(target.agentId);
+        return ctx.agentManager!.prepareAgentCliTerminal(target.agentId, target.action);
       }
       : undefined,
   );
@@ -481,7 +484,16 @@ export function createApp(ctx: AppContext): AppHandle {
   );
   registerSessionRoutes(app, ctx.db, sessions);
   registerScheduleRoutes(app, { service: scheduleService, ledger: scheduleLedger });
-  registerNativeSessionRoutes(app, { db: ctx.db, sessions, broadcaster });
+  registerNativeSessionRoutes(app, {
+    db: ctx.db,
+    sessions,
+    broadcaster,
+    catalogPluginIds: async () => {
+      if (!ctx.catalogService) return [];
+      const list = await ctx.catalogService.list();
+      return list.items.map(item => item.pluginId);
+    },
+  });
   registerWorkspaceFileRoutes(app, ctx.db);
   registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
     applicationRoutes: ctx.applicationRouteOptions,

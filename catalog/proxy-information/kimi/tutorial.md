@@ -46,8 +46,8 @@ Agent 的登录维护终端属于 Workbench 的维护用途，不等于 ACP 执�
 ## 5. 第一次使用
 
 1. 安装 Integration，等待 Runtime 组合激活，先排除下载、摘要、解压和版本检查错误。
-2. 添加 Kimi Agent，为独立配置选择新的托管 HOME。
-3. 打开该 Agent 的 CLI 维护终端，按 Kimi 当前版本的官方流程登录或配置服务。不要在普通任务消息里发送登录密钥。
+2. 添加 Kimi Agent。未设置 KIMI_CODE_HOME 时默认 HOME 为 `~/.kimi-code`；需要独立配置时可选择新建托管 HOME。
+3. 在 Agent 详情点击“登录”，使用所选 HOME 执行 CLI 登录命令。不要在普通任务消息里发送登录密钥。
 4. 返回详情检查状态，再在授权工作区创建会话。
 5. 先尝试小任务，检查计划、工具权限和完成状态。需要分叉或旁路时，确认 Runtime 真的返回该能力。
 
@@ -55,13 +55,13 @@ Agent 的登录维护终端属于 Workbench 的维护用途，不等于 ACP 执�
 
 ## 6. HOME 与隔离
 
-Kimi 通过 KIMI_CODE_HOME 使用所选 Agent 状态目录。Gian 托管 HOME 为：
+Kimi 通过 KIMI_CODE_HOME 使用所选 Agent 状态目录。未覆盖时默认目录为 `~/.kimi-code`；独立托管 HOME 为：
 
 ```text
 <dataDir>/homes/kimi/<agentId>/
 ```
 
-它包含该 CLI 的配置、认证、会话、缓存和日志等状态。多个 Agent 默认使用不同 HOME；若选择同一已有 HOME，就会共享这些状态，不能宣称它们拥有独立账号和历史。
+它包含该 CLI 的配置、认证、会话、缓存和日志等状态。需要独立账号和历史时，请选择新建托管 HOME。
 
 HOME 不是程序安装目录，也不是项目沙箱。不要把 Runtime 归档解压到 HOME，或通过移动 HOME 改写已有会话的程序绑定。Gian 不自动导入或清空自定义 HOME；CLI 对自己的状态目录仍可能进行正常升级写入。
 

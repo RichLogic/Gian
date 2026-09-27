@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { DEFAULT_TRANSLATION_PREFERENCES, type ComposerDocument, type TranslationRecord } from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES, isTranslationConfigured, type ComposerDocument, type TranslationRecord } from '@gian/shared';
 import { cancelTranslation, loadTranslationState, setAutoTranslation, translateText, type TranslationState } from '../operations/translation.js';
 import { useOperationDispatchOptional } from '../operations/use-operations.js';
+import { useT } from '../i18n/index.js';
 
 export interface ReadingTranslation { pending: boolean; record?: TranslationRecord; error?: string }
 interface SendRequest {
@@ -10,6 +11,7 @@ interface SendRequest {
 }
 
 export function useTranslation(sessionId: string) {
+  const t = useT();
   const dispatch = useOperationDispatchOptional();
   const [state, setState] = useState<TranslationState>({ enabled: false, results: [], automatic: {}, preferences: { ...DEFAULT_TRANSLATION_PREFERENCES } });
   const [ready, setReady] = useState(false);
@@ -25,9 +27,13 @@ export function useTranslation(sessionId: string) {
     try {
       const next = await loadTranslationState(sessionId);
       if (!next?.preferences || !Array.isArray(next.results)) throw new Error('Translation settings are unavailable.');
-      if (alive.current) { setState(next); setReady(true); setError(''); }
+      if (alive.current) {
+        setState(next);
+        setReady(true);
+        setError(next.enabled && !isTranslationConfigured(next.preferences) ? t('translation.configureFirst') : '');
+      }
     } catch (error) { if (alive.current) setError(String(error)); }
-  }, [sessionId]);
+  }, [sessionId, t]);
   useEffect(() => {
     alive.current = true;
     void refresh();
@@ -53,6 +59,10 @@ export function useTranslation(sessionId: string) {
 
   async function toggle(enabled: boolean) {
     if (saving) return;
+    if (enabled && !isTranslationConfigured(state.preferences)) {
+      setError(t('translation.configureFirst'));
+      return;
+    }
     setSaving(true);
     try { await setAutoTranslation(sessionId, enabled, dispatch); await refresh(); }
     catch (error) { setError(String(error)); }
@@ -84,6 +94,11 @@ export function useTranslation(sessionId: string) {
   }
   function prepareSend(text: string, document?: ComposerDocument): Promise<string> {
     if (!ready) return Promise.reject(new Error('Translation settings are still loading.'));
+    if (!isTranslationConfigured(state.preferences)) {
+      const message = t('translation.configureFirst');
+      setError(message);
+      return Promise.reject(new Error(message));
+    }
     if (sendRef.current) return Promise.reject(new Error('Translation is already running.'));
     return new Promise((resolve, reject) => {
       sendRef.current = { text, document, resolve, reject };

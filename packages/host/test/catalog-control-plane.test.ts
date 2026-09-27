@@ -349,7 +349,7 @@ test('anonymous Catalog discovery selects only published Catalog tags in the mix
   const network = createCatalogAnonymousNetwork({
     policy: officialCatalogSourcePolicy(),
     fetchImpl: async input => {
-      assert.equal(String(input), 'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=100');
+      assert.equal(String(input), 'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=5&page=1');
       return Response.json([
         { tag_name: 'proxy-codex-v0.3.1', assets: [] },
         { tag_name: 'catalog-v1.99.0', draft: true, assets: [] },
@@ -361,6 +361,38 @@ test('anonymous Catalog discovery selects only published Catalog tags in the mix
   const latest = await network.latest({});
   assert.equal(latest.status, 200);
   if (latest.status === 200) assert.equal(latest.release.sequence, 7);
+});
+
+test('anonymous Catalog discovery scans bounded pages when Proxy releases fill the newest page', async () => {
+  const urls: string[] = [];
+  const network = createCatalogAnonymousNetwork({
+    policy: officialCatalogSourcePolicy(),
+    fetchImpl: async (input, init) => {
+      const url = String(input);
+      urls.push(url);
+      const conditional = new Headers(init?.headers).get('if-none-match');
+      if (url.endsWith('page=1')) {
+        assert.equal(conditional, '"previous"');
+        return Response.json(Array.from({ length: 5 }, (_, index) => ({
+          tag_name: `proxy-kimi-v0.4.${index + 1}`, assets: [],
+        })), { headers: { etag: '"newest-page"' } });
+      }
+      assert.ok(url.endsWith('page=2'));
+      assert.equal(conditional, null);
+      return Response.json([{ tag_name: 'catalog-v1.15.0', draft: false, prerelease: false,
+        assets: [{ name: 'catalog-v1.json', size: 10 }] }]);
+    },
+  });
+  const latest = await network.latest({ ifNoneMatch: '"previous"' });
+  assert.deepEqual(urls, [
+    'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=5&page=1',
+    'https://api.github.com/repos/RichLogic/Gian-Proxies/releases?per_page=5&page=2',
+  ]);
+  assert.equal(latest.status, 200);
+  if (latest.status === 200) {
+    assert.equal(latest.release.sequence, 15);
+    assert.equal(latest.release.etag, '"newest-page"');
+  }
 });
 
 test('signature, rollback, same-sequence conflict, and network failure keep last-known-good', async () => {

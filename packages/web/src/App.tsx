@@ -1767,6 +1767,7 @@ export function App() {
                   scope: { kind: 'workspace', id: input.workspaceId,
                     ...(input.executionEnvironmentId ? { environmentId: input.executionEnvironmentId } : {}) },
                   text: input.firstMessage,
+                  ...(input.autoTranslate ? { autoTranslate: true } : {}),
                   attachments: input.firstAttachments ?? [],
                   ...(input.contextItems && input.contextItems.length > 0
                     ? { contextItems: input.contextItems }
@@ -1912,7 +1913,7 @@ export function App() {
             >
               {mode === 'agents' && (
                 <Suspense fallback={null}>
-                  <AgentsView />
+                  <AgentsView ws={ws} terminalPreferences={displayConfig?.terminal ?? DEFAULT_TERMINAL_PREFERENCES} />
                 </Suspense>
               )}
               {mode === 'custom' && (

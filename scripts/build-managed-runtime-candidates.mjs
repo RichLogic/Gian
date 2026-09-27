@@ -17,10 +17,16 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
+import { stageZcodeRuntime } from './build-zcode-runtime.mjs';
+import { validateZcodeRuntimeSource, zcodeRuntimeSource } from './zcode-runtime-source.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_RUNTIME_ASSET_BYTES = 512 * 1024 * 1024;
+// GitHub's signed CDN redirect repeats the asset name in a long query string.
+// Keep the filename short for existing Gian Hosts' URL length bound; the
+// certificate and immutable release tag still bind the exact source.
+export const ZCODE_RUNTIME_ASSET_NAME = 'zcode.tar.gz';
 
 export const upstreamRuntimeCandidates = Object.freeze({
   claude: Object.freeze({
@@ -61,7 +67,8 @@ function parseVersion(output, provider) {
 
 async function inspectEntry(provider, path, expectedVersion, environment = {}) {
   const bytes = await readFile(path);
-  const { stdout, stderr } = await execFileAsync(path, ['--version'], {
+  const script = /\.(?:c?js|mjs)$/.test(path);
+  const { stdout, stderr } = await execFileAsync(script ? process.execPath : path, script ? [path, '--version'] : ['--version'], {
     cwd: rootDir,
     encoding: 'utf8',
     timeout: 20_000,
@@ -136,10 +143,10 @@ async function archiveFileList(directory, prefix = '') {
     else if (item.isFile()) paths.push(relative);
     else if (item.isSymbolicLink()) {
       const target = await stat(path);
-      if (!target.isFile()) throw new Error(`DSH Runtime link must resolve to a file: ${relative}`);
+      if (!target.isFile()) throw new Error(`Runtime link must resolve to a file: ${relative}`);
       paths.push(relative);
     } else {
-      throw new Error(`DSH Runtime contains an unsupported filesystem entry: ${relative}`);
+      throw new Error(`Runtime contains an unsupported filesystem entry: ${relative}`);
     }
   }
   return paths.sort((left, right) => left.localeCompare(right));
@@ -152,6 +159,44 @@ async function normalizeArchiveTimes(root, paths) {
       utimes(join(root, ...relative.split('/')), epoch, epoch)
     )));
   }
+}
+
+async function packRuntime(runtimeRoot, path, listPath, paths) {
+  await normalizeArchiveTimes(runtimeRoot, paths);
+  await writeFile(listPath, Buffer.from(`${paths.join('\0')}\0`, 'utf8'));
+  await execFileAsync('/usr/bin/tar', [
+    '-czhf', path, '--format', 'ustar', '--uid', '0', '--gid', '0',
+    '--uname', 'root', '--gname', 'root', '--numeric-owner',
+    '--no-xattrs', '--no-acls', '--no-fflags', '--no-mac-metadata',
+    '--options', 'gzip:!timestamp', '-C', runtimeRoot, '--null', '-T', listPath,
+  ], { maxBuffer: 1024 * 1024, env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  const bytes = await readFile(path);
+  if (bytes.length > MAX_RUNTIME_ASSET_BYTES) throw new Error('Runtime archive exceeds the size limit.');
+  return bytes;
+}
+
+async function buildZcode(outputDir, workDir) {
+  const metadata = proxyReleaseMetadata('zcode');
+  const source = validateZcodeRuntimeSource();
+  if (!metadata.runtime.verifiedVersions.includes(source.cliVersion)) {
+    throw new Error('ZCode Proxy Manifest does not admit its pinned CLI version.');
+  }
+  const base = `https://github.com/RichLogic/Gian/releases/download/${metadata.tag}/`;
+  const runtimeRoot = await stageZcodeRuntime(workDir, base);
+  const entryPath = join(runtimeRoot, source.entryRelativePath);
+  const home = join(workDir, 'zcode-home');
+  await mkdir(home, { mode: 0o700 });
+  const entry = await inspectEntry('zcode', entryPath, source.cliVersion, { HOME: home });
+  const name = ZCODE_RUNTIME_ASSET_NAME;
+  const path = join(outputDir, name);
+  const bytes = await packRuntime(runtimeRoot, path, join(workDir, 'zcode-runtime-files'),
+    await archiveFileList(runtimeRoot));
+  return {
+    provider: 'zcode', version: source.cliVersion, source: zcodeRuntimeSource,
+    format: 'tar.gz', entryRelativePath: source.entryRelativePath, entry,
+    asset: { name, path, url: `${base}${name}`, sha256: digest(bytes), size: bytes.length, publish: true },
+    candidateBin: entryPath,
+  };
 }
 
 async function buildDsh(outputDir, workDir) {
@@ -248,6 +293,7 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
     candidates.push(await buildUpstream(provider, definition, target, workDir));
   }
   candidates.push(await buildDsh(target, workDir));
+  candidates.push(await buildZcode(target, workDir));
   const manifest = {
     schemaVersion: 1,
     platform: 'darwin-arm64',
@@ -258,7 +304,7 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   };
   await writeFile(join(target, 'runtime-candidates.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   if (githubEnv) {
-    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', dsh: 'DSH_BIN' };
+    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', dsh: 'DSH_BIN', zcode: 'ZCODE_BIN' };
     const body = candidates.map(candidate => `${envNames[candidate.provider]}=${candidate.candidateBin}`).join('\n');
     await writeFile(resolve(githubEnv), `${body}\n`, { flag: 'a' });
   }

@@ -1,19 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
-import { DEFAULT_TRANSLATION_PREFERENCES, type TranslationRecord } from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES, type SystemConfig, type TranslationRecord, type UserAgentStatus } from '@gian/shared';
 import { ChatUiI18nProvider } from '@gian/chat-ui';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { EN } from '../src/i18n/en.js';
 import { Transcript } from '../src/transcript/Transcript.js';
 import { AutoTranslationChip, TranslationButton, TranslationResult } from '../src/translation/TranslationControls.js';
+import { SettingsTranslation } from '../src/translation/SettingsTranslation.js';
 import { useTranslation, type TranslationController } from '../src/translation/use-translation.js';
-import { loadTranslationState, translateText, cancelTranslation } from '../src/operations/translation.js';
+import { loadTranslationState, translateText, cancelTranslation, setAutoTranslation, translationCatalog } from '../src/operations/translation.js';
+import { loadAgents } from '../src/api.js';
 import type { TranscriptItem } from '../src/types.js';
 import { applyEnvelope } from '../src/transcript/apply.js';
 
 vi.mock('../src/operations/translation.js', () => ({
   loadTranslationState: vi.fn(), translateText: vi.fn(), cancelTranslation: vi.fn(async () => {}),
   setAutoTranslation: vi.fn(async (_id: string, enabled: boolean) => ({ enabled })),
+  translationCatalog: vi.fn(),
+}));
+vi.mock('../src/api.js', async () => ({
+  ...await vi.importActual<typeof import('../src/api.js')>('../src/api.js'),
+  loadAgents: vi.fn(),
 }));
 
 const record: TranslationRecord = {
@@ -21,6 +28,7 @@ const record: TranslationRecord = {
   targetLanguage: 'zh-CN', agentId: 'agent', model: 'luna', purpose: 'read', sourceId: 'turn:1',
 };
 const initial = { enabled: false, results: [], automatic: {}, preferences: { ...DEFAULT_TRANSLATION_PREFERENCES } };
+const configured = { ...initial, preferences: { ...initial.preferences, agent_id: 'agent', model: 'luna' } };
 function controller(): TranslationController {
   return { state: initial, ready: true, error: '', saving: false, sending: null,
     toggle: vi.fn(), read: vi.fn(), result: () => ({ pending: false }),
@@ -84,6 +92,38 @@ describe('translation surfaces', () => {
     expect(translation.read).not.toHaveBeenCalled();
   });
 
+  it('refuses to enable automatic translation without an Agent and model', async () => {
+    vi.mocked(loadTranslationState).mockResolvedValue(initial);
+    const { result } = renderHook(() => useTranslation('s1'));
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    await act(async () => { await result.current.toggle(true); });
+    expect(result.current.state.enabled).toBe(false);
+    expect(result.current.error).toContain('Choose an available local translation Agent');
+    expect(setAutoTranslation).not.toHaveBeenCalled();
+  });
+
+  it('refreshes a deleted translation Agent instead of keeping its stale model picker', async () => {
+    const oldAgent = { id: 'old-agent', name: 'Codex', pluginId: 'codex', ready: true, enabled: true } as UserAgentStatus;
+    const currentAgent = { ...oldAgent, id: 'current-agent' };
+    vi.mocked(loadAgents).mockResolvedValueOnce([oldAgent]).mockResolvedValue([currentAgent]);
+    vi.mocked(translationCatalog).mockRejectedValueOnce(new Error('agent not found: old-agent'));
+    const config = { translation: {
+      sending_language: 'en', reading_language: 'zh-CN', agent_id: oldAgent.id, model: '',
+    } } as SystemConfig;
+    const onPatch = vi.fn();
+    render(wrap(<SettingsTranslation config={config} onPatch={onPatch} />));
+    await waitFor(() => expect(translationCatalog).toHaveBeenCalledWith('codex', oldAgent.id));
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Codex' })).toHaveValue(currentAgent.id));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Agent unavailable'));
+    expect(screen.getByLabelText('Translation model')).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Local translation Agent'), { target: { value: currentAgent.id } });
+    await waitFor(() => expect(onPatch).toHaveBeenCalledWith({ translation: {
+      ...config.translation, agent_id: currentAgent.id, model: '',
+    } }));
+    expect(loadAgents).toHaveBeenCalledWith({ refresh: true });
+  });
+
   it('keeps a failed reading translation retryable without replacing the source', () => {
     const retry = vi.fn();
     render(wrap(<TranslationResult value={{ pending: false, error: 'offline' }} onRetry={retry} />));
@@ -92,7 +132,7 @@ describe('translation surfaces', () => {
   });
 
   it('retains a failed send until the user explicitly chooses the original', async () => {
-    vi.mocked(loadTranslationState).mockResolvedValue(initial);
+    vi.mocked(loadTranslationState).mockResolvedValue(configured);
     vi.mocked(translateText).mockRejectedValue(new Error('offline'));
     const { result } = renderHook(() => useTranslation('s1'));
     await waitFor(() => expect(result.current.ready).toBe(true));
@@ -108,7 +148,7 @@ describe('translation surfaces', () => {
   });
 
   it('cancels translation work on unmount without dispatching a main-model message', async () => {
-    vi.mocked(loadTranslationState).mockResolvedValue(initial);
+    vi.mocked(loadTranslationState).mockResolvedValue(configured);
     vi.mocked(translateText).mockImplementation((_session, _input, signal) => new Promise((_resolve, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }));

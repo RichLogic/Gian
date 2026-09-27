@@ -4,13 +4,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
-import {
-  proxyReleaseMetadata,
-  reviewedExternalRuntimeCandidates,
-} from './proxy-release-metadata.mjs';
+import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
 import { prepareCatalogCoordinate } from './prepare-catalog-coordinate.mjs';
+import { zcodeRuntimeSource } from './zcode-runtime-source.mjs';
 
 const requiredSteps = [
   'protocol-build',
@@ -73,18 +72,16 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
         proxyVersion: candidate.proxyVersion,
         sha256: candidate.provider === provider ? proxySha256 : 'a'.repeat(64),
       },
-      cli: reviewedExternalRuntimeCandidates[candidate.provider]
-        ? { ...reviewedExternalRuntimeCandidates[candidate.provider], verified: true }
-        : {
-          source: 'managed-runtime-artifact',
-          version: candidate.runtime.verifiedCliVersions[0],
-          verified: true,
-          sha256: candidate.provider === provider ? runtimeSha256 : 'b'.repeat(64),
-          size: candidate.provider === provider ? runtimeSize : 1,
-        },
+      cli: {
+        source: 'managed-runtime-artifact',
+        version: candidate.runtime.verifiedCliVersions[0],
+        verified: true,
+        sha256: candidate.provider === provider ? runtimeSha256 : 'b'.repeat(64),
+        size: candidate.provider === provider ? runtimeSize : 1,
+        ...(candidate.provider === 'zcode' ? { sourceCommit: zcodeRuntimeSource.commit } : {}),
+      },
     })),
     runtimeArtifacts: candidatePackages
-      .filter(candidate => candidate.pluginId !== 'com.zhipu.zcode')
       .map(candidate => {
         const selected = candidate.provider === provider;
         const version = candidate.runtime.verifiedCliVersions[0];
@@ -96,8 +93,9 @@ function releaseCertificate(provider, proxySha256, runtimeSha256, runtimeSize) {
         return {
           provider: candidate.provider,
           version,
-          format: 'raw',
-          entryRelativePath: `bin/${candidate.provider}`,
+          format: candidate.provider === 'zcode' ? 'tar.gz' : 'raw',
+          entryRelativePath: candidate.provider === 'zcode' ? zcodeRuntimeSource.entryRelativePath : `bin/${candidate.provider}`,
+          ...(candidate.provider === 'zcode' ? { source: zcodeRuntimeSource } : {}),
           entry: { sha256, size },
           asset: {
             name,
@@ -168,23 +166,48 @@ test('Catalog coordinate binds immutable darwin-arm64 URLs to exact certified by
   );
 });
 
-test('ZCode coordinate binds the certified local App Runtime without a CLI download', async (t) => {
+test('ZCode coordinate downloads a Git-pinned CLI archive and rejects changed provenance', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-zcode-coordinate-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const metadata = proxyReleaseMetadata('zcode');
   const archive = Buffer.from('zcode proxy archive');
   const manifest = Buffer.from('{"schemaVersion":4}\n');
-  const reviewedRuntime = reviewedExternalRuntimeCandidates.zcode;
+  const entry = Buffer.from("process.stdout.write('0.16.9\\n');\n");
+  const tarball = (source) => {
+    const records = [];
+    for (const [name, bytes] of [
+      [zcodeRuntimeSource.entryRelativePath, entry],
+      ['zcode/gian-source.json', Buffer.from(JSON.stringify(source))],
+    ]) {
+      const header = Buffer.alloc(512);
+      header.write(name);
+      header.write('0000755\0', 100);
+      header.write(`${bytes.length.toString(8).padStart(11, '0')}\0`, 124);
+      header[156] = 0x30;
+      header.fill(0x20, 148, 156);
+      const checksum = header.reduce((sum, byte) => sum + byte, 0);
+      header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+      records.push(header, bytes, Buffer.alloc((512 - bytes.length % 512) % 512));
+    }
+    return gzipSync(Buffer.concat([...records, Buffer.alloc(1024)]));
+  };
+  const runtimeBytes = tarball(zcodeRuntimeSource);
   const certificate = releaseCertificate(
     'zcode',
     createHash('sha256').update(archive).digest('hex'),
-    reviewedRuntime.sha256,
-    reviewedRuntime.size,
+    createHash('sha256').update(entry).digest('hex'),
+    entry.length,
   );
+  const runtime = certificate.runtimeArtifacts.find(candidate => candidate.provider === 'zcode');
+  runtime.asset.name = 'zcode-runtime.tar.gz';
+  runtime.asset.path = runtime.asset.name;
+  runtime.asset.sha256 = createHash('sha256').update(runtimeBytes).digest('hex');
+  runtime.asset.size = runtimeBytes.length;
   const certificatePath = join(root, 'certificate.json');
   await Promise.all([
     writeFile(join(root, metadata.asset), archive),
     writeFile(join(root, `${metadata.asset}.manifest.json`), manifest),
+    writeFile(join(root, runtime.asset.name), runtimeBytes),
     writeFile(certificatePath, `${JSON.stringify(certificate, null, 2)}\n`),
   ]);
 
@@ -193,17 +216,22 @@ test('ZCode coordinate binds the certified local App Runtime without a CLI downl
     artifactDir: root,
     certificatePath,
   });
-  assert.deepEqual(coordinate.combination.runtime, {
-    kind: 'external-app',
-    runtimeId: 'zcode',
-    version: metadata.runtime.verifiedVersions[0],
-    artifactSha256: reviewedRuntime.sha256,
-  });
+  assert.equal(coordinate.combination.runtime.kind, 'native-binary');
+  assert.equal(coordinate.combination.runtime.format, 'tar.gz');
+  assert.equal(coordinate.combination.runtime.entryRelativePath, zcodeRuntimeSource.entryRelativePath);
+  assert.equal(coordinate.combination.runtime.asset.sha256, runtime.asset.sha256);
+
+  const changed = tarball({ ...zcodeRuntimeSource, commit: 'f'.repeat(40) });
+  runtime.asset.sha256 = createHash('sha256').update(changed).digest('hex');
+  runtime.asset.size = changed.length;
+  await writeFile(join(root, runtime.asset.name), changed);
+  await writeFile(certificatePath, JSON.stringify(certificate));
+  await assert.rejects(prepareCatalogCoordinate({ provider: 'zcode', artifactDir: root, certificatePath }), /pinned Git source/);
 });
 
 test('Catalog coordinate rejects non-shipping packages and malformed repositories', async () => {
   await assert.rejects(
-    prepareCatalogCoordinate({ provider: 'grok', artifactDir: '/tmp' }),
+    prepareCatalogCoordinate({ provider: 'vendor-x', artifactDir: '/tmp' }),
     /not in the shipping/,
   );
   await assert.rejects(

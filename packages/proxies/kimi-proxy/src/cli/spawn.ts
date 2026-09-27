@@ -10,7 +10,6 @@ import { planRuntimeInstallation } from '../runtime/install.js';
 import { KimiProxyService } from '../core/service.js';
 import { createTaskQueue } from '../core/task-queue.js';
 import { KimiProtocolV2Adapter } from '../protocol/v2-adapter.js';
-import { KimiAcpClient } from '../runtime/kimi-acp-client.js';
 import { discoverKimiRuntimes, probeKimiRuntime } from '../runtime/discover.js';
 import {
   createProtocolWriter,
@@ -44,7 +43,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.2';
+  return '0.3.3';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -101,6 +100,7 @@ async function main(): Promise<void> {
   }
   const options = parseArgs(argv);
   const writer = createProtocolWriter(process.stdout);
+  const dataDir = process.env.GIAN_PLUGIN_DATA_DIR ?? null;
 
   const reportCrash = (kind: 'uncaught' | 'unhandledRejection', error: unknown) => {
     const message = error instanceof Error
@@ -125,19 +125,20 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (error) => reportCrash('uncaught', error));
   process.on('unhandledRejection', (error) => reportCrash('unhandledRejection', error));
 
-  const runtime = new KimiAcpClient({ binaryPath: options.kimiBin });
-  const service = new KimiProxyService({ runtime });
+  // The Kimi local server (`kimi web`) is spawned lazily on the first
+  // request that needs it, supervised, and stopped on shutdown.
+  const service = new KimiProxyService({
+    kimiBin: options.kimiBin,
+    ...(dataDir !== null ? { dataDir } : {}),
+  });
   const adapter = new KimiProtocolV2Adapter(
     service,
     PLUGIN_VERSION,
     (method, params) => writer.notification(method, params),
   );
-  await service.initialize();
 
   // Every dispatched task (session or scan) is tracked so EOF/shutdown/signal
-  // can drain in-flight work before the process exits: a scan must never be
-  // orphaned without its Response because the loop ended or a shutdown was
-  // processed while it was still running.
+  // can drain in-flight work before the process exits.
   const queue = createTaskQueue('kimi-proxy');
 
   let shuttingDown = false;
@@ -146,13 +147,10 @@ async function main(): Promise<void> {
     shuttingDown = true;
     try {
       await queue.drain();
-      await service.close();
+      await service.shutdown();
     } catch (error) {
-      // Fail closed: an unverified terminal process group must turn the
-      // shutdown into a failed exit, not a silent clean one — and must never
-      // surface as an unhandled rejection.
       console.error(
-        '[kimi-proxy:shutdown] terminal cleanup failed:',
+        '[kimi-proxy:shutdown] server stop failed:',
         error instanceof Error ? error.message : String(error),
       );
       process.exit(1);
@@ -172,12 +170,11 @@ async function main(): Promise<void> {
     crlfDelay: Infinity,
   });
 
-  // Request pipelining (shared Host responsiveness): a slow customization
-  // scan must never block live session traffic, and session traffic must
-  // never block a scan. Session-scoped requests stay serialized among
-  // themselves; customization requests dispatch concurrently. Kimi's
-  // dispatch() returns per-request notifications, so Response-before-
-  // Notification holds for every pipelined request.
+  // Request pipelining: a slow customization scan must never block live
+  // session traffic, and session traffic must never block a scan. Session-
+  // scoped requests stay serialized among themselves. dispatch() returns
+  // per-request notifications, so Response-before-Notification holds for
+  // every pipelined request.
   const isCustomization = (method: string): boolean => (
     method === 'customization.list' || method === 'customization.detail'
   );
@@ -239,13 +236,10 @@ async function main(): Promise<void> {
       queue.enqueuePipelined(() => dispatchTask(request));
       continue;
     }
-    // Session traffic is strictly serialized relative to itself but never
-    // waits for an in-flight customization scan (and vice versa).
     queue.enqueueSession(() => dispatchTask(request));
   }
 
-  // EOF with work still in flight: every tracked task (including scans) gets
-  // to write its Response before the process exits.
+  // EOF with work still in flight: every tracked task gets its Response.
   await queue.drain();
   await shutdown(0);
 }

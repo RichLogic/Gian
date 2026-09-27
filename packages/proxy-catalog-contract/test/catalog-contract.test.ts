@@ -391,3 +391,28 @@ test('Ed25519 verification uses exact UTF-8 bytes and fails closed', () => {
     envelope: signed.envelope,
   }));
 });
+
+test('Catalog entries expose no env/command execution channel (strict closed schema)', () => {
+  // HOME/env mapping lives in the owning Proxy; the Catalog is a signed
+  // brand/docs/artifact manifest and must not carry arbitrary environment
+  // variables, commands, or spawn hints. strictObject rejects any such key.
+  assert.throws(() => catalogEntryV1Schema.parse({
+    ...validCatalogEntry(),
+    env: [{ name: 'GROK_HOME', value: '/tmp/x' }],
+  }));
+  assert.throws(() => catalogEntryV1Schema.parse({
+    ...validCatalogEntry(),
+    command: ['grok', '--yolo'],
+  }));
+  assert.throws(() => catalogEntryV1Schema.parse({
+    ...validCatalogEntry(),
+    spawn: { argv: ['/bin/sh'] },
+  }));
+  assert.throws(() => catalogIndexV1Schema.parse({
+    ...validCatalogIndex(),
+    plugins: [{
+      ...validCatalogIndex().plugins[0]!,
+      env: { GROK_HOME: '/tmp/x' },
+    }],
+  }));
+});

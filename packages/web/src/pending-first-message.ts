@@ -12,6 +12,7 @@ export interface PendingFirstAttachment {
 export interface PendingFirstMessage {
   scope: { kind: 'workspace' | 'task'; id: string; environmentId?: string };
   text: string;
+  autoTranslate?: boolean;
   attachments: PendingFirstAttachment[];
   contextItems?: MessageContextItem[];
   composerDocument?: ComposerDocument;

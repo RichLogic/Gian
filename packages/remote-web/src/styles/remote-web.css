@@ -222,7 +222,7 @@ input, select, textarea {
   color: var(--text);
 }
 .btn:hover { background: var(--surface-3); }
-.rw-context-usage { width: 16px; height: 16px; flex: 0 0 16px; border-radius: 50%; margin: 0 6px; mask: radial-gradient(circle, transparent 5px, #000 5.5px); }
+.rw-context-usage { width: 16px; height: 16px; flex: 0 0 16px; border-radius: 50%; margin: 0; mask: radial-gradient(circle, transparent 5px, #000 5.5px); }
 .btn.primary { background: var(--accent); color: var(--accent-contrast, #fff); }
 .btn.primary:hover { background: var(--accent-strong, var(--accent)); }
 .btn.danger { background: var(--danger); color: #fff; }
@@ -1447,6 +1447,38 @@ input, select, textarea {
 .rw-app[data-mode="narrow"] .composer-act {
   min-width: 44px;
   min-height: 44px;
+}
+.rw-app[data-mode="narrow"] .composer-bar { gap: 0; }
+.rw-app[data-mode="narrow"] .composer-bar :is(.composer-model.icon-only, .rw-approval, .composer-act) {
+  position: relative;
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  justify-content: center;
+  background: transparent;
+}
+.rw-app[data-mode="narrow"] .composer-bar :is(.composer-model.icon-only, .rw-approval, .composer-act)::before {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+.rw-app[data-mode="narrow"] .composer-bar :is(.composer-model.icon-only, .rw-approval, .composer-act) > * {
+  position: relative;
+  z-index: 1;
+}
+.rw-app[data-mode="narrow"] .composer-bar .composer-act.primary::before { background: var(--accent); }
+.rw-app[data-mode="narrow"] .composer-bar .composer-act.primary.danger::before { background: var(--danger); }
+.rw-app[data-mode="narrow"] .rw-context-usage {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  margin: 0;
+  mask: radial-gradient(circle, transparent 7px, #000 7.5px);
 }
 .rw-app[data-mode="narrow"] .rw-host-btn { min-height: 36px; }
 .rw-app[data-mode="narrow"] .btn.xs { min-height: 32px; }

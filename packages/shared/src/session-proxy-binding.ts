@@ -32,6 +32,7 @@ export type SessionRuntimeProfile = OpenRuntimeProfile | AgentRuntimeProfile;
 export interface SessionProxyBinding {
   schemaVersion: 1;
   pluginId: ProxyPluginId;
+  /** Last successful launch snapshot, not a permanent version pin on resume. */
   pluginVersion: string;
   manifestSha256: string;
   protocolVersion: string;

@@ -6,6 +6,7 @@ import { gunzipSync } from 'node:zlib';
 
 import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
 import { validateProxyReleaseCertificate } from './verify-proxy-release-certificate.mjs';
+import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -148,6 +149,11 @@ export async function prepareCatalogCoordinate({
     const entryBytes = runtimeFormat === 'raw'
       ? runtimeBytes
       : runtimeArchiveEntry(runtimeBytes, runtimeEntry);
+    if (provider === 'zcode') {
+      assertZcodeSourceBinding(runtimeCandidate);
+      const source = JSON.parse(runtimeArchiveEntry(runtimeBytes, 'zcode/gian-source.json').toString('utf8'));
+      assertZcodeSourceBinding({ ...runtimeCandidate, source });
+    }
     if (digest(entryBytes) !== tuple.cli.sha256 || entryBytes.length !== tuple.cli.size) {
       throw new Error(`${provider} Runtime asset differs from the certified CLI candidate.`);
     }

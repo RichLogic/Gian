@@ -173,6 +173,10 @@ export interface GianToolResolvedSessionConfig {
 export interface GianToolCatalogAgent {
   id: string;
   name: string;
+  /** Live identity: the open plugin id every realtime entry keys on. */
+  plugin_id: string;
+  /** Legacy official-kind alias; null for pure-plugin Agents. Never means
+   *  "not ready" — readiness is the `ready` field. */
   proxy: UserAgent['proxy'];
   ready: boolean;
   defaults: {

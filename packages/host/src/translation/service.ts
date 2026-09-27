@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  composerDocumentUserText, normalizeComposerDocument, isTranslationLanguage,
+  composerDocumentUserText, normalizeComposerDocument, isTranslationConfigured,
   type ComposerDocument, type TranslationRecord, type TranslationPreferences,
 } from '@gian/shared';
 import type { Db } from '../storage/db.js';
@@ -125,7 +125,7 @@ export class TranslationService {
     if (this.closing) throw new Error('Local translation service is shutting down.');
     if (preferences.agent_id.startsWith('remote:')) throw new Error('Translation requires a local Agent. Remote translation is not supported.');
     const language = input.purpose === 'send' ? preferences.sending_language : preferences.reading_language;
-    if (!isTranslationLanguage(language) || !preferences.agent_id || !preferences.model) {
+    if (!isTranslationConfigured(preferences)) {
       throw new Error('Choose a translation Agent, model and languages in Settings first.');
     }
     if (!input.text.trim() || input.text.length > MAX_TEXT) throw new Error('Translation text must contain 1 to 120000 characters.');

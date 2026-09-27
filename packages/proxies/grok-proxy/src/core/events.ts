@@ -8,7 +8,22 @@ export const EXCLUDED_EXTENSIONS = [
   'share',
   'plugin',
   'marketplace',
-  'mcp',
+  'announcements',
+  'queue',
+  'follow_ups',
+  'leader',
+  'scheduled_task',
+  // Request-shaped MCP methods are never notifications; only status
+  // notifications (init_progress, tools_changed, servers_updated,
+  // server_status, elicit_complete) translate to notices.
+  'mcp/list',
+  'mcp/call',
+  'mcp/read_resource',
+  'mcp/auth',
+  'mcp/setup',
+  'mcp/toggle',
+  'mcp/upsert',
+  'mcp/delete',
 ] as const;
 
 export interface TranslatedEvent {
@@ -149,6 +164,66 @@ function genericActivity(name: string, payload: Record<string, unknown>): Transl
   };
 }
 
+/** Native subagent lifecycle (subagent_spawned/progress/finished updates). */
+function subagentActivity(
+  kind: 'subagent_spawned' | 'subagent_progress' | 'subagent_finished',
+  value: Record<string, unknown>,
+): TranslatedEvent | null {
+  const subagentId = typeof value.subagentId === 'string' && value.subagentId
+    ? value.subagentId
+    : typeof value.subagent_id === 'string' && value.subagent_id
+      ? value.subagent_id
+      : '';
+  if (!subagentId) return null;
+  const status = kind === 'subagent_finished'
+    ? (String(value.status ?? '') === 'failed'
+      ? 'failed' as const
+      : String(value.status ?? '') === 'cancelled'
+        ? 'cancelled' as const
+        : 'succeeded' as const)
+    : 'running' as const;
+  const description = typeof value.description === 'string' ? value.description : '';
+  const childSessionId = typeof value.childSessionId === 'string'
+    ? value.childSessionId
+    : typeof value.child_session_id === 'string' ? value.child_session_id : undefined;
+  const subagentType = typeof value.subagentType === 'string'
+    ? value.subagentType
+    : typeof value.subagent_type === 'string' ? value.subagent_type : undefined;
+  return {
+    method: 'activity.updated',
+    data: {
+      activityId: `grok-subagent-${subagentId}`,
+      kind: 'agent',
+      title: description || `Subagent ${subagentId}`,
+      status,
+      presentation: {
+        type: 'agent',
+        data: {
+          agentId: subagentId,
+          state: kind === 'subagent_finished'
+            ? (status === 'failed' ? 'failed' : status === 'cancelled' ? 'interrupted' : 'completed')
+            : 'running',
+          ...(childSessionId ? { childSessionId } : {}),
+          ...(subagentType ? { subagentType } : {}),
+          ...(kind === 'subagent_finished' && typeof value.error === 'string' && value.error
+            ? { error: value.error }
+            : {}),
+          ...(kind === 'subagent_progress'
+            ? {
+              turnCount: typeof value.turnCount === 'number'
+                ? value.turnCount
+                : typeof value.turn_count === 'number' ? value.turn_count : undefined,
+              toolCallCount: typeof value.toolCallCount === 'number'
+                ? value.toolCallCount
+                : typeof value.tool_call_count === 'number' ? value.tool_call_count : undefined,
+            }
+            : {}),
+        },
+      },
+    },
+  };
+}
+
 export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
   const value = record(update);
   const kind = String(value.sessionUpdate ?? '');
@@ -228,6 +303,11 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
       },
     });
     return events;
+  }
+
+  if (kind === 'subagent_spawned' || kind === 'subagent_progress' || kind === 'subagent_finished') {
+    const activity = subagentActivity(kind, value);
+    return activity ? [activity] : [];
   }
 
   if (kind === 'plan' || kind === 'plan_update') {
@@ -329,6 +409,42 @@ export function translateExtension(method: string, params: unknown): TranslatedE
   const payload = record(params);
   const normalized = name.toLowerCase();
 
+  // x.ai/session_notification wraps a SessionNotification payload; grok's own
+  // subagent lifecycle updates (subagent_spawned/progress/finished) and title
+  // updates arrive through it, so the inner update is translated directly.
+  if (normalized === 'session_notification' || normalized === 'session/notification') {
+    const update = record(payload.update ?? payload.sessionUpdate);
+    if (Object.keys(update).length === 0) return [];
+    return translateSessionUpdate(update);
+  }
+  // x.ai/sessions/changed: the native session directory changed (create,
+  // rename, delete, or sync elsewhere). Session-scoped, not turn-scoped.
+  if (normalized === 'sessions_changed' || normalized === 'sessions/changed') {
+    return [{
+      method: 'session.updated',
+      data: { nativeSessionsChanged: true, updatedAt: new Date().toISOString() },
+    }];
+  }
+  if (/git_head/.test(normalized)) {
+    return [noticeActivity({
+      noticeId: 'grok-git-head-changed',
+      title: 'Grok detected a new git HEAD',
+      message: String(payload.message ?? payload.head ?? 'The workspace git HEAD changed outside the session.'),
+      code: 'GROK_GIT_HEAD_CHANGED',
+    })];
+  }
+  // Host MCP status: surfaced as notices so the Host can observe server
+  // initialization, tool-list changes, and failures without dialing anything.
+  if (/^mcp(_|\/)/.test(normalized) || normalized.includes('mcp_')) {
+    const failed = /error|fail/.test(normalized);
+    return [noticeActivity({
+      noticeId: `grok-${name}`,
+      title: failed ? 'Grok MCP server problem' : 'Grok MCP status',
+      message: String(payload.message ?? payload.status ?? payload.serverName ?? name),
+      code: `GROK_MCP_${failed ? 'FAILED' : 'UPDATE'}`,
+      ...(failed ? { status: 'failed' as const } : {}),
+    })];
+  }
   if (/turn[_-]?completed/.test(normalized)) {
     return [{
       method: 'turn.completed',

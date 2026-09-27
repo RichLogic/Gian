@@ -734,6 +734,9 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
         activeSessionId: nextCreated.id,
         pendingFirstMessage: null,
       });
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>().some(frame => (
+        frame.type === 'message:send' && frame.session_id === nextCreated.id
+      ))).toBe(true));
       const sent = socket.parsedSent<ClientToServerMessage>();
       const subscribeIndex = sent.findIndex(frame => (
         frame.type === 'events:subscribe' && frame.session_id === nextCreated.id
@@ -833,6 +836,115 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
       ops.dispose();
       ws.disconnect();
       wireMessageEchoSink(null);
+    }
+  });
+
+  it('enables translation before dispatching a remote Session first message', async () => {
+    const created = sessionContractFixture({ id: 'remote-created', remote_execution: {
+      environment_id: 'remote-a', environment_name: 'Build Mac', host_id: 'host-a',
+      remote_session_id: 'remote-native', repository_id: 'remote-repo', repository_name: 'Repo',
+    } });
+    let finishPatch!: (response: Response) => void;
+    const patch = new Promise<Response>(resolve => { finishPatch = resolve; });
+    let finishTranslation!: (response: Response) => void;
+    const translated = new Promise<Response>(resolve => { finishTranslation = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const url = String(input);
+      if (url === '/api/schedule-confirmations?status=pending') {
+        return new Response(JSON.stringify({ confirmations: [] }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/requests')) return translated;
+      if (url.endsWith('/translation/state')) return patch;
+      throw new Error(`Unexpected request in translation-first-message test: ${url}`);
+    });
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops}
+      pendingFirstMessage={{
+        scope: { kind: 'workspace', id: 'remote-repo', environmentId: 'remote-a' },
+        text: 'first remote message', autoTranslate: true, attachments: [],
+      }} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({ type: 'session:created', session: created, origin: 'interactive-create' }));
+
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+        `/api/sessions/${created.id}/translation/state`,
+        expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ enabled: true }) }),
+      ));
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+      await act(async () => {
+        finishPatch(new Response(JSON.stringify({ enabled: true }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+        await patch;
+      });
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+        `/api/sessions/${created.id}/translation/requests`,
+        expect.objectContaining({ method: 'POST', body: expect.stringContaining('first remote message') }),
+      ));
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+      await act(async () => {
+        finishTranslation(new Response(JSON.stringify({ id: 'first-translation' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+        await translated;
+      });
+      await waitFor(() => expect(socket.parsedSent<ClientToServerMessage>()).toContainEqual(
+        expect.objectContaining({ type: 'message:send', session_id: created.id,
+          text: 'first remote message', translation_id: 'first-translation' }),
+      ));
+    } finally {
+      fetchSpy.mockRestore();
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+    }
+  });
+
+  it('does not send a remote first message when translation setup fails', async () => {
+    const created = sessionContractFixture({ id: 'remote-translation-failed', remote_execution: {
+      environment_id: 'remote-a', environment_name: 'Build Mac', host_id: 'host-a',
+      remote_session_id: 'remote-native', repository_id: 'remote-repo', repository_name: 'Repo',
+    } });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Translation settings unavailable' }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } },
+    ));
+    const ws = new GianWs('ws://test.invalid/ws', () => 'token');
+    const store = createOperationStore();
+    const ops = createOperationDispatcher({ store, transport: ws });
+    const view = render(<ClientReducerHarness ws={ws} store={store} ops={ops}
+      pendingFirstMessage={{
+        scope: { kind: 'workspace', id: 'remote-repo', environmentId: 'remote-a' },
+        text: 'keep the original', autoTranslate: true, attachments: [],
+      }} />);
+
+    try {
+      const socket = getMockWebSockets()[0]!;
+      await act(async () => { socket.fakeOpen(); await Promise.resolve(); await Promise.resolve(); });
+      act(() => socket.fakeMessage({ type: 'auth_ok', user: 'dev' }));
+      act(() => socket.fakeMessage(stateSyncFixture()));
+      act(() => socket.fakeMessage({ type: 'session:created', session: created, origin: 'interactive-create' }));
+      await waitFor(() => expect(feedbackSnapshot().toasts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'error', message: expect.stringContaining('The first message was not sent.') }),
+      ])));
+      expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
+    } finally {
+      fetchSpy.mockRestore();
+      view.unmount();
+      ops.dispose();
+      ws.disconnect();
+      wireMessageEchoSink(null);
+      __resetFeedback();
     }
   });
 

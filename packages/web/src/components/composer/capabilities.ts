@@ -14,7 +14,7 @@ import type {
   SlashCommandSource,
   ThinkingEffort,
 } from '@gian/shared';
-import { isApprovalMode, usesNativeExecutorConfig } from '@gian/shared';
+import { catalogModeSemantics, isApprovalMode } from '@gian/shared';
 import { loadAllFiles, loadProxyCapabilities, loadProxyModels, loadSlashCommands } from '../../api.js';
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
@@ -249,14 +249,13 @@ export function executorSettingsFromCapabilities(executor: Executor | null, raw:
   const legacyModes = raw && typeof raw === 'object'
     ? modesFromCapabilities({ modes: (raw as { modes?: unknown }).modes })
     : [];
-  // Managed Claude/Codex defaults are Gian's semantic ApprovalMode values.
-  // A Protocol 2 Proxy that publishes native, low-level permission values in
-  // the approval role (Codex 0.2.0, Claude 0.2.0) must not turn those into an
-  // AgentProxyDefaults.mode that Host cannot apply. Native executors own their
-  // mode vocabulary and therefore keep the Catalog values verbatim.
+  // Mode vocabulary follows `catalogModeSemantics`, not binding: a Proxy's
+  // native mode may be turn-bound. `catalog.modeSemantics`-gated modeKind
+  // markers win; the legacy kind allowlist only covers older Proxies.
+  const providerNative = catalogModeSemantics(executor, catalog) === 'provider-native';
   const catalogModesAreSemantic = advertisedModes.length > 0
     && advertisedModes.every(mode => isApprovalMode(mode.id));
-  const modes = usesNativeExecutorConfig(executor)
+  const modes = providerNative
     ? advertisedModes
     : catalogMode?.choices?.length && catalogModesAreSemantic
       ? advertisedModes
@@ -312,7 +311,7 @@ export function createConfigsFromCatalog(
     else if (option.role === 'effort') {
       thinkingEffort = value == null ? null : String(value);
     } else if (option.role === 'approval_mode' && isApprovalMode(value)
-      && !usesNativeExecutorConfig(executor)) {
+      && catalogModeSemantics(executor, { configOptions: [option] }) === 'gian-preset') {
       approvalMode = value;
     } else if (option.role === 'fast') {
       serviceTier = value === true ? 'fast' : null;

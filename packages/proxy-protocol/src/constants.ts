@@ -88,6 +88,11 @@ export const CAPABILITY_NAMES = [
   'runtime.probe',
   'runtime.install.plan',
   'customization.list',
+  /** Version-gated protocol increment (additive): the Proxy classifies its
+   *  mode config options with `modeKind` on every configOption. Hosts below
+   *  the gate fall back to the legacy product-kind allowlist; Proxies above
+   *  it must not rely on that fallback. */
+  'catalog.modeSemantics',
 ] as const;
 
 export const PROTOCOL_V22_ONLY_CAPABILITIES = [

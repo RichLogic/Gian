@@ -179,11 +179,11 @@ test('turn prompt is agent-only and blocked slash commands are rejected', async 
   await service.closeSession({ sessionId: created.session.id });
 });
 
-test('rename succeeds when Grok agent does not implement session/rename', async () => {
+test('rename surfaces method-not-found honestly instead of faking success', async () => {
   const runtime = fakeRuntime({
     async renameSession() {
       runtime.calls.push('x.ai/session/rename');
-      throw new Error('Method not found');
+      throw new Error('Method not found: x.ai/session/rename');
     },
   });
   const service = new GrokProxyService({
@@ -191,10 +191,13 @@ test('rename succeeds when Grok agent does not implement session/rename', async 
     createRuntime: () => runtime,
   });
   const created = await service.createSession({ cwd: '/workspace' });
-  assert.deepEqual(await service.renameSession({
-    sessionId: created.session.id,
-    name: 'New conversation',
-  }), { ok: true });
+  await assert.rejects(
+    service.renameSession({
+      sessionId: created.session.id,
+      name: 'New conversation',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CAPABILITY_NOT_SUPPORTED',
+  );
   await service.closeSession({ sessionId: created.session.id });
 });
 
@@ -366,17 +369,28 @@ test('Grok gian.proxy/2 rejects a second attached session and hostServices', asy
   }));
   await assert.rejects(
     fresh.handle(v2Request('2', 'session.create', {
-      sessionId: 'host-mcp',
+      sessionId: 'host-mcp-stdio',
       workspace: { cwd: '/workspace', roots: ['/workspace'] },
       config: {},
       hostServices: [{
-        id: 'gian-tools',
+        id: 'local-tool',
         protocol: 'mcp',
-        transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+        transport: { type: 'stdio', command: 'evil-binary' },
       }],
     })),
-    /does not advertise integration.mcp.streamableHttp/,
+    /streamable-http/,
   );
+  const admitted = await fresh.handle(v2Request('3', 'session.create', {
+    sessionId: 'host-mcp-http',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+    hostServices: [{
+      id: 'gian-tools',
+      protocol: 'mcp',
+      transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+    }],
+  }));
+  assert.ok(admitted);
 });
 
 test('Grok gian.proxy/2 returns an empty Replay Event page before native history exists', async () => {
@@ -1023,8 +1037,11 @@ test('Grok gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
     protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   })));
-  assert.equal(initialized.capabilities.sidechat, 1);
-  assert.equal(initialized.capabilities['session.fork'], 1);
+  // x.ai/*-independent capabilities are never claimed at initialize: the
+  // runtime does not exist yet and 1.0.41 registers none of the methods.
+  // ACP-fork fallback runtimes surface through catalog actions + dispatch.
+  assert.equal(initialized.capabilities.sidechat, undefined);
+  assert.equal(initialized.capabilities['session.fork'], undefined);
   assert.equal(initialized.capabilities['session.fork.atTurn'], undefined);
   const catalog = resultSchemas['catalog.list'].parse(await adapter.handle(v2Request('2', 'catalog.list', {})));
   assert.equal(catalog.actions?.find((action) => action.id === 'sidechat.create')?.supported, true);

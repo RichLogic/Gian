@@ -93,7 +93,7 @@ export interface SpawnOptions {
   /** Optional override of the shell binary. Defaults to $SHELL → /bin/zsh
    *  → /bin/bash → /bin/sh. */
   shell?: string;
-  target?: { kind: 'agent_cli'; agentId: string };
+  target?: { kind: 'agent_cli'; agentId: string; action?: 'login' };
 }
 
 export interface ResolvedTerminalTarget {

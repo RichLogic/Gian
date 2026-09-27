@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { assertExecutionAllowed } from './execution-policy.mjs';
 import { assertHeadlessTests, requiresFullSuite, sourcePolicyChecks } from './source-gate.mjs';
 
@@ -19,12 +20,34 @@ test('source policy keeps executable quality gates without requiring a retired l
 import { assertSourceCertificate, assertPublicSource, assertDesktopAcceptance, isPublicPath, DESKTOP_CHECKS, DESKTOP_PLAN } from './delivery-certificate.mjs';
 import { allocatePorts, validatePorts } from './dev-ports.mjs';
 import { assertDevOAuthConfiguration, assertDevSigningEntitlements, devPackageConfiguration, requireDevOAuthClientId } from './dev-package-config.mjs';
+const require = createRequire(import.meta.url);
+const { assertLocalDevPackageContext } = require('./local-dev-package-guard.cjs');
 
-test('packaging is hosted CI only; interactive execution needs per-run consent', () => {
+test('formal packaging stays hosted; local packaging permits only a selected ad-hoc GianDev', () => {
   for (const env of [{}, { CI: 'true' }, { GITHUB_ACTIONS: 'true' }, { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted' }, { GIAN_ALLOW_DESKTOP_E2E: '1' }]) {
     assert.throws(() => assertExecutionAllowed('package', env), /restricted/);
   }
   assert.doesNotThrow(() => assertExecutionAllowed('package', { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' }));
+  assert.throws(() => assertExecutionAllowed('package', { GIAN_ALLOW_LOCAL_DEV_PACKAGE: '1' }), /restricted/);
+  assert.throws(() => assertExecutionAllowed('dev-package-local', {}), /explicit permission/);
+  assert.throws(() => assertExecutionAllowed('dev-package-local', {
+    GIAN_ALLOW_LOCAL_DEV_PACKAGE: '1', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
+  }), /explicit permission/);
+  assert.doesNotThrow(() => assertExecutionAllowed('dev-package-local', { GIAN_ALLOW_LOCAL_DEV_PACKAGE: '1' }));
+  const devContext = {
+    electronPlatformName: 'darwin',
+    packager: {
+      config: { appId: 'com.gian.desktop.dev', productName: 'GianDev', publish: null,
+        extraMetadata: { gianReleaseChannel: 'dev' } },
+      platformSpecificBuildOptions: { identity: '-', notarize: false },
+    },
+  };
+  assert.doesNotThrow(() => assertLocalDevPackageContext(devContext));
+  for (const context of [
+    { ...devContext, packager: { ...devContext.packager, config: { ...devContext.packager.config, appId: 'com.gian.desktop' } } },
+    { ...devContext, packager: { ...devContext.packager, config: { ...devContext.packager.config, publish: [{ provider: 'github' }] } } },
+    { ...devContext, packager: { ...devContext.packager, platformSpecificBuildOptions: { identity: 'Developer ID', notarize: true } } },
+  ]) assert.throws(() => assertLocalDevPackageContext(context), /ad-hoc, unpublished GianDev/);
   assert.throws(() => assertExecutionAllowed('desktop', {}), /explicit user permission/);
   assert.doesNotThrow(() => assertExecutionAllowed('desktop', { GIAN_ALLOW_DESKTOP_E2E: '1' }));
 });

@@ -13,6 +13,7 @@ import {
 } from './run-proxy-certification.mjs';
 import { validateProxyReleaseCertificate } from './verify-proxy-release-certificate.mjs';
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
+import { zcodeRuntimeSource } from './zcode-runtime-source.mjs';
 
 test('development certification is deterministic and never claims admission', () => {
   const options = parseProxyCertificationOptions([
@@ -106,8 +107,8 @@ test('certification rejects ambiguous stages, missing bases, and hidden Proxies'
     /--base is required/,
   );
   assert.throws(
-    () => parseProxyCertificationOptions(['--stage', 'release', '--base', 'x', '--provider', 'grok']),
-    /only accepts shipping Proxies: grok/,
+    () => parseProxyCertificationOptions(['--stage', 'release', '--base', 'x', '--provider', 'vendor-x']),
+    /only accepts shipping Proxies: vendor-x/,
   );
   assert.throws(
     () => parseProxyCertificationOptions([
@@ -155,16 +156,18 @@ test('release candidate binding derives the exact packaged Proxy and managed Run
 test('artifact certificate binds the downloadable Runtime to the exact exercised entry', () => {
   const candidateTuple = shippingProxyIds.map(provider => ({
     provider,
-    cli: { version: '1.2.3', sha256: 'a'.repeat(64), size: 12 },
+    cli: { version: provider === 'zcode' ? zcodeRuntimeSource.cliVersion : '1.2.3', sha256: 'a'.repeat(64), size: 12,
+      ...(provider === 'zcode' ? { sourceCommit: zcodeRuntimeSource.commit } : {}) },
   }));
-  const runtimeProviders = shippingProxyIds.filter(provider => provider !== 'zcode');
+  const runtimeProviders = shippingProxyIds;
   const manifest = {
     schemaVersion: 1,
     platform: 'darwin-arm64',
     candidates: runtimeProviders.map(provider => ({
       provider,
-      version: '1.2.3',
-      format: 'raw',
+      version: provider === 'zcode' ? zcodeRuntimeSource.cliVersion : '1.2.3',
+      format: provider === 'zcode' ? 'tar.gz' : 'raw',
+      ...(provider === 'zcode' ? { source: zcodeRuntimeSource, entryRelativePath: zcodeRuntimeSource.entryRelativePath } : {}),
       entry: { sha256: 'a'.repeat(64), size: 12 },
       asset: { url: 'https://downloads.example.test/runtime', sha256: 'b'.repeat(64), size: 24 },
     })),
@@ -235,23 +238,20 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
         sha256: 'a'.repeat(64),
       },
       cli: {
-        source: candidate.pluginId === 'com.zhipu.zcode'
-          ? 'reviewed-external-app'
-          : 'managed-runtime-artifact',
+        source: 'managed-runtime-artifact',
+        ...(candidate.provider === 'zcode' ? { sourceCommit: zcodeRuntimeSource.commit } : {}),
         version: candidate.runtime.verifiedCliVersions[0],
         verified: true,
-        sha256: candidate.pluginId === 'com.zhipu.zcode'
-          ? 'e9f1868c0fdb863537ed910ee3828b9be96b8c2fd805473f63b439e1113266b8'
-          : 'b'.repeat(64),
-        size: candidate.pluginId === 'com.zhipu.zcode' ? 12615227 : 123,
+        sha256: 'b'.repeat(64),
+        size: 123,
       },
     })),
     runtimeArtifacts: candidatePackages
-      .filter(candidate => candidate.pluginId !== 'com.zhipu.zcode')
       .map(candidate => ({
         provider: candidate.provider,
         version: candidate.runtime.verifiedCliVersions[0],
-        format: 'raw',
+        format: candidate.provider === 'zcode' ? 'tar.gz' : 'raw',
+        ...(candidate.provider === 'zcode' ? { source: zcodeRuntimeSource, entryRelativePath: zcodeRuntimeSource.entryRelativePath } : {}),
         entry: { sha256: 'b'.repeat(64), size: 123 },
         asset: { sha256: 'c'.repeat(64), size: 456 },
       })),
@@ -296,4 +296,11 @@ test('Proxy publication accepts a fresh full-shipping artifact certificate for t
     }).join('\n'),
     /certificate run 123 != 999[\s\S]*run attempt 1 != 2[\s\S]*repository RichLogic\/Gian != Other\/Gian/,
   );
+
+  const changedSource = structuredClone(certificate);
+  changedSource.runtimeArtifacts.find(candidate => candidate.provider === 'zcode').source.commit = 'f'.repeat(40);
+  assert.match(validateProxyReleaseCertificate(changedSource, { revision }).join('\n'), /pinned Git source/);
+  const missingZcode = structuredClone(certificate);
+  missingZcode.runtimeArtifacts = missingZcode.runtimeArtifacts.filter(candidate => candidate.provider !== 'zcode');
+  assert.match(validateProxyReleaseCertificate(missingZcode, { revision }).join('\n'), /zcode managed Runtime/);
 });

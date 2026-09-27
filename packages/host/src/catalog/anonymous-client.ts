@@ -19,6 +19,7 @@ import type { CatalogLatestRelease, CatalogNetwork, CatalogReleaseAsset } from '
 const API_VERSION = '2022-11-28';
 const USER_AGENT = 'Gian';
 const MAX_REDIRECTS = 5;
+const RELEASE_PAGE_SIZE = 5;
 const REPOSITORY_PATTERN = /^[0-9A-Za-z_.-]+\/[0-9A-Za-z_.-]+$/;
 
 export function encodeGitHubCatalogAssetName(path: string): string {
@@ -37,57 +38,65 @@ export function createCatalogAnonymousNetwork(options: {
 
   return {
     async latest(input) {
-      const url = `https://api.github.com/repos/${repository}/releases?per_page=100`;
-      const headers = anonymousHeaders();
-      if (input.ifNoneMatch) headers.set('if-none-match', input.ifNoneMatch);
-      const response = await fetchImpl(url, {
-        headers,
-        redirect: 'error',
-        ...(input.signal ? { signal: input.signal } : {}),
-      });
-      try {
-        const etag = headerEtag(response);
-        if (response.status === 304) {
-          await cancelQuietly(response);
-          return { status: 304, ...(etag ? { etag } : {}) };
-        }
-        if (!response.ok) {
-          await cancelQuietly(response);
-          throw new Error(`Catalog anonymous latest lookup failed (${response.status}).`);
-        }
-        const body = await readBoundedResponseBody(response, MAX_ANONYMOUS_METADATA_BYTES);
-        let parsed: unknown;
+      // GitHub release metadata includes every asset on every Release. A
+      // 100-item response now exceeds the fixed 512 KiB safety bound even
+      // though the newest signed Catalog itself is small. Scan bounded pages
+      // until the first Catalog instead of weakening the response limit.
+      const pages = Math.ceil(MAX_ANONYMOUS_RELEASES / RELEASE_PAGE_SIZE);
+      let firstPageEtag: string | undefined;
+      for (let page = 1; page <= pages; page += 1) {
+        const url = `https://api.github.com/repos/${repository}/releases?per_page=${RELEASE_PAGE_SIZE}&page=${page}`;
+        const headers = anonymousHeaders();
+        if (page === 1 && input.ifNoneMatch) headers.set('if-none-match', input.ifNoneMatch);
+        const response = await fetchImpl(url, {
+          headers,
+          redirect: 'error',
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
         try {
-          parsed = JSON.parse(body.toString('utf8'));
-        } catch {
-          throw new Error('Catalog anonymous latest lookup returned invalid JSON.');
+          const etag = headerEtag(response);
+          if (page === 1) firstPageEtag = etag;
+          if (response.status === 304 && page === 1) {
+            await cancelQuietly(response);
+            return { status: 304, ...(etag ? { etag } : {}) };
+          }
+          if (!response.ok) {
+            await cancelQuietly(response);
+            throw new Error(`Catalog anonymous latest lookup failed (${response.status}).`);
+          }
+          const body = await readBoundedResponseBody(response, MAX_ANONYMOUS_METADATA_BYTES);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(body.toString('utf8'));
+          } catch {
+            throw new Error('Catalog anonymous latest lookup returned invalid JSON.');
+          }
+          if (!Array.isArray(parsed)) {
+            throw new Error('Catalog anonymous latest lookup returned an invalid release list.');
+          }
+          if (parsed.length > RELEASE_PAGE_SIZE) {
+            throw new Error('Catalog anonymous latest lookup exceeded the release page bound.');
+          }
+          const tagged: { item: unknown; sequence: number }[] = [];
+          for (const item of parsed) {
+            const sequence = catalogTagSequence(item);
+            if (sequence !== null) tagged.push({ item, sequence });
+          }
+          if (tagged.length > 0) {
+            tagged.sort((left, right) => right.sequence - left.sequence);
+            const release = parseAnonymousRelease(tagged[0]!.item, firstPageEtag);
+            if (!release) throw new Error('Catalog anonymous highest release metadata is invalid.');
+            return { status: 200, release };
+          }
+          if (parsed.length < RELEASE_PAGE_SIZE) break;
+        } catch (error) {
+          await cancelQuietly(response);
+          throw error;
         }
-        if (!Array.isArray(parsed)) {
-          throw new Error('Catalog anonymous latest lookup returned an invalid release list.');
-        }
-        if (parsed.length > MAX_ANONYMOUS_RELEASES) {
-          throw new Error('Catalog anonymous latest lookup exceeded the release bound.');
-        }
-        const tagged: { item: unknown; sequence: number }[] = [];
-        for (const item of parsed) {
-          const sequence = catalogTagSequence(item);
-          if (sequence !== null) tagged.push({ item, sequence });
-        }
-        if (tagged.length === 0) {
-          throw Object.assign(new Error('Catalog anonymous latest lookup found no catalog-v1 release.'), {
-            code: 'CATALOG_RELEASE_NOT_FOUND',
-          });
-        }
-        tagged.sort((left, right) => right.sequence - left.sequence);
-        const release = parseAnonymousRelease(tagged[0]!.item, etag);
-        if (!release) {
-          throw new Error('Catalog anonymous highest release metadata is invalid.');
-        }
-        return { status: 200, release };
-      } catch (error) {
-        await cancelQuietly(response);
-        throw error;
       }
+      throw Object.assign(new Error('Catalog anonymous latest lookup found no catalog-v1 release.'), {
+        code: 'CATALOG_RELEASE_NOT_FOUND',
+      });
     },
 
     async download(input) {

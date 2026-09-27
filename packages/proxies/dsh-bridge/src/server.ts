@@ -126,6 +126,27 @@ export class BridgeServer {
       }
       case 'interaction.respond':
         return host.interactionRespond(this.interactionRespondParams(request.params));
+      case 'session.fork':
+        return host.sessionFork({
+          sessionId: stringField(request.params, 'sessionId'),
+          newSessionId: stringField(request.params, 'newSessionId'),
+          anchor: forkAnchor(request.params.anchor),
+        });
+      case 'customization.list':
+        return host.customizationList({
+          kind: customizationKind(request.params, 'kind'),
+          ...(typeof request.params.cwd === 'string' && request.params.cwd.length > 0
+            ? { cwd: request.params.cwd }
+            : {}),
+        });
+      case 'customization.detail':
+        return host.customizationDetail({
+          kind: customizationKind(request.params, 'kind'),
+          id: stringField(request.params, 'id'),
+          ...(typeof request.params.cwd === 'string' && request.params.cwd.length > 0
+            ? { cwd: request.params.cwd }
+            : {}),
+        });
       case 'shutdown':
         this.shuttingDown = true;
         return host.shutdown();
@@ -217,7 +238,29 @@ function coerceTurnInput(raw: unknown): BridgeTurnInputItem {
     ...(typeof record.name === 'string' ? { name: record.name } : {}),
     ...(typeof record.mime === 'string' ? { mime: record.mime } : {}),
     ...(typeof record.size === 'number' ? { size: record.size } : {}),
+    ...(typeof record.skill === 'string' ? { skill: record.skill } : {}),
   };
+}
+
+function forkAnchor(value: unknown): { kind: 'head' } | { kind: 'turn'; nativeTurn: number } {
+  const record = (value ?? {}) as Record<string, unknown>;
+  if (record.kind === 'head') return { kind: 'head' };
+  if (record.kind === 'turn' && typeof record.nativeTurn === 'number'
+    && Number.isSafeInteger(record.nativeTurn) && record.nativeTurn >= 0) {
+    return { kind: 'turn', nativeTurn: record.nativeTurn };
+  }
+  throw new BridgeProtocolError(-32602, 'params.anchor must be {kind:"head"} or {kind:"turn",nativeTurn}.');
+}
+
+function customizationKind(
+  params: Record<string, unknown>,
+  key: string,
+): 'skill' | 'mcp' | 'hook' | 'rule' {
+  const value = params[key];
+  if (value === 'skill' || value === 'mcp' || value === 'hook' || value === 'rule') {
+    return value;
+  }
+  throw new BridgeProtocolError(-32602, `params.${key} must be one of skill, mcp, hook, rule.`);
 }
 
 function stringArray(params: Record<string, unknown>, key: string): string[] {

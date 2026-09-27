@@ -1,22 +1,24 @@
 /**
- * Catalog projection (Revision 2 §7).
+ * Catalog projection (Revision 2 §7) for ZCode CLI 0.16.9.
  *
- * `workspace/readState` is the side-effect-free Catalog source proven by WP0
- * G0 (session/list count unchanged; no inner session/create anywhere). The
- * bootstrap Catalog only covers the unconfigured state readState itself
- * reports (available=0, zcode-unconfigured).
+ * `catalog.list` stays side-effect-free: `workspace/readPresentation` supplies
+ * mode and slash commands, while the pinned `gian/modelCatalog` integration
+ * returns allowlisted Registry metadata without creating a session or
+ * exposing Provider credentials. Live snapshots may update only the current
+ * selection when it still belongs to that Registry catalog.
  *
- * Outer ConfigValue is scalar, so model references use the versioned reversible
- * encoding `zmodel:v1:<base64url(JSON.stringify([providerId, modelId]))>`;
- * anything malformed is CONFIG_VALUE_INVALID.
+ * Outer ConfigValue stays scalar; model references use the versioned
+ * reversible encoding `zmodel:v1:<base64url(JSON.stringify([providerId,
+ * modelId]))>`; anything malformed is CONFIG_VALUE_INVALID.
  */
 
+import { createHash } from 'node:crypto';
 import type {
   InnerModelInfo,
-  InnerReasoningLevel,
+  InnerPresentation,
   InnerReadState,
+  InnerReasoningLevel,
   InnerSettings,
-  InnerSlashCommand,
 } from './inner/model.js';
 
 export const MODEL_VALUE_PREFIX = 'zmodel:v1:';
@@ -81,13 +83,55 @@ export function decodeModelValue(value: string): { providerId: string; modelId: 
   return { providerId, modelId };
 }
 
-/** Unconfigured vocabulary readState itself reports on a config-less HOME. */
-function isUnconfigured(settings: InnerSettings | undefined): boolean {
+export interface CatalogActions {
+  fork: { supported: boolean; reason?: string };
+  forkAtTurn: { supported: boolean; reason?: string };
+  sidechat: { supported: boolean; reason?: string };
+}
+
+/** Kept in one place so bootstrap and projected catalogs agree. */
+const SIDECHAT_UNAVAILABLE_REASON = 'ZCode selection side chats inherit hidden parent context and restrict fork/retry; not a semantic Gian Side Chat.';
+
+/** Capability truth for 0.16.9 (see README for the full evidence map):
+ *  - v4 `forkAssistant` is a stable conversation-only fork (fork-edit-retry.ts:6),
+ *    exposed for head and completed-turn boundaries;
+ *  - upstream `createSelectionSideSession` always inherits the parent's
+ *    committed context with hidden-transcript rewriting (session-fork.ts:677-693)
+ *    and restricts fork/edit/retry inside the child — not semantically equal to
+ *    a Gian Side Chat, so it stays unsupported;
+ *  - v4 `deleteSession` is documented as closeSession ("非真删 record",
+ *    session-mgmt.ts:154-158), so native delete is never declared. */
+export function catalogActions(): CatalogActions {
+  return {
+    fork: { supported: true },
+    forkAtTurn: { supported: true },
+    sidechat: {
+      supported: false,
+      reason: SIDECHAT_UNAVAILABLE_REASON,
+    },
+  } as CatalogActions;
+}
+
+function actionsList(): ProjectedCatalog['actions'] {
+  const actions = catalogActions();
+  const list: ProjectedCatalog['actions'] = [
+    { id: 'session.fork', supported: actions.fork.supported },
+    { id: 'session.fork.atTurn', supported: actions.forkAtTurn.supported },
+    { id: 'sidechat.create', supported: actions.sidechat.supported },
+    { id: 'session.native.delete', supported: false, reason: 'ZCode deleteSession is a close: history is never purged (session-mgmt.ts:154-158).' },
+  ];
+  if (actions.fork.reason !== undefined) list[0]!.reason = actions.fork.reason;
+  if (actions.forkAtTurn.reason !== undefined) list[1]!.reason = actions.forkAtTurn.reason;
+  if (actions.sidechat.reason !== undefined) list[2]!.reason = actions.sidechat.reason;
+  return list;
+}
+
+/** Unconfigured workspace: no provider account configured yet. */
+function isUnconfigured(settings: InnerSettings | undefined, presentation: InnerPresentation | undefined): boolean {
   const providerId = settings?.model?.current?.providerId;
   return (settings?.model?.available?.length ?? 0) === 0
-    && providerId !== undefined
-    && providerId !== null
-    && (providerId as string) === 'zcode-unconfigured';
+    && (presentation?.mode === undefined || presentation.mode === null)
+    && (providerId === undefined || providerId === null || providerId === 'zcode-unconfigured');
 }
 
 export function bootstrapCatalog(runtimeFingerprint: string): ProjectedCatalog {
@@ -97,23 +141,27 @@ export function bootstrapCatalog(runtimeFingerprint: string): ProjectedCatalog {
     configOptions: [],
     specialCatalogs: {},
     actions: [
-      { id: 'sidechat.create', supported: false, reason: 'ZCode does not provide a Side Chat runtime context.' },
-      { id: 'session.fork', supported: false, reason: 'ZCode does not provide a verifiable fork boundary.' },
-      { id: 'session.fork.atTurn', supported: false, reason: 'ZCode does not provide a verifiable fork boundary.' },
+      { id: 'session.fork', supported: false, reason: 'catalog.list has not run yet.' },
+      { id: 'session.fork.atTurn', supported: false, reason: 'catalog.list has not run yet.' },
+      { id: 'sidechat.create', supported: false, reason: SIDECHAT_UNAVAILABLE_REASON },
+      { id: 'session.native.delete', supported: false, reason: 'ZCode deleteSession is a close: history is never purged (session-mgmt.ts:154-158).' },
     ],
     slashCommands: [],
   };
 }
 
-function catalogFingerprint(state: InnerReadState): string {
-  return Buffer.from(JSON.stringify({
-    settings: state.settings ?? {},
-    slash: (state.slashCommands ?? []).map((command) => command.name ?? ''),
-  }), 'utf8').toString('base64url').slice(0, 24);
+function catalogFingerprint(presentation: InnerPresentation, observed: InnerReadState | null): string {
+  return createHash('sha256').update(JSON.stringify({
+    mode: presentation.mode ?? '',
+    slash: (presentation.slashCommands ?? []).map((command) => command.name ?? ''),
+    model: observed?.settings?.model?.current ?? null,
+    available: observed?.settings?.model?.available ?? [],
+    thought: observed?.settings?.thoughtLevel?.current ?? null,
+  })).digest('hex').slice(0, 24);
 }
 
-export function revisionFor(runtimeFingerprint: string, state: InnerReadState): string {
-  return `zcode:${Buffer.from(runtimeFingerprint).toString('base64url').slice(0, 12)}:${catalogFingerprint(state)}`;
+export function revisionFor(runtimeFingerprint: string, presentation: InnerPresentation, observed: InnerReadState | null): string {
+  return `zcode:${Buffer.from(runtimeFingerprint).toString('base64url').slice(0, 12)}:${catalogFingerprint(presentation, observed)}`;
 }
 
 type ModelWithRef = InnerModelInfo & {
@@ -139,6 +187,11 @@ function selectCatalogModel(
   selection: CatalogSelection,
 ): { providerId: string; model: ModelWithRef } {
   const models = availableModels(settings);
+  if (models.length === 0) {
+    throw new ConfigValueInvalidError(
+      'ZCode has no configured model provider in the selected HOME.',
+    );
+  }
   const requestedRef = selection.modelValue === undefined
     ? undefined
     : decodeModelValue(selection.modelValue);
@@ -172,122 +225,139 @@ function selectCatalogModel(
   return { providerId, model };
 }
 
+/** Catalog input vocabulary for 0.16.9: the v4 `sendText` payload accepts
+ *  text plus `{ref,fileName,mime,bytes}` attachments (local zero-copy by
+ *  absolute path), and skills activate through the canonical manual-skill
+ *  prompt (slash-commands.ts:229 buildManualSkillPrompt). */
+export const CATALOG_INPUT: ProjectedCatalog['input'] = [
+  { type: 'text' },
+  { type: 'localImage' },
+  { type: 'localFile' },
+  { type: 'skill' },
+];
+
 export function projectCatalog(
   runtimeFingerprint: string,
-  state: InnerReadState,
+  presentation: InnerPresentation,
+  observed: InnerReadState | null = null,
   selection: CatalogSelection = {},
 ): ProjectedCatalog {
-  const settings = state.settings;
-  if (isUnconfigured(settings)) {
+  const settings = observed?.settings;
+  if (isUnconfigured(settings, presentation)) {
     return bootstrapCatalog(runtimeFingerprint);
   }
-  const revision = revisionFor(runtimeFingerprint, state);
+  const revision = revisionFor(runtimeFingerprint, presentation, observed);
   const models = availableModels(settings);
-  const selected = selectCatalogModel(settings, selection);
-  const providerChoices = new Map<string, string>();
-  for (const model of models) {
-    if (!providerChoices.has(model.ref.providerId)) {
-      providerChoices.set(model.ref.providerId, model.providerLabel ?? model.ref.providerId);
+  if (models.length === 0 && (selection.modelValue !== undefined || selection.providerId !== undefined)) {
+    // A model/provider value cannot resolve against an empty observed market.
+    throw new ConfigValueInvalidError('Model config value was not advertised.');
+  }
+  const configOptions: CatalogConfigOption[] = [];
+  let selected: { providerId: string; model: ModelWithRef } | null = null;
+  if (models.length > 0) {
+    selected = selectCatalogModel(settings, selection);
+    const providerChoices = new Map<string, string>();
+    for (const model of models) {
+      if (!providerChoices.has(model.ref.providerId)) {
+        providerChoices.set(model.ref.providerId, model.providerLabel ?? model.ref.providerId);
+      }
+    }
+    configOptions.push({
+      id: 'provider',
+      displayName: 'Provider',
+      description: 'ZCode model provider for the next turn.',
+      binding: 'turn',
+      control: 'select',
+      required: true,
+      defaultValue: selected.providerId,
+      choices: [...providerChoices].map(([value, displayName]) => ({ value, displayName })),
+    });
+    const visibleModels = models.filter(model => model.ref.providerId === selected!.providerId);
+    configOptions.push({
+      id: 'model',
+      displayName: 'Model',
+      description: 'ZCode model for the next turn.',
+      binding: 'turn',
+      control: 'select',
+      required: true,
+      defaultValue: encodeModelValue(selected.model.ref),
+      choices: visibleModels
+        .map((model) => {
+          const ref = model.ref;
+          return {
+            value: encodeModelValue(ref),
+            displayName: model.label ?? ref.modelId,
+            ...(model.providerLabel !== undefined ? { description: model.providerLabel } : {}),
+          };
+        }),
+    });
+
+    // Thinking/Reasoning: 0.16.9 reports the model's reasoning facts on the
+    // current model option and the session's full thoughtLevel list.
+    const reasoning = selected.model.reasoning;
+    const levels: InnerReasoningLevel[] = (reasoning?.levels ?? [])
+      .filter((level) => typeof level.value === 'string' && level.value !== '');
+    const thoughtChoices = (levels.length > 0 ? levels : (settings?.thoughtLevel?.available ?? []))
+      .filter((level) => typeof level.value === 'string' && level.value !== '');
+    if (reasoning?.enabled !== false && thoughtChoices.length > 0) {
+      const current = settings?.model?.current ?? settings?.model?.lastUsed;
+      const selectedIsCurrent = current?.providerId === selected.model.ref.providerId
+        && current.modelId === selected.model.ref.modelId;
+      // The session's thoughtLevel facts belong to the CURRENT model; a
+      // different selection takes the model's own default level.
+      configOptions.push({
+        id: 'thinking',
+        displayName: 'Thinking',
+        description: 'Reasoning effort for the selected model.',
+        binding: 'turn',
+        control: 'select',
+        required: true,
+        defaultValue: (selectedIsCurrent ? settings?.thoughtLevel?.current : undefined)
+          ?? reasoning?.defaultLevel
+          ?? thoughtChoices[0]?.value
+          ?? null,
+        choices: thoughtChoices.map((level: InnerReasoningLevel) => ({
+          value: level.value,
+          displayName: level.label ?? level.value,
+        })),
+      });
     }
   }
-  const providerOption: CatalogConfigOption = {
-    id: 'provider',
-    displayName: 'Provider',
-    description: 'ZCode model provider for the next turn.',
-    binding: 'turn',
-    control: 'select',
-    required: true,
-    defaultValue: selected.providerId,
-    choices: [...providerChoices].map(([value, displayName]) => ({ value, displayName })),
-  };
-  const visibleModels = models.filter(model => model.ref.providerId === selected.providerId);
-  const defaultModel = encodeModelValue(selected.model.ref);
 
-  const modelOption: CatalogConfigOption = {
-    id: 'model',
-    displayName: 'Model',
-    description: 'ZCode model for the next turn.',
-    binding: 'turn',
-    control: 'select',
-    required: true,
-    defaultValue: defaultModel,
-    choices: visibleModels
-      .map((model) => {
-        const ref = model.ref;
-        return {
-          value: encodeModelValue(ref),
-          displayName: model.label ?? ref.modelId,
-          ...(model.providerLabel !== undefined ? { description: model.providerLabel } : {}),
-        };
-      }),
-  };
-
-  const approvalOption: CatalogConfigOption = {
+  const currentMode = presentation.mode ?? settings?.permission?.mode ?? 'build';
+  configOptions.push({
     id: 'approval_mode',
     displayName: 'Approval mode',
     description: 'How ZCode asks for permission before acting.',
     binding: 'turn',
     control: 'select',
     required: true,
-    defaultValue: settings?.permission?.mode ?? settings?.mode?.current ?? 'build',
+    defaultValue: currentMode,
     choices: [
       { value: 'plan', displayName: 'Plan' },
       { value: 'build', displayName: 'Build' },
       { value: 'edit', displayName: 'Edit' },
       { value: 'yolo', displayName: 'Yolo' },
-      { value: 'auto', displayName: 'Auto' },
     ],
-  };
-
-  const configOptions: CatalogConfigOption[] = [providerOption, modelOption];
-  const reasoning = selected.model.reasoning;
-  if (reasoning?.enabled === true) {
-    const current = settings?.model?.current ?? settings?.model?.lastUsed;
-    const selectedIsCurrent = current?.providerId === selected.model.ref.providerId
-      && current.modelId === selected.model.ref.modelId;
-    const thinkingOption: CatalogConfigOption = {
-      id: 'thinking',
-      displayName: 'Thinking',
-      description: 'Reasoning effort for the selected model.',
-      binding: 'turn',
-      control: 'select',
-      required: true,
-      defaultValue: (selectedIsCurrent ? settings?.thoughtLevel?.current : undefined)
-        ?? reasoning.defaultLevel
-        ?? reasoning.levels?.[0]?.value
-        ?? null,
-      choices: (reasoning.levels ?? []).map((level: InnerReasoningLevel) => ({
-        value: level.value,
-        displayName: level.label ?? level.value,
-      })),
-    };
-    if ((thinkingOption.choices ?? []).length > 0) {
-      configOptions.push(thinkingOption);
-    }
-  }
-  configOptions.push(approvalOption);
+  });
 
   return {
     catalogRevision: revision,
-    input: [{ type: 'text' }],
+    input: CATALOG_INPUT,
     configOptions,
     specialCatalogs: {
-      model: 'model',
+      ...(models.length > 0 ? { model: 'model' } : {}),
       ...(configOptions.some((option) => option.id === 'thinking') ? { thinking: 'thinking' } : {}),
       approvalMode: 'approval_mode',
     },
-    actions: [
-      { id: 'sidechat.create', supported: false, reason: 'ZCode does not provide a Side Chat runtime context.' },
-      { id: 'session.fork', supported: false, reason: 'ZCode does not provide a verifiable fork boundary.' },
-      { id: 'session.fork.atTurn', supported: false, reason: 'ZCode does not provide a verifiable fork boundary.' },
-    ],
-    slashCommands: projectSlashCommands(state.slashCommands ?? []),
+    actions: actionsList(),
+    slashCommands: projectSlashCommands(presentation.slashCommands ?? []),
   };
 }
 
-export function projectSlashCommands(commands: InnerSlashCommand[]): ProjectedCatalog['slashCommands'] {
+export function projectSlashCommands(commands: InnerPresentation['slashCommands']): ProjectedCatalog['slashCommands'] {
   const projected: ProjectedCatalog['slashCommands'] = [];
-  for (const command of commands) {
+  for (const command of commands ?? []) {
     const name = typeof command.name === 'string' ? command.name.trim() : '';
     if (name === '' || name.includes(' ')) continue;
     if (command.source !== 'builtin') continue; // unverifiable source: not exposed (§7.3)
@@ -312,7 +382,8 @@ export interface ResolvedCatalog {
  *  Thinking values made obsolete by an explicit Provider/model change. */
 export function resolveCatalog(
   runtimeFingerprint: string,
-  state: InnerReadState,
+  presentation: InnerPresentation,
+  observed: InnerReadState | null,
   input: { sessionConfig: Record<string, unknown>; turnConfig: Record<string, unknown> },
 ): ResolvedCatalog & ProjectedCatalog {
   if (Object.keys(input.sessionConfig).length > 0) {
@@ -331,12 +402,12 @@ export function resolveCatalog(
   const modelValue = typeof input.turnConfig.model === 'string'
     ? input.turnConfig.model
     : undefined;
-  const catalog = projectCatalog(runtimeFingerprint, state, {
+  const catalog = projectCatalog(runtimeFingerprint, presentation, observed, {
     ...(providerId === undefined ? {} : { providerId }),
     ...(modelValue === undefined ? {} : { modelValue }),
   });
   const resolved: Record<string, string | number | boolean | null> = {};
-  const baseline = projectCatalog(runtimeFingerprint, state);
+  const baseline = projectCatalog(runtimeFingerprint, presentation, observed);
   const baselineProvider = baseline.configOptions.find(option => option.id === 'provider')?.defaultValue;
   const baselineModel = baseline.configOptions.find(option => option.id === 'model')?.defaultValue;
   const dependencyChanged = (providerId !== undefined && providerId !== baselineProvider)

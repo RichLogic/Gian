@@ -22,6 +22,7 @@
 /* A zero-width portal span can sit between the chip and the nav buttons,
    so this must be a general-sibling override, not adjacent (+). */
 .translation-auto ~ .transcript-navbtns { margin-left: 0; flex-shrink: 0; }
+.ns-translation-underbar .translation-auto { min-height: 44px; }
 .translation-block { margin-top: 12px; min-width: 0; font-size: 0.9em; color: var(--text); }
 .translation-heading { display: flex; align-items: center; gap: 6px; }
 .translation-collapse { display: inline-flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--muted); padding: 4px 0; font: inherit; cursor: pointer; }

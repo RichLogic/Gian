@@ -18,9 +18,9 @@ import {
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('the default release set includes ZCode and excludes the hidden Grok Proxy', () => {
-  assert.deepEqual([...shippingProxyIds].sort(), ['claude', 'codex', 'dsh', 'kimi', 'zcode']);
-  assert.equal(proxyDefinitions.find(item => item.id === 'grok')?.shipping, false);
+test('the default release set follows all six self-describing shipping Proxies', () => {
+  assert.deepEqual([...shippingProxyIds].sort(), ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode']);
+  assert.equal(proxyDefinitions.find(item => item.id === 'grok')?.shipping, true);
 });
 
 test('a new self-describing Proxy package needs no release registry edit', async (t) => {

@@ -44,7 +44,7 @@ async function writeExecutable(path: string, source: string): Promise<void> {
 function runtimeFixtureSource(options: {
   pluginId?: string;
   version?: string;
-  mode?: 'normal' | 'none' | 'hang' | 'mutate' | 'mismatch' | 'bad-version' | 'old-version' | 'relative' | 'session-side-effect' | 'malformed' | 'readiness' | 'wrong-id' | 'hung-tree';
+  mode?: 'normal' | 'none' | 'hang' | 'mutate' | 'mismatch' | 'bad-version' | 'old-version' | 'relative' | 'session-side-effect' | 'malformed' | 'readiness' | 'wrong-id' | 'hung-tree' | 'managed-tree';
   setupUrl?: string;
 } = {}): string {
   const pluginId = options.pluginId ?? 'io.gian.fixture';
@@ -122,6 +122,18 @@ rl.on('line', async (line) => {
   if (req.method === 'runtime.probe') {
     if (mode === 'hang') return;
     const requested = req.params.path;
+    if (mode === 'managed-tree') {
+      const { dirname } = await import('node:path');
+      reply({
+        runtimeId: 'fixture',
+        displayName: 'Fixture CLI',
+        path: requested,
+        version: '1.2.3',
+        configHome: null,
+        contentRoots: [{ path: dirname(dirname(requested)), mode: 'directory' }],
+      });
+      return;
+    }
     if (mode === 'mutate' && requested) {
       fs.appendFileSync(requested, '\\n# mutated\\n');
     }
@@ -377,6 +389,73 @@ test('Host fingerprint rejects escape, symlink children, and depth overflow', as
   );
 });
 
+test('Host fingerprints the complete managed ZCode-style tree without widening external roots', async (t) => {
+  const root = await tempRoot(t);
+  const store = join(root, 'runtimes');
+  const packageRoot = join(store, '.staging-123', 'zcode');
+  const selected = join(packageRoot, 'agent', 'zcode.cjs');
+  await writeExecutable(selected, '#!/bin/sh\necho 1.2.3\n');
+  const dependency = join(packageRoot, 'packages', 'dependency.js');
+  await mkdir(dirname(dependency), { recursive: true });
+  await writeFile(dependency, 'first');
+  for (let i = 0; i <= MAX_RUNTIME_FINGERPRINT_FILES; i += 1) {
+    await writeFile(join(packageRoot, 'packages', `file-${i}`), 'x');
+  }
+  const large = join(packageRoot, 'packages', 'large.bin');
+  const handle = await (await import('node:fs/promises')).open(large, 'w');
+  await handle.truncate(MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  await handle.close();
+  let deep = packageRoot;
+  for (let i = 0; i <= MAX_RUNTIME_FINGERPRINT_DEPTH; i += 1) deep = join(deep, `d${i}`);
+  await mkdir(deep, { recursive: true });
+  await writeFile(join(deep, 'leaf'), 'x');
+  const input = {
+    selectedPath: selected,
+    configHome: null,
+    contentRoots: [{ path: packageRoot, mode: 'directory' as const }],
+    homeDir: root,
+    managedStoreRoot: store,
+  };
+  await assert.rejects(
+    () => hostRuntimeFingerprint({ ...input, managedStoreRoot: undefined }),
+    /not anchored/,
+  );
+  const first = await hostRuntimeFingerprint(input);
+  await writeFile(dependency, 'second');
+  assert.notEqual(await hostRuntimeFingerprint(input), first);
+  await assert.rejects(
+    () => hostRuntimeFingerprint({ ...input, managedStoreRoot: join(root, 'other') }),
+    /not anchored/,
+  );
+  await assert.rejects(
+    () => hostRuntimeFingerprint({ ...input, contentRoots: [{ path: join(store, '.staging-123'), mode: 'directory' }] }),
+    /not anchored/,
+  );
+});
+
+test('RuntimeResolver accepts a managed package root and detects dependency mutation', async (t) => {
+  const { root, entry } = await writeFixture(t, runtimeFixtureSource({ mode: 'managed-tree' }));
+  const store = join(root, 'runtimes');
+  const packageRoot = join(store, 'zcode', '0.16.9', 'a'.repeat(64), 'zcode');
+  const selected = join(packageRoot, 'agent', 'zcode.cjs');
+  const dependency = join(packageRoot, 'packages', 'dependency.js');
+  await writeExecutable(selected, '#!/bin/sh\necho 1.2.3\n');
+  await mkdir(dirname(dependency), { recursive: true });
+  await writeFile(dependency, 'first');
+  const resolver = new RuntimeResolver({
+    dataDir: join(root, 'resolver-data'),
+    updateLockDataDir: join(root, 'locks'),
+    managedStoreRoot: store,
+    hostVersion: '0.1.0',
+    homeDir: root,
+  });
+  const resolved = await resolver.resolve(externalInput(entry, selected));
+  assert.equal(resolved.profile.verification, 'verified');
+  await resolved.lease?.release();
+  await writeFile(dependency, 'second');
+  assert.deepEqual(await resolver.detectExternalChanges(), [PLUGIN_ID]);
+});
+
 test('runtime:none produces a null-fact profile and no lease', async (t) => {
   const { root, entry } = await writeFixture(t, runtimeFixtureSource({ mode: 'none' }));
   const resolver = resolverFor(root);
@@ -626,7 +705,7 @@ test('failed claim release blocks reuse until retry succeeds', { timeout: 20_000
   await retried.lease.release();
 });
 
-test('official Proxies project discover/probe facts through the same Host fingerprint', { timeout: 30_000 }, async (t) => {
+test('discoverable Proxies project probe facts through the Host fingerprint; managed ZCode does not adopt ZCode.app', { timeout: 30_000 }, async (t) => {
   const root = await tempRoot(t);
   const previousPath = process.env.PATH;
   const previousHome = process.env.HOME;
@@ -653,7 +732,7 @@ test('official Proxies project discover/probe facts through the same Host finger
   const { discoverKimiRuntimes, probeKimiRuntime } = await import('../../proxies/kimi-proxy/src/runtime/discover.ts');
   const { discoverGrokRuntimes, probeGrokRuntime } = await import('../../proxies/grok-proxy/src/runtime/discover.ts');
   const { discoverDshRuntimes, probeDshRuntime } = await import('../../proxies/dsh-proxy/src/runtime/discover.ts');
-  const { discoverZcodeRuntimes, probeZcodeRuntime } = await import('../../proxies/zcode-proxy/src/runtime/discover.ts');
+  const { discoverZcodeRuntimes } = await import('../../proxies/zcode-proxy/src/runtime/discover.ts');
 
   const bins = join(root, '.local', 'bin');
   await Promise.all([
@@ -670,18 +749,12 @@ test('official Proxies project discover/probe facts through the same Host finger
   ] as const) {
     await writeExecutable(join(bins, name), `#!/bin/sh\necho ${name} ${version}\n`);
   }
-  const zcode = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
-  await mkdir(join(root, '.zcode', 'cli'), { recursive: true });
-  await writeFile(join(root, '.zcode', 'cli', 'config.json'), '{"ok":true}\n');
-
   const official = [
     { name: 'claude', discover: discoverClaudeRuntimes, probe: probeClaudeRuntime, verified: '2.1.159', source: 'official-user' },
     { name: 'codex', discover: discoverCodexRuntimes, probe: probeCodexRuntime, verified: '0.146.0', source: 'official-user' },
     { name: 'kimi', discover: discoverKimiRuntimes, probe: probeKimiRuntime, verified: '0.38.0', source: 'official-user' },
     { name: 'grok', discover: discoverGrokRuntimes, probe: probeGrokRuntime, verified: '1.0.4', source: 'official-user' },
     { name: 'dsh', discover: discoverDshRuntimes, probe: probeDshRuntime, verified: '0.1.1-rc.2', source: 'official-user' },
-    { name: 'zcode', discover: discoverZcodeRuntimes, probe: probeZcodeRuntime, verified: '0.16.5', source: 'official-user' },
   ];
   for (const item of official) {
     const discovered = await item.discover();
@@ -706,6 +779,8 @@ test('official Proxies project discover/probe facts through the same Host finger
       'verified',
     );
   }
+  assert.deepEqual((await discoverZcodeRuntimes()).candidates, [],
+    'managed ZCode must not offer an unrelated Desktop Runtime for adoption');
 });
 
 test('SemVer classification uses exact match, prerelease order, and unverified newer lines', () => {

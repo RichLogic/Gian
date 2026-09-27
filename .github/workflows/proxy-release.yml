@@ -105,10 +105,11 @@ jobs:
           PROVIDER: ${{ steps.plugin.outputs.id }}
         shell: bash
         run: |
-          if [ "${PROVIDER}" = zcode ]; then exit 0; fi
           MANIFEST=certification/artifacts/runtimes/runtime-candidates.json
           test -f "${MANIFEST}"
           RUNTIME="$(jq -ce --arg provider "${PROVIDER}" '.candidates[] | select(.provider == $provider)' "${MANIFEST}")"
+          CERTIFIED_RUNTIME="$(jq -cSe --arg provider "${PROVIDER}" '.runtimeArtifacts[] | select(.provider == $provider)' certification/output/proxy-certification/release/certificate.json)"
+          test "$(jq -cS . <<<"${RUNTIME}")" = "${CERTIFIED_RUNTIME}"
           ASSET="$(jq -r '.asset.name' <<<"${RUNTIME}")"
           EXPECTED_SHA="$(jq -r '.asset.sha256' <<<"${RUNTIME}")"
           EXPECTED_SIZE="$(jq -r '.asset.size' <<<"${RUNTIME}")"

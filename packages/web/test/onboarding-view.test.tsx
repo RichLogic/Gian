@@ -198,7 +198,7 @@ describe('OnboardingView', () => {
 
     await waitFor(() => expect(createAgent).toHaveBeenCalledWith({
       name: 'Kimi Code',
-      proxy: 'kimi',
+      pluginId: 'kimi',
     }));
     // Never a restart while the wizard is open.
     expect(restartApp).not.toHaveBeenCalled();

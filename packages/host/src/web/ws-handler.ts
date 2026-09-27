@@ -497,6 +497,7 @@ async function dispatch(
         || msg.target.agent_id.length === 0
         || msg.target.agent_id.length > 128
         || msg.target.agent_id.includes('\0')
+        || (msg.target.action !== undefined && msg.target.action !== 'login')
       )) {
         throw Object.assign(
           new Error('Agent CLI terminal target is invalid.'),
@@ -517,7 +518,11 @@ async function dispatch(
       if (msg.cwd !== undefined) spawnOpts.cwd = msg.cwd;
       if (msg.shell !== undefined) spawnOpts.shell = msg.shell;
       if (msg.target?.kind === 'agent_cli') {
-        spawnOpts.target = { kind: 'agent_cli', agentId: msg.target.agent_id };
+        spawnOpts.target = {
+          kind: 'agent_cli',
+          agentId: msg.target.agent_id,
+          ...(msg.target.action ? { action: msg.target.action } : {}),
+        };
       }
       const result = await term.spawn(spawnOpts);
       broadcaster.send(ws, {

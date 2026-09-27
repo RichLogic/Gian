@@ -15,6 +15,7 @@ import {
   type ListSessionsResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type McpServer,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
@@ -26,16 +27,54 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 
+import {
+  extensionSupportFromInitialize,
+  type GrokExtMethod,
+  type GrokExtensionSupport,
+  NO_EXTENSION_SUPPORT,
+} from './grok-extensions.js';
+
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_MS = 3_000;
 
+export const GROK_DEFAULT_DENY_RULES = ['MCPTool(*)'] as const;
+
+/** Legacy alias: spawn prefix with the default MCP isolation boundary. */
 export const GROK_SPAWN_PREFIX = [
   '--deny',
-  'MCPTool(*)',
+  GROK_DEFAULT_DENY_RULES[0],
   '--disallowed-tools',
   'search_tool,use_tool',
 ] as const;
+
+export class GrokExtMethodUnsupportedError extends Error {
+  constructor(readonly method: string, reason: string) {
+    super(reason);
+    this.name = 'GrokExtMethodUnsupportedError';
+  }
+}
+
+/** Wire shape of the native `x.ai/session/fork` extension request. */
+export interface GrokNativeForkRequest {
+  sourceSessionId: string;
+  sourceCwd: string;
+  newCwd: string;
+  newSessionId?: string;
+  newModelId?: string;
+  /** 0-based inclusive user-prompt index the fork keeps. Omit to fork the head. */
+  targetPromptIndex?: number;
+}
+
+export interface GrokNativeForkResponse {
+  newSessionId: string;
+  chatMessagesCopied?: number;
+  updatesCopied?: number;
+  planStateCopied?: boolean;
+  newCwd?: string;
+  parentSessionId?: string;
+  newModelId?: string | null;
+}
 
 export type GrokAcpPermissionHandler = (
   request: RequestPermissionRequest,
@@ -55,6 +94,22 @@ export interface GrokAcpTransport {
 
 export type GrokAcpTransportFactory = (client: Client) => Promise<GrokAcpTransport>;
 
+/** The Agent HOME this Proxy serves: the Host-provided constrained
+ *  GIAN_AGENT_HOME wins; an inherited GROK_HOME is only a compatibility
+ *  fallback for the pre-gate Host generation. */
+export function agentHome(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.GIAN_AGENT_HOME !== undefined && env.GIAN_AGENT_HOME !== '') return env.GIAN_AGENT_HOME;
+  return env.GROK_HOME;
+}
+
+/** Provider-specific child env: translates the Host's constrained
+ *  GIAN_AGENT_HOME into GROK_HOME so the CLI reads its state from the served
+ *  Agent's HOME and never from a stale machine-wide value. */
+export function grokChildHomeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const home = agentHome(env);
+  return home !== undefined ? { GROK_HOME: home } : {};
+}
+
 export interface GrokAcpClientOptions {
   binaryPath: string;
   cwd: string;
@@ -63,11 +118,19 @@ export interface GrokAcpClientOptions {
   startupTimeoutMs?: number;
   gracefulStopMs?: number;
   transportFactory?: GrokAcpTransportFactory;
+  /** MCP permission deny rules for the spawn boundary; defaults to MCPTool(*). */
+  spawnDenyRules?: readonly string[];
 }
 
 export interface GrokAcpRuntimeStoppedEvent extends GrokAcpExit {
   expected: boolean;
 }
+
+/** Reverse `x.ai/*` request routed to the Proxy (ask_user_question etc.). */
+export type GrokExtMethodHandler = (
+  method: string,
+  params: unknown,
+) => Promise<unknown>;
 
 interface GrokAcpClientEvents {
   debug: [message: string];
@@ -99,7 +162,9 @@ function validateAbsolutePath(value: string, field: string): void {
   if (!isAbsolute(value)) throw new Error(`${field} must be an absolute path.`);
 }
 
-function isMethodNotFound(error: unknown): boolean {
+export function isMethodNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  if (code === -32601) return true;
   const message = error instanceof Error ? error.message : String(error);
   return /method not found/i.test(message);
 }
@@ -126,12 +191,17 @@ function innerConnection(connection: ClientSideConnection): ExtCapable {
 }
 
 function processTransportFactory(
-  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'cwd' | 'env' | 'gracefulStopMs'>,
+  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'cwd' | 'env' | 'gracefulStopMs' | 'spawnDenyRules'>,
   emitDebug: (message: string) => void,
 ): GrokAcpTransportFactory {
   return async (client) => {
+    const args: string[] = [];
+    for (const rule of options.spawnDenyRules ?? GROK_DEFAULT_DENY_RULES) {
+      args.push('--deny', rule);
+    }
+    args.push('--disallowed-tools', 'search_tool,use_tool');
     const child = spawn(options.binaryPath, [
-      ...GROK_SPAWN_PREFIX,
+      ...args,
       'agent',
       '--no-leader',
       'stdio',
@@ -140,6 +210,11 @@ function processTransportFactory(
       env: {
         ...process.env,
         ...options.env,
+        // Home mapping lives in the owning Proxy (Host provides the
+        // constrained universal GIAN_AGENT_HOME). The explicit translation
+        // wins over any inherited GROK_HOME so a stale outer value can never
+        // point the CLI at another Agent's state.
+        ...grokChildHomeEnv(options.env ?? process.env),
         GROK_DISABLE_AUTOUPDATER: '1',
         GROK_SANDBOX: 'workspace',
       },
@@ -180,6 +255,8 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     extMethod?(method: string, params: unknown): Promise<unknown>;
   };
   private permissionHandler: GrokAcpPermissionHandler | null;
+  private extMethodHandler: GrokExtMethodHandler | null = null;
+  private extSupport: GrokExtensionSupport = NO_EXTENSION_SUPPORT;
   private transport: GrokAcpTransport | null = null;
   private initializeResponse: InitializeResponse | null = null;
   private startPromise: Promise<InitializeResponse> | null = null;
@@ -206,7 +283,15 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
       extNotification: async (method, params) => {
         this.emit('extensionNotification', method, params);
       },
-      extMethod: async () => ({}),
+      extMethod: async (method: string, params: unknown) => {
+        // Reverse requests from the agent must be answered honestly: the old
+        // blanket `{}` return silently mis-answered structured questions.
+        if (!this.extMethodHandler) {
+          throw new Error(`Method not found: ${method}`);
+        }
+        const result = await this.extMethodHandler(method, params);
+        return result as Record<string, unknown>;
+      },
     };
   }
 
@@ -222,8 +307,17 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     return this.initializeResponse;
   }
 
+  /** Version-gated native x.ai/* extension method support for this runtime. */
+  get extensions(): GrokExtensionSupport {
+    return this.extSupport;
+  }
+
   setPermissionHandler(handler: GrokAcpPermissionHandler | null): void {
     this.permissionHandler = handler;
+  }
+
+  setExtMethodHandler(handler: GrokExtMethodHandler | null): void {
+    this.extMethodHandler = handler;
   }
 
   async ensureStarted(): Promise<InitializeResponse> {
@@ -286,6 +380,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     }
 
     this.initializeResponse = response;
+    this.extSupport = extensionSupportFromInitialize(response);
     return response;
   }
 
@@ -314,6 +409,41 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   async forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
     return (await this.connection()).unstable_forkSession(params);
+  }
+
+  /** One live extension-request round trip with honest per-attach learning.
+   *  Unknown methods are allowed a first real attempt: a -32601 "Method not
+   *  found" refutes the method for the rest of this attach (later calls fail
+   *  fast instead of repeating the live misreport), any other outcome
+   *  confirms it. Refuted methods never touch the runtime again. */
+  private async extRequest(method: GrokExtMethod, params: unknown): Promise<unknown> {
+    if (!this.extSupport.mayAttempt(method)) {
+      throw new GrokExtMethodUnsupportedError(method, this.extSupport.unsupportedReason(method));
+    }
+    try {
+      const result = await (await this.ext()).sendRequest(method, params);
+      this.extSupport.confirm(method);
+      return result;
+    } catch (error) {
+      if (isMethodNotFound(error)) {
+        this.extSupport.refute(method);
+        throw new GrokExtMethodUnsupportedError(method, this.extSupport.unsupportedReason(method));
+      }
+      throw error;
+    }
+  }
+
+  /** Native `x.ai/session/fork` — supports head forks and exact-turn forks
+   *  via `targetPromptIndex` (0-based, inclusive). Does not start the forked
+   *  session; attach it afterwards with `resumeSession`. */
+  async nativeForkSession(params: GrokNativeForkRequest): Promise<GrokNativeForkResponse> {
+    const response = (await this.extRequest('x.ai/session/fork', params)) as Record<string, unknown>;
+    if (!response || typeof response !== 'object'
+      || typeof (response as { newSessionId?: unknown }).newSessionId !== 'string'
+      || !(response as { newSessionId: string }).newSessionId) {
+      throw new Error('x.ai/session/fork did not return a newSessionId.');
+    }
+    return response as unknown as GrokNativeForkResponse;
   }
 
   async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
@@ -354,28 +484,48 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     return (await this.connection()).unstable_setSessionModel(params);
   }
 
-  async renameSession(sessionId: string, title: string): Promise<unknown> {
-    const ext = await this.ext();
-    const params = { sessionId, title };
-    // Grok's TUI knows x.ai/session/rename; the stdio `grok agent` used by
-    // Gian does not register that ext method. Try both wire names, then
-    // succeed locally so Host bring-up does not fail a new conversation.
-    for (const method of ['x.ai/session/rename', '_x.ai/session/rename'] as const) {
-      try {
-        return await ext.sendRequest(method, params);
-      } catch (error) {
-        if (!isMethodNotFound(error)) throw error;
-      }
-    }
-    return { ok: true };
+  async renameSession(sessionId: string, title: string, cwd?: string): Promise<unknown> {
+    // Method-not-found is refuted and surfaced honestly by extRequest instead
+    // of being swallowed into a local fake success.
+    return this.extRequest('x.ai/session/rename', {
+      sessionId,
+      title,
+      ...(cwd ? { cwd } : {}),
+    });
   }
 
-  async deleteSession(sessionId: string): Promise<unknown> {
-    return (await this.ext()).sendRequest('x.ai/session/delete', { sessionId });
+  async deleteSession(sessionId: string, cwd?: string): Promise<unknown> {
+    return this.extRequest('x.ai/session/delete', {
+      sessionId,
+      ...(cwd ? { cwd } : {}),
+    });
+  }
+
+  /** Mid-session MCP server swap; the agent admits and merges client servers. */
+  async updateSessionMcpServers(sessionId: string, mcpServers: McpServer[]): Promise<unknown> {
+    return this.extRequest('x.ai/session/update_mcp_servers', {
+      sessionId,
+      mcpServers,
+    });
+  }
+
+  /** Read-only effective MCP server catalog (no server is contacted). */
+  async mcpList(): Promise<unknown> {
+    return this.extRequest('x.ai/mcp/list', {});
+  }
+
+  /** Read-only skill listing reloaded from disk (no hooks run, no MCP dialed). */
+  async skillsList(cwd: string): Promise<unknown> {
+    return this.extRequest('x.ai/skills/list', { cwd });
+  }
+
+  /** Read-only hook listing for an attached session. */
+  async hooksList(sessionId: string): Promise<unknown> {
+    return this.extRequest('x.ai/hooks/list', { sessionId });
   }
 
   async sessionUsage(sessionId: string): Promise<unknown> {
-    return (await this.ext()).sendRequest('x.ai/session/usage', { sessionId });
+    return this.extRequest('x.ai/session/usage', { sessionId });
   }
 
   async interject(params: {
@@ -383,7 +533,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     text: string;
     interjectionId: string;
   }): Promise<unknown> {
-    return (await this.ext()).sendRequest('x.ai/interject', params);
+    return this.extRequest('x.ai/interject', params);
   }
 
   async notifyPermissionMode(params: {

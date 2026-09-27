@@ -1,5 +1,5 @@
 import type { Hono } from 'hono';
-import { DEFAULT_TRANSLATION_PREFERENCES, normalizeComposerDocument } from '@gian/shared';
+import { DEFAULT_TRANSLATION_PREFERENCES, isTranslationConfigured, normalizeComposerDocument } from '@gian/shared';
 import type { Db } from '../../storage/db.js';
 import { loadConfig } from '../../storage/config.js';
 import type { TranslationService } from '../../translation/service.js';
@@ -21,6 +21,9 @@ export function registerTranslationRoutes(app: Hono, db: Db, service: Translatio
   app.patch('/api/sessions/:sessionId/translation/state', async c => {
     const body = await c.req.json();
     if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled must be boolean' }, 400);
+    if (body.enabled && !isTranslationConfigured(loadConfig(db).translation ?? DEFAULT_TRANSLATION_PREFERENCES)) {
+      return c.json({ error: 'Choose a translation Agent, model and languages in Settings first.' }, 409);
+    }
     service.setEnabled(c.req.param('sessionId'), body.enabled);
     return c.json({ enabled: body.enabled });
   });

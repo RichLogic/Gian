@@ -44,8 +44,8 @@ Node 运行环境由 Gian App/Host 提供。网络受限时，安装应显示明
 ## 5. 第一次使用
 
 1. 安装 Codex Integration，确认受管 Runtime 已激活。
-2. 添加 Agent，选择新建托管 HOME，或明确选择要复用的已有 Codex HOME。
-3. 从这个 Agent 打开 CLI 维护终端，按 Codex 的官方流程登录或配置 Provider。普通 Gian 对话不是登录表单。
+2. 添加 Agent。默认 HOME 为 `~/.codex`；需要隔离时可选择新建托管 HOME。
+3. 在 Agent 详情点击“登录”，使用所选 HOME 执行 CLI 登录命令。普通 Gian 对话不是登录表单。
 4. 返回 Agent 详情，确认程序与配置状态；新 HOME 没有继承另一个 Agent 的登录是正常现象。
 5. 选择工作区创建会话，核对模型、思考强度和权限模式；需要 Fast 时先确认当前 Runtime/模型确实提供该选项。
 6. 先执行一个范围小的任务，观察真实审批、Plan/Diff 与完成状态，而不是只凭“请求已发送”认定任务成功。
@@ -54,13 +54,13 @@ Node 运行环境由 Gian App/Host 提供。网络受限时，安装应显示明
 
 ## 6. HOME 与隔离
 
-Gian 通过 CODEX_HOME 指向 Agent 选定的 Codex 状态根。托管目录为：
+Gian 通过 CODEX_HOME 指向 Agent 选定的 Codex 状态根。默认目录为 `~/.codex`；独立托管目录为：
 
 ```text
 <dataDir>/homes/codex/<agentId>/
 ```
 
-这里承载该 CLI 的配置、登录状态和原生会话资料。多个 Agent 共享程序版本，但不默认共享 HOME。选择同一 Custom HOME 意味着主动共享其厂商状态。
+这里承载该 CLI 的配置、登录状态和原生会话资料。每个 Agent 绑定一个 HOME；需要独立账号或历史时，请选择新建托管 HOME。
 
 HOME 不是沙箱。工作区访问、命令执行和网络等权限仍由 Codex 的策略与 Gian 的授权边界控制。不要把工作区中的项目配置、系统安装目录和 CODEX_HOME 当成同一个东西。
 

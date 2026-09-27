@@ -13,6 +13,7 @@ import {
   parseSessionProxyBinding,
   sessionRuntimeCliPath,
   type Executor,
+  type ManagedRuntimeGeneration,
   type SessionProxyBinding,
   type UserAgent,
 } from '@gian/shared';
@@ -505,7 +506,7 @@ test('exact create persists real Manifest digest and never a synthetic official 
   assert.equal(prepared.sessionBinding.processScope, 'session');
 });
 
-test('unknown fixture Session create/reattach uses stored binding after Agent delete and current change', async (t) => {
+test('unknown fixture Session follows the current package after Agent deletion and upgrade', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-exact-unknown-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   let db: ReturnType<typeof openDatabase> | undefined;
@@ -599,7 +600,7 @@ test('unknown fixture Session create/reattach uses stored binding after Agent de
   const urls2 = artifactUrls('2.0.0');
   assets.set(`RichLogic/Gian:${urls2.tag}:${urls2.archive}`, archive2);
   assets.set(`RichLogic/Gian:${urls2.tag}:${urls2.manifest}`, v2.manifest);
-  await store.install(coordinate('2.0.0', v2.manifest, archive2, 2));
+  const v2Receipt = await store.install(coordinate('2.0.0', v2.manifest, archive2, 2));
   assert.equal((await store.inspect('io.gian.fixture')).currentVersion, '2.0.0');
 
   const newer = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });
@@ -638,13 +639,13 @@ test('unknown fixture Session create/reattach uses stored binding after Agent de
   const client = proxyB.get(created.id);
   assert.ok(client);
   assert.equal(client.pluginId, 'io.gian.fixture');
+  assert.equal(resumed.getSession(created.id).proxy_binding?.pluginVersion, '2.0.0');
+  assert.equal(resumed.getSession(created.id).proxy_binding?.manifestSha256, v2Receipt.manifestSha256);
   db.prepare(`UPDATE turns SET status = 'completed' WHERE session_id = ? AND status = 'running'`)
     .run(created.id);
 
-  await assert.rejects(
-    () => store.removeVersion('io.gian.fixture', '1.0.0'),
-    (error: unknown) => error instanceof PluginReferencedError,
-  );
+  await proxy.closeAll();
+  await store.removeVersion('io.gian.fixture', '1.0.0');
   await assert.rejects(
     () => store.removeVersion('io.gian.fixture', '2.0.0'),
     (error: unknown) => error instanceof PluginReferencedError,
@@ -653,10 +654,9 @@ test('unknown fixture Session create/reattach uses stored binding after Agent de
   const current = await store.currentLaunch('io.gian.fixture');
   assert.equal(current?.pluginVersion, '2.0.0');
 
-  await writeFile(join(root, 'plugins', 'io.gian.fixture', '1.0.0', 'manifest.json'), '{"tampered":true}\n');
   const proxyC = new ProxyManager({ dataDir: join(root, 'proxy-c') });
   t.after(() => proxyC.closeAll());
-  const damaged = new SessionManager(
+  const resumedAgain = new SessionManager(
     db,
     proxyC,
     new CapturingBroadcaster() as unknown as WsBroadcaster,
@@ -677,11 +677,9 @@ test('unknown fixture Session create/reattach uses stored binding after Agent de
     undefined,
     planner,
   );
-  await assert.rejects(
-    () => damaged.sendMessage(created.id, 'must fail closed'),
-    /digest|revalidation|quarantine|binding|TRUSTED_LAUNCH|PLUGIN_/i,
-  );
-  assert.equal(proxyC.get(created.id), undefined);
+  await resumedAgain.sendMessage(created.id, 'resume without the retired Proxy package');
+  assert.equal(resumedAgain.getSession(created.id).proxy_binding?.pluginVersion, '2.0.0');
+  assert.ok(proxyC.get(created.id));
 });
 
 function fakeLaunch(pluginId: string, version: string, digest: string, entryPath: string) {
@@ -745,6 +743,100 @@ function openProfile(agentId: string, path = '/tmp/fixture-runtime'): import('@g
     verification: 'verified',
   };
 }
+
+test('resume follows the active certified Proxy and CLI without the old package', async () => {
+  const pluginId = parseProxyPluginId('io.gian.fixture');
+  const oldPath = '/tmp/fixture-runtime-1';
+  const currentPath = '/tmp/fixture-runtime-2';
+  const currentDigest = '2'.repeat(64);
+  const binding: SessionProxyBinding = {
+    schemaVersion: 1,
+    pluginId,
+    pluginVersion: '1.0.0',
+    manifestSha256: '1'.repeat(64),
+    protocolVersion: '2.0',
+    processScope: 'session',
+    runtimeProfile: openProfile('agent-existing', oldPath),
+  };
+  const active: ManagedRuntimeGeneration = {
+    schemaVersion: 1,
+    generationId: 'current-generation',
+    pluginId,
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '2.0.0', manifestSha256: currentDigest,
+      artifactSha256: '3'.repeat(64), entryPath: '/tmp/current-proxy.mjs',
+      processScope: 'shared', protocolRange: '^2.2',
+    },
+    runtime: {
+      runtimeId: 'fixture-runtime', version: '2.0.0', artifactSha256: '4'.repeat(64),
+      entryPath: currentPath, ownership: 'managed',
+    },
+    companions: [], certificate: { id: 'certificate', sha256: '5'.repeat(64) },
+    state: 'active', installedAt: '2026-09-01T00:00:00.000Z', activatedAt: '2026-09-02T00:00:00.000Z',
+  };
+  const exactRequests: string[] = [];
+  const runtimePaths: Array<string | null> = [];
+  const planner = new SessionBindingPlanner({
+    resolveCurrent: async () => { throw new Error('current pointer must not replace the active generation'); },
+    resolveActiveGeneration: async () => active,
+    resolveExact: async input => {
+      exactRequests.push(input.pluginVersion);
+      assert.equal(input.pluginVersion, '2.0.0');
+      assert.equal(input.expectedManifestSha256, currentDigest);
+      return fakeExternalLaunch(pluginId, '2.0.0', currentDigest, active.proxy.entryPath, 'shared');
+    },
+    runtimeResolver: {
+      resolve: async (input: { agentId: string; selectedPath: string | null }) => {
+        runtimePaths.push(input.selectedPath);
+        return {
+          profile: { ...openProfile(input.agentId, currentPath), version: '2.0.0' },
+          lease: {
+            binaryPath: currentPath, version: '2.0.0', source: 'managed' as const,
+            env: Object.freeze({}), release: async () => {},
+          },
+        };
+      },
+    } as unknown as RuntimeResolver,
+  });
+
+  const prepared = await planner.prepareResume(binding);
+  assert.deepEqual(exactRequests, ['2.0.0']);
+  assert.deepEqual(runtimePaths, [currentPath]);
+  assert.equal(prepared.sessionBinding.pluginVersion, '2.0.0');
+  assert.equal(prepared.sessionBinding.manifestSha256, currentDigest);
+  assert.equal(prepared.sessionBinding.processScope, 'shared');
+  assert.notEqual(prepared.sessionBinding.protocolVersion, binding.protocolVersion);
+  assert.equal(sessionRuntimeCliPath(prepared.sessionBinding.runtimeProfile), currentPath);
+  assert.equal(prepared.sessionBinding.runtimeProfile?.agentId, 'agent-existing');
+  assert.equal(prepared.sessionBinding.runtimeProfile?.configHome, '/tmp/fixture-config');
+  assert.deepEqual(prepared.remintedBinding, prepared.sessionBinding);
+  const lease = await prepared.acquireLease();
+  assert.equal(lease?.binaryPath, currentPath);
+  await lease?.release();
+  await prepared.releaseUnusedLease();
+
+  const mismatched = new SessionBindingPlanner({
+    resolveCurrent: async () => null,
+    resolveActiveGeneration: async () => active,
+    resolveExact: async () => fakeExternalLaunch(pluginId, '3.0.0', currentDigest, active.proxy.entryPath),
+  });
+  await assert.rejects(
+    () => mismatched.prepareResume(binding),
+    (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'BINDING_GENERATION_MISMATCH',
+  );
+
+  const unavailable = new SessionBindingPlanner({
+    resolveCurrent: async () => null,
+    resolveExact: async () => { throw new Error('no package'); },
+  });
+  await assert.rejects(
+    () => unavailable.prepareResume(binding),
+    (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'BINDING_PACKAGE_UNAVAILABLE',
+  );
+});
 
 test('exact v3 reattach preserves stored protocol 2.0 and passes the saved Runtime path', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'gian-v3-exact-'));
@@ -988,10 +1080,14 @@ test('Runtime upgrade on resume re-mints and persists the exact binding', async 
     contentFingerprint: 'fingerprint-2',
     verifiedVersions: ['1.0.1'],
   });
-  const plannerFor = (profileFor: (agentId: string) => import('@gian/shared').OpenRuntimeProfile) => (
+  const plannerFor = (
+    profileFor: (agentId: string) => import('@gian/shared').OpenRuntimeProfile,
+    pluginVersion = '1.0.0',
+    manifestDigest = digest,
+  ) => (
     new SessionBindingPlanner({
-      resolveCurrent: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
-      resolveExact: async () => fakeExternalLaunch('io.gian.fixture', '1.0.0', digest, entry),
+      resolveCurrent: async () => fakeExternalLaunch('io.gian.fixture', pluginVersion, manifestDigest, entry),
+      resolveExact: async () => { throw new Error('retained package is unavailable'); },
       runtimeResolver: {
         resolve: async (input: { agentId: string; selectedPath: string | null }) => ({
           profile: profileFor(input.agentId),
@@ -1072,6 +1168,20 @@ test('Runtime upgrade on resume re-mints and persists the exact binding', async 
     before,
     'an unchanged generation must not rewrite the stored binding',
   );
+  db.prepare(`UPDATE turns SET status = 'completed' WHERE session_id = ? AND status = 'running'`)
+    .run(created.id);
+
+  const newDigest = '6'.repeat(64);
+  const fourth = makeSessions(
+    new FakeProxyManager('native-remint', false, false, 'always'),
+    plannerFor(upgradedProfile, '2.0.0', newDigest),
+  );
+  await fourth.sendMessage(created.id, 'resume after the Proxy upgrade');
+  const afterProxyUpdate = fourth.getSession(created.id);
+  assert.equal(afterProxyUpdate.native_session_id, created.native_session_id);
+  assert.equal(afterProxyUpdate.proxy_binding?.pluginVersion, '2.0.0');
+  assert.equal(afterProxyUpdate.proxy_binding?.manifestSha256, newDigest);
+  assert.ok(bindingRow(created.id).proxy_binding_json?.includes('"pluginVersion":"2.0.0"'));
   db.close();
 });
 

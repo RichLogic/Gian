@@ -48,8 +48,8 @@ CLI 终端是另一种用途：让你完成厂商登录和维护配置。它属�
 ## 5. 第一次使用
 
 1. 先安装 Claude Code Integration，等待完整 Runtime 组合激活成功。只有 Proxy 文件可见不代表 CLI 已安装。
-2. 点击“添加 Agent”，选择已安装的 Integration。为新配置使用新建的 Gian 托管 HOME；仅在明确要复用现有厂商配置时选择已有 HOME。
-3. 在 Agent 详情打开 CLI 维护终端，按 Claude Code 自己的流程完成登录或模型服务配置。不要把凭据粘贴到普通会话、Catalog 文档或 Issue。
+2. 点击“添加 Agent”，选择已安装的 Integration。默认 HOME 为 `~/.claude`；若需隔离配置，可选择新建 Gian 托管 HOME。
+3. 在 Agent 详情点击“登录”，使用该 Agent 所选 HOME 执行 CLI 登录命令。不要把凭据粘贴到普通会话、Catalog 文档或 Issue。
 4. 完成后退出维护命令，返回 Agent 详情确认状态。程序安装成功与账号/端点配置完成是两个独立检查点。
 5. 为授权的项目创建会话。第一次使用先发送一个范围小的任务，确认工作区、模型和权限提示都符合预期。
 
@@ -57,13 +57,13 @@ CLI 终端是另一种用途：让你完成厂商登录和维护配置。它属�
 
 ## 6. HOME 与隔离
 
-Claude Code 的配置根通过 CLAUDE_CONFIG_DIR 指向所选 Agent HOME。托管 HOME 通常位于：
+默认 Agent HOME 为 `~/.claude`；选择其他目录时，Gian 通过 CLAUDE_CONFIG_DIR 指向它。独立托管 HOME 位于：
 
 ```text
 <dataDir>/homes/claude/<agentId>/
 ```
 
-其中保存 CLI 自身的配置、认证与原生历史等状态。两个 Agent 可以共享同一受管 CLI/Proxy 程序版本，但使用不同 HOME。若主动选择同一个已有 HOME，它们就会共享该 HOME 的厂商配置和历史，不能再称为账号隔离。
+其中保存 CLI 自身的配置、认证与原生历史等状态。每个 Agent 绑定一个 HOME；Gian 不允许两个 Agent 使用重叠目录。需要独立账号或历史时，请选择新建托管 HOME。
 
 Gian 不自动复制、清空或迁移你的自定义 HOME；CLI 会按自身正常行为读写所选目录。HOME 隔离不是文件系统沙箱，项目读写权限仍由工作区授权和 CLI 模式控制。已有会话保留其创建时的 HOME，不应靠修改目录位置迁移会话。
 

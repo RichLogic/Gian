@@ -127,3 +127,54 @@ test('prompt _meta usage is read from official token fields only', () => {
   });
   assert.equal(parsePromptUsage('used 12 tokens'), null);
 });
+
+test('native subagent lifecycle updates map to owned agent activities', () => {
+  const spawned = translateSessionUpdate({
+    sessionUpdate: 'subagent_spawned',
+    subagentId: 'child-1',
+    childSessionId: 'native-child-1',
+    parentSessionId: 'native-parent',
+    subagentType: 'explore',
+    description: 'Scan repo',
+  });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0]!.method, 'activity.updated');
+  assert.equal((spawned[0]!.data.presentation as { type: string }).type, 'agent');
+
+  const finished = translateSessionUpdate({
+    sessionUpdate: 'subagent_finished',
+    subagentId: 'child-1',
+    childSessionId: 'native-child-1',
+    status: 'failed',
+    error: 'blew up',
+  });
+  assert.equal(finished[0]!.method, 'activity.updated');
+  assert.equal((finished[0]!.data.presentation as { data: { state: string } }).data.state, 'failed');
+});
+
+test('session_notification envelopes translate their inner update', () => {
+  const events = translateExtension('x.ai/session_notification', {
+    sessionId: 'native-1',
+    update: {
+      sessionUpdate: 'subagent_progress',
+      subagentId: 'child-2',
+      childSessionId: 'native-child-2',
+      turnCount: 2,
+      toolCallCount: 5,
+    },
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.method, 'activity.updated');
+});
+
+test('session directory changes translate to session-scoped updates', () => {
+  const events = translateExtension('x.ai/sessions/changed', {});
+  assert.equal(events[0]!.method, 'session.updated');
+});
+
+test('mcp status notifications surface notices; request methods stay excluded', () => {
+  const failed = translateExtension('x.ai/mcp/tools_changed', {});
+  assert.equal(failed[0]!.method, 'activity.updated');
+  assert.equal(translateExtension('x.ai/mcp/list', {}).length, 0);
+  assert.equal(translateExtension('x.ai/mcp/toggle_tool', {}).length, 0);
+});

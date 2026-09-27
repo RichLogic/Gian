@@ -7,6 +7,29 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.4] - 2026-09-27
+
+### Added
+
+- Open an Agent's own login terminal from Agents when its Runtime needs account setup.
+- Show Agent actions and conversation controls according to the capabilities declared by its Proxy.
+
+### Changed
+
+- Use the Proxy plugin ID consistently as Agent identity across setup, selection, and management.
+- Keep Remote Web's conversation context compact during long-running control sessions.
+
+### Fixed
+
+- Resume sessions against their active certified Runtime generation, and restore the update action for installed Integrations.
+- Translate the first outgoing turn correctly and reject stale translation setup instead of sending with outdated settings.
+- Preserve Claude Code's default configuration scope when no separate Agent configuration directory is needed.
+- Correct Agent logos and screenshot handling in the Desktop and Agents views.
+
+### Notes
+
+- Proxy-specific capabilities require compatible independently published Proxy and Catalog versions. Installing this App does not publish or replace those assets.
+
 ## [0.6.3] - 2026-09-24
 
 ### Added

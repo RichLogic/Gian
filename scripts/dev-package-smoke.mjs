@@ -13,7 +13,7 @@ assertExecutionAllowed('desktop');
 const expectedClientId = requireDevOAuthClientId(process.env.GIAN_GITHUB_CLIENT_ID);
 const require = createRequire(new URL('../packages/desktop/package.json', import.meta.url));
 const { _electron } = require('playwright');
-const root = await mkdtemp(join(tmpdir(), 'gian-dev-smoke-'));
+const root = await mkdtemp(join(process.env.GIAN_DEV_SMOKE_ROOT ?? tmpdir(), 'gian-dev-smoke-'));
 const release = resolve('packages/desktop/release');
 const archive = resolve(process.argv[2] ?? join(release, (await readdir(release)).find(name => /^GianDev-.*\.zip$/.test(name)) ?? 'missing.zip'));
 const desktopToken = randomBytes(32).toString('base64url');

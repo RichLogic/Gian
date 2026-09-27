@@ -5,6 +5,7 @@ import type { SessionNotification } from '@agentclientprotocol/sdk';
 import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
 
 import { toV2ConfigOptions } from '../core/catalog.js';
+import { GrokCustomizationInspector } from '../core/customization.js';
 import { GrokProxyError } from '../core/errors.js';
 import {
   extensionName,
@@ -19,6 +20,7 @@ import { filterAdvertisedCommands } from '../core/slash-policy.js';
 import { GrokProxyService } from '../core/service.js';
 import { NativeTurnIdentityStore } from './replay-identity.js';
 import { discoverGrokRuntimes, probeGrokRuntime } from '../runtime/discover.js';
+import { GrokExtMethodUnsupportedError } from '../runtime/grok-acp-client.js';
 import { GrokJsonRpcError, GrokProtocolError, type DomainCode } from '../transport/protocol.js';
 
 type ConfigValue = string | boolean | number | null;
@@ -135,8 +137,18 @@ interface HostTurnRef {
 
 interface InteractionRef extends HostTurnRef {
   serviceApprovalId: string;
+  /** 'approval' routes to requestPermission; other kinds to the question flow. */
+  questionKind?: 'question' | 'plan' | 'elicit';
   actionIds: string[];
   responses: Map<string, { actionId: string; values: Record<string, unknown> }>;
+}
+
+interface InteractionInput {
+  id: string;
+  type: 'text' | 'single_select' | 'multi_select';
+  label: string;
+  required: boolean;
+  choices?: Array<{ value: string; displayName: string; description?: string }>;
 }
 
 interface ReplayEvent {
@@ -199,45 +211,27 @@ const REPLAYABLE = new Set([
 const CAPABILITIES = {
   'input.localFile': 1,
   'input.localImage': 1,
-  'session.rename': 1,
   'session.native.list': 1,
-  'session.native.delete': 1,
   'session.replay': 1,
-  sidechat: 1,
-  'session.fork': 1,
-  'turn.steer': 1,
+  'catalog.resolve': 1,
+  'integration.mcp.streamableHttp': 1,
   interaction: 1,
   'event.reasoning': 1,
   'event.plan': 1,
   'event.diff': 1,
   'event.usage': 1,
+  // NOT declared (honest by default): 'session.rename', 'session.fork',
+  // 'sidechat', 'turn.steer', and 'session.native.delete' all ride on native
+  // x.ai/* stdio extension methods. The published 1.0.41 stdio agent answers
+  // -32601 "Method not found" for every one of them (live-verified before and
+  // after session/new), and initialize metadata carries no per-method
+  // surface, so the Proxy declares nothing and dispatch answers with an
+  // explicit CAPABILITY_NOT_SUPPORTED instead of a runtime failure.
 } as const;
 
 const CONFIG_APPLY_ORDER = ['permission_mode', 'model', 'reasoning_effort'] as const;
 
-function customizationUnsupportedList(kind: string, status: 'proxy_unsupported' | 'provider_unsupported', message?: string) {
-  return {
-    kind,
-    status,
-    completeness: 'none',
-    observedAt: new Date().toISOString(),
-    items: [],
-    truncated: false,
-    diagnostics: message ? [{ code: 'SOURCE_NOT_ENUMERABLE', message }] : [],
-  };
-}
-
-function customizationUnavailableDetail(kind: string, id: string, message: string) {
-  return {
-    kind,
-    id,
-    status: 'unavailable',
-    observedAt: new Date().toISOString(),
-    text: '',
-    truncated: false,
-    diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message }],
-  };
-}
+const CUSTOMIZATION_KINDS = new Set(['skill', 'mcp', 'hook', 'rule']);
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -269,8 +263,13 @@ function isConfigValue(value: unknown): value is ConfigValue {
     || (typeof value === 'number' && Number.isFinite(value));
 }
 
-function standardError(error: unknown): GrokProtocolError | GrokJsonRpcError {
+export function standardError(error: unknown): GrokProtocolError | GrokJsonRpcError {
   if (error instanceof GrokProtocolError || error instanceof GrokJsonRpcError) return error;
+  if (error instanceof GrokExtMethodUnsupportedError) {
+    // A live-refuted x.ai/* method is an honest capability refusal, never an
+    // internal fault (the E2E steer path surfaced exactly that).
+    return new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', error.message, false);
+  }
   if (error instanceof GrokProxyError) {
     if (error.code === 'INVALID_REQUEST') {
       return new GrokJsonRpcError(-32602, error.message);
@@ -315,6 +314,7 @@ function sessionUpdatedData(data: Record<string, unknown>): Record<string, unkno
   if (data.lastError !== undefined) next.lastError = data.lastError;
   if (data.turnConfigOptions !== undefined) next.turnConfigOptions = data.turnConfigOptions;
   if (data.turnConfigRevision !== undefined) next.turnConfigRevision = data.turnConfigRevision;
+  if (data.mcpBoundary !== undefined) next.mcpBoundary = data.mcpBoundary;
   if (data.updatedAt !== undefined) next.updatedAt = data.updatedAt;
   if (Object.keys(next).length === 0) next.updatedAt = new Date().toISOString();
   return next;
@@ -432,11 +432,7 @@ export class GrokProtocolV2Adapter {
       case 'session.native.list': return this.listNative(request.params);
       case 'session.native.delete': return this.deleteNative(request.params);
       case 'session.replay': return this.replay(request.params);
-      case 'catalog.resolve':
-        throw new GrokProtocolError(
-          'CAPABILITY_NOT_SUPPORTED',
-          'catalog.resolve is not advertised by Grok Proxy.',
-        );
+      case 'catalog.resolve': return this.resolveCatalog(request.params);
       case 'runtime.discover':
         if (this.protocolVersion === PROTOCOL_V2) {
           throw new GrokProtocolError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
@@ -448,21 +444,23 @@ export class GrokProtocolV2Adapter {
         }
         return await probeGrokRuntime(String(request.params.path ?? ''));
       case 'customization.list':
-      case 'customization.detail':
+      case 'customization.detail': {
         if (this.protocolVersion !== PROTOCOL_V23) {
           throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', `${request.method} requires gian.proxy/2.3.`);
         }
+        const kind = String(request.params.kind ?? '') as Parameters<GrokCustomizationInspector['list']>[0];
+        if (!CUSTOMIZATION_KINDS.has(kind)) {
+          throw new GrokJsonRpcError(-32602, `Unknown customization kind "${kind}".`);
+        }
+        const inspector = new GrokCustomizationInspector(this.service.customizationAccess());
         return request.method === 'customization.list'
-          ? customizationUnsupportedList(
-              String(request.params.kind ?? ''),
-              'proxy_unsupported',
-              'Grok customization sources are not safely enumerable by this Proxy version.',
-            )
-          : customizationUnavailableDetail(
-              String(request.params.kind ?? ''),
+          ? await inspector.list(kind, { ...(typeof request.params.cwd === 'string' ? { cwd: request.params.cwd } : {}) })
+          : await inspector.detail(
+              kind,
               String(request.params.id ?? ''),
-              'Grok customization detail is not supported.',
+              { ...(typeof request.params.cwd === 'string' ? { cwd: request.params.cwd } : {}) },
             );
+      }
       case 'shutdown': return { ok: true };
       default:
         throw new GrokJsonRpcError(-32601, `Unknown method "${request.method}".`);
@@ -560,7 +558,13 @@ export class GrokProtocolV2Adapter {
           supported: this.service.supportsFork(),
           ...(this.service.supportsFork() ? {} : { reason: 'Current Grok ACP runtime does not support session/fork.' }),
         },
-        { id: 'session.fork.atTurn', supported: false, reason: 'Grok ACP only forks the current head.' },
+        {
+          id: 'session.fork.atTurn',
+          supported: this.service.supportsAtTurnFork(),
+          ...(this.service.supportsAtTurnFork()
+            ? {}
+            : { reason: 'Exact-turn forks need native x.ai/session/fork support in this Grok runtime.' }),
+        },
       ],
       slashCommands,
     };
@@ -786,10 +790,14 @@ export class GrokProtocolV2Adapter {
       );
     }
     if (params.hostServices !== undefined) {
-      throw new GrokProtocolError(
-        'CAPABILITY_NOT_SUPPORTED',
-        'Grok Proxy does not advertise integration.mcp.streamableHttp.',
-      );
+      // Admit only Host Streamable HTTP MCP descriptors; the spawn-time MCP
+      // isolation boundary (see mcp-isolation.ts) is derived from them.
+      try {
+        this.service.setHostMcpServices(params.hostServices);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new GrokProtocolError('INVALID_PARAMS', message);
+      }
     }
     const config = record(params.config);
     if (Object.keys(config).length > 0 && !this.advertisedOptionIds().has('model')) {
@@ -877,7 +885,17 @@ export class GrokProtocolV2Adapter {
       throw new GrokProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
     }
     const anchor = this.sidechatAnchor(parent);
-    const forked = await this.service.forkSession({ sessionId: parent.serviceSessionId });
+    const boundaryTurnId = anchor.type === 'turn' ? anchor.turnId : null;
+    const forked = await this.service.forkSession({
+      sessionId: parent.serviceSessionId,
+      ...(boundaryTurnId !== null && this.service.supportsAtTurnFork()
+        ? (() => {
+          const terminalOrder = this.terminalOrderBySession.get(parent.id) ?? [];
+          const index = terminalOrder.findIndex((entry) => entry.turnId === boundaryTurnId);
+          return index >= 0 ? { targetPromptIndex: index } : {};
+        })()
+        : {}),
+    });
     const session = this.attachForkedSession(sidechatId, parent, forked.session as ServiceSessionShape);
     const createdAt = new Date().toISOString();
     const resumeRef = this.resumeStore.seal({
@@ -993,10 +1011,17 @@ export class GrokProtocolV2Adapter {
     const sourceStreamId = nonEmptyString(params.sourceStreamId);
     const sessionId = nonEmptyString(params.sessionId);
     const anchor = record(params.anchor);
-    if (!sourceSessionId || !sourceStreamId || !sessionId || anchor.type !== 'head') {
+    const anchorType = anchor.type === 'head' ? 'head' : anchor.type === 'turn' ? 'turn' : null;
+    if (!sourceSessionId || !sourceStreamId || !sessionId || anchorType === null) {
       throw new GrokProtocolError(
-        anchor.type === 'turn' ? 'CAPABILITY_NOT_SUPPORTED' : 'INVALID_PARAMS',
-        anchor.type === 'turn' ? 'Grok ACP does not support exact turn forks.' : 'A head fork anchor is required.',
+        'INVALID_PARAMS',
+        'sourceSessionId, sourceStreamId, sessionId, and a head or turn anchor are required.',
+      );
+    }
+    if (anchorType === 'turn' && !this.service.supportsAtTurnFork()) {
+      throw new GrokProtocolError(
+        'CAPABILITY_NOT_SUPPORTED',
+        'Exact-turn forks need native x.ai/session/fork support in this Grok runtime.',
       );
     }
     const fingerprint = JSON.stringify({ sourceSessionId, sourceStreamId, anchor });
@@ -1011,10 +1036,17 @@ export class GrokProtocolV2Adapter {
       throw new GrokProtocolError('CONFLICT', 'Fork sessionId already belongs to another Session.');
     }
     const source = this.requireOrdinaryAttached(sourceSessionId, sourceStreamId);
-    const boundary = this.forkBoundary(source);
-    const forked = await this.service.forkSession({ sessionId: source.serviceSessionId });
+    const boundary = this.forkBoundary(source, anchorType === 'turn'
+      ? nonEmptyString(anchor.turnId) ?? ''
+      : null);
+    const forked = await this.service.forkSession({
+      sessionId: source.serviceSessionId,
+      ...(boundary.targetPromptIndex !== undefined
+        ? { targetPromptIndex: boundary.targetPromptIndex }
+        : {}),
+    });
     const child = this.attachForkedSession(sessionId, source, forked.session as ServiceSessionShape);
-    this.replayBySession.set(child.id, this.cloneReplay(source, child));
+    this.replayBySession.set(child.id, this.cloneReplay(source, child, boundary.turnId));
     const result = {
       session: this.serialize(child),
       origin: {
@@ -1032,6 +1064,43 @@ export class GrokProtocolV2Adapter {
     if (!this.service.supportsFork()) {
       throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', 'Current Grok ACP runtime does not support session/fork.');
     }
+  }
+
+  /**
+   * Resolve the fork boundary. `anchorTurnId` selects a specific terminal turn
+   * recorded live in this attach generation; the native fork keeps prompts
+   * 0..targetPromptIndex inclusive, so the anchor turn's ordinal in the
+   * session's terminal order is its inclusive prompt index. Anchors from
+   * imported history cannot be mapped to a native prompt index and are
+   * rejected honestly rather than guessed.
+   */
+  private forkBoundary(
+    session: AttachedSession,
+    anchorTurnId: string | null,
+  ): { turnId: string; sourceTurnId: string; targetPromptIndex?: number } {
+    if (this.activeTurnBySession.has(session.id)) {
+      throw new GrokProtocolError('SESSION_BUSY', 'Fork requires an idle source Session.');
+    }
+    const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
+    if (anchorTurnId !== null) {
+      const index = terminalOrder.findIndex((entry) => entry.turnId === anchorTurnId);
+      if (index < 0) {
+        throw new GrokProtocolError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          'The anchor turn was not recorded in this attach generation; native prompt indexes for imported history cannot be mapped safely.',
+        );
+      }
+      return {
+        turnId: anchorTurnId,
+        sourceTurnId: anchorTurnId,
+        targetPromptIndex: index,
+      };
+    }
+    const boundary = terminalOrder.at(-1);
+    if (!boundary) {
+      throw new GrokProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires a terminal Turn.');
+    }
+    return { turnId: boundary.turnId, sourceTurnId: boundary.sourceTurnId };
   }
 
   private attachForkedSession(
@@ -1060,17 +1129,31 @@ export class GrokProtocolV2Adapter {
     return session;
   }
 
-  private cloneReplay(source: AttachedSession, child: AttachedSession): ReplayState {
+  private cloneReplay(
+    source: AttachedSession,
+    child: AttachedSession,
+    boundaryTurnId?: string,
+  ): ReplayState {
     const parent = this.replayBySession.get(source.id) ?? {
       streamId: stableId('replay', source.nativeSessionId),
       events: [],
       sequence: 0,
     };
     const streamId = stableId('replay', child.nativeSessionId);
+    // A turn-anchored fork keeps only the events up to and including the
+    // anchor turn; later turns are absent from the forked native session.
+    let events = parent.events;
+    if (boundaryTurnId !== undefined) {
+      let lastIndex = -1;
+      for (let index = 0; index < events.length; index += 1) {
+        if (events[index]!.sourceTurnId === boundaryTurnId) lastIndex = index;
+      }
+      if (lastIndex >= 0) events = events.slice(0, lastIndex + 1);
+    }
     return {
       streamId,
-      sequence: parent.sequence,
-      events: parent.events.map((event) => ({
+      sequence: events.length,
+      events: events.map((event) => ({
         ...event,
         sessionId: child.id,
         replayStreamId: streamId,
@@ -1086,15 +1169,6 @@ export class GrokProtocolV2Adapter {
     if (boundary) return { type: 'turn', ...boundary };
     if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
     throw new GrokProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'No stable terminal Turn is available in this attach generation.');
-  }
-
-  private forkBoundary(session: AttachedSession): { turnId: string; sourceTurnId: string } {
-    if (this.activeTurnBySession.has(session.id)) {
-      throw new GrokProtocolError('SESSION_BUSY', 'Fork requires an idle source Session.');
-    }
-    const boundary = this.latestTerminalBoundary(session.id);
-    if (!boundary) throw new GrokProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires a terminal Turn.');
-    return boundary;
   }
 
   private latestTerminalBoundary(sessionId: string): { turnId: string; sourceTurnId: string } | null {
@@ -1248,11 +1322,20 @@ export class GrokProtocolV2Adapter {
     }
     interaction.responses.set(responseId, { actionId, values });
     try {
-      await this.service.respondApproval({
-        sessionId: session.serviceSessionId,
-        approvalId: interaction.serviceApprovalId,
-        nativeOptionId: actionId,
-      });
+      if (interaction.questionKind === undefined) {
+        await this.service.respondApproval({
+          sessionId: session.serviceSessionId,
+          approvalId: interaction.serviceApprovalId,
+          nativeOptionId: actionId,
+        });
+      } else {
+        await this.service.respondQuestion({
+          questionId: interaction.serviceApprovalId,
+          responseId,
+          actionId,
+          values,
+        });
+      }
     } catch (error) {
       interaction.responses.delete(responseId);
       throw standardError(error);
@@ -1263,8 +1346,10 @@ export class GrokProtocolV2Adapter {
   private async rename(params: Record<string, unknown>) {
     const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const name = typeof params.name === 'string' ? params.name : '';
-    if ([...name].length > 200) {
-      throw new GrokJsonRpcError(-32602, 'Session name must not exceed 200 Unicode code points.');
+    if ([...name].length > 100) {
+      // Upstream grok enforces a 100-scalar title limit; the previous 200
+      // limit produced runtime rejections the Host could not preview.
+      throw new GrokJsonRpcError(-32602, 'Session name must not exceed 100 Unicode code points.');
     }
     await this.service.renameSession({ sessionId: session.serviceSessionId, name });
     return { ok: true as const };
@@ -1322,6 +1407,17 @@ export class GrokProtocolV2Adapter {
     if (!nativeSessionId) {
       throw new GrokJsonRpcError(-32602, 'nativeSessionId is required.');
     }
+    // Guard: a native session a live Side Chat still depends on stays
+    // undeletable through this Proxy until that Side Chat is closed.
+    for (const [sidechatId, sidechat] of this.sidechats) {
+      const session = this.sessions.get(sidechatId);
+      if (session?.nativeSessionId === nativeSessionId) {
+        throw new GrokProtocolError(
+          'CONFLICT',
+          `Native session ${nativeSessionId} backs live Side Chat ${sidechatId}; close it first.`,
+        );
+      }
+    }
     try {
       await this.service.deleteNativeSession(nativeSessionId);
       return { ok: true as const };
@@ -1344,6 +1440,122 @@ export class GrokProtocolV2Adapter {
       params.cursor === null || typeof params.cursor === 'string' ? params.cursor : null,
       limit,
     );
+  }
+
+  /**
+   * catalog.resolve: resolve the session-scoped config surface for a
+   * requested model from runtime model metadata — thinking (reasoning
+   * effort) choices, input kinds, and defaults. No model is called and no
+   * live session is mutated.
+   */
+  private async resolveCatalog(params: Record<string, unknown>) {
+    const catalogRevision = nonEmptyString(params.catalogRevision);
+    if (!catalogRevision) throw new GrokJsonRpcError(-32602, 'catalogRevision is required.');
+    const sessionId = nonEmptyString(params.sessionId);
+    const streamId = nonEmptyString(params.streamId);
+    if ((sessionId === null) !== (streamId === null)) {
+      throw new GrokJsonRpcError(-32602, 'sessionId and streamId must be sent together.');
+    }
+    if (sessionId && streamId) this.requireOrdinaryAttached(sessionId, streamId);
+    const sessionConfig = record(params.sessionConfig);
+    const turnConfig = record(params.turnConfig);
+    if (Object.keys(turnConfig).length > 0) {
+      throw new GrokProtocolError(
+        'CONFIG_BINDING_INVALID',
+        'Grok config options are session-bound; send them in sessionConfig, not turnConfig.',
+      );
+    }
+    const raw = this.sessions.size > 0
+      ? this.service.currentCatalog()
+      : await this.service.listCapabilities();
+    const models = raw.models as Array<{
+      id: string;
+      displayName: string;
+      description?: string;
+      isDefault: boolean;
+      efforts: Array<{ id: string; displayName: string; isDefault: boolean }>;
+      input: readonly string[];
+    }>;
+    if (models.length === 0) {
+      throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', 'Grok model metadata is not available.');
+    }
+    const requestedModelId = typeof sessionConfig.model === 'string' ? sessionConfig.model : null;
+    const model = requestedModelId
+      ? models.find(item => item.id === requestedModelId)
+      : models.find(item => item.isDefault) ?? models[0]!;
+    if (!model) {
+      throw new GrokProtocolError(
+        'CONFIG_VALUE_INVALID',
+        `Unknown Grok model ${String(requestedModelId)}.`,
+      );
+    }
+    const permissionChoices = raw.modes.map((mode: { id: string; displayName: string }) => ({
+      value: mode.id,
+      displayName: mode.displayName,
+    }));
+    const configOptions = toV2ConfigOptions([
+      {
+        id: 'model',
+        displayName: 'Model',
+        category: 'model',
+        type: 'select' as const,
+        scope: 'session' as const,
+        currentValue: model.id,
+        choices: [{ value: model.id, displayName: model.displayName }],
+      },
+      ...(model.efforts.length > 0 ? [{
+        id: 'reasoning_effort',
+        displayName: 'Thinking',
+        category: 'reasoning_effort',
+        type: 'select' as const,
+        scope: 'session' as const,
+        currentValue: model.efforts.find(effort => effort.isDefault)?.id ?? model.efforts[0]!.id,
+        choices: model.efforts.map(effort => ({
+          value: effort.id,
+          displayName: effort.displayName,
+        })),
+        enabledWhen: [{ optionId: 'model', oneOf: [model.id] as ConfigValue[] }],
+      }] : []),
+      {
+        id: 'permission_mode',
+        displayName: 'Mode',
+        category: 'mode',
+        type: 'select' as const,
+        scope: 'session' as const,
+        currentValue: (this.service.currentCatalog().sessionOptions.find(option => option.id === 'permission_mode')?.currentValue ?? 'default') as string,
+        choices: permissionChoices,
+      },
+    ]);
+    const resolvedDefaults: { sessionConfig: Record<string, ConfigValue> } = { sessionConfig: {} };
+    for (const option of configOptions) {
+      if (sessionConfig[option.id] !== undefined) continue;
+      if (!isConfigValue(option.defaultValue) || option.defaultValue === null) continue;
+      if (option.id === 'model' && option.defaultValue !== model.id) continue;
+      resolvedDefaults.sessionConfig[option.id] = option.defaultValue;
+    }
+    if (resolvedDefaults.sessionConfig.model === undefined) {
+      resolvedDefaults.sessionConfig.model = model.id;
+    }
+    const payload = {
+      catalogRevision: stableId('catalog-resolve', {
+        model: model.id,
+        options: configOptions,
+      }),
+      input: [
+        { type: 'text' as const },
+        { type: 'localFile' as const },
+        { type: 'localImage' as const },
+      ],
+      configOptions,
+      specialCatalogs: {
+        model: 'model',
+        ...(model.efforts.length > 0 ? { thinking: 'reasoning_effort' } : {}),
+        approvalMode: 'permission_mode',
+      },
+      slashCommands: [] as Array<{ name: string; description: string; source: 'builtin'; argHints: Array<{ kind: 'free'; placeholder: string }> }>,
+      resolvedDefaults,
+    };
+    return payload;
   }
 
   private translateServiceEvent(method: string, params: Record<string, unknown>) {
@@ -1430,6 +1642,136 @@ export class GrokProtocolV2Adapter {
           interactionId: String(data.approvalId ?? ''),
           outcome: 'cancelled',
         });
+      return;
+    }
+    if (method === 'question.requested') {
+      const interactionId = nonEmptyString(data.questionId);
+      if (!interactionId) return;
+      const questionKind = data.kind === 'exit_plan_mode'
+        ? 'plan' as const
+        : data.kind === 'mcp_elicit' ? 'elicit' as const : 'question' as const;
+      const inputs: InteractionInput[] = [];
+      const actions: Array<{ id: string; label: string; style: 'primary' | 'secondary' | 'danger' }> = [];
+      if (questionKind === 'question') {
+        const questions = Array.isArray(data.questions) ? data.questions : [];
+        for (const raw of questions) {
+          const question = record(raw);
+          const label = typeof question.question === 'string' && question.question
+            ? question.question
+            : '';
+          if (!label) continue;
+          const options = Array.isArray(question.options) ? question.options : [];
+          const choices = options.flatMap((rawOption) => {
+            const option = record(rawOption);
+            const value = typeof option.label === 'string' && option.label ? option.label : '';
+            if (!value) return [];
+            return [{
+              value,
+              displayName: value,
+              ...(typeof option.description === 'string' && option.description
+                ? { description: option.description }
+                : {}),
+            }];
+          });
+          const multi = question.multiSelect === true || question.multi_select === true;
+          inputs.push(choices.length > 0
+            ? {
+              id: label,
+              type: multi ? 'multi_select' : 'single_select',
+              label,
+              required: false,
+              choices,
+            }
+            : { id: label, type: 'text', label, required: false });
+        }
+        actions.push({ id: 'submit', label: 'Submit', style: 'primary' });
+        actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
+        if (data.mode === 'plan') {
+          actions.push({ id: 'chat_about_this', label: 'Chat about this', style: 'secondary' });
+          actions.push({ id: 'skip_interview', label: 'Skip interview', style: 'secondary' });
+        }
+      } else if (questionKind === 'plan') {
+        actions.push({ id: 'approve', label: 'Approve plan', style: 'primary' });
+        actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
+      } else {
+        actions.push({ id: 'submit', label: 'Submit', style: 'primary' });
+        actions.push({ id: 'decline', label: 'Decline', style: 'danger' });
+        actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
+      }
+      // Interactions are turn-scoped on the wire; a question arriving outside
+      // an active turn stays pending in the service and settles as cancelled
+      // when the turn ends, so the agent's reverse request never hangs.
+      if (!turnId) return;
+      this.interactions.set(interactionId, {
+        sessionId: session.id,
+        turnId,
+        serviceApprovalId: interactionId,
+        questionKind: questionKind === 'plan' || questionKind === 'elicit' ? questionKind : 'question',
+        actionIds: actions.map((action) => action.id),
+        responses: new Map(),
+      });
+      this.updateSession(session, { state: 'waiting_interaction' });
+      this.emitTurnEvent('interaction.requested', session, turnId, {
+        interactionId,
+        title: questionKind === 'plan'
+          ? 'Grok requests plan approval'
+          : questionKind === 'elicit'
+            ? 'Grok MCP server requests input'
+            : 'Grok has a question',
+        description: '',
+        presentation: {
+          kind: questionKind === 'question' ? 'question' : 'permission',
+          tone: questionKind === 'question' ? 'neutral' : 'warning',
+        },
+        inputs,
+        actions,
+        ...(data.plan !== undefined || data.questions !== undefined || data.requestedSchema !== undefined
+          ? {
+            context: {
+              ...(data.plan !== undefined && data.plan !== null ? { plan: String(data.plan) } : {}),
+              ...(data.requestedSchema !== undefined && data.requestedSchema !== null
+                ? { requestedSchema: jsonValue(data.requestedSchema) }
+                : {}),
+              ...(data.questions !== undefined ? { questions: jsonValue(data.questions) } : {}),
+            },
+          }
+          : {}),
+      });
+      return;
+    }
+    if (method === 'question.resolved') {
+      const interactionId = nonEmptyString(data.questionId);
+      const interactionRef = interactionId ? this.interactions.get(interactionId) : undefined;
+      if (!interactionId || !interactionRef) return;
+      this.interactions.delete(interactionId);
+      const submitted = interactionRef.responses.size > 0;
+      const last = [...interactionRef.responses.values()].at(-1);
+      const waiting = [...this.interactions.values()].some((item) => (
+        item.sessionId === session.id && item.turnId === interactionRef.turnId
+      ));
+      this.updateSession(session, { state: waiting ? 'waiting_interaction' : 'running' });
+      this.emitTurnEvent('interaction.resolved', session, interactionRef.turnId, submitted && last
+        ? {
+          interactionId,
+          outcome: 'submitted',
+          actionId: last.actionId,
+        }
+        : {
+          interactionId,
+          outcome: 'cancelled',
+        });
+      return;
+    }
+    if (method === 'mcp.boundary') {
+      // Honest report of the runtime MCP isolation verification result.
+      this.emitSessionEvent('session.updated', session, sessionUpdatedData({
+        mcpBoundary: {
+          approved: data.approved ?? [],
+          unexpected: data.unexpected ?? [],
+          ...(Array.isArray(data.diagnostics) ? { diagnostics: data.diagnostics } : {}),
+        },
+        updatedAt: new Date().toISOString(),
+      }));
       return;
     }
     if (method === 'session.updated') {

@@ -5,6 +5,10 @@ export function assertExecutionAllowed(kind, env = process.env) {
   const hosted = env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted';
   if (kind === 'package') {
     if (!hosted) throw new Error('App packaging is restricted to GitHub-hosted CI. Download a CI artifact instead.');
+  } else if (kind === 'dev-package-local') {
+    if (hosted || env.GIAN_ALLOW_LOCAL_DEV_PACKAGE !== '1') {
+      throw new Error('Local GianDev packaging requires explicit permission for this run (GIAN_ALLOW_LOCAL_DEV_PACKAGE=1).');
+    }
   } else if (kind === 'desktop') {
     if (!hosted && env.GIAN_ALLOW_DESKTOP_E2E !== '1') {
       throw new Error('Desktop execution requires explicit user permission for this run (GIAN_ALLOW_DESKTOP_E2E=1).');

@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { proxyDefinitions, shippingProxyIds } from './build-proxy-artifacts.mjs';
-import { reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs';
+import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const artifactRequiredStepIds = [
@@ -150,16 +150,7 @@ export function validateProxyReleaseCertificate(
       || tuple.cli.size <= 0) {
       issues.push(`${id} CLI tuple has no exact artifact identity`);
     }
-    if (definition.pluginId === 'com.zhipu.zcode') {
-      const reviewed = reviewedExternalRuntimeCandidates[id];
-      if (!reviewed
-        || tuple.cli?.source !== 'reviewed-external-app'
-        || tuple.cli?.version !== reviewed.version
-        || tuple.cli?.sha256 !== reviewed.sha256
-        || tuple.cli?.size !== reviewed.size) {
-        issues.push(`${id} external-App Runtime is not the reviewed compatibility candidate`);
-      }
-    } else {
+    {
       const runtime = runtimeArtifacts.get(id);
       if (tuple.cli?.source !== 'managed-runtime-artifact'
         || !runtime
@@ -171,6 +162,12 @@ export function validateProxyReleaseCertificate(
         || !Number.isSafeInteger(runtime.asset?.size)
         || runtime.asset.size <= 0) {
         issues.push(`${id} managed Runtime artifact is not bound to the qualified CLI tuple`);
+      }
+      if (id === 'zcode') {
+        try {
+          assertZcodeSourceBinding(runtime);
+          if (tuple.cli?.sourceCommit !== runtime.source.commit) throw new Error('ZCode CLI source commit differs from the Runtime.');
+        } catch (error) { issues.push(error.message); }
       }
     }
   }

@@ -51,8 +51,10 @@ export function remotePickerAgents(environmentId: string, catalog: RemoteEnviron
       mode: agent.defaults?.mode ?? '', options: agent.defaults?.options ?? {} };
     const state = agent.readiness === 'ready' ? 'ready' as const : 'missing' as const;
     return { id: `remote:${environmentId}:${agent.id}`, name: agent.name,
+      // The remote Agent projection now carries the live pluginId in the
+      // wire `proxy` field; the legacy cast would mislabel pure-plugin rows.
       pluginId: agent.proxy as UserAgentStatus['pluginId'],
-      proxy: agent.proxy as UserAgentStatus['proxy'], cliPath: null, defaults, proxyName: agent.proxy,
+      proxy: null, cliPath: null, defaults, proxyName: agent.proxy,
       ready: agent.readiness === 'ready', cli: { state, path: null, version: null, source: null },
       plugin: { state, path: null, version: null, source: null, defaults }, runtimeProfile: null, officialInstallUrl: '' };
   });

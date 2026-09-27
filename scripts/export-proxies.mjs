@@ -9,6 +9,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const common = new Set(['LICENSE', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json',
   'scripts/check-node.js', 'scripts/build-proxy-artifacts.mjs', 'scripts/proxy-release-metadata.mjs',
   'scripts/build-managed-runtime-candidates.mjs', 'scripts/verify-managed-runtime-candidates.mjs',
+  'scripts/build-zcode-runtime.mjs', 'scripts/zcode-runtime-source.mjs',
+  'scripts/verify-zcode-runtime-protocol.mjs',
+  'scripts/zcode-runtime-integration.mjs',
+  'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs',
   'scripts/stage-official-catalog-release.mjs']);
 
 export function proxiesExportPath(path) {

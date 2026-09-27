@@ -282,6 +282,66 @@ test('real Cordis host resumes the exact authenticated Host-owned native session
   assert.equal(result.session.createdAt, new Date(1_700_000_000_000).toISOString());
 });
 
+test('Side Chat bridge resume reattaches an existing native child without creating a session', async () => {
+  const nativeSessionId = 'native-sidechat';
+  const resumed: Array<Record<string, unknown>> = [];
+  const mountedPresets: string[] = [];
+  const agentContext = { on: () => () => true, agent: undefined as unknown };
+  const agent = {
+    id: nativeSessionId,
+    status: 'idle' as const,
+    session: {
+      id: nativeSessionId,
+      header: { createdAt: 1_700_000_000_000, agentPreset: 'standard', parentSession: 'native-parent' },
+      events: [],
+    },
+    ctx: agentContext,
+    cancel: () => undefined,
+    whenIdle: async () => undefined,
+    followup: () => undefined,
+    steer: () => undefined,
+  };
+  agentContext.agent = agent;
+  const host = new CordisDshHost({
+    agents: {
+      create: async () => assert.fail('Side Chat resume must not create a native session'),
+      resume: async (options: Record<string, unknown>) => {
+        resumed.push(options);
+        await (options.setup as ((ctx: unknown) => Promise<void>) | undefined)?.(agentContext);
+        return { agent, dispose: async () => undefined };
+      },
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    agentPresets: {
+      defaultId: 'standard',
+      list: async () => [{ id: 'standard' }],
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      mount: async (_ctx: unknown, id?: string) => {
+        mountedPresets.push(id ?? 'standard');
+        return { id: id ?? 'standard' };
+      },
+    },
+    on: () => () => true,
+  } as never, '0.1.6');
+  const result = await host.sessionResume({ sessionId: 'gian-sidechat', nativeSessionId }) as {
+    session: { id: string; nativeId: string; createdAt: string };
+  };
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0]?.resumeSessionId, nativeSessionId);
+  assert.deepEqual(resumed[0]?.agentOptions, { provider: 'deepseek-official', model: 'deepseek-chat' });
+  assert.deepEqual(mountedPresets, ['standard']);
+  assert.equal(result.session.id, 'gian-sidechat');
+  assert.equal(result.session.nativeId, nativeSessionId);
+  assert.equal(result.session.createdAt, new Date(1_700_000_000_000).toISOString());
+  await assert.rejects(
+    () => host.sessionResume({ sessionId: 'gian-sidechat', nativeSessionId }),
+    (error: unknown) => error instanceof Error && (error as Error & { domainCode?: string }).domainCode === 'CONFLICT',
+  );
+});
+
 test('real Cordis host rejects a foreign or conflicting native binding proof', async () => {
   const hostBindingKey = 'test-host-binding-key';
   const host = new CordisDshHost({

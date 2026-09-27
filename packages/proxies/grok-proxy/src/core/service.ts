@@ -20,11 +20,20 @@ import { createAppError, GrokProxyError } from './errors.js';
 import { parsePromptUsage } from './events.js';
 import { firstText, normalizeInputItems, toPromptBlocks } from './input.js';
 import {
+  admitHostStreamableHttpServices,
+  McpAdmissionError,
+  mcpSpawnDenyRules,
+  scanDiskConfiguredMcpServers,
+  unexpectedMcpServerNames,
+  type AdmittedHostMcp,
+} from './mcp-isolation.js';
+import {
   grokPermissionSpec,
   parseGrokPermissionMode,
   type GrokPermissionMode,
 } from './permissions.js';
 import { firstSlashToken, isBlockedSlashCommand } from './slash-policy.js';
+import type { GrokCustomizationRuntimeAccess } from './customization.js';
 import type {
   ApprovalResponseParams,
   CloseSessionParams,
@@ -33,12 +42,18 @@ import type {
   InterruptTurnParams,
   ListNativeSessionsParams,
   PendingApproval,
+  PendingQuestion,
+  QuestionOutcome,
   SessionRecord,
   SetConfigOptionParams,
   StartTurnParams,
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
-import { GrokAcpClient } from '../runtime/grok-acp-client.js';
+import {
+  GrokAcpClient,
+  GrokExtMethodUnsupportedError,
+  isMethodNotFound,
+} from '../runtime/grok-acp-client.js';
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
@@ -50,7 +65,7 @@ interface ActiveTurn {
 
 export interface ServiceOptions {
   binaryPath: string;
-  createRuntime?: (cwd: string) => GrokAcpClient;
+  createRuntime?: (cwd: string, spawn: { spawnDenyRules: readonly string[] }) => GrokAcpClient;
   emitEvent?: ProxyEventSink;
 }
 
@@ -59,6 +74,13 @@ function nonEmptyString(value: unknown, field: string): string {
     throw createAppError(400, 'INVALID_REQUEST', `${field} is required.`);
   }
   return value.trim();
+}
+
+function recordField(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  const raw = value[key];
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
 }
 
 function isStructuredNotFound(error: unknown): boolean {
@@ -90,6 +112,13 @@ async function nativeSessionListed(runtime: GrokAcpClient, nativeSessionId: stri
 }
 
 function mapRuntimeError(error: unknown, binaryPath: string): GrokProxyError {
+  if (error instanceof GrokProxyError) return error;
+  if (error instanceof GrokExtMethodUnsupportedError) {
+    return createAppError(400, 'CAPABILITY_NOT_SUPPORTED', error.message);
+  }
+  if (error instanceof McpAdmissionError) {
+    return createAppError(400, 'INVALID_REQUEST', error.message);
+  }
   const message = error instanceof Error ? error.message : String(error);
   const auth = /auth|login|unauthorized|401/i.test(message);
   return createAppError(
@@ -101,9 +130,15 @@ function mapRuntimeError(error: unknown, binaryPath: string): GrokProxyError {
   );
 }
 
+/** Feature-detect newer GrokAcpClient surface so minimal runtime doubles keep working. */
+function runtimeExtensionSupport(runtime: GrokAcpClient | null): { supports(method: string): boolean } | null {
+  const candidate = runtime as { extensions?: { supports(method: string): boolean } } | null;
+  return candidate?.extensions ?? null;
+}
+
 export class GrokProxyService {
   private readonly binaryPath: string;
-  private readonly createRuntime: (cwd: string) => GrokAcpClient;
+  private readonly createRuntime: (cwd: string, spawn: { spawnDenyRules: readonly string[] }) => GrokAcpClient;
   private emitEvent: ProxyEventSink;
   private runtime: GrokAcpClient | null = null;
   private runtimeCwd: string | null = null;
@@ -118,15 +153,27 @@ export class GrokProxyService {
   private slashCommands: AvailableCommand[] = [];
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly approvalsById = new Map<string, PendingApproval>();
+  private readonly questionsById = new Map<string, PendingQuestion>();
+  /** Bounded record of settled question responses for idempotent replays. */
+  private readonly settledQuestionResponses = new Map<string, {
+    actionId: string;
+    values: Record<string, unknown>;
+  }>();
   private promptGeneration = 0;
   private forkSupported = false;
+  /** Remembered x.ai/session/fork support from the last runtime initialize. */
+  private nativeForkSupported = false;
+  /** Host-approved MCP servers admitted before the runtime spawns. */
+  private admittedHostMcp: AdmittedHostMcp | null = null;
 
   constructor(options: ServiceOptions) {
     this.binaryPath = options.binaryPath;
-    this.createRuntime = options.createRuntime ?? ((cwd) => new GrokAcpClient({
-      binaryPath: options.binaryPath,
-      cwd,
-    }));
+    this.createRuntime = options.createRuntime
+      ?? ((cwd, spawn) => new GrokAcpClient({
+        binaryPath: options.binaryPath,
+        cwd,
+        spawnDenyRules: spawn.spawnDenyRules,
+      }));
     this.emitEvent = options.emitEvent ?? (() => undefined);
   }
 
@@ -135,10 +182,12 @@ export class GrokProxyService {
   }
 
   async listCapabilities() {
-    const aux = this.createRuntime(resolve(tmpdir()));
+    const aux = this.createRuntime(resolve(tmpdir()), { spawnDenyRules: ['MCPTool(*)'] });
     try {
       const initialized = await aux.ensureStarted();
       this.forkSupported = initialized.agentCapabilities?.sessionCapabilities?.fork != null;
+      const auxExtensions = runtimeExtensionSupport(aux);
+      this.nativeForkSupported = auxExtensions?.supports('x.ai/session/fork') === true;
       const meta = (initialized as { _meta?: Record<string, unknown> })._meta ?? {};
       this.modelState = modelStateFromUnknown(meta.modelState);
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
@@ -156,13 +205,52 @@ export class GrokProxyService {
   }
 
   supportsFork(): boolean {
+    // Native x.ai/session/fork is preferred; the standard ACP fork capability
+    // remains a fallback for runtimes that advertise it.
+    const extensions = runtimeExtensionSupport(this.runtime);
+    if (extensions?.supports('x.ai/session/fork') === true) return true;
     return this.forkSupported
       || this.runtime?.negotiated?.agentCapabilities?.sessionCapabilities?.fork != null;
   }
 
+  /** Whether exact-turn forks (targetPromptIndex) are available natively. */
+  supportsAtTurnFork(): boolean {
+    const extensions = runtimeExtensionSupport(this.runtime);
+    if (extensions) return extensions.supports('x.ai/session/fork') === true;
+    return this.nativeForkSupported;
+  }
+
+  /**
+   * Admit Host Streamable HTTP MCP services before the runtime spawns. The
+   * admitted list also selects the spawn-time MCP deny rules (see
+   * mcp-isolation.ts), so it is immutable once the runtime has started.
+   */
+  setHostMcpServices(hostServices: unknown): void {
+    if (this.runtime) {
+      throw createAppError(
+        409,
+        'CONFLICT',
+        'Host MCP services must be provided before the Grok runtime starts; the MCP isolation boundary is fixed at spawn.',
+      );
+    }
+    if (hostServices === undefined || hostServices === null) {
+      this.admittedHostMcp = null;
+      return;
+    }
+    this.admittedHostMcp = admitHostStreamableHttpServices(hostServices);
+  }
+
+  get hostMcpServerNames(): readonly string[] {
+    return this.admittedHostMcp?.names ?? [];
+  }
+
+  get hostMcpServers(): Array<Record<string, unknown>> {
+    return this.admittedHostMcp?.servers ?? [];
+  }
+
   async listNativeSessions(params: ListNativeSessionsParams) {
     const cwd = params.cwd ? resolve(params.cwd) : resolve(tmpdir());
-    const aux = this.createRuntime(cwd);
+    const aux = this.createRuntime(cwd, { spawnDenyRules: ['MCPTool(*)'] });
     try {
       await aux.ensureStarted();
       return await aux.listSessions({
@@ -180,10 +268,11 @@ export class GrokProxyService {
     if (this.sessionsById.size > 0 && input.allowAdditional !== true) {
       throw createAppError(409, 'NATIVE_SESSION_ATTACHED', 'This Grok Proxy already has an attached session.');
     }
-    if (Array.isArray(input.mcpServers) && input.mcpServers.length > 0) {
-      throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Grok MCP servers are not supported.');
-    }
     const cwd = resolve(nonEmptyString(input.cwd, 'cwd'));
+    if (input.mcpServers && input.mcpServers.length > 0 && !this.admittedHostMcp) {
+      throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Only admitted Host Streamable HTTP MCP servers are supported.');
+    }
+    const diskDiagnostics = this.runtime ? [] : (await scanDiskConfiguredMcpServers(cwd)).diagnostics;
     const runtime = await this.ensureRuntime(cwd);
     const importHistory = Boolean(input.nativeSessionId?.trim()) && input.resumeMode !== 'resume';
     const nativeId = input.nativeSessionId?.trim() || null;
@@ -196,13 +285,14 @@ export class GrokProxyService {
       }
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
       const permission = grokPermissionSpec(this.permissionMode);
+      const hostMcp = this.hostMcpServers as never[];
       const response = nativeId
         ? input.resumeMode === 'resume'
-          ? await runtime.resumeSession({ sessionId: nativeId, cwd, mcpServers: [] })
-          : await runtime.loadSession({ sessionId: nativeId, cwd, mcpServers: [] })
+          ? await runtime.resumeSession({ sessionId: nativeId, cwd, mcpServers: hostMcp })
+          : await runtime.loadSession({ sessionId: nativeId, cwd, mcpServers: hostMcp })
         : await runtime.newSession({
           cwd,
-          mcpServers: [],
+          mcpServers: hostMcp,
           _meta: {
             mode: 'agent',
             ...permission.createMeta,
@@ -223,7 +313,7 @@ export class GrokProxyService {
         activeTurnId: null,
         configOptions: [],
         slashCommands: this.slashCommands,
-        mcpServers: [],
+        mcpServers: [...hostMcp] as SessionRecord['mcpServers'],
         attached: true,
         lastError: null,
         createdAt: nowIso(),
@@ -232,6 +322,9 @@ export class GrokProxyService {
       this.sessionsById.set(session.id, session);
       this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
       this.currentModel = this.modelState.currentModelId ?? this.currentModel;
+      if (this.admittedHostMcp) {
+        void this.verifyMcpBoundary(session, diskDiagnostics);
+      }
       const replayUpdates = this.replayCollectors.get(session.nativeSessionId)
         ?? this.unclaimedUpdates.get(session.nativeSessionId)
         ?? [];
@@ -251,25 +344,64 @@ export class GrokProxyService {
     }
   }
 
-  async forkSession(params: { sessionId: string }) {
+  /**
+   * Fork a session. Prefers the native `x.ai/session/fork` (supports
+   * `targetPromptIndex` for exact-turn forks); falls back to the standard ACP
+   * fork when the runtime advertises it (head-only). The native fork copies
+   * session files without starting them, so the forked native session is
+   * attached through `resume` in the same runtime.
+   */
+  async forkSession(params: { sessionId: string; targetPromptIndex?: number }) {
     const source = this.requireSession(params.sessionId);
     if (source.activeTurnId) {
       throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
     }
-    if (!this.supportsFork()) {
+    const runtime = this.requireRuntime();
+    const runtimeExtensions = runtimeExtensionSupport(runtime);
+    const useNative = runtimeExtensions?.supports('x.ai/session/fork') === true;
+    if (!useNative && !this.supportsFork()) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Grok ACP does not advertise session/fork.');
     }
-    const response = await this.requireRuntime().forkSession({
-      sessionId: source.nativeSessionId,
-      cwd: source.cwd,
-      mcpServers: source.mcpServers,
-    });
+
+    let forked: { sessionId: string; configOptions?: unknown };
+    let parentChildIsolation = false;
+    if (useNative) {
+      const response = await runtime.nativeForkSession({
+        sourceSessionId: source.nativeSessionId,
+        sourceCwd: source.cwd,
+        newCwd: source.cwd,
+        ...(params.targetPromptIndex !== undefined
+          ? { targetPromptIndex: params.targetPromptIndex }
+          : {}),
+      });
+      // The fork exists on disk only; attach it in this runtime via resume so
+      // parent and child remain separate native sessions with stable ids.
+      const attached = await this.createSession({
+        cwd: source.cwd,
+        nativeSessionId: response.newSessionId,
+        resumeMode: 'resume',
+        mcpServers: [...source.mcpServers],
+        allowAdditional: true,
+      });
+      forked = {
+        sessionId: attached.session.nativeSessionId,
+        configOptions: attached.session.configOptions,
+      };
+      parentChildIsolation = true;
+    } else {
+      const response = await runtime.forkSession({
+        sessionId: source.nativeSessionId,
+        cwd: source.cwd,
+        mcpServers: source.mcpServers,
+      });
+      forked = { sessionId: response.sessionId, configOptions: response.configOptions };
+    }
     const createdAt = nowIso();
     const session: SessionRecord = {
       ...source,
       id: randomId('sess'),
-      nativeSessionId: response.sessionId,
-      configOptions: response.configOptions ?? source.configOptions,
+      nativeSessionId: forked.sessionId,
+      configOptions: (forked.configOptions as SessionRecord['configOptions']) ?? source.configOptions,
       slashCommands: [...source.slashCommands],
       activeTurnId: null,
       status: 'idle',
@@ -277,6 +409,15 @@ export class GrokProxyService {
       createdAt,
       updatedAt: createdAt,
     };
+    if (parentChildIsolation) {
+      // createSession already registered the resumed fork; reuse that record
+      // so native-id mapping stays 1:1 and both rows never claim one id.
+      const existingId = this.proxyIdByNativeId.get(session.nativeSessionId);
+      if (existingId) {
+        const existing = this.sessionsById.get(existingId)!;
+        return { session: this.serializeSession(existing) };
+      }
+    }
     this.sessionsById.set(session.id, session);
     this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
     return { session: this.serializeSession(session) };
@@ -390,6 +531,9 @@ export class GrokProxyService {
   async interruptTurn(params: InterruptTurnParams) {
     const session = this.requireSession(params.sessionId);
     if (!session.activeTurnId) return;
+    // Cancel pending structured questions first so the agent's blocked
+    // reverse request settles before the cancel notification arrives.
+    this.resolveQuestionsForSession(session.id);
     await this.requireRuntime().cancel(session.nativeSessionId);
   }
 
@@ -403,6 +547,276 @@ export class GrokProxyService {
     approval.resolve({ outcome: { outcome: 'selected', optionId } });
     this.approvalsById.delete(params.approvalId);
     return { ok: true };
+  }
+
+  /**
+   * Respond to a pending structured question (x.ai/ask_user_question),
+   * plan-approval (x.ai/exit_plan_mode), or MCP elicit request mapped to a
+   * Gian interaction. Repeated identical responses are idempotent; a repeated
+   * responseId with a different payload is a conflict.
+   */
+  async respondQuestion(params: {
+    questionId: string;
+    responseId: string;
+    actionId: string;
+    values?: Record<string, unknown>;
+  }) {
+    const values = params.values ?? {};
+    const replayKey = `${params.questionId}\u0000${params.responseId}`;
+    const settled = this.settledQuestionResponses.get(replayKey);
+    if (settled) {
+      if (settled.actionId !== params.actionId
+        || JSON.stringify(settled.values) !== JSON.stringify(values)) {
+        throw createAppError(409, 'CONFLICT', 'responseId was reused with a different payload.');
+      }
+      return { ok: true as const };
+    }
+    const question = this.questionsById.get(params.questionId);
+    if (!question) {
+      throw createAppError(404, 'APPROVAL_NOT_FOUND', 'Interaction not found.');
+    }
+    if (!question.actionIds.includes(params.actionId)) {
+      throw createAppError(400, 'INVALID_APPROVAL_OPTION', 'Interaction action is not available.');
+    }
+    const previous = question.responses.get(params.responseId);
+    if (previous) {
+      if (previous.actionId !== params.actionId
+        || JSON.stringify(previous.values) !== JSON.stringify(values)) {
+        throw createAppError(409, 'CONFLICT', 'responseId was reused with a different payload.');
+      }
+      return { ok: true as const };
+    }
+    question.responses.set(params.responseId, { actionId: params.actionId, values });
+    const outcome = this.questionOutcomeFromAction(question.kind, params.actionId, values);
+    question.resolve(outcome);
+    this.rememberSettledQuestion(replayKey, { actionId: params.actionId, values });
+    this.questionsById.delete(params.questionId);
+    const session = this.sessionsById.get(question.sessionId);
+    if (session) {
+      this.emitEvent('question.resolved', this.envelope(session, {
+        questionId: params.questionId,
+        actionId: params.actionId,
+      }, question.turnId ?? undefined));
+    }
+    return { ok: true as const };
+  }
+
+  private rememberSettledQuestion(
+    replayKey: string,
+    record: { actionId: string; values: Record<string, unknown> },
+  ): void {
+    if (this.settledQuestionResponses.size >= 256) {
+      const oldest = this.settledQuestionResponses.keys().next().value;
+      if (oldest !== undefined) this.settledQuestionResponses.delete(oldest);
+    }
+    this.settledQuestionResponses.set(replayKey, record);
+  }
+
+  private questionOutcomeFromAction(
+    kind: PendingQuestion['kind'],
+    actionId: string,
+    values: Record<string, unknown>,
+  ): QuestionOutcome {
+    if (actionId === 'cancel') return { kind: 'cancelled' };
+    if (kind === 'plan') {
+      if (actionId === 'submit' || actionId === 'approve') {
+        return { kind: 'plan_approved' };
+      }
+      const feedback = typeof values.feedback === 'string' ? values.feedback : undefined;
+      return {
+        kind: 'plan_cancelled',
+        ...(feedback !== undefined ? { feedback } : {}),
+      };
+    }
+    if (kind === 'elicit') {
+      if (actionId === 'submit') return { kind: 'elicit_accept', content: values.content ?? null };
+      return { kind: 'elicit_decline' };
+    }
+    // ask_user_question
+    if (actionId === 'submit') {
+      const answers: Record<string, string[]> = {};
+      const annotations: Record<string, { preview?: string; notes?: string }> = {};
+      for (const [key, value] of Object.entries(values)) {
+        if (typeof value === 'string') answers[key] = [value];
+        else if (Array.isArray(value) && value.every(item => typeof item === 'string')) {
+          answers[key] = value as string[];
+        }
+      }
+      const notes = recordField(values, 'annotations');
+      for (const [key, value] of Object.entries(notes)) {
+        if (value && typeof value === 'object') {
+          const annotation = value as Record<string, unknown>;
+          annotations[key] = {
+            ...(typeof annotation.preview === 'string' ? { preview: annotation.preview } : {}),
+            ...(typeof annotation.notes === 'string' ? { notes: annotation.notes } : {}),
+          };
+        }
+      }
+      return { kind: 'submitted', answers, ...(Object.keys(annotations).length > 0 ? { annotations } : {}) };
+    }
+    if (actionId === 'chat_about_this' || actionId === 'skip_interview') {
+      const partial: Record<string, string> = {};
+      for (const [key, value] of Object.entries(values)) {
+        if (typeof value === 'string') partial[key] = value;
+        else if (Array.isArray(value) && value.every(item => typeof item === 'string') && value.length > 0) {
+          partial[key] = (value as string[])[0]!;
+        }
+      }
+      return { kind: actionId, partialAnswers: partial };
+    }
+    return { kind: 'cancelled' };
+  }
+
+  /** Handle reverse x.ai/* requests from the agent. Never fabricates success. */
+  private async handleRuntimeExtMethod(method: string, params: unknown): Promise<unknown> {
+    const payload = params && typeof params === 'object'
+      ? params as Record<string, unknown>
+      : {};
+    if (method === 'x.ai/ask_user_question') {
+      return this.handleAskUserQuestion(payload);
+    }
+    if (method === 'x.ai/exit_plan_mode') {
+      return this.handleExitPlanMode(payload);
+    }
+    if (method === 'x.ai/mcp/elicit') {
+      return this.handleMcpElicit(payload);
+    }
+    throw new Error(`Method not found: ${method}`);
+  }
+
+  private async handleAskUserQuestion(payload: Record<string, unknown>): Promise<unknown> {
+    const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+    const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
+    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
+    if (!session) return { outcome: 'cancelled' };
+    const questionId = randomId('iq');
+    const turnId = session.activeTurnId;
+    const response = await new Promise<QuestionOutcome>((resolve) => {
+      this.questionsById.set(questionId, {
+        questionId,
+        kind: 'question',
+        sessionId: session.id,
+        turnId,
+        nativeRequestId: typeof payload.toolCallId === 'string' ? payload.toolCallId : questionId,
+        mode: payload.mode === 'plan' ? 'plan' : 'default',
+        questions: Array.isArray(payload.questions) ? payload.questions : [],
+        actionIds: ['submit', 'cancel', ...(payload.mode === 'plan' ? ['chat_about_this', 'skip_interview'] : [])],
+        responses: new Map(),
+        resolve,
+      });
+      this.emitEvent('question.requested', this.envelope(session, {
+        questionId,
+        toolCallId: typeof payload.toolCallId === 'string' ? payload.toolCallId : null,
+        questions: payload.questions ?? [],
+        mode: payload.mode === 'plan' ? 'plan' : 'default',
+      }, turnId ?? undefined));
+    });
+    if (this.questionsById.has(questionId)) {
+      // Resolved externally (turn end/cancel) — the map entry is cleaned by the resolver path.
+      this.questionsById.delete(questionId);
+    }
+    switch (response.kind) {
+      case 'submitted':
+        return {
+          outcome: 'accepted',
+          answers: response.answers,
+          ...(response.annotations ? { annotations: response.annotations } : {}),
+        };
+      case 'chat_about_this':
+        return { outcome: 'chat_about_this', partial_answers: response.partialAnswers };
+      case 'skip_interview':
+        return { outcome: 'skip_interview', partial_answers: response.partialAnswers };
+      default:
+        return { outcome: 'cancelled' };
+    }
+  }
+
+  private async handleExitPlanMode(payload: Record<string, unknown>): Promise<unknown> {
+    const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+    const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
+    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
+    if (!session) return { outcome: 'cancelled', feedback: undefined };
+    const questionId = randomId('iq');
+    const turnId = session.activeTurnId;
+    const response = await new Promise<QuestionOutcome>((resolve) => {
+      this.questionsById.set(questionId, {
+        questionId,
+        kind: 'plan',
+        sessionId: session.id,
+        turnId,
+        nativeRequestId: typeof payload.toolCallId === 'string' ? payload.toolCallId : questionId,
+        mode: 'plan',
+        questions: [],
+        actionIds: ['approve', 'cancel'],
+        responses: new Map(),
+        resolve,
+      });
+      this.emitEvent('question.requested', this.envelope(session, {
+        questionId,
+        toolCallId: typeof payload.toolCallId === 'string' ? payload.toolCallId : null,
+        plan: typeof payload.planContent === 'string' ? payload.planContent : null,
+        mode: 'plan',
+        kind: 'exit_plan_mode',
+      }, turnId ?? undefined));
+    });
+    if (this.questionsById.has(questionId)) this.questionsById.delete(questionId);
+    if (response.kind === 'plan_approved') return { outcome: 'approved' };
+    return {
+      outcome: 'cancelled',
+      ...(response.kind === 'plan_cancelled' && response.feedback
+        ? { feedback: response.feedback }
+        : {}),
+    };
+  }
+
+  private async handleMcpElicit(payload: Record<string, unknown>): Promise<unknown> {
+    const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+    const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
+    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
+    if (!session) return 'decline';
+    const questionId = randomId('iq');
+    const turnId = session.activeTurnId;
+    const response = await new Promise<QuestionOutcome>((resolve) => {
+      this.questionsById.set(questionId, {
+        questionId,
+        kind: 'elicit',
+        sessionId: session.id,
+        turnId,
+        nativeRequestId: typeof payload.serverName === 'string' ? payload.serverName : questionId,
+        mode: 'default',
+        questions: Array.isArray(payload.questions) ? payload.questions : [],
+        actionIds: ['submit', 'decline', 'cancel'],
+        responses: new Map(),
+        resolve,
+      });
+      this.emitEvent('question.requested', this.envelope(session, {
+        questionId,
+        toolCallId: typeof payload.serverName === 'string' ? payload.serverName : null,
+        requestedSchema: payload.requestedSchema ?? null,
+        kind: 'mcp_elicit',
+      }, turnId ?? undefined));
+    });
+    if (this.questionsById.has(questionId)) this.questionsById.delete(questionId);
+    if (response.kind === 'elicit_accept') {
+      return { accept: { content: response.content ?? {} } };
+    }
+    return 'decline';
+  }
+
+  /** Resolve every pending question for a session (turn end, cancel, close). */
+  private resolveQuestionsForSession(sessionId: string, outcome: QuestionOutcome['kind'] = 'cancelled'): void {
+    for (const [questionId, question] of [...this.questionsById]) {
+      if (question.sessionId !== sessionId) continue;
+      this.questionsById.delete(questionId);
+      question.resolve({ kind: outcome } as QuestionOutcome);
+      const session = this.sessionsById.get(question.sessionId);
+      if (session) {
+        this.emitEvent('question.resolved', this.envelope(session, {
+          questionId,
+          actionId: null,
+        }, question.turnId ?? undefined));
+      }
+    }
   }
 
   async setConfigOption(params: SetConfigOptionParams) {
@@ -448,29 +862,48 @@ export class GrokProxyService {
 
   async renameSession(params: { sessionId: string; name: string }) {
     const session = this.requireSession(params.sessionId);
-    try {
-      await this.requireRuntime().renameSession(session.nativeSessionId, params.name);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/method not found/i.test(message)) throw mapRuntimeError(error, this.binaryPath);
+    // Upstream enforces a 100-scalar title limit; reject early rather than
+    // relying on the runtime's sanitized rejection.
+    if ([...params.name].length > 100) {
+      throw createAppError(400, 'INVALID_REQUEST', 'Grok session names are limited to 100 Unicode code points.');
     }
+    try {
+      await this.requireRuntime().renameSession(session.nativeSessionId, params.name, session.cwd);
+    } catch (error) {
+      if (isMethodNotFound(error)) {
+        throw createAppError(
+          400,
+          'CAPABILITY_NOT_SUPPORTED',
+          `Grok runtime does not support x.ai/session/rename: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      throw mapRuntimeError(error, this.binaryPath);
+    }
+    session.updatedAt = nowIso();
     return { ok: true as const };
   }
 
   async deleteNativeSession(nativeSessionId: string) {
+    // Guard 1: never delete a native session this Proxy still has attached.
     if (this.proxyIdByNativeId.has(nativeSessionId)) {
       throw createAppError(409, 'CONFLICT', 'Cannot delete an attached Grok session.');
     }
-    const aux = this.createRuntime(this.sessionsById.values().next().value?.cwd ?? resolve(tmpdir()));
+    // Guard 2: ownership must be provable — the session has to appear in the
+    // native directory listing before a destructive call is issued.
+    const scopedCwd = this.sessionsById.values().next().value?.cwd ?? null;
+    const aux = this.createRuntime(scopedCwd ?? resolve(tmpdir()), { spawnDenyRules: ['MCPTool(*)'] });
     try {
       await aux.ensureStarted();
       if (!await nativeSessionListed(aux, nativeSessionId)) {
         throw createAppError(404, 'NATIVE_SESSION_NOT_FOUND', `Grok native session ${nativeSessionId} was not found.`);
       }
-      await aux.deleteSession(nativeSessionId);
+      await aux.deleteSession(nativeSessionId, scopedCwd ?? undefined);
       return { ok: true as const };
     } catch (error) {
       if (error instanceof GrokProxyError) throw error;
+      if (error instanceof GrokExtMethodUnsupportedError) {
+        throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', error.message);
+      }
       if (isStructuredNotFound(error)) {
         throw createAppError(404, 'NATIVE_SESSION_NOT_FOUND', `Grok native session ${nativeSessionId} was not found.`);
       }
@@ -492,6 +925,7 @@ export class GrokProxyService {
         await this.runtime.closeSession({ sessionId: session.nativeSessionId }).catch(() => undefined);
       }
     } finally {
+      this.resolveQuestionsForSession(session.id);
       this.sessionsById.delete(session.id);
       this.proxyIdByNativeId.delete(session.nativeSessionId);
       this.activeTurns.delete(session.id);
@@ -513,6 +947,22 @@ export class GrokProxyService {
     this.permissionMode = mode;
   }
 
+  /** Runtime access for the read-only customization inspector. */
+  customizationAccess(): GrokCustomizationRuntimeAccess {
+    return {
+      createAuxRuntime: (cwd: string) => this.createRuntime(cwd, { spawnDenyRules: ['MCPTool(*)'] }),
+      attachedRuntime: () => {
+        const session = this.sessionsById.values().next().value;
+        if (!session || !this.runtime || this.runtimeCwd !== session.cwd) return null;
+        return {
+          runtime: this.runtime,
+          nativeSessionId: session.nativeSessionId,
+          cwd: session.cwd,
+        };
+      },
+    };
+  }
+
   private async ensureRuntime(cwd: string): Promise<GrokAcpClient> {
     if (this.runtime) {
       if (this.runtimeCwd !== cwd) {
@@ -520,8 +970,15 @@ export class GrokProxyService {
       }
       return this.runtime;
     }
-    const runtime = this.createRuntime(cwd);
+    // The MCP isolation boundary is fixed here: disk-configured server names
+    // are enumerated once and denied per name when Host MCP is injected.
+    const diskScan = await scanDiskConfiguredMcpServers(cwd);
+    const denyRules = mcpSpawnDenyRules(this.admittedHostMcp, diskScan.names);
+    const runtime = this.createRuntime(cwd, { spawnDenyRules: denyRules });
     runtime.setPermissionHandler(request => this.handlePermissionRequest(request));
+    if (typeof (runtime as { setExtMethodHandler?: unknown }).setExtMethodHandler === 'function') {
+      runtime.setExtMethodHandler((method, params) => this.handleRuntimeExtMethod(method, params));
+    }
     runtime.on('extensionNotification', (method, params) => {
       const nativeSessionId = params && typeof params === 'object'
         ? String((params as Record<string, unknown>).sessionId ?? '')
@@ -536,6 +993,7 @@ export class GrokProxyService {
     runtime.on('runtimeStopped', (event) => {
       if (event.expected) return;
       for (const session of this.sessionsById.values()) {
+        this.resolveQuestionsForSession(session.id);
         session.status = 'stale';
         session.lastError = 'Grok runtime stopped.';
         this.emitEvent('session.updated', this.envelope(session, { status: 'stale' }));
@@ -558,6 +1016,36 @@ export class GrokProxyService {
     this.runtime = null;
     this.runtimeCwd = null;
     if (runtime) await runtime.stop();
+  }
+
+  /**
+   * Runtime MCP isolation verification: compare the effective server catalog
+   * (`x.ai/mcp/list`, a pure read that contacts nothing) against the approved
+   * Host set. Unexpected servers are reported honestly; they were already
+   * denied at spawn when their names came from disk config, so this catches
+   * the residual (e.g. plugin-contributed) sources.
+   */
+  private async verifyMcpBoundary(session: SessionRecord, diskDiagnostics: readonly string[]): Promise<void> {
+    try {
+      const catalog = await this.runtime?.mcpList();
+      const entries = catalog && typeof catalog === 'object'
+        ? (catalog as { servers?: unknown }).servers
+        : undefined;
+      const effective = (Array.isArray(entries) ? entries : []).flatMap((raw) => {
+        const entry = raw && typeof raw === 'object' ? (raw as { name?: unknown }) : {};
+        return typeof entry.name === 'string' && entry.name ? [entry.name] : [];
+      });
+      const unexpected = unexpectedMcpServerNames(effective, this.admittedHostMcp?.names ?? []);
+      if (unexpected.length === 0 && diskDiagnostics.length === 0) return;
+      this.emitEvent('mcp.boundary', this.envelope(session, {
+        approved: this.admittedHostMcp?.names ?? [],
+        unexpected,
+        ...(diskDiagnostics.length > 0 ? { diagnostics: diskDiagnostics } : {}),
+      }));
+    } catch {
+      // Verification is best-effort; the spawn-time deny rules remain the
+      // hard boundary. Absence of x.ai/mcp/list is reported via capabilities.
+    }
   }
 
   private requireSession(sessionId: string): SessionRecord {
@@ -595,6 +1083,7 @@ export class GrokProxyService {
     active.completed = true;
     session.activeTurnId = null;
     session.status = 'idle';
+    this.resolveQuestionsForSession(session.id);
     this.emitEvent('turn.completed', this.envelope(session, { stopReason }, turnId));
   }
 
@@ -605,6 +1094,7 @@ export class GrokProxyService {
     session.activeTurnId = null;
     session.status = 'error';
     session.lastError = error instanceof Error ? error.message : String(error);
+    this.resolveQuestionsForSession(session.id);
     this.emitEvent('turn.failed', this.envelope(session, {
       code: /auth|login/i.test(session.lastError) ? 'RUNTIME_AUTH_REQUIRED' : 'RUNTIME_ERROR',
       message: session.lastError,

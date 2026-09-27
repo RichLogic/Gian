@@ -866,7 +866,7 @@ async function readManagedRuntimeInstallStream(
 export interface AgentDraftDefaults {
   name: string;
   cliPath: string | null;
-  home?: { kind: 'managed'; path: null } | null;
+  home?: { kind: 'default'; path: string } | null;
 }
 
 /** Prefill for a new draft card: numbered name and the kind's existing path. */

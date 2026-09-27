@@ -44,8 +44,8 @@ Program installation does not reuse login credentials or require an account-popu
 ## 5. First use
 
 1. Install the Integration and wait for activation, resolving download, digest, extraction and version-check failures first.
-2. Add a Kimi Agent with a new managed HOME for independent configuration.
-3. Use its CLI maintenance terminal for the current vendor login/service setup. Never send authentication keys as task messages.
+2. Add a Kimi Agent. The default HOME is `~/.kimi-code` unless KIMI_CODE_HOME is configured; choose a new managed HOME for independent configuration.
+3. Click Log in in that Agent's details to run the CLI login command with its selected HOME. Never send authentication keys as task messages.
 4. Check readiness and create a session in an authorized workspace.
 5. Try a small task and inspect plans, permissions and completion. Confirm actual Runtime support before using forks or Sidechat.
 
@@ -53,13 +53,13 @@ If restoration fails, preserve the native session and HOME. Clearing history and
 
 ## 6. HOME and isolation
 
-KIMI_CODE_HOME points to the Agent's state directory:
+KIMI_CODE_HOME points to the Agent's state directory. Without an override it defaults to `~/.kimi-code`; a separate managed HOME lives at:
 
 ```text
 <dataDir>/homes/kimi/<agentId>/
 ```
 
-It holds CLI configuration, authentication, sessions, caches and logs. Separate Agents default to separate HOME directories. Choosing the same existing HOME shares these states, not independent accounts/history.
+It holds CLI configuration, authentication, sessions, caches and logs. Choose a separate managed HOME for another account or history.
 
 HOME is neither the program directory nor a project sandbox. Do not unpack Runtime archives into it or move it to rewrite existing session bindings. Gian does not automatically import or clear custom HOME directories; normal CLI upgrades may still update their data.
 

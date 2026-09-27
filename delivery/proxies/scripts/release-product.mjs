@@ -6,7 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { proxyDefinitions, assertProxySelfTest, main as buildArtifacts } from './build-proxy-artifacts.mjs';
-import { proxyReleaseMetadata, reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs';
+import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
+import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
 import { verifySource } from './verify-source.mjs';
 import { assertSameCatalogExecutables, assertSelectedCatalogExecutables, selectReleaseDefinitions } from './catalog-docs-policy.mjs';
 
@@ -50,6 +51,15 @@ export function validateCertificate(certificate, expected = {}) {
     if (!record || record.pluginId !== metadata.pluginId || record.version !== metadata.version
       || record.tag !== metadata.tag || !isDeepStrictEqual(record.manifest, definition.manifest)
       || !metadata.runtime.verifiedVersions.includes(record.runtime.version)) throw new Error(`Certificate metadata mismatch: ${definition.id}`);
+    if (definition.id === 'zcode') {
+      assertZcodeSourceBinding({ ...record.runtime, source: record.runtimeSource });
+      if (record.runtime.kind !== 'native-binary' || record.publishRuntime !== true
+        || !record.runtimeAsset || record.runtime.asset?.url !== releaseUrl(record.tag, record.runtimeAsset)
+        || !certificate.assets?.some(a => a.name === record.runtimeAsset
+          && a.sha256 === record.runtime.asset.sha256 && a.size === record.runtime.asset.size)) {
+        throw new Error('ZCode certificate does not bind the downloadable CLI archive');
+      }
+    }
   }
   if (!Array.isArray(certificate.assets) || !certificate.assets.length) throw new Error('Certificate has no artifacts');
   const names = new Set();
@@ -88,6 +98,7 @@ async function qualify() {
   });
   await step('build', build);
   await step('proxy-contracts', async () => {
+    command(process.execPath, ['--test', 'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs']);
     for (const definition of shipping) command('pnpm', ['--filter', definition.packageName, 'test']);
     command('pnpm', ['--filter', '@gian/dsh-bridge', 'test']);
     command('pnpm', ['--filter', '@gian/proxy-catalog-contract', 'test']);
@@ -115,21 +126,16 @@ async function qualify() {
         }
         for (const suffix of ['', '.sha256', '.manifest.json']) cpSync(`${path}${suffix}`, join(output, `${metadata.asset}${suffix}`));
       } finally { rmSync(temporary, { recursive: true, force: true }); }
-      let runtime;
-      if (metadata.runtime.distribution === 'external-app') {
-        const reviewed = reviewedExternalRuntimeCandidates[definition.id];
-        if (!reviewed || !metadata.runtime.verifiedVersions.includes(reviewed.version)) throw new Error('Missing reviewed external Runtime identity');
-        runtime = { kind: 'external-app', runtimeId: metadata.runtime.id, version: reviewed.version, artifactSha256: reviewed.sha256 };
-      } else {
-        const candidate = runtimes.candidates.find(r => r.provider === definition.id);
-        if (!candidate || !metadata.runtime.verifiedVersions.includes(candidate.version)) throw new Error('Runtime candidate version mismatch');
-        cpSync(join(root, 'artifacts/runtimes', candidate.asset.name), join(output, candidate.asset.name));
-        runtime = { kind: 'native-binary', runtimeId: metadata.runtime.id, version: candidate.version,
-          asset: { url: candidate.asset.url, sha256: candidate.asset.sha256, size: candidate.asset.size },
-          format: candidate.format, entryRelativePath: candidate.entryRelativePath };
-      }
+      const candidate = runtimes.candidates.find(r => r.provider === definition.id);
+      if (!candidate || !metadata.runtime.verifiedVersions.includes(candidate.version)) throw new Error('Runtime candidate version mismatch');
+      if (definition.id === 'zcode') assertZcodeSourceBinding(candidate);
+      cpSync(join(root, 'artifacts/runtimes', candidate.asset.name), join(output, candidate.asset.name));
+      const runtime = { kind: 'native-binary', runtimeId: metadata.runtime.id, version: candidate.version,
+        asset: { url: candidate.asset.url, sha256: candidate.asset.sha256, size: candidate.asset.size },
+        format: candidate.format, entryRelativePath: candidate.entryRelativePath };
       proxies.push({ provider: definition.id, pluginId: metadata.pluginId, version: metadata.version,
         tag: metadata.tag, archive: metadata.asset, manifest: definition.manifest, runtime,
+        ...(candidate.source ? { runtimeSource: candidate.source } : {}),
         runtimeAsset: runtimes.candidates.find(r => r.provider === definition.id)?.asset.name ?? null,
         publishRuntime: runtimes.candidates.find(r => r.provider === definition.id)?.asset.publish ?? false });
     }
@@ -186,7 +192,7 @@ async function publish(directory) {
     const names = [record.archive, `${record.archive}.sha256`, `${record.archive}.manifest.json`, 'certificate.json'];
     if (record.publishRuntime) names.push(record.runtimeAsset);
     publishRelease(record.tag, names.map(name => join(directory, name)),
-      `Independent Proxy ${record.version}. Exact hosted artifacts from ${certificate.certificateId}. DSH includes its Bridge. ZCode remains an external-App integration with upstream standalone limitations. No App or real-provider acceptance is claimed.`);
+      `Independent Proxy ${record.version}. Exact hosted artifacts from ${certificate.certificateId}. DSH includes its Bridge. ZCode includes a managed CLI Runtime built from its pinned upstream Git commit. No App or real-provider acceptance is claimed.`);
   }
 }
 

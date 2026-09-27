@@ -40,8 +40,8 @@ This is not the Codex executable on PATH or a Codex Desktop directory. Do not re
 ## 5. First use
 
 1. Install Codex Integration and confirm Runtime activation.
-2. Add an Agent using a new managed HOME or an explicitly selected existing Codex HOME.
-3. Open that Agent's CLI maintenance terminal and complete the official login or Provider configuration. An ordinary Gian conversation is not a login form.
+2. Add an Agent. The default HOME is `~/.codex`; choose a new managed HOME for isolation.
+3. Click Log in in that Agent's details to run the CLI login command with its selected HOME. An ordinary Gian conversation is not a login form.
 4. Check program and configuration status. A new HOME not inheriting another Agent's login is expected.
 5. Create a workspace session and check model, thinking and permission choices. Use Fast only when the Runtime/model provides it.
 6. Start with a small task; inspect real approvals, Plan/Diff and completion instead of treating a sent request as success.
@@ -50,13 +50,13 @@ Native-session discovery is HOME-scoped. A thread missing from another HOME has 
 
 ## 6. HOME and isolation
 
-CODEX_HOME selects the Agent's Codex state root:
+CODEX_HOME selects the Agent's Codex state root. It defaults to `~/.codex`; a separate managed HOME lives at:
 
 ```text
 <dataDir>/homes/codex/<agentId>/
 ```
 
-It contains configuration, login state and native sessions. Agents may share program versions, but do not share HOME by default. Selecting the same Custom HOME explicitly shares vendor state.
+It contains configuration, login state and native sessions. Each saved Agent has one HOME; choose a managed HOME when a separate account or history is needed.
 
 HOME is not a sandbox. Codex policy and Gian authorization still govern workspace access, commands and networking. Project configuration, program installation and CODEX_HOME are different locations. Gian does not require copying credentials: log in normally in a new HOME or explicitly select an existing one. Existing sessions retain their original binding.
 

@@ -138,6 +138,7 @@ async function main(): Promise<void> {
   }
   const runtimeResolver = new RuntimeResolver({
     dataDir: join(dataDir, 'runtime-resolver'),
+    managedStoreRoot: join(dataDir, 'runtimes'),
     updateLockDataDir: agentManager.updateLockDataDir(),
     hostVersion: releaseVersion,
   });

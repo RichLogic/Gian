@@ -11,7 +11,17 @@ function firstVersion(text: string): string | null {
   return text.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
 }
 
+function agentHome(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.GIAN_AGENT_HOME !== undefined && env.GIAN_AGENT_HOME !== '') return env.GIAN_AGENT_HOME;
+  return env.GROK_HOME;
+}
+
 function homeDir(): string {
+  // The Agent-scoped HOME (GIAN_AGENT_HOME) wins over the machine HOME: all
+  // Grok state (.grok) is read relative to the served Agent, not the user.
+  if (process.env.GIAN_AGENT_HOME && isAbsolute(process.env.GIAN_AGENT_HOME)) {
+    return process.env.GIAN_AGENT_HOME;
+  }
   return process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : homedir();
 }
 
@@ -88,7 +98,7 @@ export async function probeGrokRuntime(path: string): Promise<{
     displayName: 'Grok CLI',
     path,
     version,
-    configHome: join(homeDir(), '.grok'),
+    configHome: agentHome(process.env) ?? join(homeDir(), '.grok'),
     contentRoots: [{ path, mode: 'file' }],
   };
 }

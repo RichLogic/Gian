@@ -61,6 +61,8 @@ export interface CreateSessionParams {
   cwd: string;
   nativeSessionId?: string;
   resumeMode?: 'load' | 'resume';
+  /** Only admitted Host Streamable HTTP servers may be passed (see
+   *  mcp-isolation.ts); other transports are rejected at admission. */
   mcpServers?: McpServer[];
   /** Internal Side Chat reattach path; ordinary session.create remains one
    *  per session-scoped Proxy process. */
@@ -121,6 +123,35 @@ export interface PendingApproval {
       | { outcome: 'selected'; optionId: string }
       | { outcome: 'cancelled' };
   }): void;
+}
+
+/** Reverse x.ai/* request mapped to a Gian interaction. */
+export type QuestionOutcome =
+  | { kind: 'cancelled' }
+  | {
+    kind: 'submitted';
+    answers: Record<string, string[]>;
+    annotations?: Record<string, { preview?: string; notes?: string }>;
+  }
+  | { kind: 'chat_about_this'; partialAnswers: Record<string, string> }
+  | { kind: 'skip_interview'; partialAnswers: Record<string, string> }
+  | { kind: 'plan_approved' }
+  | { kind: 'plan_cancelled'; feedback?: string }
+  | { kind: 'elicit_accept'; content: unknown }
+  | { kind: 'elicit_decline' };
+
+export interface PendingQuestion {
+  questionId: string;
+  /** 'question' = ask_user_question, 'plan' = exit_plan_mode, 'elicit' = mcp/elicit. */
+  kind: 'question' | 'plan' | 'elicit';
+  sessionId: string;
+  turnId: string | null;
+  nativeRequestId: string;
+  mode: 'default' | 'plan';
+  questions: unknown[];
+  actionIds: string[];
+  responses: Map<string, { actionId: string; values: Record<string, unknown> }>;
+  resolve(outcome: QuestionOutcome): void;
 }
 
 export interface ProxyEventEnvelope<T = Record<string, unknown>> {

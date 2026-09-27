@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
-import type { ProductExecutor } from '@gian/shared';
 
 export interface AgentLogoSource {
   light: string;
   dark: string;
 }
 
-export function proxyLogoSource(proxy: ProductExecutor, environmentId?: string): AgentLogoSource {
+/** `proxy` accepts any Agent identity string — the live `pluginId` or the
+ *  legacy official-kind alias; the Host logo route resolves both (signed
+ *  Catalog first, installed Proxy second). */
+export function proxyLogoSource(proxy: string, environmentId?: string): AgentLogoSource {
   if (environmentId) return {
     light: `/api/remote/environments/${encodeURIComponent(environmentId)}/logos/${encodeURIComponent(proxy)}/light`,
     dark: `/api/remote/environments/${encodeURIComponent(environmentId)}/logos/${encodeURIComponent(proxy)}/dark`,
@@ -25,7 +27,7 @@ export function AgentLogo({
   size = 24,
   className = '',
 }: {
-  proxy: ProductExecutor | null;
+  proxy: string | null;
   environmentId?: string;
   logo?: AgentLogoSource;
   /** Fallback glyph source for open pluginIds without a legacy kind
@@ -67,10 +69,22 @@ export function AgentLogo({
     >
       {lightFailed
         ? <span className="agent-logo-fallback agent-logo-light">{letter}</span>
-        : <img className="agent-logo-image agent-logo-light" src={logo.light} alt="" onError={() => setLightFailed(true)} />}
+        : <img className="agent-logo-image agent-logo-light" src={logo.light} alt=""
+               onLoad={event => {
+                 if (event.currentTarget.naturalWidth <= 1 || event.currentTarget.naturalHeight <= 1) {
+                   setLightFailed(true);
+                 }
+               }}
+               onError={() => setLightFailed(true)} />}
       {darkFailed
         ? <span className="agent-logo-fallback agent-logo-dark">{letter}</span>
-        : <img className="agent-logo-image agent-logo-dark" src={logo.dark} alt="" onError={() => setDarkFailed(true)} />}
+        : <img className="agent-logo-image agent-logo-dark" src={logo.dark} alt=""
+               onLoad={event => {
+                 if (event.currentTarget.naturalWidth <= 1 || event.currentTarget.naturalHeight <= 1) {
+                   setDarkFailed(true);
+                 }
+               }}
+               onError={() => setDarkFailed(true)} />}
     </span>
   );
 }

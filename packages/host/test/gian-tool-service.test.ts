@@ -141,11 +141,26 @@ class FakeProxyClient implements ProxyClient {
 
 class FakeProxyManager {
   readonly client = new FakeProxyClient();
+  lastCatalog: Record<string, unknown> | null = null;
   async getOrCreate(): Promise<ProxyClient> { return this.client; }
   get(): ProxyClient { return this.client; }
   async dispose() {}
   async forceDispose() {}
   async closeAll() {}
+  async acquireInspectionHost() {
+    const manager = this;
+    return {
+      host: {
+        initialize: () => manager.client.initialize(),
+        catalog: async () => {
+          manager.lastCatalog = await manager.client.catalog();
+          return manager.lastCatalog;
+        },
+      },
+      shared: false,
+      release: async () => {},
+    };
+  }
 }
 
 class CapturingBroadcaster {
@@ -195,7 +210,7 @@ function setup(agentDefaults?: AgentProxyDefaults) {
       return { agent, cliPath: null };
     },
     agentRuntimeProfile: async () => null,
-    agentsForKind: executor => executor === agent.proxy ? [agent] : [],
+    agentsForKind: executor => (agent.pluginId === executor || agent.proxy === executor) ? [agent] : [],
   };
   const sessions = new SessionManager(
     db,
@@ -215,16 +230,40 @@ function setup(agentDefaults?: AgentProxyDefaults) {
   approvals.setGetModeFn(sessionId => sessions.getApprovalModeForActiveTurn(sessionId));
 
   const agents = {
-    listAgents: () => [agent],
+    listAgents: () => [agent, {
+      ...agent,
+      id: 'agent-fixture-1',
+      name: 'Fixture Plugin Agent',
+      pluginId: 'io.gian.fixture',
+      proxy: null,
+      defaults: { model: '', thinking: '', mode: '', options: {} },
+    }],
     getAgent: (id: string) => {
       if (id !== agent.id) throw new Error(`agent not found: ${id}`);
       return agent;
     },
     agentStatus: async (id: string) => {
+      if (id === 'agent-fixture-1') {
+        return {
+          ...agent,
+          id: 'agent-fixture-1',
+          name: 'Fixture Plugin Agent',
+          pluginId: 'io.gian.fixture',
+          proxy: null,
+          ready: false,
+          defaults: { model: '', thinking: '', mode: '', options: {} },
+        };
+      }
       if (id !== agent.id) throw new Error(`agent not found: ${id}`);
       return { ...agentStatus(), defaults: agent.defaults };
     },
     agentRuntimePath: () => ({ proxy: agent.proxy, cliPath: null }),
+    agentCapabilities: async (pluginId: string, agentId: string) => {
+      if (pluginId !== agent.pluginId || agentId !== agent.id) throw new Error(`agent not found: ${agentId}`);
+      const catalog = (proxy as unknown as { lastCatalog: ProxyCatalog | null }).lastCatalog
+        ?? { catalogRevision: 'test-catalog', configOptions: [] } as ProxyCatalog;
+      return { catalog, capabilities: {} as Record<string, number> };
+    },
   } as unknown as AgentManager;
   const tasks = new TaskManager(db);
   const tool = new GianToolService({
@@ -971,6 +1010,44 @@ test('GIAN-TOOL-001: session.create inherits Agent option defaults and explicit 
         .resolved_config.turn.provider,
       'vendor-a',
     );
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-001: catalog.get_create_options keys pure-plugin Agents on plugin_id without gating on proxy', async () => {
+  const context = setup();
+  try {
+    const result = await call(context, 'catalog.get_create_options', {});
+    assert.equal(result.ok, true);
+    const agents = (result.data as {
+      agents: Array<{ id: string; plugin_id?: string; proxy: string | null; ready: boolean; models: unknown[] }>;
+    }).agents;
+    const official = agents.find(entry => entry.id === 'agent-claude-review')!;
+    assert.equal(official.plugin_id, 'claude');
+    assert.equal(official.ready, true);
+    const fixture = agents.find(entry => entry.id === 'agent-fixture-1')!;
+    // A null proxy alias never forces ready:false — readiness tracks the
+    // Runtime, and the entry carries the live plugin_id.
+    assert.equal(fixture.plugin_id, 'io.gian.fixture');
+    assert.equal(fixture.proxy, null);
+    assert.equal(fixture.ready, false);
+    assert.deepEqual(fixture.models, []);
+  } finally {
+    teardown(context);
+  }
+});
+
+test('GIAN-TOOL-001: unknown approval_mode value fails closed with INVALID_ARGUMENT', async () => {
+  const context = setup();
+  try {
+    const result = await call(context, 'session.create', {
+      workspace_id: context.workspaceId,
+      agent_id: AGENT.id,
+      config: { approval_mode: 'not-a-gian-preset' },
+    }, 'create-bad-mode');
+    assert.equal(result.ok, false);
+    assert.equal((result.error as { code: string }).code, 'INVALID_ARGUMENT');
   } finally {
     teardown(context);
   }

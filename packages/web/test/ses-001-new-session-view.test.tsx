@@ -24,6 +24,7 @@ import {
   loadProxyCapabilities,
   loadProxyModels,
   loadResolvedProxyCatalog,
+  loadSettings,
 } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
@@ -67,6 +68,7 @@ vi.mock('../src/api.js', () => ({
   loadProxyModels: vi.fn(),
   loadProxyCapabilities: vi.fn(),
   loadResolvedProxyCatalog: vi.fn(),
+  loadSettings: vi.fn(),
 }));
 
 vi.mock('../src/remote-environments.js', async () => ({
@@ -201,6 +203,9 @@ describe('NewSessionView', () => {
       throw new Error('Remote Host unavailable');
     });
     vi.mocked(loadAgents).mockResolvedValue(agents);
+    vi.mocked(loadSettings).mockResolvedValue({ translation: {
+      sending_language: 'en', reading_language: 'zh-CN', agent_id: 'agent-codex-1', model: 'gpt-5.6-luna',
+    } } as Awaited<ReturnType<typeof loadSettings>>);
     vi.mocked(loadProxyModels).mockResolvedValue(codexModels);
     vi.mocked(loadProxyCapabilities).mockResolvedValue({
       protocolVersion: 'test', models: [], modes: [], slashCommands: [],
@@ -278,6 +283,54 @@ describe('NewSessionView', () => {
     fireEvent.click(screen.getByTestId('ns-host-picker'));
     fireEvent.click(screen.getByRole('button', { name: /This Mac/ }));
     expect(await screen.findByTestId('ns-agent-picker')).toBeTruthy();
+  });
+
+  it('offers automatic translation before a remote Session first message', async () => {
+    const { onCreate } = renderView();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Build Mac/ }));
+    await screen.findByTestId('ns-agent-picker');
+    const translation = screen.getByTestId('ns-auto-translation');
+    expect(translation).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(translation);
+    await waitFor(() => expect(translation).toHaveAttribute('aria-pressed', 'true'));
+
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'first remote message');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      executionEnvironmentId: hostA,
+      workspaceId: 'remote-workspace',
+      firstMessage: 'first remote message',
+      autoTranslate: true,
+    }));
+  });
+
+  it('does not enable first-message translation without a configured local Agent and model', async () => {
+    vi.mocked(loadSettings).mockResolvedValue({ translation: {
+      sending_language: 'en', reading_language: 'zh-CN', agent_id: '', model: '',
+    } } as Awaited<ReturnType<typeof loadSettings>>);
+    const { onCreate } = renderView();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Build Mac/ }));
+    await screen.findByTestId('ns-agent-picker');
+    await userEvent.click(screen.getByTestId('ns-auto-translation'));
+    expect(await screen.findByTestId('new-session-translation-error')).toHaveTextContent('Choose an available local translation Agent');
+    expect(screen.getByTestId('ns-auto-translation')).toHaveAttribute('aria-pressed', 'false');
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects a saved translation Agent that is no longer present before remote creation', async () => {
+    vi.mocked(loadSettings).mockResolvedValue({ translation: {
+      sending_language: 'en', reading_language: 'zh-CN', agent_id: 'removed-agent', model: 'luna',
+    } } as Awaited<ReturnType<typeof loadSettings>>);
+    const { onCreate } = renderView();
+    fireEvent.click(screen.getByTestId('ns-host-picker'));
+    fireEvent.click(await screen.findByRole('button', { name: /Build Mac/ }));
+    await screen.findByTestId('ns-agent-picker');
+    await userEvent.click(screen.getByTestId('ns-auto-translation'));
+    expect(await screen.findByTestId('new-session-translation-error')).toHaveTextContent('Agent unavailable');
+    expect(screen.getByTestId('ns-auto-translation')).toHaveAttribute('aria-pressed', 'false');
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it('keeps takeover attached to the selected Host in the picker menu', async () => {
@@ -600,6 +653,38 @@ describe('NewSessionView', () => {
       sessionConfig: { workspace_mode: 'strict', model: 'mock-vision' },
       turnConfig: { mock_trace: true },
       firstMessage: 'inspect',
+    }));
+  });
+
+  it('loads session model choices for a ready Grok Agent without a legacy proxy alias', async () => {
+    const grok = { ...agent('grok', 'Grok'), proxy: null };
+    vi.mocked(loadAgents).mockResolvedValue([grok]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.2',
+      catalogRevision: 'grok-models',
+      specialCatalogs: { model: 'model' },
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'model', displayName: 'Model', binding: 'session', role: 'model',
+        control: 'select', required: false, defaultValue: 'grok-4.7',
+        choices: [
+          { value: 'grok-4.7', displayName: 'Grok 4.7' },
+          { value: 'grok-4.6', displayName: 'Grok 4.6' },
+        ],
+      }],
+      slashCommands: [], capabilities: {}, models: [], modes: [],
+    });
+
+    const { onCreate } = renderView({ initialAgentId: grok.id });
+    await waitFor(() => expect(loadProxyCapabilities).toHaveBeenCalledWith('grok', grok.id));
+    expect(loadProxyModels).not.toHaveBeenCalled();
+    await userEvent.selectOptions(await screen.findByLabelText('Model'), 'grok-4.6');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'inspect');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: grok.id,
+      executor: 'grok',
+      sessionConfig: { model: 'grok-4.6' },
     }));
   });
 

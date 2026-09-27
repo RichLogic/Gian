@@ -77,14 +77,30 @@ test('Grok Proxy negotiates 2.3 with customization.list and answers proxy_unsupp
     proxy.send({ jsonrpc: '2.0', id: 'req-2', method: 'customization.list', params: { kind: 'hook' } });
     const listed = await responseFor(proxy, 'req-2') as { result: {
       kind: string; status: string; completeness: string; items: unknown[]; truncated: boolean;
-      diagnostics: Array<{ code: string }>;
+      diagnostics: Array<{ code: string; message: string }>;
     } };
     assert.equal(listed.result.kind, 'hook');
     assert.equal(listed.result.status, 'proxy_unsupported');
+
     assert.equal(listed.result.completeness, 'none');
     assert.deepEqual(listed.result.items, []);
     assert.equal(listed.result.truncated, false);
     assert.equal(listed.result.diagnostics[0]!.code, 'SOURCE_NOT_ENUMERABLE');
+    assert.match(listed.result.diagnostics[0]!.message, /attach a session before listing hooks/);
+
+    // Rules have no native enumeration surface and are reported as such.
+    proxy.send({ jsonrpc: '2.0', id: 'req-2b', method: 'customization.list', params: { kind: 'rule' } });
+    const rules = await responseFor(proxy, 'req-2b') as { result: { status: string; completeness: string; items: unknown[] } };
+    assert.equal(rules.result.status, 'provider_unsupported');
+    assert.equal(rules.result.completeness, 'none');
+    assert.deepEqual(rules.result.items, []);
+
+    // Skills enumerate through the runtime's own disk reload (x.ai/skills/list).
+    proxy.send({ jsonrpc: '2.0', id: 'req-2c', method: 'customization.list', params: { kind: 'skill', cwd: '/tmp' } });
+    const skills = await responseFor(proxy, 'req-2c') as { result: { status: string; completeness: string; items: unknown[] } };
+    assert.equal(skills.result.status, 'ok');
+    assert.equal(skills.result.completeness, 'configured');
+    assert.deepEqual(skills.result.items, []);
 
     proxy.send({ jsonrpc: '2.0', id: 'req-3', method: 'shutdown', params: {} });
     await responseFor(proxy, 'req-3');

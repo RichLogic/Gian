@@ -105,9 +105,19 @@ async function main(): Promise<void> {
     try {
       const outcome = await adapter.dispatch(request);
       if (outcome.error) writer.error(request.id, outcome.error);
-      else writer.result(request.id, outcome.result);
-      for (const notification of outcome.notifications) {
-        writer.notification(notification.method, notification.params);
+      else if (request.method === 'sidechat.close') {
+        // Close barrier (10.5.4): the queued terminal teardown events must be
+        // written before the Success response, the explicit exception to the
+        // response-before-notification rule.
+        for (const notification of outcome.notifications) {
+          writer.notification(notification.method, notification.params);
+        }
+        writer.result(request.id, outcome.result);
+      } else {
+        writer.result(request.id, outcome.result);
+        for (const notification of outcome.notifications) {
+          writer.notification(notification.method, notification.params);
+        }
       }
       if (request.method === 'shutdown') {
         shuttingDown = true;

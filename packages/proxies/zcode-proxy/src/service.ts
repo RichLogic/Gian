@@ -10,6 +10,7 @@ import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import {
+  ModelFactStore,
   ServiceError,
   ZcodeV2Adapter,
   type DispatchOutcome,
@@ -58,16 +59,20 @@ const SESSION_METHODS = new Set([
   'session.close',
   'session.replay',
   'session.rename',
-  'session.native.delete',
   'turn.steer',
-  'sidechat.create',
-  'sidechat.resume',
-  'sidechat.close',
   'session.fork',
 ]);
+// Addressed without an attached session: session.native.delete and the
+// sidechat family are answered by the (shared) catalog runtime adapter,
+// which rejects them with the documented capability errors.
+const UNATTACHED_METHODS = new Set(['session.native.delete', 'sidechat.create', 'sidechat.resume', 'sidechat.close']);
 
 export class ZcodeSharedService {
   private initializationParams: Record<string, unknown> | null = null;
+  /** Model/thoughtLevel facts observed from live session snapshots; feeds the
+   *  side-effect-free catalog (0.16.9 snapshots only report the current
+   *  model, and the provider registry never crosses the protocol). */
+  private readonly modelFacts = new ModelFactStore();
   private catalogRuntime: RuntimeEntry | null = null;
   private readonly workspaceRuntimes = new Map<string, RuntimeEntry>();
   private readonly sessionRoutes = new Map<string, SessionRoute>();
@@ -100,6 +105,7 @@ export class ZcodeSharedService {
           if (request.method === 'interaction.respond' && !this.options.interactionEnabled) {
             throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'interaction capability is not declared.');
           }
+          if (UNATTACHED_METHODS.has(request.method)) return await this.dispatchCatalog(request);
           if (SESSION_METHODS.has(request.method)) return await this.dispatchSession(request);
           return await this.dispatchCatalog(request);
       }
@@ -144,14 +150,34 @@ export class ZcodeSharedService {
 
   private async dispatchSession(request: WireRequest): Promise<DispatchOutcome> {
     this.requireInitialized();
-    const sessionId = requiredString(request.params, 'sessionId');
-    const route = this.sessionRoutes.get(sessionId);
-    if (!route) throw new ServiceError('SESSION_NOT_FOUND', `Session ${sessionId} is not attached.`);
+    // session.fork addresses the SOURCE session; params.sessionId names the
+    // new child Gian session and is not attached yet.
+    const routingId = request.method === 'session.fork'
+      ? requiredString(request.params, 'sourceSessionId')
+      : requiredString(request.params, 'sessionId');
+    const route = this.sessionRoutes.get(routingId);
+    if (!route) throw new ServiceError('SESSION_NOT_FOUND', `Session ${routingId} is not attached.`);
     const outcome = await route.runtime.adapter.dispatch(request);
+    if (request.method === 'session.fork' && outcome.ok) {
+      // The adapter created (or rolled back) the child adapter record; the
+      // Shared Service must atomically register the child's route in the same
+      // step, or the first child turn.start dies with "Session ... is not
+      // attached" (live-verified 0.16.9). The adapter only reports a child
+      // after its record, native id, and ownership are committed.
+      const session = (outcome.result as { session?: Record<string, unknown> } | undefined)?.session;
+      const childId = typeof session?.id === 'string' ? session.id : null;
+      const native = session?.nativeSession as Record<string, unknown> | undefined;
+      const nativeId = typeof native?.id === 'string' && native.id !== '' ? native.id : null;
+      if (childId !== null) {
+        route.runtime.sessionIds.add(childId);
+        this.sessionRoutes.set(childId, { runtime: route.runtime, nativeSessionId: nativeId });
+        if (nativeId !== null) this.nativeOwners.set(nativeId, childId);
+      }
+    }
     if (request.method === 'session.close' && outcome.ok) {
-      this.sessionRoutes.delete(sessionId);
-      route.runtime.sessionIds.delete(sessionId);
-      if (route.nativeSessionId && this.nativeOwners.get(route.nativeSessionId) === sessionId) {
+      this.sessionRoutes.delete(routingId);
+      route.runtime.sessionIds.delete(routingId);
+      if (route.nativeSessionId && this.nativeOwners.get(route.nativeSessionId) === routingId) {
         this.nativeOwners.delete(route.nativeSessionId);
       }
       if (route.runtime.sessionIds.size === 0) await this.stopWorkspaceRuntime(route.runtime);
@@ -237,6 +263,7 @@ export class ZcodeSharedService {
       interactionEnabled: this.options.interactionEnabled,
       runtimeBin: this.options.runtimeBin,
       isNativeSessionOwned: nativeSessionId => this.nativeOwners.has(nativeSessionId),
+      modelFacts: this.modelFacts,
     });
     adapter.setEmitSink(notification => this.emitSink(notification));
     const runtime: RuntimeEntry = { key, adapter, transport, sessionIds: new Set(), stopping: false };

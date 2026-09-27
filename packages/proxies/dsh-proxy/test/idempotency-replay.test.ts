@@ -22,10 +22,10 @@ function fakeBridge(counter: { turns: number } = { turns: 0 }) {
       }
       if (method === 'session.events.read') {
         return {
-          formatVersion: 0,
+          formatVersion: 3,
           events: [
             { type: 'turn/start', seq: 0, data: { turn: 0 } },
-            { type: 'user/message', seq: 1, data: { turn: 0, source: 'external' } },
+            { type: 'user/message', seq: 1, data: { turn: 0, source: 'external', message: { role: 'user', content: [{ type: 'text', text: 'external hello' }] } } },
             { type: 'assistant/chunk', seq: 2, data: { turn: 0, step: 0, chunk: { type: 'text-delta', text: 'ok' } } },
             { type: 'assistant/message', seq: 3, data: { turn: 0, step: 0, message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, usage: { inputTokens: 3, outputTokens: 1 } } },
             { type: 'step/end', seq: 4, data: { turn: 0, step: 0 } },

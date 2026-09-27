@@ -44,8 +44,8 @@ Web-only debugging and Desktop environments may have different download and cred
 ## 5. First use
 
 1. Install the Integration and wait for the full Runtime combination to activate. Seeing Proxy files alone is insufficient.
-2. Add an Agent with a new managed HOME, or explicitly select an existing HOME whose vendor configuration you intend to reuse.
-3. Open that Agent's CLI maintenance terminal and use the vendor's login or service-configuration flow. Never paste credentials into an ordinary conversation, Catalog document or Issue.
+2. Add an Agent. The default HOME is `~/.claude`; choose a new managed HOME for an isolated configuration.
+3. Click Log in in that Agent's details to run the CLI login command with its selected HOME. Never paste credentials into an ordinary conversation, Catalog document or Issue.
 4. Exit maintenance commands and check the Agent status. Program installation and account/endpoint readiness are separate checks.
 5. Create a session for an authorized project. Start with a small task and confirm the workspace, model and permission prompts.
 
@@ -53,13 +53,13 @@ On failure, retain the Agent, HOME and history. Retrying installation should not
 
 ## 6. HOME and isolation
 
-CLAUDE_CONFIG_DIR points to the selected Agent HOME. A managed HOME typically lives at:
+The default Agent HOME is `~/.claude`. Other selected HOMEs are passed through CLAUDE_CONFIG_DIR. A separate managed HOME lives at:
 
 ```text
 <dataDir>/homes/claude/<agentId>/
 ```
 
-It holds CLI configuration, authentication and native history. Agents can share program versions without sharing HOME. Explicitly selecting the same existing HOME shares vendor configuration and history, so those Agents are not account-isolated.
+It holds CLI configuration, authentication and native history. Each Agent has one HOME, and Gian blocks assigning an overlapping HOME to another Agent. Choose a managed HOME for a separate account or history.
 
 Gian does not automatically copy, clear or migrate custom HOME directories. The CLI normally reads and writes its own state. HOME separation is not a filesystem sandbox; workspace authorization and CLI policy still apply. Existing sessions retain their original HOME bindings.
 

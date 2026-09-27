@@ -15,7 +15,7 @@ test('release metadata is derived from every self-describing shipping package', 
     assert.ok(metadata.runtime.verifiedVersions.length > 0);
     assert.equal(
       metadata.runtime.distribution,
-      metadata.pluginId === 'com.zhipu.zcode' ? 'external-app' : 'native-binary',
+      'native-binary',
     );
     assert.equal(metadata.tag, `proxy-${id}-v${metadata.version}`);
     assert.equal(metadata.asset, `gian-proxy-${id}-${metadata.version}-darwin-arm64.tar.gz`);
@@ -23,6 +23,6 @@ test('release metadata is derived from every self-describing shipping package', 
 });
 
 test('hidden and unknown packages cannot enter release publication', () => {
-  assert.throws(() => proxyReleaseMetadata('grok'), /not in the shipping/);
+  assert.throws(() => proxyReleaseMetadata('vendor-x'), /not in the shipping/);
   assert.throws(() => proxyReleaseMetadata('unknown'), /not in the shipping/);
 });

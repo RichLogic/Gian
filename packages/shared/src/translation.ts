@@ -19,6 +19,14 @@ export function isTranslationLanguage(value: unknown): value is string {
   return typeof value === 'string' && TRANSLATION_LANGUAGES.some(([id]) => id === value);
 }
 
+export function isTranslationConfigured(value: TranslationPreferences): boolean {
+  return isTranslationLanguage(value.sending_language)
+    && isTranslationLanguage(value.reading_language)
+    && value.agent_id.length > 0
+    && !value.agent_id.startsWith('remote:')
+    && value.model.length > 0;
+}
+
 export function parseTranslationPreferences(value: unknown): TranslationPreferences {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('translation must be an object');

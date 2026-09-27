@@ -1,872 +1,937 @@
-import { tmpdir } from 'node:os';
-import {
-  KimiCustomizationScanner,
-  ScanTimeoutError,
-} from './customization.js';
-import { resolve } from 'node:path';
+/**
+ * KimiProxyService — orchestration over the Kimi local server API
+ * (`kimi web` REST + `/api/v1/ws`), replacing the retired ACP transport.
+ *
+ * Semantics kept from the ACP generation: exclusive attach per native
+ * session, stream-scoped turn ledger at the adapter, detach-only close,
+ * opaque sidechat resume refs, and honest state mapping. Everything the ACP
+ * build had to synthesize (turn identities, replay capture windows, hidden
+ * /usage prompts, proxy-owned tool terminals) is GONE: the server API carries
+ * native ids, cursors and server-side tool execution.
+ */
 
-import type {
-  PromptResponse,
-  RequestPermissionRequest,
-  RequestPermissionResponse,
-  SessionConfigOption,
-  SessionNotification,
-} from '@agentclientprotocol/sdk';
+import { createHash } from 'node:crypto';
 
-import { createAppError, KimiProxyError } from './errors.js';
-import { normalizeInputItems, toPromptBlocks } from './input.js';
-import { normalizeThinkingOption } from './thinking-options.js';
+import { OpaqueSidechatResumeStore } from '@gian/proxy-protocol';
+
+import { KimiCustomizationScanner, ScanTimeoutError } from './customization.js';
+import { renderUnifiedDiff } from './diff.js';
+import { buildPromptInput, type OuterInputItem } from './input.js';
+import { KimiSessionProjector, type OuterNotification } from './projector.js';
+import { buildReplayEvents } from './replay.js';
 import type {
-  ApprovalResponseParams,
-  CloseSessionParams,
-  CreateSessionParams,
-  GetSessionParams,
-  InitializePayload,
-  InterruptTurnParams,
-  ListNativeSessionsParams,
-  PendingApproval,
-  SessionRecord,
-  SessionSnapshotParams,
-  SetConfigOptionParams,
-  StartTurnParams,
+  KimiFileChange,
+  KimiModelInfo,
+  KimiMessage,
+  KimiSessionInfo,
 } from './types.js';
-import { nowIso, randomId } from './utils.js';
-import { KimiAcpClient } from '../runtime/kimi-acp-client.js';
-import { recordSelectedKimiActivation } from '../runtime/discover.js';
+import { KimiServerRuntime, type ResyncNotice, type SessionCursor } from '../runtime/kimi-server.js';
+import { KimiApiError, KimiTransportError } from '../runtime/rest-client.js';
+import { KimiProtocolError } from '../transport/protocol.js';
 
-type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
-
-interface ActiveTurn {
-  turnId: string;
-  requestId?: number | string;
-  isCompact: boolean;
+export interface KimiServiceOptions {
+  kimiBin: string;
+  dataDir?: string | null;
+  /** Test seam / externally managed endpoint: skips spawning `kimi web`. */
+  endpoint?: { baseUrl: string; token: string };
 }
 
-interface ServiceOptions {
-  runtime: KimiAcpClient;
-  emitEvent?: ProxyEventSink;
-  /** Test seam: bound on how long an accepted interrupt may take to end the
-   *  native turn before the shared runtime is considered wedged. */
-  interruptSettleMs?: number;
+export interface SessionRecord {
+  sessionId: string;
+  streamId: string;
+  nativeSessionId: string;
+  cwd: string;
+  state: 'attaching' | 'idle' | 'running' | 'waiting_interaction' | 'stale';
+  activeTurn: { gianTurnId: string; promptId: string; nativeTurnId: number | null; interruptAccepted: boolean } | null;
+  lastCompleted: { gianTurnId: string; promptId: string; nativeTurnId: number | null } | null;
+  readonly projector: KimiSessionProjector;
+  isSidechat: boolean;
+  parentSessionId: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-const DEFAULT_INTERRUPT_SETTLE_MS = 10_000;
-
-function nonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw createAppError(400, 'INVALID_REQUEST', `${field} is required.`);
-  }
-  return value.trim();
+export interface TurnConfigMap {
+  model?: string;
+  thinking?: string;
+  approval_mode?: string;
 }
 
-function runtimeErrorCode(error: unknown): number | string | null {
-  if (!error || typeof error !== 'object' || !('code' in error)) return null;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'number' || typeof code === 'string' ? code : null;
+const INTERRUPT_SETTLE_MS = 15_000;
+const MESSAGE_PAGE_SIZE = 200;
+
+function sha32(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function mapRuntimeError(error: unknown, binaryPath: string): Error {
-  if (runtimeErrorCode(error) === -32000) {
-    return createAppError(
-      401,
-      'AUTH_REQUIRED',
-      `Kimi Code is not logged in. Run ${shellQuote(binaryPath)} login in a terminal, then retry.`,
-    );
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function updateKind(notification: SessionNotification): string {
-  return notification.update.sessionUpdate;
-}
-
-function permissionReason(request: RequestPermissionRequest): string {
-  const title = request.toolCall.title;
-  return typeof title === 'string' && title.trim()
-    ? title.trim()
-    : 'Kimi requested a user decision.';
-}
-
-/** Kimi's ACP adapter sends AskUserQuestion with a bare `title:
- *  'AskUserQuestion'` and the actual question text inside a toolCall content
- *  block — surface that text as the approval reason so the card shows the
- *  question, not just the tool name next to the answer options. */
-function permissionContentText(request: RequestPermissionRequest): string | null {
-  for (const block of request.toolCall.content ?? []) {
-    if (block.type === 'content' && block.content.type === 'text') {
-      const text = block.content.text.trim();
-      if (text) return text;
-    }
-  }
-  return null;
-}
-
-function commandName(value: string): string {
-  return value.trim().replace(/^\/+/, '').toLowerCase();
-}
-
-function advertisedCommand(session: SessionRecord, command: string): boolean {
-  const expected = commandName(command);
-  return session.slashCommands.some(item => commandName(item.name) === expected);
-}
-
-function firstTextCommand(input: Array<{ type: string; text?: string }>): string | null {
-  const text = input.find(item => item.type === 'text')?.text?.trim();
-  if (!text?.startsWith('/')) return null;
-  return text.split(/\s+/, 1)[0]?.toLowerCase() ?? null;
-}
-
-function tokenCount(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
-}
-
-interface ModeCapability {
-  id: string;
-  label: string;
-  description: string;
-  isDefault: boolean;
-}
-
-interface ModelCapability {
-  id: string;
-  model: string;
-  displayName: string;
-  description: string;
-  hidden: boolean;
-  isDefault: boolean;
-  defaultThinking: string | null;
-  supportedThinking: string[];
-}
-
-interface ProbedCapabilities {
-  modes: ModeCapability[];
-  models: ModelCapability[];
-  sessionOptions: SessionConfigOption[];
-}
-
-type SelectConfigOption = Extract<SessionConfigOption, { type: 'select' }>;
-
-function flatChoices(option: SelectConfigOption) {
-  return option.options.flatMap(entry =>
-    'options' in entry ? entry.options : [entry]);
-}
-
-/** Classify a session config option the same way the web composer's
- *  nativeOptionRole does: category (or id) decides whether the select is the
- *  model picker, the thinking-level picker, or the approval-mode picker. */
-function configOptionRole(
-  option: SessionConfigOption,
-): 'model' | 'thinking' | 'mode' | null {
-  const category = typeof option.category === 'string'
-    ? option.category.trim().toLowerCase()
-    : '';
-  const id = option.id.trim().toLowerCase();
-  if (category === 'model' || id === 'model') return 'model';
-  if (
-    category === 'thought_level'
-    || category === 'thought'
-    || category === 'thinking'
-    || category === 'effort'
-    || id === 'thought_level'
-    || id === 'thought'
-    || id === 'thinking'
-    || id === 'effort'
-    || id === 'reasoning_effort'
-  ) return 'thinking';
-  if (category === 'mode' || id === 'mode') return 'mode';
-  return null;
-}
-
-function selectOptionByRole(
-  options: SessionConfigOption[],
-  role: 'model' | 'thinking' | 'mode',
-): SelectConfigOption | null {
-  const found = options.find(option =>
-    option.type === 'select' && configOptionRole(option) === role);
-  return found && found.type === 'select' ? found : null;
-}
-
-/** Extract the approval-mode choices from a session's ACP configOptions.
- *  Select options may be flat or grouped. */
-function modesFromConfigOptions(options: SessionConfigOption[]): ModeCapability[] {
-  const modeOption = selectOptionByRole(options, 'mode');
-  if (!modeOption) return [];
-  return flatChoices(modeOption).map(choice => ({
-    id: String(choice.value),
-    label: choice.name || String(choice.value),
-    description: typeof choice.description === 'string' ? choice.description : '',
-    isDefault: choice.value === modeOption.currentValue,
-  }));
-}
-
-interface ModelThinking {
-  supportedThinking: string[];
-  defaultThinking: string | null;
-}
-
-function thinkingFromConfigOptions(options: SessionConfigOption[]): ModelThinking {
-  const selected = selectOptionByRole(options, 'thinking');
-  if (!selected) return { supportedThinking: [], defaultThinking: null };
-  const thinkingOption = normalizeThinkingOption(selected) as SelectConfigOption;
-  const current = typeof thinkingOption.currentValue === 'string'
-    ? thinkingOption.currentValue
-    : null;
-  return {
-    supportedThinking: flatChoices(thinkingOption).map(choice => String(choice.value)),
-    defaultThinking: current,
-  };
-}
-
-function currentModelId(options: SessionConfigOption[]): string | null {
-  const modelOption = selectOptionByRole(options, 'model');
-  return modelOption && typeof modelOption.currentValue === 'string'
-    ? modelOption.currentValue
-    : null;
-}
-
-function modelIdsFromOptions(options: SessionConfigOption[]): string[] {
-  const modelOption = selectOptionByRole(options, 'model');
-  return modelOption ? flatChoices(modelOption).map(choice => String(choice.value)) : [];
-}
-
-function modelsFromConfigOptions(
-  options: SessionConfigOption[],
-  thinkingByModel: Map<string, ModelThinking>,
-): ModelCapability[] {
-  const modelOption = selectOptionByRole(options, 'model');
-  if (!modelOption) return [];
-  return flatChoices(modelOption).map(choice => {
-    const value = String(choice.value);
-    const thinking = thinkingByModel.get(value) ?? { supportedThinking: [], defaultThinking: null };
-    return {
-      id: `kimi-model-${value}`,
-      model: value,
-      displayName: choice.name || value,
-      description: typeof modelOption.description === 'string' ? modelOption.description : '',
-      hidden: false,
-      isDefault: choice.value === modelOption.currentValue,
-      defaultThinking: thinking.defaultThinking,
-      supportedThinking: thinking.supportedThinking,
-    };
-  });
-}
-
-function capabilitiesFromConfigOptions(
-  options: SessionConfigOption[],
-  thinkingByModel: Map<string, ModelThinking>,
-): ProbedCapabilities {
-  return {
-    modes: modesFromConfigOptions(options),
-    models: modelsFromConfigOptions(options, thinkingByModel),
-    sessionOptions: [...options],
-  };
-}
-
-export function parseKimiConversationUsage(value: unknown) {
-  if (!value || typeof value !== 'object') return null;
-  const usage = value as Record<string, unknown>;
-  const inputTokens = tokenCount(usage.inputTokens);
-  const outputTokens = tokenCount(usage.outputTokens);
-  const totalTokens = tokenCount(usage.totalTokens);
-  // ACP SDK 0.23 marks these three fields as required. Accepting a partial
-  // match as an absolute snapshot would let EventCoordinator replace every
-  // missing counter with zero, so malformed/future shapes must stay unknown.
-  if (inputTokens === undefined || outputTokens === undefined || totalTokens === undefined) {
-    return null;
-  }
-  const rawCachedRead = usage.cachedReadTokens;
-  const rawCachedWrite = usage.cachedWriteTokens;
-  const rawThoughtTokens = usage.thoughtTokens;
-  const cachedReadTokens = tokenCount(rawCachedRead);
-  const cachedWriteTokens = tokenCount(rawCachedWrite);
-  const thoughtTokens = tokenCount(rawThoughtTokens);
-  if (
-    (rawCachedRead !== undefined && rawCachedRead !== null && cachedReadTokens === undefined)
-    || (rawCachedWrite !== undefined && rawCachedWrite !== null && cachedWriteTokens === undefined)
-    || (rawThoughtTokens !== undefined && rawThoughtTokens !== null && thoughtTokens === undefined)
-  ) return null;
-  return {
-    mode: 'absolute' as const,
-    inputTokens,
-    outputTokens,
-    cachedInputTokens: (cachedReadTokens ?? 0) + (cachedWriteTokens ?? 0),
-    totalTokens,
-  };
-}
-
-function conversationUsage(response: PromptResponse) {
-  return parseKimiConversationUsage(response.usage);
-}
-
-export function parseKimiStatusContext(
-  notifications: SessionNotification[],
-): { used: number; window: number } | null {
-  const text = notifications
-    .map(notification => notification.update as unknown as Record<string, unknown>)
-    .filter(update => update.sessionUpdate === 'agent_message_chunk')
-    .map(update => {
-      const content = update.content;
-      if (!content || typeof content !== 'object') return '';
-      const block = content as Record<string, unknown>;
-      return block.type === 'text' && typeof block.text === 'string' ? block.text : '';
-    })
-    .join('');
-  const match = /Context\s*:\s*([\d,_]+)\s*\/\s*([\d,_]+)/i.exec(text);
-  if (!match) return null;
-  const used = Number(match[1]!.replaceAll(/[, _]/g, ''));
-  const window = Number(match[2]!.replaceAll(/[, _]/g, ''));
-  if (!Number.isFinite(used) || used < 0 || !Number.isFinite(window) || window <= 0) {
-    return null;
-  }
-  return { used: Math.floor(used), window: Math.floor(window) };
-}
-
-export function parseKimiUsageUpdate(
-  notifications: SessionNotification[],
-): { used: number; window: number } | null {
-  let latest: { used: number; window: number } | null = null;
-  for (const notification of notifications) {
-    const update = notification.update as unknown as Record<string, unknown>;
-    if (update.sessionUpdate !== 'usage_update') continue;
-    const used = update.used;
-    const size = update.size;
-    if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) continue;
-    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) continue;
-    latest = { used: Math.floor(used), window: Math.floor(size) };
-  }
-  return latest;
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 export class KimiProxyService {
-  private readonly runtime: KimiAcpClient;
-  private readonly customization: KimiCustomizationScanner;
-  private readonly interruptSettleMs: number;
-  private emitEvent: ProxyEventSink;
-  private readonly sessionsById = new Map<string, SessionRecord>();
-  private readonly proxyIdByNativeId = new Map<string, string>();
-  private readonly activeTurns = new Map<string, ActiveTurn>();
-  private readonly approvalsById = new Map<string, PendingApproval>();
-  private readonly resumePromises = new Map<string, Promise<SessionRecord>>();
-  private readonly provisionalUpdates = new Map<string, SessionNotification[]>();
-  private readonly unclaimedUpdates = new Map<string, SessionNotification[]>();
-  private readonly slashReadySessions = new Set<string>();
-  private readonly slashWaiters = new Map<string, Set<() => void>>();
-  private readonly toolCallsByNativeId = new Map<
-    string,
-    Map<string, Record<string, unknown>>
-  >();
+  private readonly runtime: KimiServerRuntime;
+  private readonly records = new Map<string, SessionRecord>();
+  private readonly byNative = new Map<string, string>();
+  private readonly sequences = new Map<string, number>();
+  private readonly sidechatStore: OpaqueSidechatResumeStore;
+  private readonly customization = new KimiCustomizationScanner();
+  private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
+  private emitSink: (notification: OuterNotification) => void = () => undefined;
+  private stopped = false;
 
-  constructor(options: ServiceOptions) {
-    this.runtime = options.runtime;
-    this.emitEvent = options.emitEvent ?? (() => undefined);
-    this.interruptSettleMs = options.interruptSettleMs ?? DEFAULT_INTERRUPT_SETTLE_MS;
-    if (!Number.isFinite(this.interruptSettleMs) || this.interruptSettleMs <= 0) {
-      throw new TypeError('interruptSettleMs must be a positive finite number.');
-    }
-    this.customization = new KimiCustomizationScanner();
-    this.runtime.setPermissionHandler((request) => this.handlePermissionRequest(request));
-    this.runtime.on('sessionUpdate', (notification) => {
-      this.handleSessionUpdate(notification);
+  constructor(private readonly options: KimiServiceOptions) {
+    this.runtime = new KimiServerRuntime({
+      kimiBin: options.kimiBin,
+      ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
     });
-    this.runtime.on('runtimeStopped', (event) => {
-      this.handleRuntimeStopped(event);
+    this.sidechatStore = new OpaqueSidechatResumeStore(options.dataDir ?? null);
+    this.runtime.on('session-event', (frame) => this.handleFrame(frame));
+    this.runtime.on('resync', (notice) => { void this.handleResync(notice); });
+    this.runtime.on('down', () => this.handleRuntimeDown());
+  }
+
+  setEmitSink(sink: (notification: OuterNotification) => void): void {
+    this.emitSink = sink;
+  }
+
+  private nextSequence(sessionId: string): number {
+    const next = (this.sequences.get(sessionId) ?? 0) + 1;
+    this.sequences.set(sessionId, next);
+    return next;
+  }
+
+  private async ensureStarted(): Promise<void> {
+    if (this.stopped) throw new KimiProtocolError('SESSION_CLOSED', 'The proxy service is shutting down.');
+    await this.runtime.start();
+  }
+
+  // ---- registry ----
+
+  private register(record: Omit<SessionRecord, 'streamId' | 'createdAt' | 'updatedAt' | 'projector' | 'lastCompleted'> & {
+    streamId?: string;
+  }): SessionRecord {
+    const now = nowIso();
+    const projector = new KimiSessionProjector({
+      gianSessionId: record.sessionId,
+      nativeSessionId: record.nativeSessionId,
+      nextSequence: () => this.nextSequence(record.sessionId),
+      emit: (notification) => this.emitSink(notification),
+      onFinalized: () => this.onTurnFinalizedById(record.sessionId),
+      finalUsage: async () => {
+        const info = await this.runtime.rest.request<KimiSessionInfo>(
+          'GET', `/api/v1/sessions/${record.nativeSessionId}`,
+        );
+        return (info.usage ?? null) as Record<string, unknown> | null;
+      },
+      fileDiff: async (nativeTurnId: number) => this.fetchFileDiff(record.nativeSessionId, nativeTurnId),
     });
-    this.runtime.on('debug', (message) => {
-      this.emitEvent('debug', { message });
-    });
-  }
-
-  async initialize(): Promise<void> {
-    await this.runtime.ensureStarted();
-  }
-
-  supportsFork(): boolean {
-    return this.runtime.negotiated?.agentCapabilities?.sessionCapabilities?.fork != null;
-  }
-
-  supportsHttpMcp(): boolean {
-    return this.runtime.negotiated?.agentCapabilities?.mcpCapabilities?.http === true;
-  }
-
-  mcpServers(sessionId: string): SessionRecord['mcpServers'] {
-    return structuredClone(this.requireSession(sessionId).mcpServers);
-  }
-
-  setEventSink(handler: ProxyEventSink): void {
-    this.emitEvent = handler;
-  }
-
-  initializePayload(): InitializePayload {
-    return {
-      mode: 'spawn',
-      protocolVersion: 'acp/1',
-      methods: [
-        'initialize',
-        'capabilities.list',
-        'slash.list',
-        'session.create',
-        'session.get',
-        'session.listNative',
-        'session.config.set',
-        'turn.start',
-        'turn.interrupt',
-        'approval.respond',
-        'session.snapshot',
-        'session.close',
-        'shutdown',
-      ],
+    const full: SessionRecord = {
+      ...record,
+      streamId: record.streamId ?? `stream-${sha32([record.sessionId, now])}`,
+      lastCompleted: null,
+      createdAt: now,
+      updatedAt: now,
+      projector,
     };
+    full.projector.setStreamId(full.streamId);
+    this.records.set(record.sessionId, full);
+    this.byNative.set(record.nativeSessionId, record.sessionId);
+    return full;
   }
 
-  async listCapabilities() {
-    const probed = await this.probeCapabilities();
-    return {
-      ...await this.runtime.ensureStarted(),
-      modes: probed.modes,
-      models: probed.models,
-      sessionOptions: probed.sessionOptions,
-    };
+  get(sessionId: string): SessionRecord | undefined {
+    return this.records.get(sessionId);
   }
 
-  private probedCapabilities: ProbedCapabilities | null = null;
-
-  /** Kimi reveals thinking choices per current model (`session/set_config_option`
-   *  on `model` rewrites the thought-level select). Learn the baseline snapshot
-   *  once, then probe every other model on a throwaway session — never mutate a
-   *  live user session. Cached for the process lifetime; the proxy is
-   *  respawned on upgrade. On any failure (e.g. not logged in) report no
-   *  modes/models rather than breaking capabilities. */
-  private async probeCapabilities(): Promise<ProbedCapabilities> {
-    if (this.probedCapabilities) return this.probedCapabilities;
-
-    let baseline: SessionConfigOption[] | null = null;
-    let throwawayId: string | null = null;
-    for (const session of this.sessionsById.values()) {
-      if (session.configOptions.length === 0) continue;
-      baseline = session.configOptions;
-      break;
+  requireSession(sessionId: string): SessionRecord {
+    const record = this.records.get(sessionId);
+    if (record === undefined) {
+      throw new KimiProtocolError('SESSION_NOT_FOUND', `Session ${sessionId} is not attached.`);
     }
-    if (!baseline) {
-      try {
-        const response = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
-        baseline = response.configOptions ?? [];
-        throwawayId = response.sessionId;
-      } catch {
-        return { modes: [], models: [], sessionOptions: [] };
-      }
-    }
-
-    const thinkingByModel = new Map<string, ModelThinking>();
-    const current = currentModelId(baseline);
-    if (current) thinkingByModel.set(current, thinkingFromConfigOptions(baseline));
-
-    const others = modelIdsFromOptions(baseline).filter((modelId) => !thinkingByModel.has(modelId));
-    if (others.length > 0) {
-      if (!throwawayId) {
-        try {
-          const extra = await this.runtime.newSession({ cwd: tmpdir(), mcpServers: [] });
-          throwawayId = extra.sessionId;
-          const extraCurrent = currentModelId(extra.configOptions ?? []);
-          if (extraCurrent && !thinkingByModel.has(extraCurrent)) {
-            thinkingByModel.set(extraCurrent, thinkingFromConfigOptions(extra.configOptions ?? []));
-          }
-        } catch {
-          /* keep unknown models empty rather than rewriting a live session */
-        }
-      }
-      const modelOption = selectOptionByRole(baseline, 'model');
-      if (throwawayId && modelOption) {
-        for (const modelId of others) {
-          if (thinkingByModel.has(modelId)) continue;
-          try {
-            const response = await this.runtime.setSessionConfigOption({
-              sessionId: throwawayId,
-              configId: modelOption.id,
-              value: modelId,
-            });
-            thinkingByModel.set(modelId, thinkingFromConfigOptions(response.configOptions ?? []));
-          } catch {
-            thinkingByModel.set(modelId, { supportedThinking: [], defaultThinking: null });
-          }
-        }
-      }
-    }
-
-    if (throwawayId) {
-      try {
-        await this.runtime.closeSession({ sessionId: throwawayId });
-      } catch { /* close unsupported or failed — the probe session stays detached */ }
-    }
-
-    this.probedCapabilities = capabilitiesFromConfigOptions(baseline, thinkingByModel);
-    return this.probedCapabilities;
+    return record;
   }
 
-  async listNativeSessions(params: ListNativeSessionsParams) {
-    return this.runtime.listSessions({
-      ...(params.cwd ? { cwd: resolve(params.cwd) } : {}),
-      ...(params.cursor ? { cursor: params.cursor } : {}),
-    });
+  requireStream(sessionId: string, streamId: string): SessionRecord {
+    const record = this.requireSession(sessionId);
+    if (record.streamId !== streamId) {
+      throw new KimiProtocolError('SESSION_STALE', `Stream ${streamId} is no longer active.`);
+    }
+    return record;
   }
 
-  async listSlashCommands(params: GetSessionParams) {
-    const session = this.requireSession(params.sessionId);
-    await this.waitForInitialSlashCommands(session.id);
-    return { commands: [...session.slashCommands] };
+  private touch(record: SessionRecord): void {
+    record.updatedAt = nowIso();
   }
 
-  async createSession(input: CreateSessionParams) {
-    const cwd = resolve(nonEmptyString(input.cwd, 'cwd'));
-    const mcpServers = Array.isArray(input.mcpServers) ? input.mcpServers : [];
-    const nativeSessionId = typeof input.nativeSessionId === 'string'
-      && input.nativeSessionId.trim()
-      ? input.nativeSessionId.trim()
-      : null;
-    const proxySessionId = randomId('sess');
-    const createdAt = nowIso();
+  private setState(record: SessionRecord, state: SessionRecord['state']): void {
+    record.state = state;
+    this.touch(record);
+  }
 
-    if (!nativeSessionId) {
-      await recordSelectedKimiActivation(this.runtime.binaryPath);
-      try {
-        const response = await this.runtime.newSession({ cwd, mcpServers });
-        const session = this.makeSession({
-          id: proxySessionId,
-          cwd,
-          nativeSessionId: response.sessionId,
-          mcpServers,
-          configOptions: response.configOptions ?? [],
-          createdAt,
-        });
-        this.addSession(session);
-        // Kimi may publish commands before session/new resolves, when the
-        // native ID is not known to the proxy yet.
-        const initialUpdates = this.claimUnownedUpdates(session);
-        return {
-          session: this.serializeSession(session),
-          replayUpdates: initialUpdates,
-        };
-      } catch (error) {
-        throw mapRuntimeError(error, this.runtime.binaryPath);
-      }
+  /** waiting_interaction when interactions are pending on a running turn. */
+  private reconcileState(record: SessionRecord): void {
+    if (record.state === 'stale' || record.state === 'attaching') return;
+    if (record.activeTurn !== null) {
+      this.setState(record, record.projector.pendingInteractions.size > 0 ? 'waiting_interaction' : 'running');
+    } else {
+      this.setState(record, 'idle');
     }
+  }
 
-    await recordSelectedKimiActivation(this.runtime.binaryPath);
-    const session = this.makeSession({
-      id: proxySessionId,
-      cwd,
-      nativeSessionId,
-      mcpServers,
-      configOptions: [],
-      createdAt,
-    });
-    try {
-      this.addSession(session);
-    } catch (error) {
-      // Reconnect recovery: a native id left bound to a Proxy session whose
-      // shared runtime already died is provably stale — drop the dead binding
-      // once and retry the attach once. A live binding still fails closed.
-      if (!this.dropStaleNativeBinding(session.nativeSessionId, error)) throw error;
-      this.addSession(session);
-    }
-    // session/load replays history during the RPC. Hold those updates until
-    // load succeeds so the host can persist its row + replay transactionally.
-    this.provisionalUpdates.set(session.id, []);
-
-    try {
-      const response = input.resumeMode === 'resume'
-        ? await this.runtime.resumeSession({
-          sessionId: nativeSessionId,
-          cwd,
-          mcpServers,
-        })
-        : await this.runtime.loadSession({
-          sessionId: nativeSessionId,
-          cwd,
-          mcpServers,
-        });
-      session.configOptions = response.configOptions ?? session.configOptions;
-      session.updatedAt = nowIso();
-      const replayUpdates = this.provisionalUpdates.get(session.id) ?? [];
-      this.provisionalUpdates.delete(session.id);
-      this.toolCallsByNativeId.delete(session.nativeSessionId);
-      return {
-        session: this.serializeSession(session),
-        replayUpdates,
+  private onTurnFinalizedById(sessionId: string): void {
+    const record = this.records.get(sessionId);
+    if (record === undefined) return;
+    if (record.activeTurn !== null) {
+      record.lastCompleted = {
+        gianTurnId: record.activeTurn.gianTurnId,
+        promptId: record.activeTurn.promptId,
+        nativeTurnId: record.activeTurn.nativeTurnId,
       };
-    } catch (error) {
-      this.provisionalUpdates.delete(session.id);
-      this.removeSession(session);
-      throw mapRuntimeError(error, this.runtime.binaryPath);
+      record.activeTurn = null;
     }
+    this.clearInterruptTimer(record.sessionId);
+    this.reconcileState(record);
   }
 
-  async forkSession(params: { sessionId: string; mcpServers?: SessionRecord['mcpServers'] }) {
-    const source = this.requireSession(params.sessionId);
-    if (source.activeTurnId) {
-      throw createAppError(409, 'SESSION_BUSY', 'Stop the active turn before forking the session.');
-    }
-    if (!this.supportsFork()) {
-      throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Kimi ACP does not advertise session/fork.');
+  // ---- runtime events ----
+
+  private handleFrame(frame: { type: string; seq: number; session_id?: string; payload: Record<string, unknown> }): void {
+    const sessionId = typeof frame.session_id === 'string' ? frame.session_id : '';
+    const gianId = this.byNative.get(sessionId);
+    if (gianId === undefined) return;
+    const record = this.records.get(gianId);
+    if (record === undefined) return;
+    record.projector.handleFrame({ type: frame.type, seq: frame.seq, payload: frame.payload });
+    this.reconcileState(record);
+  }
+
+  private async handleResync(notice: ResyncNotice): Promise<void> {
+    const gianId = this.byNative.get(notice.sessionId);
+    if (gianId === undefined) return;
+    const record = this.records.get(gianId);
+    if (record === undefined) return;
+    if (record.projector.hasActiveTurn()) {
+      await record.projector.failTurn('The Kimi server requested a state resync while the turn was running.', true);
     }
     try {
-      const mcpServers = params.mcpServers ?? source.mcpServers;
-      const response = await this.runtime.forkSession({
-        sessionId: source.nativeSessionId,
-        cwd: source.cwd,
-        mcpServers,
-      });
-      const createdAt = nowIso();
-      const session = this.makeSession({
-        id: randomId('sess'),
-        cwd: source.cwd,
-        nativeSessionId: response.sessionId,
-        mcpServers,
-        configOptions: response.configOptions ?? source.configOptions,
-        createdAt,
-      });
-      this.addSession(session);
-      return { session: this.serializeSession(session) };
-    } catch (error) {
-      throw mapRuntimeError(error, this.runtime.binaryPath);
+      const info = await this.runtime.rest.request<KimiSessionInfo>('GET', `/api/v1/sessions/${notice.sessionId}`);
+      await this.runtime.subscribe(notice.sessionId, { seq: info.last_seq ?? 0 });
+    } catch {
+      /* the next attach/start retries; the session stays usable */
     }
   }
 
-
-  getSession(params: GetSessionParams) {
-    return { session: this.serializeSession(this.requireSession(params.sessionId)) };
+  private handleRuntimeDown(): void {
+    for (const record of this.records.values()) {
+      if (record.projector.hasActiveTurn()) {
+        void record.projector.failTurn('The Kimi server exited while the turn was running.', true);
+      }
+      this.clearInterruptTimer(record.sessionId);
+      this.setState(record, 'stale');
+      this.emitSink({
+        method: 'runtime.error',
+        params: {
+          eventId: `runtime-down-${sha32([record.sessionId, Date.now()])}`,
+          sessionId: record.sessionId,
+          streamId: record.streamId,
+          sequence: this.nextSequence(record.sessionId),
+          emittedAt: nowIso(),
+          data: {
+            domainCode: 'RUNTIME_ERROR',
+            message: 'The Kimi server process exited; the session is stale and recovers on the next request.',
+            retryable: true,
+            details: {},
+          },
+        },
+      });
+    }
   }
 
-  async startTurn(params: StartTurnParams, requestId?: number | string, beforeStart?: () => void) {
-    const session = await this.ensureAttached(this.requireSession(params.sessionId));
-    if (session.activeTurnId) {
-      throw createAppError(409, 'SESSION_BUSY', 'This session already has an active turn.');
+  // ---- session lifecycle ----
+
+  async createSession(params: {
+    sessionId: string;
+    cwd: string;
+    nativeSessionId?: string;
+    history?: 'none' | 'replay';
+  }): Promise<{ snapshot: Record<string, unknown>; replayNotifications?: OuterNotification[] }> {
+    await this.ensureStarted();
+    const existing = this.records.get(params.sessionId);
+    if (existing !== undefined) {
+      // Rebind path (proxy-side restart): the native identity must match.
+      if (params.nativeSessionId !== undefined && params.nativeSessionId !== existing.nativeSessionId) {
+        throw new KimiProtocolError('CONFLICT', 'Session id names a different native session.');
+      }
+      const info = await this.runtime.rest.request<KimiSessionInfo>(
+        'GET', `/api/v1/sessions/${existing.nativeSessionId}`,
+      );
+      if (info.busy === true) {
+        throw new KimiProtocolError('SESSION_BUSY', 'The native session is busy; refusing to rebind.');
+      }
+      existing.streamId = `stream-${sha32([params.sessionId, nowIso()])}`;
+      existing.projector.setStreamId(existing.streamId);
+      this.setState(existing, 'idle');
+      await this.subscribeNative(existing, { seq: info.last_seq ?? 0 });
+      const replayNotifications = params.history === 'replay'
+        ? this.replayNotifications(existing, await this.fetchReplay(existing))
+        : undefined;
+      return { snapshot: this.snapshot(existing), ...(replayNotifications !== undefined ? { replayNotifications } : {}) };
     }
 
-    const input = normalizeInputItems(params.input, session.cwd);
-    const prompt = await toPromptBlocks(input);
-    const command = firstTextCommand(input);
-    // Commit the adapter's replay identity only after all asynchronous input
-    // preparation succeeds, but before publishing any turn-scoped event.
-    beforeStart?.();
-    this.toolCallsByNativeId.delete(session.nativeSessionId);
-    const turnId = randomId('turn');
-    const activeTurn: ActiveTurn = {
-      turnId,
-      ...(requestId === undefined ? {} : { requestId }),
-      isCompact: command === '/compact',
-    };
-    this.activeTurns.set(session.id, activeTurn);
-    this.updateSession(session, {
-      activeTurnId: turnId,
-      status: 'running',
-      lastError: null,
+    if (params.nativeSessionId !== undefined) {
+      const info = await this.runtime.rest.request<KimiSessionInfo>(
+        'GET', `/api/v1/sessions/${params.nativeSessionId}`,
+      ).catch((error: unknown) => {
+        if (error instanceof KimiApiError && error.code === 40401) {
+          throw new KimiProtocolError('NATIVE_SESSION_NOT_FOUND', `Kimi session ${params.nativeSessionId} does not exist.`);
+        }
+        throw error;
+      });
+      if (info.busy === true) {
+        throw new KimiProtocolError('SESSION_BUSY', 'The native session is busy; refusing to attach.');
+      }
+      const record = this.register({
+        sessionId: params.sessionId,
+        nativeSessionId: info.id,
+        cwd: info.metadata?.cwd ?? params.cwd,
+        state: 'attaching',
+        activeTurn: null,
+        isSidechat: false,
+        parentSessionId: null,
+      });
+      this.setState(record, 'idle');
+      await this.subscribeNative(record, { seq: info.last_seq ?? 0 });
+      const replayNotifications = params.history === 'replay'
+        ? this.replayNotifications(record, await this.fetchReplay(record))
+        : undefined;
+      return { snapshot: this.snapshot(record), ...(replayNotifications !== undefined ? { replayNotifications } : {}) };
+    }
+
+    // Fresh native session. The workspace must be registered first (the
+    // server refuses sessions with unknown roots, error 40409).
+    const workspace = await this.runtime.rest.request<{ id: string }>('POST', '/api/v1/workspaces', {
+      json: { root: params.cwd },
     });
-    if (activeTurn.isCompact) {
-      this.emitEvent('token_usage.updated', this.eventEnvelope(session, {
-        context: null,
-        reason: 'compact_started',
-      }, turnId));
+    const info = await this.runtime.rest.request<KimiSessionInfo>('POST', '/api/v1/sessions', {
+      json: { metadata: { cwd: params.cwd }, workspace_id: workspace.id },
+    });
+    const record = this.register({
+      sessionId: params.sessionId,
+      nativeSessionId: info.id,
+      cwd: params.cwd,
+      state: 'attaching',
+      activeTurn: null,
+      isSidechat: false,
+      parentSessionId: null,
+    });
+    this.setState(record, 'idle');
+    await this.subscribeNative(record);
+    return { snapshot: this.snapshot(record) };
+  }
+
+  private async subscribeNative(record: SessionRecord, cursor?: SessionCursor): Promise<void> {
+    try {
+      await this.runtime.subscribe(record.nativeSessionId, cursor);
+    } catch (error) {
+      this.dropRecord(record);
+      throw error instanceof KimiProtocolError
+        ? error
+        : new KimiProtocolError('RUNTIME_ERROR', `Kimi event subscription failed: ${error instanceof Error ? error.message : String(error)}`, true);
     }
-    this.emitEvent('turn.started', this.eventEnvelope(session, {
-      turnId,
-      status: 'running',
-    }));
+  }
 
-    // ACP session/prompt resolves only when the turn ends. Keep the proxy RPC
-    // non-blocking and finish the turn through notifications.
-    void this.runPrompt(session.id, turnId, prompt);
+  private dropRecord(record: SessionRecord): void {
+    this.records.delete(record.sessionId);
+    if (this.byNative.get(record.nativeSessionId) === record.sessionId) {
+      this.byNative.delete(record.nativeSessionId);
+    }
+    this.runtime.forgetSession(record.nativeSessionId);
+  }
 
+  private async fetchAllMessages(nativeSessionId: string): Promise<KimiMessage[]> {
+    const messages: KimiMessage[] = [];
+    let afterId: string | undefined = undefined;
+    for (;;) {
+      const page: { items: KimiMessage[]; has_more?: boolean } = await this.runtime.rest.request<{ items: KimiMessage[]; has_more?: boolean }>(
+        'GET',
+        `/api/v1/sessions/${nativeSessionId}/messages`,
+        { query: { page_size: MESSAGE_PAGE_SIZE, ...(afterId !== undefined ? { after_id: afterId } : {}) } },
+      );
+      messages.push(...page.items);
+      if (page.has_more !== true || page.items.length === 0) break;
+      afterId = page.items.at(-1)!.id;
+    }
+    return messages;
+  }
+
+  private async fetchReplay(record: SessionRecord): Promise<{
+    replayStreamId: string;
+    events: Array<Record<string, unknown>>;
+  }> {
+    const messages = await this.fetchAllMessages(record.nativeSessionId);
+    const revision = sha32([messages.length, messages.at(-1)?.id ?? '']);
+    const replayStreamId = `replay:kimi:${record.nativeSessionId}:${revision}:v1`;
+    const events = buildReplayEvents({
+      sessionId: record.sessionId,
+      nativeSessionId: record.nativeSessionId,
+      replayStreamId,
+      messages,
+    }) as unknown as Array<Record<string, unknown>>;
+    return { replayStreamId, events };
+  }
+
+  /** Convert attach-replay events into live-stream notifications carrying the
+   *  fresh stream id and outer sequence numbers (response-barrier ordered). */
+  private replayNotifications(record: SessionRecord, replay: {
+    replayStreamId: string;
+    events: Array<Record<string, unknown>>;
+  }): OuterNotification[] {
+    void replay.replayStreamId;
+    return replay.events.map((event) => {
+      const { method, ...rest } = event as { method?: string } & Record<string, unknown>;
+      return {
+        method: method as string,
+        params: {
+          ...rest,
+          streamId: record.streamId,
+          sequence: this.nextSequence(record.sessionId),
+        },
+      };
+    });
+  }
+
+  snapshot(record: SessionRecord): Record<string, unknown> {
     return {
-      session: this.serializeSession(session),
-      turn: { id: turnId, status: 'running' },
+      id: record.sessionId,
+      nativeSession: { id: record.nativeSessionId },
+      streamId: record.streamId,
+      state: record.state === 'attaching' ? 'idle' : record.state,
+      sessionConfig: {},
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
     };
   }
 
-  async interruptTurn(params: InterruptTurnParams) {
-    const session = this.requireSession(params.sessionId);
-    if (!session.activeTurnId) {
-      throw createAppError(409, 'INVALID_REQUEST', 'This session does not have an active turn.');
+  async closeSession(sessionId: string, streamId: string): Promise<void> {
+    const record = this.requireStream(sessionId, streamId);
+    if (record.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Cannot close while a turn is active.');
     }
-    // Barrier order (frozen state machine): the session barrier rises
-    // SYNCHRONOUSLY before the cancel RPC, so no create can slip into the
-    // cancel await window. Cancel failure still drains; both failures are
-    // combined; only cancel+drain success lifts the temporary barrier.
-    const lease = this.runtime.beginSessionTerminalDrain(session.nativeSessionId);
-    let cancelError: unknown = null;
-    try {
-      await this.runtime.cancel(session.nativeSessionId);
-      this.cancelApprovalsForSession(session.id);
-    } catch (error) {
-      cancelError = error;
-    }
-    let cleanupError: unknown = null;
-    try {
-      await lease.drain();
-    } catch (error) {
-      cleanupError = error;
-      lease.keepBlocked();
-    }
-    const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
-    if (cancelError !== null && cleanupError !== null) {
-      throw createAppError(
-        500,
-        'SESSION_ERROR',
-        `Interrupt failed: cancel: ${describe(cancelError)}; terminal cleanup: ${describe(cleanupError)}`,
-      );
-    }
-    if (cleanupError !== null) {
-      throw createAppError(
-        500,
-        'SESSION_ERROR',
-        `Terminal cleanup after interrupt failed: ${describe(cleanupError)}`,
-      );
-    }
-    if (cancelError !== null) {
-      // Cleanup verified; per the frozen machine the barrier only lifts on
-      // cancel+drain success, so the session stays blocked until the next
-      // turn's successful finalizer drain re-enables terminal creation.
-      lease.keepBlocked();
-      throw createAppError(500, 'SESSION_ERROR', `Interrupt cancel failed: ${describe(cancelError)}`);
-    }
-    lease.releaseForNextTurn();
-    this.watchInterruptSettle(session.id);
-    return { ok: true, session: this.serializeSession(session) };
+    this.dropRecord(record);
+    // Detach only: the Kimi session and its history stay in the store.
   }
 
-  /** After an accepted interrupt the runtime must end the turn promptly:
-   *  `session/cancel` is an ACP notification, so its wire success says
-   *  nothing about the turn. If the turn never settles, the shared child is
-   *  wedged — fence it so the runtimeStopped broadcast fails the turn and
-   *  every session lazily rebinds to a fresh runtime. */
-  private watchInterruptSettle(sessionId: string): void {
-    const turnId = this.activeTurns.get(sessionId)?.turnId;
-    if (!turnId) return;
-    const timer = setTimeout(() => {
-      const active = this.activeTurns.get(sessionId);
-      if (!active || active.turnId !== turnId) return;
-      this.runtime.retireWedgedRuntime();
-    }, this.interruptSettleMs);
-    timer.unref();
+  // ---- native list / rename / delete ----
+
+  async listNativeSessions(params: {
+    cwd?: string;
+    cursor?: string | null;
+    limit?: number;
+  }): Promise<{ sessions: Array<Record<string, unknown>>; nextCursor: string | null }> {
+    await this.ensureStarted();
+    const limit = params.limit ?? 100;
+    let afterId: string | undefined = undefined;
+    if (params.cursor !== null && params.cursor !== undefined && params.cursor !== '') {
+      try {
+        const parsed = JSON.parse(Buffer.from(params.cursor, 'base64url').toString('utf8')) as { after?: unknown };
+        if (typeof parsed.after === 'string') afterId = parsed.after;
+      } catch {
+        throw new KimiProtocolError('INVALID_PARAMS', 'cursor is not a valid native list cursor.');
+      }
+    }
+    const page = await this.runtime.rest.request<{ items: KimiSessionInfo[]; has_more?: boolean }>(
+      'GET',
+      '/api/v1/sessions',
+      {
+        query: {
+          page_size: Math.min(limit, 200),
+          busy: false,
+          include_archive: false,
+          ...(afterId !== undefined ? { after_id: afterId } : {}),
+        },
+      },
+    );
+    const items = page.items.filter((session) => {
+      if (this.byNative.has(session.id)) return false;
+      if (params.cwd !== undefined && session.metadata?.cwd !== params.cwd) return false;
+      return true;
+    });
+    const nextCursor = page.has_more === true && page.items.length > 0
+      ? Buffer.from(JSON.stringify({ after: page.items.at(-1)!.id }), 'utf8').toString('base64url')
+      : null;
+    return {
+      sessions: items.map((session) => ({
+        id: session.id,
+        ...(session.title ? { displayName: session.title } : {}),
+        ...(session.metadata?.cwd ? { cwd: session.metadata.cwd } : {}),
+        ...(session.updated_at ? { updatedAt: session.updated_at } : {}),
+      })),
+      nextCursor,
+    };
   }
 
-  async respondApproval(params: ApprovalResponseParams) {
-    const session = this.requireSession(params.sessionId);
-    const approval = this.approvalsById.get(params.approvalId);
-    if (!approval || approval.sessionId !== session.id) {
-      throw createAppError(404, 'APPROVAL_NOT_FOUND', 'Approval not found.');
-    }
+  async renameSession(sessionId: string, streamId: string, name: string): Promise<void> {
+    const record = this.requireStream(sessionId, streamId);
+    await this.runtime.rest.request('POST', `/api/v1/sessions/${record.nativeSessionId}/profile`, {
+      json: { title: name },
+    });
+  }
 
-    if (!params.nativeOptionId) {
-      this.resolveApproval(approval, { outcome: { outcome: 'cancelled' } });
-      return { ok: true, session: this.serializeSession(session) };
+  async deleteNativeSession(nativeSessionId: string): Promise<void> {
+    await this.ensureStarted();
+    if (this.byNative.has(nativeSessionId)) {
+      throw new KimiProtocolError('SESSION_BUSY', 'The native session is attached; close it before deleting.');
     }
+    await this.runtime.rest.request('POST', `/api/v1/sessions/${nativeSessionId}:delete`, { json: {} });
+  }
 
-    if (!approval.options.some((option) => option.optionId === params.nativeOptionId)) {
-      throw createAppError(
-        409,
-        'INVALID_APPROVAL_OPTION',
-        'The selected native approval option is no longer available.',
-      );
+  // ---- turns ----
+
+  async startTurn(params: {
+    sessionId: string;
+    streamId: string;
+    turnId: string;
+    input: OuterInputItem[];
+    config: TurnConfigMap;
+  }): Promise<void> {
+    const record = this.requireStream(params.sessionId, params.streamId);
+    // Validate the payload BEFORE the busy check: a malformed input must be
+    // INVALID_PARAMS regardless of session state, and no prompt is submitted.
+    const built = buildPromptInput(params.input);
+    if (record.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'A turn is already active.');
     }
-
-    this.resolveApproval(approval, {
-      outcome: {
-        outcome: 'selected',
-        optionId: params.nativeOptionId,
+    const promptId = `gian-${sha32([record.nativeSessionId, params.turnId, built])}`;
+    const response = await this.runtime.rest.request<{
+      prompt_id: string;
+      status: 'running' | 'queued' | 'blocked';
+    }>('POST', `/api/v1/sessions/${record.nativeSessionId}/prompts`, {
+      json: {
+        content: built.content,
+        prompt_id: promptId,
+        ...(built.skills.length > 0 ? { skills: built.skills } : {}),
+        ...(params.config.model !== undefined ? { model: params.config.model } : {}),
+        ...(params.config.thinking !== undefined ? { thinking: params.config.thinking } : {}),
+        ...(params.config.approval_mode !== undefined ? { permission_mode: params.config.approval_mode } : {}),
+      },
+    }).catch((error: unknown) => {
+      if (error instanceof KimiApiError && error.code === 40927) {
+        throw new KimiProtocolError('CONFLICT', 'The Kimi server already accepted this turn (prompt id conflict).');
+      }
+      throw error;
+    });
+    if (response.status === 'queued') {
+      // The server had an active prompt we did not start; never present a
+      // queued submission as our turn.
+      throw new KimiProtocolError('SESSION_BUSY', 'The Kimi session already has an active prompt.');
+    }
+    record.activeTurn = {
+      gianTurnId: params.turnId,
+      promptId: response.prompt_id,
+      nativeTurnId: null,
+      interruptAccepted: false,
+    };
+    record.projector.bindTurn({ gianTurnId: params.turnId, promptId: response.prompt_id });
+    this.setState(record, 'running');
+    this.emitSink({
+      method: 'turn.started',
+      params: {
+        eventId: `evt-${sha32([record.nativeSessionId, response.prompt_id, 'turn.started']).slice(0, 16)}`,
+        sessionId: record.sessionId,
+        streamId: record.streamId,
+        sequence: this.nextSequence(record.sessionId),
+        turnId: params.turnId,
+        sourceTurnId: response.prompt_id,
+        emittedAt: nowIso(),
+        data: {},
       },
     });
-    return { ok: true, session: this.serializeSession(session) };
   }
 
-  async setConfigOption(params: SetConfigOptionParams) {
-    const session = await this.ensureAttached(this.requireSession(params.sessionId));
-    const configId = nonEmptyString(params.configId, 'configId');
-    const request = typeof params.value === 'boolean'
-      ? {
-        sessionId: session.nativeSessionId,
-        configId,
-        type: 'boolean' as const,
-        value: params.value,
-      }
-      : {
-        sessionId: session.nativeSessionId,
-        configId,
-        value: nonEmptyString(params.value, 'value'),
-      };
-    const response = await this.runtime.setSessionConfigOption(request);
-    session.configOptions = response.configOptions;
-    session.updatedAt = nowIso();
-    return {
-      session: this.serializeSession(session),
-      configOptions: response.configOptions,
-    };
-  }
-
-  async sessionSnapshot(params: SessionSnapshotParams) {
-    const session = await this.ensureAttached(this.requireSession(params.sessionId));
-    return {
-      session: this.serializeSession(session),
-      configOptions: session.configOptions,
-      slashCommands: session.slashCommands,
-    };
-  }
-
-  async closeSession(params: CloseSessionParams) {
-    const session = this.requireSession(params.sessionId);
-    if (session.activeTurnId) {
-      await this.runtime.cancel(session.nativeSessionId).catch(() => undefined);
+  async steerTurn(params: {
+    sessionId: string;
+    streamId: string;
+    turnId: string;
+    input: OuterInputItem[];
+  }): Promise<void> {
+    const record = this.requireStream(params.sessionId, params.streamId);
+    const turn = record.activeTurn;
+    if (turn === null || turn.gianTurnId !== params.turnId) {
+      throw new KimiProtocolError('TURN_NOT_FOUND', 'No active turn to steer; steering applies to a running turn only.');
     }
-    this.cancelApprovalsForSession(session.id);
-    // Frozen close order: the PERMANENT barrier rises synchronously before
-    // any RPC; cancel (active turn) and native close failures never skip the
-    // terminal drain; every error is combined and the close reports failure
-    // instead of a clean teardown. The binding is deleted only by this
-    // drain's successful release — never inside the client RPC wrapper.
-    const lease = this.runtime.beginSessionTerminalDrain(session.nativeSessionId, { permanent: true });
-    const failures: string[] = [];
-    const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
-    if (session.activeTurnId) {
-      try {
-        await this.runtime.cancel(session.nativeSessionId).catch((error) => {
+    const built = buildPromptInput(params.input);
+    const promptId = `gian-${sha32(['steer', record.nativeSessionId, params.turnId, built])}`;
+    const submitted = await this.runtime.rest.request<{ status: 'running' | 'queued' | 'blocked' }>(
+      'POST',
+      `/api/v1/sessions/${record.nativeSessionId}/prompts`,
+      { json: { content: built.content, prompt_id: promptId } },
+    ).catch((error: unknown) => {
+      if (error instanceof KimiApiError && error.code === 40927) {
+        // Identical steer replay: the queued prompt already exists.
+        return { status: 'queued' as const };
+      }
+      throw error;
+    });
+    if (submitted.status !== 'queued') {
+      throw new KimiProtocolError('SESSION_ERROR', 'The Kimi session has no active prompt to steer into.');
+    }
+    await this.runtime.rest.request<{ steered: boolean }>(
+      'POST',
+      `/api/v1/sessions/${record.nativeSessionId}/prompts:steer`,
+      { json: { prompt_ids: [promptId] } },
+    ).catch((error: unknown) => {
+      if (error instanceof KimiApiError && (error.code === 40402 || error.code === 40401)) {
+        throw new KimiProtocolError('TURN_NOT_FOUND', 'The Kimi session has no active turn to steer into.');
+      }
+      throw error;
+    });
+    // No terminal of our own: the running turn keeps its identity and ends
+    // through its own turn.ended event.
+  }
+
+  async interruptTurn(params: { sessionId: string; streamId: string; turnId: string }): Promise<void> {
+    const record = this.requireStream(params.sessionId, params.streamId);
+    const turn = record.activeTurn;
+    if (turn === null || turn.gianTurnId !== params.turnId) {
+      throw new KimiProtocolError('TURN_NOT_FOUND', `Turn ${params.turnId} is not active.`);
+    }
+    const result = await this.runtime.rest.request<{ aborted: boolean }>(
+      'POST',
+      `/api/v1/sessions/${record.nativeSessionId}/prompts/${turn.promptId}:abort`,
+      { json: {} },
+    ).catch((error: unknown) => {
+      if (error instanceof KimiApiError && error.code === 40402) {
+        return { aborted: false };
+      }
+      throw error;
+    });
+    if (result.aborted) {
+      record.projector.markInterruptAccepted();
+      const timer = setTimeout(() => {
+        this.interruptTimers.delete(params.sessionId);
+        if (record.activeTurn !== null && record.activeTurn.gianTurnId === params.turnId) {
+          void record.projector.failTurn(
+            'The Kimi server accepted the abort but the turn never ended; the runtime was fenced.',
+            true,
+          );
+        }
+      }, INTERRUPT_SETTLE_MS);
+      timer.unref();
+      this.interruptTimers.set(params.sessionId, timer);
+    }
+    // aborted=false: the prompt already finished; its own terminal stands.
+  }
+
+  private clearInterruptTimer(sessionId: string): void {
+    const timer = this.interruptTimers.get(sessionId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.interruptTimers.delete(sessionId);
+    }
+  }
+
+  // ---- interactions ----
+
+  async respondInteraction(params: {
+    sessionId: string;
+    streamId: string;
+    turnId: string;
+    interactionId: string;
+    actionId: string;
+    values: Record<string, unknown>;
+  }): Promise<void> {
+    const record = this.requireStream(params.sessionId, params.streamId);
+    const pending = record.projector.pendingInteractions.get(params.interactionId);
+    if (pending === undefined) {
+      throw new KimiProtocolError('INTERACTION_NOT_FOUND', `Interaction ${params.interactionId} is not pending.`);
+    }
+    if (pending.turnId !== params.turnId) {
+      throw new KimiProtocolError('INTERACTION_NOT_FOUND', 'Interaction belongs to a different turn.');
+    }
+    if (pending.kind === 'approval') {
+      if (params.actionId !== 'approved' && params.actionId !== 'rejected') {
+        throw new KimiProtocolError('INTERACTION_ACTION_NOT_FOUND', `Action ${params.actionId} was not advertised.`);
+      }
+      const feedback = params.values.feedback;
+      await this.runtime.rest.request(
+        'POST',
+        `/api/v1/sessions/${record.nativeSessionId}/approvals/${pending.nativeId}`,
+        {
+          json: {
+            decision: params.actionId,
+            ...(typeof feedback === 'string' && feedback !== '' ? { feedback } : {}),
+          },
+        },
+      ).catch((error: unknown) => {
+        if (error instanceof KimiApiError && (error.code === 40902 || error.code === 41001)) {
+          throw new KimiProtocolError('INTERACTION_NOT_FOUND', 'The approval is no longer pending on the Kimi server.');
+        }
+        throw error;
+      });
+    } else {
+      if (params.actionId !== 'accept' && params.actionId !== 'decline') {
+        throw new KimiProtocolError('INTERACTION_ACTION_NOT_FOUND', `Action ${params.actionId} was not advertised.`);
+      }
+      if (params.actionId === 'decline') {
+        await this.runtime.rest.request(
+          'POST',
+          `/api/v1/sessions/${record.nativeSessionId}/questions/${pending.nativeId}:dismiss`,
+          { json: {} },
+        ).catch((error: unknown) => {
+          if (error instanceof KimiApiError && (error.code === 40909 || error.code === 40405)) {
+            throw new KimiProtocolError('INTERACTION_NOT_FOUND', 'The question is no longer pending on the Kimi server.');
+          }
           throw error;
         });
-      } catch (error) {
-        failures.push(`cancel: ${describe(error)}`);
+      } else {
+        const answers: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(params.values)) {
+          if (key === 'note') continue;
+          answers[key] = value;
+        }
+        const note = params.values.note;
+        await this.runtime.rest.request(
+          'POST',
+          `/api/v1/sessions/${record.nativeSessionId}/questions/${pending.nativeId}`,
+          {
+            json: {
+              answers,
+              ...(typeof note === 'string' && note !== '' ? { note } : {}),
+            },
+          },
+        ).catch((error: unknown) => {
+          if (error instanceof KimiApiError && (error.code === 40909 || error.code === 40405)) {
+            throw new KimiProtocolError('INTERACTION_NOT_FOUND', 'The question is no longer pending on the Kimi server.');
+          }
+          throw error;
+        });
       }
     }
-    const nativeCloseSupported = (
-      this.runtime.negotiated?.agentCapabilities?.sessionCapabilities?.close != null
+    record.projector.resolveInteraction(params.interactionId);
+    this.reconcileState(record);
+    this.emitSink({
+      method: 'interaction.resolved',
+      params: {
+        eventId: `evt-${sha32([record.nativeSessionId, params.interactionId, 'resolved', params.actionId]).slice(0, 16)}`,
+        sessionId: record.sessionId,
+        streamId: record.streamId,
+        sequence: this.nextSequence(record.sessionId),
+        turnId: params.turnId,
+        sourceTurnId: record.activeTurn?.promptId ?? pending.turnId,
+        emittedAt: nowIso(),
+        data: { interactionId: params.interactionId, outcome: 'submitted', actionId: params.actionId },
+      },
+    });
+  }
+
+  // ---- fork & side chat ----
+
+  async forkSession(params: {
+    sourceSessionId: string;
+    sourceStreamId: string;
+    sessionId: string;
+    anchor: { type: 'head' } | { type: 'turn'; turnId: string; sourceTurnId: string };
+  }): Promise<{ session: Record<string, unknown>; origin: Record<string, unknown> }> {
+    const source = this.requireStream(params.sourceSessionId, params.sourceStreamId);
+    if (params.anchor.type === 'turn') {
+      throw new KimiProtocolError(
+        'FORK_BOUNDARY_UNAVAILABLE',
+        'The Kimi server API exposes only head forks: POST /sessions/{id}/children has no turn '
+        + 'boundary (the engine forkSessionOptionsSchema has turnIndex, but it is not on the REST surface).',
+      );
+    }
+    if (source.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Refusing to fork while a turn is active.');
+    }
+    if (source.lastCompleted === null) {
+      throw new KimiProtocolError(
+        'FORK_BOUNDARY_UNAVAILABLE',
+        'The source session has no completed turn to fork from.',
+      );
+    }
+    await this.ensureStarted();
+    const child = await this.runtime.rest.request<KimiSessionInfo>(
+      'POST',
+      `/api/v1/sessions/${source.nativeSessionId}/children`,
+      { json: {} },
     );
-    if (nativeCloseSupported && session.attached) {
-      try {
-        await this.runtime.closeSession({ sessionId: session.nativeSessionId });
-      } catch (error) {
-        failures.push(`native close: ${describe(error)}`);
-      }
-    }
-    try {
-      await lease.drain();
-    } catch (error) {
-      failures.push(`terminal cleanup: ${describe(error)}`);
-      lease.keepBlocked();
-    }
-    this.removeSession(session);
-    if (failures.length > 0) {
-      throw createAppError(500, 'SESSION_ERROR', `Session close failed: ${failures.join('; ')}`);
-    }
-    lease.releaseForNextTurn();
+    const record = this.register({
+      sessionId: params.sessionId,
+      nativeSessionId: child.id,
+      cwd: child.metadata?.cwd ?? source.cwd,
+      state: 'attaching',
+      activeTurn: null,
+      isSidechat: false,
+      parentSessionId: source.sessionId,
+    });
+    this.setState(record, 'idle');
+    await this.subscribeNative(record, { seq: child.last_seq ?? 0 });
     return {
-      ok: true,
-      nativeClosed: nativeCloseSupported,
-      detached: !nativeCloseSupported,
+      session: this.snapshot(record),
+      origin: {
+        kind: 'fork',
+        sessionId: params.sourceSessionId,
+        turnId: source.lastCompleted.gianTurnId,
+        sourceTurnId: source.lastCompleted.promptId,
+      },
     };
   }
+
+  async createSidechat(params: {
+    parentSessionId: string;
+    parentStreamId: string;
+    sidechatId: string;
+  }): Promise<Record<string, unknown>> {
+    const parent = this.requireStream(params.parentSessionId, params.parentStreamId);
+    if (parent.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Refusing to open a Side Chat while a turn is active.');
+    }
+    const anchor = parent.lastCompleted === null
+      ? { type: 'empty' as const }
+      : {
+          type: 'turn' as const,
+          turnId: parent.lastCompleted.gianTurnId,
+          sourceTurnId: parent.lastCompleted.promptId,
+        };
+    await this.ensureStarted();
+    const child = await this.runtime.rest.request<KimiSessionInfo>(
+      'POST',
+      `/api/v1/sessions/${parent.nativeSessionId}/children`,
+      { json: {} },
+    );
+    const record = this.register({
+      sessionId: params.sidechatId,
+      nativeSessionId: child.id,
+      cwd: child.metadata?.cwd ?? parent.cwd,
+      state: 'attaching',
+      activeTurn: null,
+      isSidechat: true,
+      parentSessionId: parent.sessionId,
+    });
+    this.setState(record, 'idle');
+    await this.subscribeNative(record, { seq: child.last_seq ?? 0 });
+    const resumeRef = this.sidechatStore.seal({
+      sidechatId: params.sidechatId,
+      parentSessionId: params.parentSessionId,
+      nativeSessionId: child.id,
+      anchor,
+      sessionConfig: {},
+      createdAt: nowIso(),
+    });
+    return this.sidechatSnapshot(record, resumeRef.id, anchor);
+  }
+
+  async resumeSidechat(params: {
+    sidechatId: string;
+    parentSessionId: string;
+    resumeRef: { id: string };
+  }): Promise<Record<string, unknown>> {
+    const tombstone = this.sidechatStore.closed(params.resumeRef.id);
+    if (tombstone !== null) {
+      throw new KimiProtocolError('SIDECHAT_UNAVAILABLE', 'This Side Chat was closed permanently.');
+    }
+    const payload = this.sidechatStore.open(params.resumeRef.id);
+    if (payload === null) {
+      throw new KimiProtocolError('SIDECHAT_UNAVAILABLE', 'The resume reference is not readable.');
+    }
+    await this.ensureStarted();
+    const info = await this.runtime.rest.request<KimiSessionInfo>('GET', `/api/v1/sessions/${payload.nativeSessionId}`);
+    if (info.busy === true) {
+      throw new KimiProtocolError('SESSION_BUSY', 'The Side Chat native session is busy.');
+    }
+    const record = this.register({
+      sessionId: params.sidechatId,
+      nativeSessionId: payload.nativeSessionId,
+      cwd: info.metadata?.cwd ?? '',
+      state: 'attaching',
+      activeTurn: null,
+      isSidechat: true,
+      parentSessionId: params.parentSessionId,
+    });
+    this.setState(record, 'idle');
+    await this.subscribeNative(record, { seq: info.last_seq ?? 0 });
+    return this.sidechatSnapshot(record, params.resumeRef.id, payload.anchor);
+  }
+
+  async closeSidechat(params: { sidechatId: string; streamId?: string; resumeRef: { id: string } }): Promise<void> {
+    const record = this.requireSession(params.sidechatId);
+    if (record.isSidechat !== true) {
+      throw new KimiProtocolError('SESSION_STALE', `${params.sidechatId} is not a Side Chat.`);
+    }
+    if (record.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Cannot close while a turn is active.');
+    }
+    if (params.streamId !== undefined) this.requireStream(params.sidechatId, params.streamId);
+    this.dropRecord(record);
+    // Kimi's :delete permanence is not verified for child sessions; the
+    // tombstone invalidates the resume ref and reports history honestly.
+    this.sidechatStore.rememberClosed(params.resumeRef.id, {
+      sidechatId: params.sidechatId,
+      providerDataDeleted: false,
+    });
+  }
+
+  private sidechatSnapshot(
+    record: SessionRecord,
+    resumeRefId: string,
+    anchor: { type: 'empty' } | { type: 'turn' | 'activeInput'; turnId: string; sourceTurnId: string },
+  ): Record<string, unknown> {
+    return {
+      id: record.sessionId,
+      parentSessionId: record.parentSessionId ?? '',
+      streamId: record.streamId,
+      state: record.state === 'attaching' ? 'idle' : record.state,
+      resumeRef: { id: resumeRefId },
+      anchor,
+      sessionConfig: {},
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  // ---- replay ----
+
+  async replay(params: {
+    sessionId: string;
+    streamId: string;
+    cursor: string | null;
+  }): Promise<{ replayStreamId: string; events: Array<Record<string, unknown>>; nextCursor: string | null }> {
+    const record = this.requireStream(params.sessionId, params.streamId);
+    const messages = await this.fetchAllMessages(record.nativeSessionId);
+    const revision = sha32([messages.length, messages.at(-1)?.id ?? '']);
+    const replayStreamId = `replay:kimi:${record.nativeSessionId}:${revision}:v1`;
+    const events = buildReplayEvents({
+      sessionId: record.sessionId,
+      nativeSessionId: record.nativeSessionId,
+      replayStreamId,
+      messages,
+    });
+    const offset = params.cursor === null ? 0 : Number.parseInt(params.cursor, 10);
+    if (!Number.isSafeInteger(offset) || offset < 0 || (params.cursor !== null && String(offset) !== params.cursor)) {
+      throw new KimiProtocolError('INVALID_PARAMS', 'Invalid replay cursor.');
+    }
+    const page = events.slice(offset, offset + 200);
+    const nextCursor = offset + page.length < events.length ? String(offset + page.length) : null;
+    return { replayStreamId, events: page as unknown as Array<Record<string, unknown>>, nextCursor };
+  }
+
+  // ---- catalog facts ----
+
+  async catalogFacts(): Promise<{ models: KimiModelInfo[]; defaultModel: string | null }> {
+    await this.ensureStarted();
+    const models = await this.runtime.rest.request<{ items: KimiModelInfo[] }>('GET', '/api/v1/models');
+    let defaultModel: string | null = null;
+    try {
+      const config = await this.runtime.rest.request<{ default_model?: string }>('GET', '/api/v1/config');
+      defaultModel = typeof config.default_model === 'string' && config.default_model !== '' ? config.default_model : null;
+    } catch {
+      defaultModel = null;
+    }
+    return { models: models.items, defaultModel };
+  }
+
+  // ---- customization ----
+
   async inspectCustomizations(params: {
     kind: import('@gian/proxy-protocol').CustomizationKind;
     cwd?: string;
@@ -879,7 +944,7 @@ export class KimiProxyService {
           kind: params.kind,
           status: 'unavailable',
           completeness: 'none',
-          observedAt: new Date().toISOString(),
+          observedAt: nowIso(),
           items: [],
           truncated: false,
           diagnostics: [{
@@ -905,7 +970,7 @@ export class KimiProxyService {
           kind: params.kind,
           id: params.id,
           status: 'unavailable',
-          observedAt: new Date().toISOString(),
+          observedAt: nowIso(),
           text: '',
           truncated: false,
           diagnostics: [{ code: 'PROVIDER_INSPECTION_FAILED', message: 'Kimi detail scan exceeded its inspection bound.' }],
@@ -915,534 +980,107 @@ export class KimiProxyService {
     }
   }
 
+  // ---- shutdown ----
 
-  async close(): Promise<void> {
-    for (const approval of [...this.approvalsById.values()]) {
-      this.resolveApproval(approval, { outcome: { outcome: 'cancelled' } }, false);
-    }
-    for (const sessionId of this.slashWaiters.keys()) {
-      this.resolveSlashWaiters(sessionId);
-    }
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    for (const timer of this.interruptTimers.values()) clearTimeout(timer);
+    this.interruptTimers.clear();
     await this.runtime.stop();
   }
 
-  private async runPrompt(
-    proxySessionId: string,
-    turnId: string,
-    prompt: Parameters<KimiAcpClient['prompt']>[0]['prompt'],
-  ): Promise<void> {
-    const session = this.sessionsById.get(proxySessionId);
-    if (!session) return;
+  // ---- diff helper ----
 
-    try {
-      const response = await this.runtime.prompt({
-        sessionId: session.nativeSessionId,
-        prompt,
-      });
-      const current = this.sessionsById.get(proxySessionId);
-      if (!current || current.activeTurnId !== turnId) return;
-
-      const cumulative = conversationUsage(response);
-      if (cumulative) {
-        this.emitEvent('token_usage.updated', this.eventEnvelope(current, {
-          conversation: cumulative,
-        }, turnId));
+  private async fetchFileDiff(nativeSessionId: string, nativeTurnId: number): Promise<{
+    diff: string;
+    truncated: boolean;
+    files: Array<Record<string, unknown>>;
+  } | null> {
+    const changes = await this.runtime.rest.request<{ changes: KimiFileChange[] }>(
+      'GET',
+      `/api/v1/sessions/${nativeSessionId}/file-history/changes`,
+      { query: { turn_id: nativeTurnId } },
+    );
+    if (changes.changes.length === 0) return null;
+    const files: Array<Record<string, unknown>> = [];
+    const patchParts: string[] = [];
+    let truncated = false;
+    for (const change of changes.changes.slice(0, 20)) {
+      files.push({ path: change.path, status: change.status });
+      if (change.binary === true || change.oversize === true) {
+        truncated = true;
+        continue;
       }
-      if (response.stopReason !== 'cancelled') {
-        // Kimi CLI 0.41 moved the Context line from /status to /usage; older
-        // CLIs still print it in /status.
-        const contextCommand = advertisedCommand(current, 'usage')
-          ? '/usage'
-          : advertisedCommand(current, 'status')
-            ? '/status'
-            : null;
-        if (contextCommand) {
-          try {
-            const status = await this.runtime.promptCaptured({
-              sessionId: current.nativeSessionId,
-              prompt: [{ type: 'text', text: contextCommand }],
-            });
-            // The fire-and-forget post-turn usage_update can race into this
-            // capture window; the structured sample is exact, so it wins over
-            // the rendered text line.
-            const context = parseKimiUsageUpdate(status.updates)
-              ?? parseKimiStatusContext(status.updates);
-            if (context && current.activeTurnId === turnId) {
-              this.emitEvent('token_usage.updated', this.eventEnvelope(current, {
-                context,
-              }, turnId));
-            }
-          } catch (error) {
-            this.emitEvent('debug', {
-              message: `[kimi] Could not refresh context usage: ${error instanceof Error ? error.message : String(error)}`,
-            });
-          }
-        }
-      }
-
-      this.activeTurns.delete(proxySessionId);
-      this.toolCallsByNativeId.delete(current.nativeSessionId);
-      // Turn-scoped terminal harvest precedes the terminal turn notification.
-      // A failed harvest must finish the turn as failed: the session keeps
-      // its create barrier, never reporting a clean completion over an
-      // unverified process group.
-      const lease = this.runtime.beginSessionTerminalDrain(current.nativeSessionId);
       try {
-        await lease.drain();
-      } catch (cleanupError) {
-        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-        this.cancelApprovalsForSession(proxySessionId);
-        this.updateSession(current, {
-          activeTurnId: null,
-          status: 'error',
-          lastError: message,
-        });
-        this.emitEvent('turn.failed', this.eventEnvelope(current, {
-          turnId,
-          code: 'TERMINAL_CLEANUP_FAILED',
-          message,
-        }, turnId));
-        lease.keepBlocked();
-        return;
-      }
-      lease.releaseForNextTurn();
-      this.updateSession(current, {
-        activeTurnId: null,
-        status: 'idle',
-        lastError: null,
-      });
-      this.emitEvent('turn.completed', this.eventEnvelope(current, {
-        turnId,
-        status: response.stopReason === 'cancelled' ? 'cancelled' : 'completed',
-        stopReason: response.stopReason,
-        usage: response.usage ?? null,
-      }, turnId));
-    } catch (error) {
-      const current = this.sessionsById.get(proxySessionId);
-      if (!current || current.activeTurnId !== turnId) return;
-      const mappedError = mapRuntimeError(error, this.runtime.binaryPath);
-
-      this.activeTurns.delete(proxySessionId);
-      this.toolCallsByNativeId.delete(current.nativeSessionId);
-      this.cancelApprovalsForSession(proxySessionId);
-      // Turn-scoped terminal harvest precedes the terminal turn notification.
-      // Its failure is appended to the original failure instead of being
-      // swallowed; the turn stays failed either way.
-      const lease = this.runtime.beginSessionTerminalDrain(current.nativeSessionId);
-      let failureMessage = mappedError.message;
-      let cleanupFailed = false;
-      try {
-        await lease.drain();
-      } catch (cleanupError) {
-        cleanupFailed = true;
-        lease.keepBlocked();
-        failureMessage = `${failureMessage}; terminal cleanup also failed: ${
-          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
-        }`;
-      }
-      if (!cleanupFailed) lease.releaseForNextTurn();
-      this.updateSession(current, {
-        activeTurnId: null,
-        status: 'error',
-        lastError: failureMessage,
-      });
-      this.emitEvent('turn.failed', this.eventEnvelope(current, {
-        turnId,
-        code: runtimeErrorCode(mappedError) ?? 'PROMPT_FAILED',
-        message: failureMessage,
-      }, turnId));
-    }
-  }
-
-  private handleSessionUpdate(notification: SessionNotification): void {
-    const completeNotification = this.completeToolUpdate(notification);
-    const proxySessionId = this.proxyIdByNativeId.get(completeNotification.sessionId);
-    if (!proxySessionId) {
-      const pending = this.unclaimedUpdates.get(completeNotification.sessionId) ?? [];
-      if (pending.length < 200) pending.push(completeNotification);
-      this.unclaimedUpdates.set(completeNotification.sessionId, pending);
-      if (this.unclaimedUpdates.size > 50) {
-        const oldest = this.unclaimedUpdates.keys().next().value;
-        if (typeof oldest === 'string') this.unclaimedUpdates.delete(oldest);
-      }
-      return;
-    }
-
-    const session = this.sessionsById.get(proxySessionId);
-    if (!session) return;
-    this.applySessionUpdate(session, completeNotification);
-
-    const provisional = this.provisionalUpdates.get(proxySessionId);
-    if (provisional) {
-      provisional.push(completeNotification);
-      return;
-    }
-
-    // A compact request may emit a usage sample for the summarization input.
-    // Keep the numerator invalid until the captured post-compact /usage (or
-    // legacy /status) response emits the authoritative replacement.
-    const activeTurn = this.activeTurns.get(proxySessionId);
-    if (activeTurn?.isCompact && updateKind(completeNotification) === 'usage_update') {
-      return;
-    }
-
-    this.emitEvent('acp.sessionUpdate', this.eventEnvelope(session, {
-      update: completeNotification.update,
-    }, session.activeTurnId ?? undefined, {
-      method: 'session/update',
-      params: completeNotification,
-    }));
-  }
-
-  /**
-   * ACP tool_call_update is intentionally sparse. Carry the initial tool
-   * metadata forward so downstream normalizers can keep one stable card type
-   * instead of turning a completed Read/Bash call into a second generic tool.
-   */
-  private completeToolUpdate(notification: SessionNotification): SessionNotification {
-    const update = notification.update as unknown as Record<string, unknown>;
-    const kind = update.sessionUpdate;
-    if (kind !== 'tool_call' && kind !== 'tool_call_update') return notification;
-    if (typeof update.toolCallId !== 'string') return notification;
-
-    let calls = this.toolCallsByNativeId.get(notification.sessionId);
-    if (!calls) {
-      calls = new Map();
-      this.toolCallsByNativeId.set(notification.sessionId, calls);
-    }
-    const previous = calls.get(update.toolCallId);
-    const complete = previous ? { ...previous, ...update } : { ...update };
-    calls.set(update.toolCallId, complete);
-    if (!previous || kind === 'tool_call') return notification;
-
-    return {
-      ...notification,
-      update: {
-        ...complete,
-        sessionUpdate: 'tool_call_update',
-      } as SessionNotification['update'],
-    };
-  }
-
-  private applySessionUpdate(session: SessionRecord, notification: SessionNotification): void {
-    if (updateKind(notification) === 'config_option_update') {
-      session.configOptions = (
-        notification.update as Extract<
-          SessionNotification['update'],
-          { sessionUpdate: 'config_option_update' }
-        >
-      ).configOptions;
-    } else if (updateKind(notification) === 'available_commands_update') {
-      session.slashCommands = (
-        notification.update as Extract<
-          SessionNotification['update'],
-          { sessionUpdate: 'available_commands_update' }
-        >
-      ).availableCommands;
-      this.slashReadySessions.add(session.id);
-      this.resolveSlashWaiters(session.id);
-    }
-    session.updatedAt = nowIso();
-  }
-
-  private async handlePermissionRequest(
-    request: RequestPermissionRequest,
-  ): Promise<RequestPermissionResponse> {
-    const proxySessionId = this.proxyIdByNativeId.get(request.sessionId);
-    const session = proxySessionId ? this.sessionsById.get(proxySessionId) : null;
-    if (!session || this.provisionalUpdates.has(session.id)) {
-      return { outcome: { outcome: 'cancelled' } };
-    }
-    // A permission request without options can never be relayed as a Gian
-    // interaction (the contract requires at least one action). Cancel it
-    // immediately instead of leaving the runtime blocked forever.
-    if (request.options.length === 0) {
-      this.emitEvent('debug', {
-        message: '[kimi] Permission request without options; auto-cancelling.',
-      });
-      return { outcome: { outcome: 'cancelled' } };
-    }
-
-    const approvalId = randomId('approval');
-    return new Promise<RequestPermissionResponse>((resolve) => {
-      const approval: PendingApproval = {
-        approvalId,
-        sessionId: session.id,
-        turnId: session.activeTurnId,
-        options: request.options,
-        resolve,
-      };
-      this.approvalsById.set(approvalId, approval);
-      this.updateSession(session, { status: 'needs-approval' });
-      this.emitEvent('approval.requested', this.eventEnvelope(session, {
-        approvalId,
-        title: permissionReason(request),
-        reason: permissionContentText(request) ?? permissionReason(request),
-        severity: 'medium',
-        nativeOptions: request.options,
-        payload: request,
-      }, session.activeTurnId ?? undefined, {
-        method: 'session/request_permission',
-        params: request,
-      }));
-    });
-  }
-
-  private resolveApproval(
-    approval: PendingApproval,
-    response: RequestPermissionResponse,
-    emit = true,
-  ): void {
-    this.approvalsById.delete(approval.approvalId);
-    approval.resolve(response);
-    const session = this.sessionsById.get(approval.sessionId);
-    if (!session) return;
-
-    this.updateSession(session, {
-      status: session.activeTurnId ? 'running' : 'idle',
-    });
-    if (emit) {
-      this.emitEvent('approval.resolved', this.eventEnvelope(session, {
-        approvalId: approval.approvalId,
-        nativeOptionId: response.outcome.outcome === 'selected'
-          ? response.outcome.optionId
-          : null,
-        cancelled: response.outcome.outcome === 'cancelled',
-      }, approval.turnId ?? undefined));
-    }
-  }
-
-  private cancelApprovalsForSession(sessionId: string): void {
-    for (const approval of [...this.approvalsById.values()]) {
-      if (approval.sessionId === sessionId) {
-        this.resolveApproval(approval, { outcome: { outcome: 'cancelled' } });
+        const before = await this.runtime.rest.request<{ content: { content?: string; binary?: boolean } }>(
+          'GET',
+          `/api/v1/sessions/${nativeSessionId}/file-history/content`,
+          { query: { turn_id: nativeTurnId, path: change.path, phase: 'before' } },
+        );
+        const after = await this.runtime.rest.request<{ content: { content?: string; binary?: boolean } }>(
+          'GET',
+          `/api/v1/sessions/${nativeSessionId}/file-history/content`,
+          { query: { turn_id: nativeTurnId, path: change.path, phase: 'after' } },
+        );
+        const rendered = renderUnifiedDiff(
+          change.path,
+          before.content.content ?? '',
+          change.status === 'deleted' ? '' : after.content.content ?? '',
+        );
+        if (rendered.truncated) truncated = true;
+        if (rendered.diff !== '') patchParts.push(rendered.diff);
+      } catch {
+        // The before/after phases are best-effort; the file facts stay.
+        truncated = true;
       }
     }
+    return { diff: patchParts.join('\n'), truncated, files };
   }
+}
 
-  private handleRuntimeStopped(event: {
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    expected: boolean;
-    error?: Error;
-    terminalCleanupError?: string;
-  }): void {
-    this.unclaimedUpdates.clear();
-    this.toolCallsByNativeId.clear();
-    for (const approval of [...this.approvalsById.values()]) {
-      this.resolveApproval(approval, { outcome: { outcome: 'cancelled' } });
-    }
-
-    for (const session of this.sessionsById.values()) {
-      const turn = this.activeTurns.get(session.id);
-      if (turn) {
-        this.emitEvent('turn.failed', this.eventEnvelope(session, {
-          turnId: turn.turnId,
-          code: 'RUNTIME_STOPPED',
-          message: 'Kimi ACP process stopped.',
-        }, turn.turnId));
-      }
-      this.activeTurns.delete(session.id);
-      // A failed terminal harvest is a failed runtime handover even when the
-      // stop itself was expected: keep the reason visible on every session.
-      const lastError = event.terminalCleanupError
-        ? `Terminal cleanup failed: ${event.terminalCleanupError}`
-        : event.expected ? null : 'Kimi ACP process stopped unexpectedly.';
-      this.updateSession(session, {
-        attached: false,
-        activeTurnId: null,
-        status: 'stale',
-        lastError,
-      });
-    }
-
-    this.emitEvent('runtime.stopped', {
-      data: {
-        code: event.code,
-        signal: event.signal,
-        expected: event.expected,
-        error: event.error?.message ?? null,
-        ...(event.terminalCleanupError !== undefined
-          ? { terminalCleanupError: event.terminalCleanupError }
-          : {}),
-      },
-    });
+/** Kimi transport/API errors → gian domain errors (shared with the adapter). */
+export function normalizeKimiError(error: unknown): KimiProtocolError {
+  if (error instanceof KimiProtocolError) return error;
+  if (error instanceof KimiApiError) {
+    const mapped = mapApiError(error.code);
+    return new KimiProtocolError(mapped.domain, error.message, mapped.retryable);
   }
-
-  private async ensureAttached(session: SessionRecord): Promise<SessionRecord> {
-    if (session.attached) return session;
-    const existing = this.resumePromises.get(session.id);
-    if (existing) return existing;
-
-    // A shared ACP crash invalidates every live adapter map. Rebind lazily to
-    // the same native ID; never fall back to session/new.
-    const resume = this.runtime.resumeSession({
-      sessionId: session.nativeSessionId,
-      cwd: session.cwd,
-      mcpServers: session.mcpServers,
-    }).then((response) => {
-      session.configOptions = response.configOptions ?? session.configOptions;
-      return this.updateSession(session, {
-        attached: true,
-        status: 'idle',
-        lastError: null,
-      });
-    }).catch((error) => {
-      this.updateSession(session, {
-        attached: false,
-        status: 'error',
-        lastError: error instanceof Error ? error.message : String(error),
-      });
-      throw mapRuntimeError(error, this.runtime.binaryPath);
-    }).finally(() => {
-      this.resumePromises.delete(session.id);
-    });
-
-    this.resumePromises.set(session.id, resume);
-    return resume;
+  if (error instanceof KimiTransportError) {
+    return new KimiProtocolError('RUNTIME_ERROR', error.message, true);
   }
+  return new KimiProtocolError('INTERNAL', error instanceof Error ? error.message : String(error));
+}
 
-  private claimUnownedUpdates(session: SessionRecord): SessionNotification[] {
-    const updates = this.unclaimedUpdates.get(session.nativeSessionId) ?? [];
-    this.unclaimedUpdates.delete(session.nativeSessionId);
-    for (const notification of updates) {
-      this.applySessionUpdate(session, notification);
-    }
-    return updates;
-  }
-
-  private makeSession(input: {
-    id: string;
-    cwd: string;
-    nativeSessionId: string;
-    mcpServers: SessionRecord['mcpServers'];
-    configOptions: SessionRecord['configOptions'];
-    createdAt: string;
-  }): SessionRecord {
-    return {
-      id: input.id,
-      cwd: input.cwd,
-      nativeSessionId: input.nativeSessionId,
-      mcpServers: input.mcpServers,
-      configOptions: input.configOptions,
-      slashCommands: [],
-      status: 'idle',
-      activeTurnId: null,
-      attached: true,
-      lastError: null,
-      createdAt: input.createdAt,
-      updatedAt: input.createdAt,
-    };
-  }
-
-  private addSession(session: SessionRecord): void {
-    if (this.proxyIdByNativeId.has(session.nativeSessionId)) {
-      throw createAppError(
-        409,
-        'NATIVE_SESSION_ATTACHED',
-        `Native Kimi session ${session.nativeSessionId} is already attached.`,
-      );
-    }
-    this.sessionsById.set(session.id, session);
-    this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
-  }
-
-  /** True only when `error` is the native-attach conflict AND the existing
-   *  binding is provably stale: the owning Proxy session lost its shared
-   *  runtime (attached === false), so the binding points at a dead native
-   *  attachment. The stale record is dropped once for the caller's single
-   *  retry; a live binding (or one mid-turn) fails closed. */
-  private dropStaleNativeBinding(nativeSessionId: string, error: unknown): boolean {
-    if (!(error instanceof KimiProxyError) || error.code !== 'NATIVE_SESSION_ATTACHED') {
-      return false;
-    }
-    const ownerId = this.proxyIdByNativeId.get(nativeSessionId);
-    const owner = ownerId === undefined ? undefined : this.sessionsById.get(ownerId);
-    if (!owner || owner.attached || owner.activeTurnId !== null) return false;
-    this.removeSession(owner);
-    return true;
-  }
-
-  private removeSession(session: SessionRecord): void {
-    this.sessionsById.delete(session.id);
-    if (this.proxyIdByNativeId.get(session.nativeSessionId) === session.id) {
-      this.proxyIdByNativeId.delete(session.nativeSessionId);
-    }
-    this.activeTurns.delete(session.id);
-    this.resumePromises.delete(session.id);
-    this.provisionalUpdates.delete(session.id);
-    this.slashReadySessions.delete(session.id);
-    this.resolveSlashWaiters(session.id);
-    this.toolCallsByNativeId.delete(session.nativeSessionId);
-  }
-
-  private async waitForInitialSlashCommands(sessionId: string): Promise<void> {
-    if (this.slashReadySessions.has(sessionId)) return;
-
-    await new Promise<void>((resolve) => {
-      let timer: ReturnType<typeof setTimeout>;
-      const finish = () => {
-        clearTimeout(timer);
-        const waiters = this.slashWaiters.get(sessionId);
-        waiters?.delete(finish);
-        if (waiters?.size === 0) this.slashWaiters.delete(sessionId);
-        resolve();
-      };
-      const waiters = this.slashWaiters.get(sessionId) ?? new Set<() => void>();
-      waiters.add(finish);
-      this.slashWaiters.set(sessionId, waiters);
-      // Older ACP agents may never publish available_commands_update. Keep
-      // slash.list bounded while giving Kimi's deferred command scan time to
-      // finish after session/new or session/load returns.
-      timer = setTimeout(finish, 1_000);
-    });
-  }
-
-  private resolveSlashWaiters(sessionId: string): void {
-    const waiters = this.slashWaiters.get(sessionId);
-    if (!waiters) return;
-    for (const finish of [...waiters]) finish();
-  }
-
-  private requireSession(sessionId: unknown): SessionRecord {
-    const normalized = nonEmptyString(sessionId, 'sessionId');
-    const session = this.sessionsById.get(normalized);
-    if (!session) {
-      throw createAppError(404, 'SESSION_NOT_FOUND', 'Session not found.');
-    }
-    return session;
-  }
-
-  private updateSession(
-    session: SessionRecord,
-    changes: Partial<SessionRecord>,
-  ): SessionRecord {
-    Object.assign(session, changes, { updatedAt: nowIso() });
-    return session;
-  }
-
-  private serializeSession(session: SessionRecord) {
-    const { mcpServers: _mcpServers, ...publicSession } = session;
-    return {
-      ...publicSession,
-      configOptions: [...session.configOptions],
-      slashCommands: [...session.slashCommands],
-    };
-  }
-
-  private eventEnvelope(
-    session: SessionRecord,
-    data: Record<string, unknown>,
-    turnId = session.activeTurnId ?? undefined,
-    rawRuntimeEvent?: { method: string; params?: unknown },
-  ) {
-    const activeTurn = this.activeTurns.get(session.id);
-    return {
-      ...(activeTurn?.requestId === undefined ? {} : { requestId: activeTurn.requestId }),
-      sessionId: session.id,
-      ...(turnId ? { turnId } : {}),
-      data,
-      ...(rawRuntimeEvent ? { rawRuntimeEvent } : {}),
-    };
+function mapApiError(code: number): { domain: import('../transport/protocol.js').DomainCode; retryable: boolean } {
+  switch (code) {
+    case 40001:
+    case 40002:
+    case 40409:
+    case 41301:
+      return { domain: 'INVALID_PARAMS', retryable: false };
+    case 40401:
+      return { domain: 'SESSION_NOT_FOUND', retryable: false };
+    case 40901:
+      return { domain: 'SESSION_BUSY', retryable: false };
+    case 40402:
+      return { domain: 'TURN_NOT_FOUND', retryable: false };
+    case 40404:
+    case 40405:
+    case 40902:
+    case 40909:
+    case 41001:
+    case 41002:
+      return { domain: 'INTERACTION_NOT_FOUND', retryable: false };
+    case 40927:
+      return { domain: 'CONFLICT', retryable: false };
+    case 40110:
+    case 40111:
+    case 40112:
+    case 40113:
+      return { domain: 'RUNTIME_AUTH_REQUIRED', retryable: false };
+    case 40926:
+      return { domain: 'RUNTIME_ERROR', retryable: true };
+    default:
+      return { domain: 'RUNTIME_ERROR', retryable: false };
   }
 }

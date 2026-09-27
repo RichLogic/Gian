@@ -63,7 +63,7 @@ export interface RemoteCommandAdapterDeps {
   snapshot: (device: RemoteDeviceRecord) => unknown;
   /** Oversized state.refresh payloads follow a pending snapshot receipt. */
   pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
-  listAgents?: () => Array<{ id: string; proxy?: string }>;
+  listAgents?: () => Array<{ id: string; proxy?: string; pluginId?: string }>;
   onSubscribe?: (deviceId: string, sessionId: string) => void;
   /** Branding bytes for one Proxy (manifest branding.logo). Null when the
    *  Proxy or the variant is unknown. Read-only; carries no device grant. */
@@ -297,11 +297,15 @@ export class RemoteCommandAdapter {
     if (!device.accountId) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified account required');
     const id = this.resolveAgentId(String(params['agent_id']));
     const agent = this.deps.listAgents?.().find(item => item.id === id);
-    if (!agent?.proxy) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
-    const inspected = await this.deps.sessions.agentCapabilities(agent.proxy, id);
+    // pluginId is the live identity; a null legacy proxy alias is a
+    // pure-plugin Agent, not an unavailable one.
+    if (!agent) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
+    const pluginId = agent.pluginId ?? agent.proxy;
+    if (!pluginId) throw new RemoteProtocolError('RESOURCE_NOT_FOUND', 'Agent unavailable');
+    const inspected = await this.deps.sessions.agentCapabilities(pluginId, id);
     const resolveSupported = inspected.capabilities['catalog.resolve'] !== undefined;
     const catalog = params['catalog_revision'] && resolveSupported
-      ? await this.deps.sessions.resolveAgentCatalog(agent.proxy, id, {
+      ? await this.deps.sessions.resolveAgentCatalog(pluginId, id, {
         catalogRevision: String(params['catalog_revision']),
         sessionConfig: (params['session_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,
         turnConfig: (params['turn_config'] ?? {}) as Record<string, import('@gian/shared').ConfigValue>,

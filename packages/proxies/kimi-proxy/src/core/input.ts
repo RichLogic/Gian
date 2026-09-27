@@ -1,126 +1,116 @@
-import { readFile } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+/**
+ * Outer gian input items → Kimi prompt content blocks.
+ *
+ * Upstream facts (kap-server OpenAPI 2.1.1):
+ * - `image` parts carry a `source` union; `kind:"path"` references a LOCAL
+ *   absolute path the server reads itself (no proxy-side base64 inline).
+ * - `file` parts carry `{path?, name?, media_type?, size?}`.
+ * - Prompt-level `skills: [{name, args?}]` is the native per-turn skill
+ *   activation (the REST analogue of the `/<skill>` slash command).
+ * Every rejection happens BEFORE the prompt is submitted, so there is no
+ * rollback work.
+ */
 
-import type { ContentBlock } from '@agentclientprotocol/sdk';
+import { statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 
-import { createAppError } from './errors.js';
-import type { InputItem } from './types.js';
+import { KimiProtocolError } from '../transport/protocol.js';
+import type { KimiContentPart, KimiMediaSource } from './types.js';
 
-const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  '.gif': 'image/gif',
-  '.jpeg': 'image/jpeg',
-  '.jpg': 'image/jpeg',
-  '.png': 'image/png',
-  '.webp': 'image/webp',
-};
-
-export function normalizeInputItems(input: unknown, cwd: string): InputItem[] {
-  if (!Array.isArray(input) || input.length === 0) {
-    throw createAppError(400, 'INVALID_REQUEST', 'input must be a non-empty array.');
-  }
-
-  return input.map((entry) => {
-    if (!entry || typeof entry !== 'object') {
-      throw createAppError(400, 'INVALID_REQUEST', 'Each input item must be an object.');
-    }
-
-    const record = entry as Record<string, unknown>;
-    if (record.type === 'text') {
-      const text = typeof record.text === 'string' ? record.text : '';
-      if (!text.trim()) {
-        throw createAppError(400, 'INVALID_REQUEST', 'text input items require non-empty text.');
-      }
-      return { type: 'text', text };
-    }
-
-    if (record.type === 'localImage') {
-      const path = typeof record.path === 'string' ? record.path.trim() : '';
-      if (!path) {
-        throw createAppError(400, 'INVALID_REQUEST', 'localImage items require a path.');
-      }
-      const mimeType = typeof record.mimeType === 'string' && record.mimeType.startsWith('image/')
-        ? record.mimeType
-        : undefined;
-      return {
-        type: 'localImage',
-        path: resolve(cwd, path),
-        ...(mimeType ? { mimeType } : {}),
-      };
-    }
-
-    if (record.type === 'localFile') {
-      const path = typeof record.path === 'string' ? record.path.trim() : '';
-      if (!path) {
-        throw createAppError(400, 'INVALID_REQUEST', 'localFile items require a path.');
-      }
-      const name = typeof record.name === 'string' && record.name.trim()
-        ? record.name.trim()
-        : undefined;
-      const mimeType = typeof record.mime === 'string' && record.mime.trim()
-        ? record.mime.trim()
-        : undefined;
-      const size = typeof record.size === 'number' && Number.isFinite(record.size) && record.size >= 0
-        ? record.size
-        : undefined;
-      return {
-        type: 'localFile',
-        path: resolve(cwd, path),
-        ...(name ? { name } : {}),
-        ...(mimeType ? { mimeType } : {}),
-        ...(size !== undefined ? { size } : {}),
-      };
-    }
-
-    throw createAppError(
-      400,
-      'INVALID_REQUEST',
-      `Unsupported input item type "${String(record.type)}".`,
-    );
-  });
+export interface OuterInputItem {
+  type: string;
+  text?: unknown;
+  path?: unknown;
+  name?: unknown;
+  mime?: unknown;
+  mimeType?: unknown;
+  size?: unknown;
+  args?: unknown;
+  [key: string]: unknown;
 }
 
-export async function toPromptBlocks(input: InputItem[]): Promise<ContentBlock[]> {
-  return Promise.all(input.map(async (item): Promise<ContentBlock> => {
-    if (item.type === 'text') {
-      return { type: 'text', text: item.text };
-    }
+export interface BuiltPromptInput {
+  content: KimiContentPart[];
+  skills: Array<{ name: string; args?: string }>;
+}
 
-    if (item.type === 'localFile') {
-      return {
-        type: 'resource_link',
-        uri: pathToFileURL(item.path).href,
-        name: item.name ?? item.path.split(/[\\/]/).pop() ?? 'attachment',
-        ...(item.mimeType ? { mimeType: item.mimeType } : {}),
-        ...(item.size !== undefined ? { size: item.size } : {}),
-      };
-    }
+function invalid(message: string): KimiProtocolError {
+  return new KimiProtocolError('INVALID_PARAMS', message);
+}
 
-    const mimeType = item.mimeType
-      ?? IMAGE_MIME_BY_EXTENSION[extname(item.path).toLowerCase()];
-    if (!mimeType) {
-      throw createAppError(
-        400,
-        'INVALID_IMAGE_TYPE',
-        `Cannot infer an image MIME type for ${item.path}.`,
-      );
-    }
+function requireLocalPath(item: OuterInputItem): string {
+  const path = item.path;
+  if (typeof path !== 'string' || path.length === 0) {
+    throw invalid(`${item.type}.path must be a non-empty string.`);
+  }
+  if (!isAbsolute(path) || path.split('/').includes('..')) {
+    throw invalid(`${item.type}.path must be a direct absolute path.`);
+  }
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile()) throw new Error('not a regular file');
+  } catch {
+    throw invalid(`${item.type} file is not readable on the Host: ${path}`);
+  }
+  return path;
+}
 
-    let bytes: Buffer;
-    try {
-      bytes = await readFile(item.path);
-    } catch (error) {
-      throw createAppError(
-        400,
-        'IMAGE_READ_FAILED',
-        `Could not read local image ${item.path}: ${String(error)}`,
-      );
-    }
+function mimeOf(item: OuterInputItem): string | undefined {
+  const mime = item.mime ?? item.mimeType;
+  return typeof mime === 'string' && mime.includes('/') ? mime : undefined;
+}
 
-    return {
-      type: 'image',
-      data: bytes.toString('base64'),
-      mimeType,
-    };
-  }));
+/** Build the prompt payload pieces from outer input items. */
+export function buildPromptInput(items: OuterInputItem[]): BuiltPromptInput {
+  const content: KimiContentPart[] = [];
+  const skills: Array<{ name: string; args?: string }> = [];
+  for (const item of items) {
+    switch (item.type) {
+      case 'text': {
+        if (typeof item.text !== 'string' || item.text.length === 0) {
+          throw invalid('text input requires a non-empty text field.');
+        }
+        content.push({ type: 'text', text: item.text });
+        continue;
+      }
+      case 'localImage': {
+        const path = requireLocalPath(item);
+        const source: KimiMediaSource = { kind: 'path', path };
+        content.push({
+          type: 'image',
+          source,
+          ...(typeof item.name === 'string' && item.name !== '' ? { name: item.name } : {}),
+        });
+        continue;
+      }
+      case 'localFile': {
+        const path = requireLocalPath(item);
+        const mediaType = mimeOf(item);
+        content.push({
+          type: 'file',
+          path,
+          ...(typeof item.name === 'string' && item.name !== '' ? { name: item.name } : {}),
+          ...(mediaType !== undefined ? { media_type: mediaType } : {}),
+        });
+        continue;
+      }
+      case 'skill': {
+        const name = item.name;
+        if (typeof name !== 'string' || name.length === 0) {
+          throw invalid('skill input requires a name.');
+        }
+        skills.push({
+          name,
+          ...(typeof item.args === 'string' && item.args !== '' ? { args: item.args } : {}),
+        });
+        continue;
+      }
+      default:
+        throw invalid(`Unsupported input type for Kimi: ${item.type || 'unknown'}.`);
+    }
+  }
+  if (content.length === 0 && skills.length === 0) {
+    throw invalid('Turn input resolved to neither content nor skills.');
+  }
+  return { content, skills };
 }

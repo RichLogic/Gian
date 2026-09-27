@@ -35,6 +35,32 @@ export interface BridgeTurnInputItem {
   name?: string;
   mime?: string;
   size?: number;
+  /** `skill` input only: kebab-case skill name resolved via `ctx.skills`. */
+  skill?: string;
+}
+
+/** Anchor for `session.fork`: native head, or an exact native turn ordinal. */
+export type BridgeForkAnchor =
+  | { kind: 'head' }
+  | { kind: 'turn'; nativeTurn: number };
+
+export interface BridgeSessionForkParams {
+  /** Gian-owned source session (must be attached in this runtime). */
+  sessionId: string;
+  /** Gian id for the fork child, allocated by the proxy. */
+  newSessionId: string;
+  anchor: BridgeForkAnchor;
+}
+
+export interface BridgeCustomizationListParams {
+  kind: 'skill' | 'mcp' | 'hook' | 'rule';
+  cwd?: string;
+}
+
+export interface BridgeCustomizationDetailParams {
+  kind: 'skill' | 'mcp' | 'hook' | 'rule';
+  id: string;
+  cwd?: string;
 }
 
 export interface BridgeTurnStartParams {
@@ -106,5 +132,8 @@ export interface BridgeHost {
   turnSteer(params: { sessionId: string; turnId?: string; input: unknown[] }): Promise<Record<string, unknown>>;
   turnInterrupt(params: { sessionId: string; turnId?: string }): Promise<Record<string, unknown>>;
   interactionRespond(params: BridgeInteractionRespondParams): Promise<Record<string, unknown>>;
+  sessionFork(params: BridgeSessionForkParams): Promise<Record<string, unknown>>;
+  customizationList(params: BridgeCustomizationListParams): Promise<Record<string, unknown>>;
+  customizationDetail(params: BridgeCustomizationDetailParams): Promise<Record<string, unknown>>;
   shutdown(): Promise<Record<string, unknown>>;
 }

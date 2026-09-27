@@ -104,10 +104,13 @@ export function validateReview({ render = false } = {}) {
     const active = current.plugins.find(p => p.id === id);
     assert.equal(history.schemaVersion, 1);
     assert.equal(history.pluginId, id);
-    assert.equal(history.currentVersion, pkg.version);
+    // Published history is evidence, not the version of an unreleased source
+    // candidate. Publication still requires an exact certified snapshot in
+    // projectInformation; never fabricate releases to allow development.
+    assert.equal(history.currentVersion, active?.version);
     assert.equal(manifest.pluginVersion, pkg.version);
-    assert.equal(active?.version, pkg.version);
-    assert.equal(history.entries.filter(e => e.version === pkg.version).length, 1, 'Current version must occur exactly once');
+    assert.ok(semver.gte(pkg.version, active.version), 'Source version is older than the published snapshot');
+    assert.equal(history.entries.filter(e => e.version === active.version).length, 1, 'Published version must occur exactly once');
     assert.ok(history.entries.length > 0 && history.entries.length <= 100);
     const unique = new Set();
     let previous = null;

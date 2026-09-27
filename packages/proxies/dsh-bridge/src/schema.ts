@@ -27,11 +27,14 @@ export const BRIDGE_METHODS = [
   'session.close',
   'session.native.list',
   'session.rename',
+  'session.fork',
   'session.events.read',
   'turn.start',
   'turn.steer',
   'turn.interrupt',
   'interaction.respond',
+  'customization.list',
+  'customization.detail',
   'shutdown',
 ] as const;
 
@@ -40,6 +43,7 @@ export const BRIDGE_NOTIFICATIONS = [
   'agent.status',
   'agent.error',
   'subagent.started',
+  'subagent.activity',
   'subagent.finished',
   'interaction.requested',
   'interaction.resolved',
@@ -208,17 +212,35 @@ export interface BridgeInitializeResult {
     version: string;
     sessionFormatVersion: number;
   };
-  capabilities: {
-    'session.resume': 1;
-    'session.events.read': 1;
-    'turn.interrupt': 1;
-    'catalog.changed': 1;
-    'interaction': 1;
-    'event.step': 1;
-    'event.request': 1;
-    'event.usage': 1;
-  };
+  capabilities: Partial<Record<typeof BRIDGE_CAPABILITY_KEYS[number], 1>>;
 }
 
-/** Session format version enters the proxy eventId source key (plan §8.2). */
-export const DSH_SESSION_FORMAT_VERSION = 0;
+/**
+ * DSH session format version verified against `@deepseek-ai/dsh@0.1.5-rc.3`
+ * (`SESSION_FORMAT_VERSION` in `@deepseek-ai/dsh-session/types`). It enters
+ * the proxy eventId source key and must match the runtime that actually
+ * writes the logs; the fake host and real Cordis host share it.
+ */
+export const DSH_SESSION_FORMAT_VERSION = 3;
+
+/**
+ * Bridge capabilities this bundle advertises once the corresponding native
+ * service is present on the mounted profile. The table is the single source
+ * for `initialize`; the Cordis host filters it by runtime probing, the fake
+ * host reports the full set.
+ */
+export const BRIDGE_CAPABILITY_KEYS = [
+  'session.events.read',
+  'session.fork',
+  'session.native.list',
+  'turn.interrupt',
+  'turn.steer',
+  'catalog.changed',
+  'interaction',
+  'input.attachments',
+  'input.skill',
+  'customization.skill',
+  'event.step',
+  'event.request',
+  'event.usage',
+] as const;

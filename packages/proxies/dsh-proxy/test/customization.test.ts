@@ -51,7 +51,7 @@ async function responseFor(proxy: ReturnType<typeof wire>, id: string) {
   }
 }
 
-test('DSH Proxy negotiates 2.3 with customization.list and answers proxy_unsupported', async () => {
+test('DSH Proxy negotiates 2.3 and inventories native skills read-only', async () => {
   const child = startProxy();
   try {
     const proxy = wire(child);
@@ -80,27 +80,39 @@ test('DSH Proxy negotiates 2.3 with customization.list and answers proxy_unsuppo
       kind: string;
       status: string;
       completeness: string;
-      items: unknown[];
+      items: Array<{ id: string; kind: string; name: string; discovery: { method: string } }>;
       truncated: boolean;
     } };
     assert.equal(listed.result.kind, 'skill');
-    assert.equal(listed.result.status, 'proxy_unsupported');
-    assert.equal(listed.result.completeness, 'none');
-    assert.deepEqual(listed.result.items, []);
+    assert.equal(listed.result.status, 'ok');
+    assert.equal(listed.result.completeness, 'effective');
+    assert.equal(listed.result.items.length, 1);
+    assert.equal(listed.result.items[0]?.name, 'fake-skill');
+    assert.equal(listed.result.items[0]?.discovery.method, 'provider_api');
     assert.equal(listed.result.truncated, false);
 
     proxy.send({
       jsonrpc: '2.0',
       id: 'req-3',
-      method: 'customization.detail',
-      params: { kind: 'skill', id: 'ci1_' + 'a'.repeat(32) },
+      method: 'customization.list',
+      params: { kind: 'mcp' },
     });
-    const detail = await responseFor(proxy, 'req-3') as { result: { status: string; text: string } };
-    assert.equal(detail.result.status, 'unavailable');
-    assert.equal(detail.result.text, '');
+    const listedMcp = await responseFor(proxy, 'req-3') as { result: { kind: string; status: string; items: unknown[] } };
+    assert.equal(listedMcp.result.status, 'provider_unsupported');
+    assert.deepEqual(listedMcp.result.items, []);
 
-    proxy.send({ jsonrpc: '2.0', id: 'req-4', method: 'shutdown', params: {} });
-    await responseFor(proxy, 'req-4');
+    proxy.send({
+      jsonrpc: '2.0',
+      id: 'req-4',
+      method: 'customization.detail',
+      params: { kind: 'skill', id: listed.result.items[0]?.id },
+    });
+    const detail = await responseFor(proxy, 'req-4') as { result: { status: string; text: string } };
+    assert.equal(detail.result.status, 'ok');
+    assert.equal(detail.result.text, 'Fake skill body.');
+
+    proxy.send({ jsonrpc: '2.0', id: 'req-5', method: 'shutdown', params: {} });
+    await responseFor(proxy, 'req-5');
     assert.equal(await waitForExit(child), 0);
   } finally {
     if (child.exitCode === null) child.kill('SIGKILL');

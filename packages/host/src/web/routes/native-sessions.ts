@@ -1,4 +1,4 @@
-import { executorIdForPluginId, pluginIdForExecutorId, resolvePluginIdInput, supportsNativeSessions, type ApprovalMode, type Executor, type NativeSession } from '@gian/shared';
+import { executorIdForPluginId, legacyExecutorFeatures, pluginIdForExecutorId, resolvePluginIdInput, catalogModeSemantics, usesCliCapabilitySurface, type ApprovalMode, type Executor, type NativeSession } from '@gian/shared';
 import type { Hono } from 'hono';
 import { unlink } from 'node:fs/promises';
 import { clearNativeSessionsCache, scanNativeSessions } from '../../native/scanner.js';
@@ -11,11 +11,15 @@ interface NativeSessionRouteDependencies {
   db: Db;
   sessions: SessionManager;
   broadcaster: WsBroadcaster;
+  /** Signed-Catalog plugin enumeration: native-session surfaces gate on the
+   *  per-plugin `session.native.*` capability probes below, never on this
+   *  list — it only decides which installed plugins to probe. */
+  catalogPluginIds?: () => Promise<string[]>;
 }
 
 export function registerNativeSessionRoutes(
   app: Hono,
-  { db, sessions }: NativeSessionRouteDependencies,
+  { db, sessions, catalogPluginIds }: NativeSessionRouteDependencies,
 ): void {
   const nativeMutations = new Map<string, Promise<void>>();
   const serializeNativeMutation = async <T>(key: string, operation: () => Promise<T>): Promise<T> => {
@@ -49,7 +53,10 @@ export function registerNativeSessionRoutes(
       ? executorIdForPluginId(body.executor)
       : null;
     const nativeId = body.native_session_id;
-    if (!executor || !supportsNativeSessions(executor)) {
+    // Capability-driven: the adopt service itself requires the plugin's
+    // advertised `session.native.list`; no provider allowlist here. A null
+    // legacy proxy alias is a pure-plugin Agent, not an unsupported one.
+    if (!executor) {
       return c.json({ error: 'executor does not support native session adoption' }, 400);
     }
     if (!nativeId) return c.json({ error: 'native_session_id required' }, 400);
@@ -58,8 +65,11 @@ export function registerNativeSessionRoutes(
     if ((approvalMode === 'custom' || approvalMode === 'full-access') && executor !== 'codex') {
       return c.json({ error: `${approvalMode} approval mode is codex-only` }, 400);
     }
+    // `catalog.modeSemantics`-gated (allowlist fallback for Proxies below the
+    // gate): provider-native modes live in the Proxy's own catalog, so the
+    // Gian approval_mode preset must be omitted.
     if (
-      (executor === 'kimi' || executor === 'grok' || executor === 'zcode')
+      catalogModeSemantics(executor, null) === 'provider-native'
       && body.approval_mode !== undefined
     ) {
       return c.json({
@@ -184,20 +194,12 @@ export function registerNativeSessionRoutes(
     const nativeId = c.req.param('nativeId');
     const rawExecutor = c.req.query('executor');
     const executor = rawExecutor ? executorIdForPluginId(rawExecutor) : null;
-    if (!executor || !supportsNativeSessions(executor)) {
+    // Capability-driven: `deletePluginNativeSession` enforces the plugin's
+    // advertised `session.native.delete`; plugins without it fall through to
+    // the legacy CLI scan only when the CLI itself owns a Gian-readable
+    // history surface (`usesCliCapabilitySurface`).
+    if (!executor) {
       return c.json({ error: 'executor does not support native session surfaces' }, 400);
-    }
-    if (executor === 'kimi') {
-      return c.json({
-        error: 'Kimi ACP does not expose destructive native-session deletion.',
-      }, 400);
-    }
-    if (executor === 'zcode') {
-      // Frozen D10: ZCode exposes no native delete; Gian never destroys
-      // provider history on its behalf.
-      return c.json({
-        error: 'ZCode does not expose destructive native-session deletion.',
-      }, 400);
     }
     const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
       .get(c.req.param('id')) as { path: string } | undefined;
@@ -215,7 +217,14 @@ export function registerNativeSessionRoutes(
         }, 409);
       }
 
-      if (executor === 'grok') {
+      // Capability-first deletion: the service enforces the plugin's
+      // advertised `session.native.delete`. When the plugin has no protocol
+      // listing at all and its CLI owns a Gian-readable history surface,
+      // fall back to the legacy scan-and-delete path.
+      const pluginListed = await sessions
+        .listPluginNativeSessions(executor, workspace.path)
+        .catch(() => null);
+      if (pluginListed !== null || !usesCliCapabilitySurface(executor)) {
         try {
           await sessions.deletePluginNativeSession(executor, nativeId, workspace.path);
           clearNativeSessionsCache();
@@ -224,14 +233,6 @@ export function registerNativeSessionRoutes(
           const message = error instanceof Error ? error.message : String(error);
           return c.json({ error: message }, 400);
         }
-      }
-
-      try {
-        if (await sessions.listPluginNativeSessions(executor, workspace.path) !== null) {
-          return c.json({ error: 'This plugin does not expose native-session deletion.' }, 400);
-        }
-      } catch (error) {
-        return c.json({ error: String(error) }, 400);
       }
 
       const candidates = await scanNativeSessions(workspace.path);
@@ -257,15 +258,37 @@ export function registerNativeSessionRoutes(
 
     const pluginSessions: NativeSession[] = [];
     const legacyExecutors: Array<'claude' | 'codex'> = [];
-    for (const executor of ['claude', 'codex', 'kimi', 'grok', 'zcode'] as const) {
+    // Probe whomever is actually installed: signed-Catalog plugins plus the
+    // legacy CLI-surface kinds. The per-plugin `session.native.list`
+    // capability decides whether a surface exists — a null probe means "no
+    // protocol listing", which routes to the kimi store shim (declared
+    // legacy surface) or the legacy disk scan (CLI-surface kinds).
+    const catalogIds = catalogPluginIds ? await catalogPluginIds().catch(() => []) : [];
+    const candidates = new Set<string>([
+      ...catalogIds.map(id => executorIdForPluginId(id) ?? id),
+      ...(['claude', 'codex'] as const).filter(kind => usesCliCapabilitySurface(kind)),
+    ]);
+    for (const candidate of candidates) {
+      const executor = executorIdForPluginId(candidate);
+      if (!executor) continue;
       try {
         const discovered = await sessions.listPluginNativeSessions(executor, workspace.path);
-        if (discovered !== null) pluginSessions.push(...discovered);
-        else if (executor === 'claude' || executor === 'codex') legacyExecutors.push(executor);
-        else if (executor === 'kimi') pluginSessions.push(...await sessions.listKimiNativeSessions(workspace.path));
+        if (discovered !== null) {
+          pluginSessions.push(...discovered);
+          continue;
+        }
+        // A null probe means the plugin does not advertise
+        // `session.native.list`. Kimi's proprietary store stays reachable via
+        // its declared legacy surface; CLI-surface kinds fall to the disk scan.
+        if (legacyExecutorFeatures(executor)?.nativeSessions === true
+          && legacyExecutorFeatures(executor)?.cliCapabilitySurface === false) {
+          pluginSessions.push(...await sessions.listKimiNativeSessions(workspace.path));
+          continue;
+        }
+        if (usesCliCapabilitySurface(executor)) legacyExecutors.push(executor);
       } catch (error) {
-        console.warn(`[native-sessions] ${executor} discovery unavailable: ${String(error)}`);
-        if (executor === 'claude' || executor === 'codex') legacyExecutors.push(executor);
+        console.warn(`[native-sessions] ${candidate} discovery unavailable: ${String(error)}`);
+        if (usesCliCapabilitySurface(candidate)) legacyExecutors.push(candidate);
       }
     }
     const diskSessions = legacyExecutors.length > 0

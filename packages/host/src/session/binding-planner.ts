@@ -10,6 +10,7 @@ import {
   parseProxyPluginId,
   productExecutorForPluginId,
   sessionRuntimeCliPath,
+  type ManagedRuntimeGeneration,
   type OpenRuntimeProfile,
   type SessionProxyBinding,
   type SessionRuntimeProfile,
@@ -37,9 +38,8 @@ export class SessionBindingError extends Error {
 export interface PreparedSessionLaunch {
   sessionBinding: SessionProxyBinding;
   launchBinding: ProxyLaunchBinding;
-  /** Set only when the stored Runtime profile drifted in launchable facts
-   *  (version/fingerprint/verification metadata) while identity held; the
-   *  caller must persist this re-minted binding after a successful bring-up. */
+  /** Current launch facts to persist after a successful resume when the
+   *  stored package or Runtime snapshot differs. */
   remintedBinding?: SessionProxyBinding;
   acquireLease: () => Promise<RuntimeLease | null>;
   /** Releases the initially resolved lease when ProxyManager reused an
@@ -49,6 +49,7 @@ export interface PreparedSessionLaunch {
 
 export interface SessionBindingPlannerOptions {
   resolveCurrent: (pluginId: string) => Promise<TrustedLaunch | null>;
+  resolveActiveGeneration?: (pluginId: string) => Promise<ManagedRuntimeGeneration | null>;
   resolveExact: (input: {
     pluginId: string;
     pluginVersion: string;
@@ -214,6 +215,69 @@ export function assertHandshakeMatchesBinding(
 export class SessionBindingPlanner {
   constructor(private readonly options: SessionBindingPlannerOptions) {}
 
+  /** Resume with the active certified generation. Stored package facts record
+   * the last successful launch; they do not pin future turns to old bytes. */
+  async prepareResume(binding: SessionProxyBinding): Promise<PreparedSessionLaunch> {
+    const pluginId = parseProxyPluginId(binding.pluginId);
+    const active = await this.options.resolveActiveGeneration?.(pluginId) ?? null;
+    const launch = active
+      ? await this.options.resolveExact({
+        pluginId,
+        pluginVersion: active.proxy.pluginVersion,
+        expectedManifestSha256: active.proxy.manifestSha256,
+      })
+      : await this.options.resolveCurrent(pluginId);
+    if (!launch) {
+      throw new SessionBindingError(
+        'BINDING_PACKAGE_UNAVAILABLE',
+        `No trusted current Proxy package is available for ${pluginId}.`,
+      );
+    }
+    if (launch.pluginId !== pluginId || (active && (
+      active.pluginId !== pluginId
+      || launch.pluginVersion !== active.proxy.pluginVersion
+      || launch.manifestSha256 !== active.proxy.manifestSha256
+      || launch.processScope !== active.proxy.processScope
+    ))) {
+      throw new SessionBindingError(
+        'BINDING_GENERATION_MISMATCH',
+        'The active Proxy generation does not match its trusted package.',
+      );
+    }
+    if (launch.schemaVersion !== 4 && !productExecutorForPluginId(pluginId)) {
+      throw new SessionBindingError(
+        'BINDING_SCHEMA_UNSUPPORTED',
+        'Unknown plugins require a Manifest v4 package.',
+      );
+    }
+    const profile = binding.runtimeProfile;
+    const selectedPath = active
+      ? active.runtime?.entryPath ?? null
+      : sessionRuntimeCliPath(profile);
+    const agentId = profile?.agentId ?? 'session';
+    const configHome = profile?.configHome ?? null;
+    let prepared: PreparedSessionLaunch;
+    try {
+      prepared = await this.prepareFromLaunch(
+        launch, agentId, selectedPath, profile, undefined, configHome,
+      );
+    } catch (error) {
+      if (!active && selectedPath !== null && launch.schemaVersion >= 4
+        && launch.runtime.kind === 'external' && this.options.runtimeResolver
+        && isMissingRuntimeRootError(error)) {
+        prepared = await this.prepareFromLaunch(
+          launch, agentId, null, profile, undefined, configHome, true,
+        );
+      } else {
+        throw error;
+      }
+    }
+    if (isDeepStrictEqual(binding, prepared.sessionBinding)) {
+      return { ...prepared, sessionBinding: binding };
+    }
+    return { ...prepared, remintedBinding: prepared.sessionBinding };
+  }
+
   async prepareCurrent(input: {
     agent: UserAgent;
     selectedPath: string | null;
@@ -243,6 +307,7 @@ export class SessionBindingPlanner {
     );
   }
 
+  /** Retained-package validation for migration diagnostics, not normal resume. */
   async prepareExact(binding: SessionProxyBinding): Promise<PreparedSessionLaunch> {
     const launch = await this.options.resolveExact({
       pluginId: binding.pluginId,

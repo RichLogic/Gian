@@ -21,9 +21,12 @@ vi.mock('../src/api.js', () => ({
     {
       id: 'kimi',
       name: 'Kimi Code',
+      pluginId: 'kimi',
+      proxy: null,
       ready: true,
       cli: { state: 'ready', path: '/bin/kimi', version: '1.0.0', source: 'path' },
-      proxy: { state: 'ready', path: '/proxy/kimi', version: '0.1.0', source: 'github-release' },
+      plugin: { state: 'ready', path: '/proxy/kimi', version: '0.1.0', source: 'github-release' },
+      defaults: { model: '', thinking: '', mode: '', options: {} },
       officialInstallUrl: 'https://example.invalid',
     },
   ]),

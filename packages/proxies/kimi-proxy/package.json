@@ -4,7 +4,15 @@
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",
-  "gianProxy": { "releaseId": "kimi", "shipping": true, "realAcceptance": { "binaryEnv": "KIMI_BIN", "proxyBinaryArg": "--kimi-bin", "setup": "kimi-store" } },
+  "gianProxy": {
+    "releaseId": "kimi",
+    "shipping": true,
+    "realAcceptance": {
+      "binaryEnv": "KIMI_BIN",
+      "proxyBinaryArg": "--kimi-bin",
+      "setup": "kimi-store"
+    }
+  },
   "scripts": {
     "build": "pnpm run clean && tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
@@ -14,8 +22,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.23.0",
-    "@gian/proxy-protocol": "workspace:*"
+    "@gian/proxy-protocol": "https://github.com/RichLogic/Gian/releases/download/proxy-protocol-v1.0.1/gian-proxy-protocol-1.0.1.tgz"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

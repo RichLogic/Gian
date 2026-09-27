@@ -52,6 +52,23 @@ describe('new Session screenshot ownership', () => {
     )).toBeNull();
   });
 
+  it('keeps the first-message translation choice scoped to the remote environment', () => {
+    const pending = {
+      scope: { kind: 'workspace' as const, id: 'remote-repo', environmentId: 'remote-a' },
+      text: 'hello',
+      autoTranslate: true,
+      attachments: [],
+    };
+    const remote = session({ remote_execution: {
+      environment_id: 'remote-a', environment_name: 'Build Mac', host_id: 'host-a',
+      remote_session_id: 'remote-session', repository_id: 'remote-repo', repository_name: 'Repo',
+    } });
+    expect(pendingFirstMessageForCreatedSession(pending, remote, 'interactive-create')).toBe(pending);
+    expect(pendingFirstMessageForCreatedSession(pending, session({
+      remote_execution: { ...remote.remote_execution!, environment_id: 'remote-b' },
+    }), 'interactive-create')).toBeNull();
+  });
+
   it('never consumes an interactive draft for native adoption', () => {
     expect(pendingFirstMessageForCreatedSession(
       {

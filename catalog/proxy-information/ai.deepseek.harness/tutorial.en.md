@@ -50,8 +50,8 @@ Before actual startup, the Proxy prepares/checks the gian profile in DSH_HOME so
 ## 5. First use
 
 1. Install DeepSeek Harness Integration and wait for the Proxy, DSH Runtime and dependencies to pass checks and activate.
-2. Add an Agent with a new managed HOME or an explicitly selected existing DSH HOME.
-3. Configure a Provider through this Agent's maintenance terminal using the current DSH flow. A working configuration in another profile does not prove the gian profile is ready.
+2. Add an Agent. The default HOME is `~/.dsh`; choose a new managed HOME for isolation.
+3. Configure a Provider through the current DSH Web settings flow for this HOME. DSH has no general CLI login command; a working configuration in another profile does not prove the gian profile is ready.
 4. Check the Provider, Model, Reasoning and Agent Preset options actually returned by DSH/Bridge.
 5. Try a small workspace task and inspect tools, permission presets and completion. Program installation does not complete Provider account setup.
 
@@ -59,7 +59,7 @@ On Bridge/profile failure, preserve diagnostics and directory state, repair depe
 
 ## 6. HOME and isolation
 
-DSH_HOME points to the Agent's state directory:
+DSH_HOME points to the Agent's state directory. It defaults to `~/.dsh`; a separate managed HOME lives at:
 
 ```text
 <dataDir>/homes/ai.deepseek.harness/<agentId>/
@@ -68,7 +68,7 @@ DSH_HOME points to the Agent's state directory:
 
 DSH manages configuration, authentication and sessions in its HOME/profile; exact files depend on the DSH version. The Bridge in the Proxy archive is program code. Do not mix these locations or copy them over one another as a dependency repair.
 
-Agents default to separate HOME directories. Reusing one shares vendor state. Gian does not clear custom HOME directories; the CLI and controlled profile preparation may normally read/write them. HOME isolation does not replace workspace permissions or DSH execution policy.
+Choose a separate managed HOME for another account or configuration. Gian does not clear custom HOME directories; the CLI and controlled profile preparation may normally read/write them. HOME isolation does not replace workspace permissions or DSH execution policy.
 
 ## 7. Reverse proxies and custom endpoints
 

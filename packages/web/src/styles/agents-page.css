@@ -359,3 +359,23 @@ button.catalog-item .grow { flex: 1; min-width: 0; display: flex; flex-direction
   .p2 .kv-grid { grid-template-columns: 78px minmax(0, 1fr); column-gap: 8px; }
   .p2-body { padding-inline: 12px; }
 }
+
+.agent-login-dialog {
+  width: min(860px, calc(100vw - 32px));
+  height: min(580px, calc(100dvh - 48px));
+}
+.agent-login-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+}
+.agent-login-head .s2-help { margin: 6px 0 0; overflow-wrap: anywhere; }
+.agent-login-tty {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  background: var(--surface);
+}
+.agent-login-tty .gian-terminal { width: 100%; height: 100%; }

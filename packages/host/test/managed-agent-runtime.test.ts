@@ -47,7 +47,7 @@ function generation(root: string, proxyEntry: string, cliEntry: string): Managed
   };
 }
 
-test('managed Agents share one certified Runtime and receive separate HOMEs', async t => {
+test('managed Agents share one certified Runtime while native and isolated HOMEs stay separate', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-agent-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const proxyEntry = join(dataDir, 'plugins', 'claude', '0.2.4', 'proxy.mjs');
@@ -91,11 +91,13 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   });
 
   const first = await manager.createAgent({ name: 'Claude A', pluginId: 'claude' });
-  const second = await manager.createAgent({ name: 'Claude B', pluginId: 'claude' });
+  const second = await manager.createAgent({ name: 'Claude B', pluginId: 'claude', home: { kind: 'managed' } });
   assert.equal(first.cliPath, null);
   assert.equal(manager.updateLockDataDir(), dataDir);
   assert.equal(second.cliPath, null);
-  assert.equal(first.home?.kind, 'managed');
+  assert.deepEqual(first.home, {
+    kind: 'custom', path: await realpath(join(dataDir, 'user-home', '.claude')),
+  });
   assert.equal(second.home?.kind, 'managed');
   assert.notEqual(first.home?.path, second.home?.path);
   assert.equal(manager.agentRuntimePath(first.id).cliPath, cliEntry);
@@ -112,6 +114,13 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   assert.notEqual(firstStatus.runtimeProfile?.id, secondStatus.runtimeProfile?.id);
   assert.equal(firstStatus.cli.source, 'managed');
   assert.notEqual(firstStatus.cli.path, '/usr/local/bin/claude', 'managed Runtime must ignore machine paths');
+  const login = await manager.prepareAgentCliTerminal(first.id, 'login');
+  assert.equal(login.executable, cliEntry);
+  assert.deepEqual(login.args, ['auth', 'login']);
+  assert.equal(login.cwd, first.home?.path);
+  assert.equal(login.env.CLAUDE_CONFIG_DIR, first.home?.path);
+  await login.reservation.cancelBeforeSpawn();
+  await login.release();
   const persisted = JSON.parse(await readFile(join(dataDir, 'agents.json'), 'utf8')) as {
     schemaVersion: number;
     agents: Array<Record<string, unknown>>;
@@ -121,7 +130,7 @@ test('managed Agents share one certified Runtime and receive separate HOMEs', as
   assert.deepEqual(persisted.agents.map(item => item.home), [first.home, second.home]);
 });
 
-test('ZCode readiness is projected from its active certified generation without a managed HOME', async t => {
+test('ZCode readiness is projected from its active certified generation with the selected HOME', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-zcode-agent-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const proxyEntry = join(dataDir, 'plugins', 'com.zhipu.zcode', '0.1.1', 'proxy.mjs');
@@ -191,11 +200,19 @@ test('ZCode readiness is projected from its active certified generation without 
   await generations.activate('com.zhipu.zcode', candidate.generationId);
   manager.managedRuntimeActivated('com.zhipu.zcode');
   const status = await manager.agentStatus(agent.id);
-  assert.equal(status.home, null);
+  assert.deepEqual(status.home, {
+    kind: 'custom', path: await realpath(join(dataDir, 'user-home', '.zcode')),
+  });
   assert.equal(status.ready, true);
   assert.equal(status.cli.path, runtimeEntry);
   assert.equal(status.cli.source, 'managed');
-  assert.equal(status.runtimeProfile?.configHome, null);
+  assert.equal(status.runtimeProfile?.configHome, status.home?.path);
+  const login = await manager.prepareAgentCliTerminal(agent.id, 'login');
+  assert.equal(login.executable, process.execPath);
+  assert.deepEqual(login.args, [runtimeEntry, 'login']);
+  assert.equal(login.env.HOME, await realpath(join(dataDir, 'user-home')));
+  await login.reservation.cancelBeforeSpawn();
+  await login.release();
 });
 
 test('managed Agent creation rejects CLI paths and validates Custom HOME ownership', async t => {
@@ -388,7 +405,7 @@ test('managed Agent API rejects CLI input and creates a recoverable Agent before
   const createdBody = await created.json() as {
     agent: { id: string; home: { kind: string; path: string }; cliPath?: unknown; cli: { path: string | null } };
   };
-  assert.equal(createdBody.agent.home.kind, 'managed');
+  assert.equal(createdBody.agent.home.kind, 'custom');
   assert.equal('cliPath' in createdBody.agent, false);
   assert.equal(createdBody.agent.cli.path, null);
 

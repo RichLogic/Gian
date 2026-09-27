@@ -3,7 +3,7 @@ import {
   sessionAllowsLegacyRuntimeFallback,
   sessionBoundRuntimeCliPath,
   sessionExactBindingError,
-  sessionProxyPluginVersion,
+  sessionRuntimeCliPath,
   type AgentProxyDefaults,
   type ConfigOption,
   type ConfigValue,
@@ -46,7 +46,7 @@ export interface BringUpProxySessionInput {
   /** The owning Agent's resolved CLI path; null resolves through the
    *  provider default (environment override / PATH / official install). */
   cliPath?: string | null;
-  /** Exact immutable Proxy package selected by the Session Runtime Profile. */
+  /** Current trusted Proxy version when no prepared launch is supplied. */
   proxyVersion?: string | null;
   nativeSessionId?: string | null;
   forkBoundaries?: PersistedForkBoundary[];
@@ -231,7 +231,7 @@ export class ProxySessionCoordinator {
     let capturedLegacyLaunch: PreparedSessionLaunch | undefined;
     let preparedLaunch: PreparedSessionLaunch | undefined;
     if (isSessionProxyBinding(session.proxy_binding) && this.bindingPlanner) {
-      preparedLaunch = await this.bindingPlanner.prepareExact(session.proxy_binding);
+      preparedLaunch = await this.bindingPlanner.prepareResume(session.proxy_binding);
     } else if (sessionAllowsLegacyRuntimeFallback(session) && this.bindingPlanner) {
       try {
         capturedLegacyLaunch = await this.bindingPlanner.captureLegacyAttach({
@@ -260,11 +260,13 @@ export class ProxySessionCoordinator {
       executor: session.executor,
       cwd: session.worktree_path ?? workspace.path,
       model: session.model,
-      cliPath: sessionBoundRuntimeCliPath(session)
+      cliPath: (preparedLaunch
+        ? sessionRuntimeCliPath(preparedLaunch.sessionBinding.runtimeProfile)
+        : sessionBoundRuntimeCliPath(session))
         ?? (sessionAllowsLegacyRuntimeFallback(session)
           ? this.resolveCliPath?.(session.executor, session) ?? null
           : null),
-      proxyVersion: sessionProxyPluginVersion(session),
+      proxyVersion: preparedLaunch?.sessionBinding.pluginVersion ?? null,
       nativeSessionId: session.native_session_id,
       forkBoundaries: persistedForkBoundaries(this.db, session.id),
       executorConfig: session.executor_config,

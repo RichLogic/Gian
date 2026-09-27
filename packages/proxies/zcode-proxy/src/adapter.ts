@@ -1,11 +1,19 @@
 /**
- * gian.proxy/2.1 adapter for com.zhipu.zcode.
+ * gian.proxy/2.1-2.3 adapter for com.zhipu.zcode, rebased onto the open-source
+ * ZCode CLI 0.16.9 (upstream commit 328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f).
  *
  * Response barriers (contract §16): every mutating request queues the
  * notifications it causes and the CLI flushes them AFTER the response.
  * `turn.started` is emitted when ZCode's typed `turn-started` event confirms
  * runtime execution, so the outer stream never claims a fact before the
  * runtime does.
+ *
+ * 0.16.9 send path: turns are driven by the v4 `sendText` command
+ * (packages/shared/src/zcode-protocol-v4/command.ts:81-134), which carries
+ * attachments ({ref, fileName, mime, bytes}) and the requested delivery
+ * routing. The legacy `session/event` stream keeps flowing for v4-driven
+ * turns while a desktop-continuous subscription exists
+ * (server-operations.ts:3040-3082 `onSessionEvent`).
  */
 
 import { createHash } from 'node:crypto';
@@ -30,7 +38,18 @@ import {
   revisionFor,
   type ProjectedCatalog,
 } from './catalog.js';
-import { SessionProjector, terminalEventIdFor, type OuterNotification } from './events.js';
+import {
+  buildManualSkillPrompt,
+  commandIdFor,
+  validateLocalAttachment,
+  type InnerAttachmentRef,
+} from './attachments.js';
+import {
+  SessionInteractionActionError,
+  SessionProjector,
+  terminalEventIdFor,
+  type OuterNotification,
+} from './events.js';
 import {
   GIAN_RUNTIME_PREFERENCES,
   InnerError,
@@ -39,7 +58,19 @@ import {
   registerGianReverseHandlers,
   ZCodeTransport,
 } from './inner/transport.js';
-import type { InnerReadState, InnerSessionSummary, InnerSettings, InnerSlashCommand } from './inner/model.js';
+import type {
+  InnerCommandAck,
+  InnerConversationRow,
+  InnerModelInfo,
+  InnerModelRef,
+  InnerPresentation,
+  InnerReadState,
+  InnerSessionSummary,
+  InnerSettings,
+  InnerSkillEntry,
+  InnerRowsRangeResult,
+  InnerUserInputQuestion,
+} from './inner/model.js';
 import {
   InteractionResponseLedger,
   randomId,
@@ -83,11 +114,51 @@ interface PendingInteraction {
   gianSessionId: string;
   gianTurnId: string;
   serverRequestId: string;
-  responses: Map<string, Record<string, unknown>>;
   resolved: boolean;
+  respond: (actionId: string, values: Record<string, unknown>) => Record<string, unknown>;
 }
 
-function customizationUnsupportedList(kind: string) {
+/** Adapter-visible facts about model/thoughtLevel state. In 0.16.9,
+ *  session/create and session/resume snapshots carry the FULL provider model
+ *  catalog (server-operations.ts snapshot() defaults modelAvailability to
+ *  undefined -> app.listModels(); only read/subscribe/setModel narrow to
+ *  "current"), so the store MERGES the available lists observed across
+ *  snapshots and keeps the newest current/thought facts. This feeds the
+ *  side-effect-free catalog without creating sessions or model requests. */
+export class ModelFactStore {
+  private settings: InnerSettings | null = null;
+  update(settings: InnerSettings | null | undefined): void {
+    if (settings === null || settings === undefined) return;
+    if (typeof settings !== 'object') return;
+    const previous = this.settings;
+    if (previous === null) {
+      this.settings = settings;
+      return;
+    }
+    const merged = new Map<string, InnerModelInfo>();
+    for (const model of [...(previous.model?.available ?? []), ...(settings.model?.available ?? [])]) {
+      const key = `${model.ref?.providerId ?? ''}\u0000${model.ref?.modelId ?? ''}`;
+      if (key !== '\u0000') merged.set(key, model);
+    }
+    this.settings = {
+      ...previous,
+      model: {
+        ...previous.model,
+        ...(settings.model?.current !== undefined ? { current: settings.model.current } : {}),
+        ...(settings.model?.lastUsed !== undefined ? { lastUsed: settings.model.lastUsed } : {}),
+        available: [...merged.values()],
+      },
+      ...(settings.thoughtLevel !== undefined ? { thoughtLevel: settings.thoughtLevel } : {}),
+      ...(settings.permission !== undefined ? { permission: settings.permission } : {}),
+      ...(settings.mode !== undefined ? { mode: settings.mode } : {}),
+    };
+  }
+  current(): InnerReadState | null {
+    return this.settings === null ? null : { settings: this.settings };
+  }
+}
+
+function customizationUnsupportedList(kind: string, message: string) {
   return {
     kind,
     status: 'proxy_unsupported',
@@ -97,7 +168,7 @@ function customizationUnsupportedList(kind: string) {
     truncated: false,
     diagnostics: [{
       code: 'SOURCE_NOT_ENUMERABLE',
-      message: 'ZCode customization sources are not safely enumerable by this Proxy version.',
+      message,
     }],
   };
 }
@@ -116,12 +187,19 @@ function customizationUnavailableDetail(kind: string, id: string, message: strin
 
 const EMPTY_CATALOG: ProjectedCatalog = bootstrapCatalog('uninitialized');
 
+/** Upstream task types surfaced in the native session list
+ *  (task-list-session-membership.ts TASK_LIST_SESSION_TYPES, minus
+ *  workflow_parent whose children are internal projections). */
+const ADOPTABLE_SESSION_KINDS = new Set(['interactive', 'fork']);
+const LISTABLE_SESSION_STATUSES = new Set(['idle', 'completed', 'error']);
+
 export class ZcodeV2Adapter {
   private initialized = false;
   private protocolVersion: '2.1' | '2.2' | '2.3' = '2.1';
   private queue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
   private catalog: ProjectedCatalog = EMPTY_CATALOG;
-  private catalogState: InnerReadState | null = null;
+  private catalogPresentation: InnerPresentation | null = null;
+  private catalogModelState: InnerReadState | null = null;
   private readonly registry: SessionRegistry;
   private readonly turns = new TurnLedger();
   private readonly responses = new InteractionResponseLedger();
@@ -141,12 +219,17 @@ export class ZcodeV2Adapter {
       interactionEnabled: boolean;
       runtimeBin: string;
       isNativeSessionOwned?: (nativeSessionId: string) => boolean;
+      /** Shared model facts observed from live session snapshots. */
+      modelFacts?: ModelFactStore;
     },
   ) {
     this.registry = new SessionRegistry(options.dataDir);
     registerGianReverseHandlers(this.transport);
     this.transport.registerReverseHandler('interaction/requestPermission', (params, transportId) => (
       this.handlePermissionReverseRequest(params, transportId)
+    ));
+    this.transport.registerReverseHandler('interaction/requestUserInput', (params, transportId) => (
+      this.handleUserInputReverseRequest(params, transportId)
     ));
     this.transport.on('notification', (notification: { method: string; params: Record<string, unknown> }) => {
       this.routeInnerNotification(notification.method, notification.params);
@@ -162,18 +245,8 @@ export class ZcodeV2Adapter {
   private handleInnerRuntimeFailure(failure: InnerRuntimeFailure): void {
     for (const record of this.registry.activeRecords()) {
       const projector = this.projectors.get(record.nativeSessionId);
-      projector?.finalizeTurn('error_provider_business', { runtimeFailure: failure });
-      for (const [interactionId, pending] of this.pendingInteractions) {
-        if (pending.gianSessionId !== record.sessionId) continue;
-        this.pendingInteractions.delete(interactionId);
-        try {
-          this.transport.respondToServer(pending.serverRequestId, {
-            error: { code: -32603, message: 'Provider turn ended before permission was resolved.' },
-          });
-        } catch {
-          // The native request may already have ended with the provider failure.
-        }
-      }
+      projector?.finalizeTurn('error_during_execution', { runtimeFailure: failure });
+      this.abortPendingInteractionsFor(record.sessionId, 'Provider turn ended before the interaction was resolved.');
       this.registry.markIdle(record);
       this.turns.forgetStream(record.sessionId, record.streamId);
     }
@@ -190,7 +263,7 @@ export class ZcodeV2Adapter {
     for (const record of this.registry.records()) {
       const projector = this.projectors.get(record.nativeSessionId);
       if (record.activeTurnId !== null) {
-        projector?.finalizeTurn('error_runtime_exit', { runtimeFailure: failure });
+        projector?.finalizeTurn('error_during_execution', { runtimeFailure: failure });
       } else {
         this.emit({
           method: 'runtime.error',
@@ -215,7 +288,25 @@ export class ZcodeV2Adapter {
       this.registry.quarantine(record, 'runtime-exit');
       this.turns.forgetStream(record.sessionId, record.streamId);
     }
-    this.pendingInteractions.clear();
+    this.abortPendingInteractionsFor(null, 'ZCode app-server exited before the interaction was resolved.');
+  }
+
+  /** Terminate every hanging interaction (optionally scoped to one session):
+   *  answer the open server requests so the runtime never waits. The outer
+   *  interaction.resolved fact (turn_ended / runtime_ended) is emitted by the
+   *  projector's terminal finalizer, so this must not emit a second one. */
+  private abortPendingInteractionsFor(sessionId: string | null, message: string): void {
+    for (const [interactionId, pending] of this.pendingInteractions) {
+      if (sessionId !== null && pending.gianSessionId !== sessionId) continue;
+      this.pendingInteractions.delete(interactionId);
+      try {
+        this.transport.respondToServer(pending.serverRequestId, {
+          error: { code: -32603, message },
+        });
+      } catch {
+        // The native request may already have ended with the failure.
+      }
+    }
   }
 
   setEmitSink(sink: (notification: OuterNotification) => void): void {
@@ -281,8 +372,11 @@ export class ZcodeV2Adapter {
       case 'session.get': return this.sessionGet(params);
       case 'turn.start': return this.turnStart(params);
       case 'turn.interrupt': return this.turnInterrupt(params);
+      case 'turn.steer': return this.turnSteer(params);
       case 'interaction.respond': return this.interactionRespond(params);
       case 'session.close': return this.sessionClose(params);
+      case 'session.rename': return this.sessionRename(params);
+      case 'session.fork': return this.sessionFork(params);
       case 'session.native.list': return this.sessionNativeList(params);
       case 'session.replay': return this.sessionReplay(params);
       case 'runtime.discover':
@@ -301,21 +395,24 @@ export class ZcodeV2Adapter {
           throw new ServiceError('CAPABILITY_NOT_SUPPORTED', `${method} requires gian.proxy/2.3.`);
         }
         return method === 'customization.list'
-          ? customizationUnsupportedList(String((params as Record<string, unknown>).kind ?? ''))
-          : customizationUnavailableDetail(
-              String((params as Record<string, unknown>).kind ?? ''),
-              String((params as Record<string, unknown>).id ?? ''),
-              'ZCode customization detail is not supported.',
-            );
+          ? this.customizationList(params)
+          : this.customizationDetail(params);
       case 'shutdown': return this.shutdown();
-      case 'session.rename':
-      case 'session.native.delete':
-      case 'turn.steer':
       case 'sidechat.create':
       case 'sidechat.resume':
       case 'sidechat.close':
-      case 'session.fork':
-        throw new ServiceError('CAPABILITY_NOT_SUPPORTED', `${method} is not part of the ZCode v1 capability set.`);
+        throw new ServiceError(
+          'SIDECHAT_UNAVAILABLE',
+          'ZCode selection side chats inherit hidden parent context and restrict fork/retry; '
+          + 'they are not a semantic Gian Side Chat (session-fork.ts:677-693, commands/executor.ts:10-16).',
+        );
+      case 'session.native.delete':
+        throw new ServiceError(
+          'CAPABILITY_NOT_SUPPORTED',
+          'ZCode v4 deleteSession is documented as closeSession: it unloads the runtime but never '
+          + 'purges persisted history (session-mgmt.ts:154-158). ZCode Proxy exposes session.close '
+          + '(detach) and keeps history visible.',
+        );
       default:
         throw new ServiceError('METHOD_NOT_FOUND', `Unknown method ${method}.`);
     }
@@ -334,7 +431,10 @@ export class ZcodeV2Adapter {
     // Execution closure: when the entry lives inside a resource tree that also
     // contains bundled plugins, cover the whole tree (WP0 G8).
     const packagesDir = join(dirname(entry), 'packages');
-    if (existsSync(packagesDir)) {
+    const managedRoot = resolve(dirname(entry), '..');
+    if (existsSync(join(managedRoot, 'gian-source.json'))) {
+      hash.update(`closure:${hashTree(managedRoot)}\u0000`);
+    } else if (existsSync(packagesDir)) {
       hash.update(`closure:${hashTree(dirname(entry))}\u0000`);
     }
     this.runtimeKeyCache = hash.digest('hex');
@@ -363,6 +463,8 @@ export class ZcodeV2Adapter {
     this.initialized = true;
     this.protocolVersion = selected;
     this.catalog = EMPTY_CATALOG;
+    this.catalogPresentation = null;
+    this.catalogModelState = null;
     const capabilities = capabilitiesFor({ interaction: this.options.interactionEnabled });
     if (selected !== '2.1') {
       capabilities['runtime.discover'] = 1;
@@ -379,14 +481,16 @@ export class ZcodeV2Adapter {
 
   // ---- catalog ----
 
-  private async readState(workspace: string): Promise<InnerReadState> {
-    const state = await this.transport.request('workspace/readState', {
-      workspace: { workspacePath: workspace, workspaceKey: workspace },
-    }) as InnerReadState | null;
-    if (state === null || typeof state !== 'object') {
-      throw new ServiceError('RUNTIME_UNAVAILABLE', 'workspace/readState returned no state.');
+  /** Side-effect-free workspace read. 0.16.9 replaced `workspace/readState`
+   *  with `workspace/readPresentation` (mode + slashCommands only). */
+  private async readPresentation(cwd: string): Promise<InnerPresentation> {
+    const presentation = await this.transport.request('workspace/readPresentation', {
+      workspace: { workspacePath: cwd, workspaceKey: cwd },
+    }) as InnerPresentation | null;
+    if (presentation === null || typeof presentation !== 'object') {
+      throw new ServiceError('RUNTIME_UNAVAILABLE', 'workspace/readPresentation returned no presentation.');
     }
-    return state;
+    return presentation;
   }
 
   private assertInnerProtocol(state: InnerReadState): void {
@@ -400,11 +504,53 @@ export class ZcodeV2Adapter {
     }
   }
 
+  /** The pinned CLI exposes the configured Registry without creating a
+   * session or returning Provider credentials. */
+  private async readModelCatalog(): Promise<InnerReadState> {
+    const catalog = await this.transport.request('gian/modelCatalog', {}) as Record<string, unknown> | null;
+    if (catalog?.schemaVersion !== 1 || !Array.isArray(catalog.models)) {
+      throw new ServiceError('RUNTIME_UNAVAILABLE', 'ZCode Runtime does not expose the pinned model catalog contract.');
+    }
+    for (const model of catalog.models) {
+      if (!model || typeof model !== 'object'
+        || typeof model.ref?.providerId !== 'string' || !model.ref.providerId
+        || typeof model.ref?.modelId !== 'string' || !model.ref.modelId) {
+        throw new ServiceError('RUNTIME_UNAVAILABLE', 'ZCode model catalog contains an invalid model reference.');
+      }
+    }
+    const current = catalog.selection as InnerModelRef | undefined;
+    if (current && (typeof current.providerId !== 'string' || typeof current.modelId !== 'string')) {
+      throw new ServiceError('RUNTIME_UNAVAILABLE', 'ZCode model catalog contains an invalid selection.');
+    }
+    return { settings: { model: {
+      available: catalog.models as InnerModelInfo[],
+      ...(current ? { current } : {}),
+    } } };
+  }
+
+  private effectiveCatalogModelState(): InnerReadState | null {
+    const full = this.catalogModelState;
+    if (!full) return null;
+    const observed = this.options.modelFacts?.current()?.settings;
+    const current = observed?.model?.current;
+    const advertised = full.settings?.model?.available ?? [];
+    if (!current || !advertised.some(model => model.ref?.providerId === current.providerId
+      && model.ref.modelId === current.modelId)) return full;
+    return { settings: {
+      ...full.settings,
+      model: { ...full.settings?.model, current },
+      ...(observed?.thoughtLevel ? { thoughtLevel: observed.thoughtLevel } : {}),
+    } };
+  }
+
   private async catalogList(): Promise<unknown> {
-    const state = await this.readState(this.options.catalogWorkspace);
-    this.assertInnerProtocol(state);
-    this.catalogState = state;
-    this.catalog = projectCatalog(this.runtimeKey(), state);
+    const [presentation, modelState] = await Promise.all([
+      this.readPresentation(this.options.catalogWorkspace),
+      this.readModelCatalog(),
+    ]);
+    this.catalogPresentation = presentation;
+    this.catalogModelState = modelState;
+    this.catalog = projectCatalog(this.runtimeKey(), presentation, this.effectiveCatalogModelState());
     return this.catalog;
   }
 
@@ -418,13 +564,18 @@ export class ZcodeV2Adapter {
       // names is impossible without cache; require a re-list.
       throw new ServiceError('CONFIG_VALUE_INVALID', 'Unknown catalogRevision; call catalog.list again.');
     }
-    if (this.catalogState === null) {
+    if (this.catalogPresentation === null) {
       throw new ServiceError('CONFIG_VALUE_INVALID', 'catalog.resolve ran before catalog.list.');
     }
     const sessionConfig = (params.sessionConfig ?? {}) as Record<string, unknown>;
     const turnConfig = (params.turnConfig ?? {}) as Record<string, unknown>;
     try {
-      return resolveCatalog(this.runtimeKey(), this.catalogState, { sessionConfig, turnConfig });
+      return resolveCatalog(
+        this.runtimeKey(),
+        this.catalogPresentation,
+        this.effectiveCatalogModelState(),
+        { sessionConfig, turnConfig },
+      );
     } catch (error) {
       if (error instanceof ConfigValueInvalidError) {
         throw new ServiceError('CONFIG_VALUE_INVALID', error.message);
@@ -435,6 +586,43 @@ export class ZcodeV2Adapter {
 
   // ---- session lifecycle ----
 
+  /** Map outer hostServices (streamable-http MCP descriptors) to ZCode
+   *  session-scoped remote MCP entries. 0.16.9 accepts `mcpServers` on
+   *  session/create AND session/resume (shared/zp/index.ts:1559-1599); the
+   *  entry is a full session-runtime override (protocol-mcp-config.ts:4-42),
+   *  so no user global config is ever touched. */
+  private hostServicesToMcpServers(hostServices: unknown): Array<Record<string, unknown>> | undefined {
+    if (Array.isArray(hostServices) === false || hostServices.length === 0) return undefined;
+    const servers: Array<Record<string, unknown>> = [];
+    for (const raw of hostServices) {
+      const service = raw as Record<string, unknown>;
+      const id = typeof service.id === 'string' ? service.id : '';
+      const transport = (service.transport ?? {}) as Record<string, unknown>;
+      const url = typeof transport.url === 'string' ? transport.url : '';
+      if (id === '' || url === '') {
+        throw new ServiceError('INVALID_PARAMS', 'hostServices entries need id and transport.url.');
+      }
+      if (service.protocol !== undefined && service.protocol !== 'mcp') {
+        throw new ServiceError('INVALID_PARAMS', `Unsupported hostService protocol: ${String(service.protocol)}.`);
+      }
+      const headers = transport.headers;
+      servers.push({
+        name: id,
+        type: 'http',
+        url,
+        ...(headers !== undefined && typeof headers === 'object' && Array.isArray(headers) === false
+          ? {
+              headers: Object.entries(headers as Record<string, string>)
+                .filter(([name]) => typeof name === 'string' && name !== '')
+                .map(([name, value]) => ({ name, value: String(value) })),
+            }
+          : {}),
+        isolation: 'session',
+      });
+    }
+    return servers;
+  }
+
   private async sessionCreate(params: Record<string, unknown>): Promise<unknown> {
     const sessionId = stringField(params, 'sessionId');
     const workspace = (params.workspace ?? {}) as Record<string, unknown>;
@@ -442,6 +630,7 @@ export class ZcodeV2Adapter {
     const config = (params.config ?? {}) as Record<string, ConfigValue>;
     const native = (params.nativeSession ?? null) as Record<string, unknown> | null;
     const nativeHistory = native && native.history === 'replay' ? 'replay' : 'none';
+    const mcpServers = this.hostServicesToMcpServers(params.hostServices);
 
     if (config && Object.keys(config).length > 0) {
       // v1 declares no session-bound options; an explicit snapshot must be {}.
@@ -482,6 +671,7 @@ export class ZcodeV2Adapter {
     let record: SessionRecord;
     if (native !== null && typeof native.id === 'string' && native.id !== '') {
       record = this.registry.beginAttach(sessionId, native.id, runtimeKey);
+      if (mcpServers !== undefined) record.hostMcpServers = mcpServers;
       try {
         await this.adoptNativeSession(record, native.id, nativeHistory === 'replay');
       } catch (error) {
@@ -491,20 +681,38 @@ export class ZcodeV2Adapter {
     } else {
       // Fresh native session. Handlers are registered before spawn; the
       // reverse preference requests are answered from the frozen Gian profile.
-      const created = await this.transport.request('session/create', {
-        workspace: { workspacePath: cwd, workspaceKey: cwd },
-      }, 45_000) as Record<string, unknown> | null;
-      const inner = (created?.session ?? null) as InnerReadState['session'] | null;
-      const nativeSessionId = typeof inner?.sessionId === 'string' ? inner.sessionId : null;
-      if (nativeSessionId === null) {
-        throw new ServiceError('RUNTIME_ERROR', 'ZCode session/create returned no native session id.');
+      // 0.16.9 turns are v4 turns, so the session MUST be created through the
+      // v4 `createSession` command: its deferred draft is the row the v4
+      // CommandInbox's session_input foreign key resolves against when the
+      // first sendText promotes persistence. A legacy `session/create`
+      // produces a session the v4 store does not know, and every v4 turn dies
+      // on the FK constraint (live-verified 0.16.9).
+      const ack = await this.v4Command({
+        commandId: commandIdFor(['createSession', sessionId]),
+        clientId: `gian:${sessionId}`,
+        sessionId: null,
+        type: 'createSession',
+        payload: {
+          workspaceId: cwd,
+          ...(mcpServers !== undefined ? { mcpServers } : {}),
+        },
+      }, 45_000);
+      const nativeSessionId = typeof ack.result?.sessionId === 'string' ? ack.result.sessionId : '';
+      if (nativeSessionId === '') {
+        throw new ServiceError('RUNTIME_ERROR', 'ZCode v4 createSession returned no native session id.');
       }
-      this.assertInnerProtocol(created as unknown as InnerReadState);
       record = this.registry.beginAttach(sessionId, nativeSessionId, runtimeKey);
-      record.confirmedNativeSettings = this.confirmedSettingsFrom(created);
-      await this.attachProjector(record);
-      this.registry.markOwned(record);
-      this.maybeCatalogChanged(created);
+      if (mcpServers !== undefined) record.hostMcpServers = mcpServers;
+      try {
+        // Adopt the fresh draft through the same resume+read path as an
+        // explicit attach: resume's snapshot carries the FULL provider model
+        // catalog (read alone narrows to the current model), which feeds the
+        // side-effect-free catalog and the selection vocabulary checks.
+        await this.adoptNativeSession(record, nativeSessionId, false);
+      } catch (error) {
+        this.registry.detachForce(record);
+        throw error;
+      }
     }
 
     this.createFingerprints.set(sessionId, fingerprint);
@@ -516,24 +724,35 @@ export class ZcodeV2Adapter {
   private confirmedSettingsFrom(created: Record<string, unknown> | null): SessionRecord['confirmedNativeSettings'] {
     const settings = (created?.settings ?? {}) as Record<string, unknown>;
     const model = (settings.model ?? {}) as Record<string, unknown>;
-    const current = model.current as Record<string, unknown> | undefined;
+    const current = model.current as InnerModelRef | undefined;
+    const modelOptions = current?.options;
     const thought = (settings.thoughtLevel ?? {}) as Record<string, unknown>;
     const permission = (settings.permission ?? {}) as Record<string, unknown>;
     return {
       ...(current && typeof current.providerId === 'string' && typeof current.modelId === 'string'
-        ? { model: { providerId: current.providerId, modelId: current.modelId } }
+        ? { model: { providerId: current.providerId, modelId: current.modelId,
+          ...(typeof modelOptions?.reasoningLevel === 'string' ? { options: { reasoningLevel: modelOptions.reasoningLevel } } : {}),
+        } }
         : {}),
-      ...(typeof thought.current === 'string' ? { thoughtLevel: thought.current } : {}),
+      ...(typeof modelOptions?.reasoningLevel === 'string' ? { thoughtLevel: modelOptions.reasoningLevel }
+        : typeof thought.current === 'string' ? { thoughtLevel: thought.current } : {}),
       ...(typeof permission.mode === 'string' ? { mode: permission.mode } : {}),
     };
   }
 
   private async adoptNativeSession(record: SessionRecord, nativeId: string, wantHistory: boolean): Promise<void> {
-    void wantHistory;
     // Ownership probe: read fails for sessions that are not loaded; resume
     // loads them. Both errors fail the attach WITHOUT mutating ZCode state.
-    await this.transport.request('session/resume', { sessionId: nativeId }, 30_000);
-    const read = await this.transport.request('session/read', { sessionId: nativeId }, 20_000) as InnerReadState | null;
+    // resume returns the FULL model catalog (snapshot() default); the
+    // follow-up read narrows to the current model, so facts merge from both.
+    const resumed = await this.transport.request('session/resume', {
+      sessionId: nativeId,
+      ...(record.hostMcpServers !== undefined ? { mcpServers: record.hostMcpServers } : {}),
+    }, 30_000) as Record<string, unknown> | null;
+    this.options.modelFacts?.update((resumed?.settings ?? undefined) as InnerReadState['settings']);
+    const read = await this.transport.request('session/read', {
+      sessionId: nativeId,
+    }, 20_000) as InnerReadState | null;
     if (read === null) {
       throw new ServiceError('NATIVE_SESSION_NOT_FOUND', 'ZCode returned no state for the native session.');
     }
@@ -543,8 +762,50 @@ export class ZcodeV2Adapter {
     }
     this.assertInnerProtocol(read);
     record.confirmedNativeSettings = this.confirmedSettingsFrom(read as unknown as Record<string, unknown>);
+    this.options.modelFacts?.update(read.settings);
     await this.attachProjector(record);
     this.registry.markOwned(record);
+    if (wantHistory) {
+      // Full history recovery: session/read's snapshot only carries messages
+      // with the subscribe snapshot; fetch the durable transcript and project
+      // it as replay-identity events on the fresh stream.
+      await this.replayHistoryOnAttach(record);
+    }
+  }
+
+  /** Project persisted history onto the freshly attached stream: complete
+   *  messages, tool calls and terminal states with stable eventIds, then a
+   *  plan snapshot when the session carries todos. Live events after the
+   *  subscribe baseline carry native eventIds, so no duplicate or reordered
+   *  facts reach the Host. */
+  private async replayHistoryOnAttach(record: SessionRecord): Promise<void> {
+    const projector = this.projectors.get(record.nativeSessionId);
+    if (projector === undefined) return;
+    const messages = await this.transport.request('session/messages', {
+      sessionId: record.nativeSessionId,
+    }, 30_000) as { messages?: Array<unknown> } | null;
+    const all = messages?.messages ?? [];
+    if (all.length > 0) {
+      const events = buildReplayEvents({
+        gianSessionId: record.sessionId,
+        streamId: record.streamId,
+        nativeSessionId: record.nativeSessionId,
+        messages: all,
+      });
+      for (const event of events) {
+        // buildReplayEvents returns the flat replay-event shape; the outer
+        // notification wraps everything except the method name.
+        const { method, ...params } = event as { method?: string } & Record<string, unknown>;
+        this.emit({
+          method: method as string,
+          params: {
+            ...params,
+            streamId: record.streamId,
+            sequence: this.nextSequence(record.sessionId),
+          },
+        });
+      }
+    }
   }
 
   private async attachProjector(record: SessionRecord): Promise<void> {
@@ -561,10 +822,8 @@ export class ZcodeV2Adapter {
     projector.setStreamId(record.streamId);
     this.projectors.set(record.nativeSessionId, projector);
     try {
-      // Real ZCode 0.16.5 emits only selected computer-use events until the
-      // client subscribes with the frozen desktop-continuous delivery kind.
-      // Fake servers used to push unconditionally and therefore masked this
-      // missing live-event boundary until WP7.
+      // Real ZCode emits live session/event notifications only while a
+      // deliveryKind subscription exists (server-operations.ts:3053).
       await this.transport.request('session/subscribe', {
         sessionId: record.nativeSessionId,
         deliveryKind: 'desktop-continuous',
@@ -576,12 +835,10 @@ export class ZcodeV2Adapter {
     }
   }
 
-  private maybeCatalogChanged(created: Record<string, unknown> | null): void {
-    if (this.catalog === EMPTY_CATALOG) return;
-    const state: InnerReadState = {};
-    if (created?.settings !== undefined) state.settings = created.settings as InnerSettings;
-    if (created?.slashCommands !== undefined) state.slashCommands = created.slashCommands as InnerSlashCommand[];
-    const projectedRevision = revisionFor(this.runtimeKey(), state);
+  private maybeCatalogChanged(_created: Record<string, unknown> | null): void {
+    if (this.catalog === EMPTY_CATALOG || this.catalogPresentation === null) return;
+    const observed = this.effectiveCatalogModelState();
+    const projectedRevision = revisionFor(this.runtimeKey(), this.catalogPresentation, observed);
     if (projectedRevision !== this.catalog.catalogRevision) {
       this.emit({
         method: 'catalog.changed',
@@ -621,6 +878,246 @@ export class ZcodeV2Adapter {
 
   // ---- turn ----
 
+  /** Issue one v4 command envelope and normalize its ack. */
+  private async v4Command(
+    envelope: {
+      commandId: string;
+      clientId: string;
+      sessionId: string | null;
+      type: string;
+      payload: Record<string, unknown>;
+    },
+    timeoutMs?: number,
+  ): Promise<InnerCommandAck> {
+    const ackEnvelope = await this.transport.request('v4/command', {
+      ...envelope,
+      issuedAt: Date.now(),
+    }, timeoutMs) as Record<string, unknown> | null;
+    return (ackEnvelope?.ack ?? ackEnvelope ?? {}) as InnerCommandAck;
+  }
+
+  /** Effective 0.16.9 model vocabulary for a ref, from the full Registry
+   * catalog when available; session snapshots may expose only the current. */
+  private modelVocabulary(ref: InnerModelRef): {
+    levels: string[] | null;
+    defaultLevel: string | null;
+  } {
+    const settings = this.catalogModelState?.settings ?? this.options.modelFacts?.current()?.settings;
+    for (const model of settings?.model?.available ?? []) {
+      if (model.ref?.providerId === ref.providerId && model.ref?.modelId === ref.modelId) {
+        return {
+          levels: model.reasoning?.levels?.map((level) => level.value) ?? null,
+          defaultLevel: model.reasoning?.defaultLevel ?? null,
+        };
+      }
+    }
+    return { levels: null, defaultLevel: null };
+  }
+
+  private async applyTurnConfig(record: SessionRecord, config: Record<string, ConfigValue>): Promise<SessionRecord['confirmedNativeSettings']> {
+    // Apply the full turn config snapshot (§7.4). 0.16.9 resolves model and
+    // reasoning level as ONE ModelSelection (`session/setModel` params carry
+    // `{providerId, modelId, options:{reasoningLevel?}}`, and the registry
+    // rejects a model whose reasoning level is missing), so model and
+    // thinking are committed ATOMICALLY here — the previous two-step
+    // setModel -> setThoughtLevel path died on the real registry validation.
+    const nativeSessionId = record.nativeSessionId;
+    const previousConfirmed = {
+      ...record.confirmedNativeSettings,
+      ...(record.confirmedNativeSettings.model
+        ? { model: { ...record.confirmedNativeSettings.model } }
+        : {}),
+    };
+    const confirmed = {
+      ...previousConfirmed,
+      ...(previousConfirmed.model ? { model: { ...previousConfirmed.model } } : {}),
+    };
+    try {
+      const modelValue = config['model'];
+      const thinkingValue = config['thinking'];
+      if (modelValue !== undefined || thinkingValue !== undefined) {
+        if (modelValue !== undefined && typeof modelValue !== 'string') {
+          throw new ConfigValueInvalidError('model config must be a string.');
+        }
+        if (thinkingValue !== undefined && (typeof thinkingValue !== 'string' || thinkingValue === '')) {
+          throw new ConfigValueInvalidError('thinking config must be a non-empty string.');
+        }
+        if (typeof modelValue === 'string') {
+          const ref = decodeModelValue(modelValue);
+          const providerValue = config['provider'];
+          if (typeof providerValue === 'string' && providerValue !== ref.providerId) {
+            throw new ConfigValueInvalidError('Provider and model config values do not match.');
+          }
+          // turn.start may arrive before catalog.list. Read the same
+          // side-effect-free Registry contract on demand, then fail cleanly
+          // instead of leaking a raw runtime rejection after admission.
+          this.catalogModelState ??= await this.readModelCatalog();
+          const available = this.catalogModelState.settings?.model?.available ?? [];
+          const known = available.some((model) =>
+            model.ref?.providerId === ref.providerId && model.ref?.modelId === ref.modelId);
+          if (!known) {
+            throw new ConfigValueInvalidError(`Unknown model ${ref.providerId}/${ref.modelId}.`);
+          }
+          confirmed.model = { providerId: ref.providerId, modelId: ref.modelId };
+        }
+        if (!confirmed.model) {
+          throw new ConfigValueInvalidError(
+            'thinking was requested but the runtime has no current model; send model and thinking together.',
+          );
+        }
+        const explicitLevel = typeof thinkingValue === 'string' ? thinkingValue : undefined;
+        const { levels, defaultLevel } = this.modelVocabulary(confirmed.model);
+        let effectiveLevel: string | undefined = explicitLevel ?? confirmed.thoughtLevel ?? undefined;
+        if (explicitLevel !== undefined && levels !== null && !levels.includes(explicitLevel)) {
+          // An explicitly requested level outside the TARGET model's own
+          // vocabulary is a clean request failure (§7.4), never a silent map.
+          throw new ConfigValueInvalidError(
+            `Reasoning level "${explicitLevel}" is not supported by ${confirmed.model.providerId}/${confirmed.model.modelId}.`,
+          );
+        }
+        if (explicitLevel === undefined && typeof modelValue === 'string'
+          && effectiveLevel !== undefined && levels !== null && !levels.includes(effectiveLevel)) {
+          // A model switch must not carry the previous model's vocabulary:
+          // fall back to the TARGET model's own default when the inherited
+          // level is not one of its reasoning choices.
+          effectiveLevel = defaultLevel ?? undefined;
+        }
+        if (effectiveLevel === undefined && levels !== null && levels.length > 0
+          && defaultLevel !== null) {
+          effectiveLevel = defaultLevel;
+        }
+        if (effectiveLevel !== undefined && levels !== null && !levels.includes(effectiveLevel)) {
+          throw new ConfigValueInvalidError(
+            `Reasoning level "${effectiveLevel}" is not supported by ${confirmed.model.providerId}/${confirmed.model.modelId}.`,
+          );
+        }
+        const selection: InnerModelRef & { options?: { reasoningLevel: string } } = {
+          providerId: confirmed.model.providerId,
+          modelId: confirmed.model.modelId,
+          ...(effectiveLevel !== undefined ? { options: { reasoningLevel: effectiveLevel } } : {}),
+        };
+        const unchanged = previousConfirmed.model?.providerId === selection.providerId
+          && previousConfirmed.model?.modelId === selection.modelId
+          && (previousConfirmed.thoughtLevel ?? undefined) === selection.options?.reasoningLevel;
+        if (!unchanged) {
+          const set = await this.transport.request('session/setModel', {
+            sessionId: nativeSessionId, model: selection,
+          }) as Record<string, unknown> | null;
+          if (selection.options?.reasoningLevel !== undefined) {
+            confirmed.thoughtLevel = selection.options.reasoningLevel;
+          }
+          this.options.modelFacts?.update((set?.settings ?? undefined) as InnerReadState['settings']);
+        }
+      }
+      const approvalValue = config['approval_mode'];
+      if (typeof approvalValue === 'string' && approvalValue !== confirmed.mode) {
+        await this.transport.request('session/setMode', {
+          sessionId: nativeSessionId, mode: approvalValue,
+        });
+        confirmed.mode = approvalValue;
+      }
+    } catch (error) {
+      // Restore the previously confirmed snapshot; the session MUST NOT run
+      // with unknown config (§7.4).
+      await this.restoreConfirmed(record, previousConfirmed).catch(() => undefined);
+      if (error instanceof ConfigValueInvalidError) {
+        throw new ServiceError('CONFIG_VALUE_INVALID', error.message);
+      }
+      if (error instanceof InnerError) {
+        throw new ServiceError('RUNTIME_ERROR', redactSecrets(error.message) as string);
+      }
+      throw error;
+    }
+    return confirmed;
+  }
+
+  /** Build the sendText text and attachment list from outer input items.
+   *  Every validation failure happens BEFORE the turn is sent. */
+  private buildSendPayload(input: Array<Record<string, unknown>>): {
+    text: string;
+    attachments: InnerAttachmentRef[];
+  } {
+    const attachments: InnerAttachmentRef[] = [];
+    const textParts: string[] = [];
+    let trailingTask = '';
+    const pendingSkills: string[] = [];
+    for (const item of input) {
+      const type = typeof item.type === 'string' ? item.type : '';
+      if (type === 'text' && typeof item.text === 'string') {
+        trailingTask = trailingTask === '' ? item.text : `${trailingTask}\n${item.text}`;
+        continue;
+      }
+      if (type === 'skill') {
+        const name = typeof item.name === 'string' ? item.name : '';
+        if (name === '') {
+          throw new ServiceError('INVALID_PARAMS', 'skill input requires a name.');
+        }
+        pendingSkills.push(name);
+        continue;
+      }
+      if (type === 'localImage' || type === 'localFile') {
+        const validated = validateLocalAttachment(item as {
+          type: string; path: string; name?: string; mime?: string; size?: number;
+        });
+        attachments.push(validated.ref);
+        continue;
+      }
+      throw new ServiceError('INVALID_PARAMS', `Unsupported input type for ZCode: ${type || 'unknown'}.`);
+    }
+    // Skills activate through the upstream canonical manual-skill prompt
+    // (slash-commands.ts buildManualSkillPrompt); the user's text is the task.
+    for (const skillName of pendingSkills) {
+      textParts.push(buildManualSkillPrompt(skillName, trailingTask));
+      trailingTask = '';
+    }
+    if (trailingTask !== '') textParts.push(trailingTask);
+    const text = textParts.join('\n\n');
+    if (text === '' && attachments.length === 0) {
+      throw new ServiceError('INVALID_PARAMS', 'Turn input resolved to neither text nor attachments.');
+    }
+    return { text, attachments };
+  }
+
+  private async sendTextCommand(args: {
+    nativeSessionId: string;
+    text: string;
+    attachments: InnerAttachmentRef[];
+    delivery: 'startNow' | 'guide';
+    commandId: string;
+    clientId: string;
+    /** Full model selection carried with the input so admission pins the
+     *  exact selection the turn was validated against (0.16.9 sendText
+     *  payload accepts `modelSelection`). */
+    modelSelection?: { providerId: string; modelId: string; options?: { reasoningLevel: string } };
+  }): Promise<InnerCommandAck> {
+    const ackEnvelope = await this.transport.request('v4/command', {
+      commandId: args.commandId,
+      clientId: args.clientId,
+      sessionId: args.nativeSessionId,
+      type: 'sendText',
+      payload: {
+        text: args.text,
+        ...(args.attachments.length > 0 ? { attachments: args.attachments } : {}),
+        ...(args.modelSelection !== undefined ? { modelSelection: args.modelSelection } : {}),
+        requestedDelivery: args.delivery,
+      },
+      issuedAt: Date.now(),
+    }, 60_000) as Record<string, unknown> | null;
+    const ack = (ackEnvelope?.ack ?? ackEnvelope ?? {}) as InnerCommandAck;
+    if (ack.status !== 'accepted' && ack.status !== 'duplicate' && ack.status !== 'noop') {
+      const reasonCode = typeof ack.reasonCode === 'string' ? ack.reasonCode : 'unknown';
+      if (args.delivery === 'guide' && reasonCode.includes('guide.attachmentsUnsupported')) {
+        throw new ServiceError('INVALID_PARAMS', 'ZCode guide routing cannot carry attachments.');
+      }
+      throw new ServiceError(
+        'RUNTIME_ERROR',
+        `ZCode rejected the sendText command (${ack.status}: ${reasonCode}).`,
+        ack.status === 'stale',
+      );
+    }
+    return ack;
+  }
+
   private async turnStart(params: Record<string, unknown>): Promise<unknown> {
     const sessionId = stringField(params, 'sessionId');
     const streamId = stringField(params, 'streamId');
@@ -638,109 +1135,89 @@ export class ZcodeV2Adapter {
       return { accepted: true, turnId };
     }
 
-    // 1. Apply the full turn config snapshot (§7.4): model -> thinking ->
-    // approval mode, verified step by step. Any failure never reaches send.
     const nativeSessionId = record.nativeSessionId;
-    const previousConfirmed = {
-      ...record.confirmedNativeSettings,
-      ...(record.confirmedNativeSettings.model
-        ? { model: { ...record.confirmedNativeSettings.model } }
-        : {}),
-    };
-    const confirmed = {
-      ...previousConfirmed,
-      ...(previousConfirmed.model ? { model: { ...previousConfirmed.model } } : {}),
-    };
+    let confirmed: SessionRecord['confirmedNativeSettings'];
     try {
-      const modelValue = config['model'];
-      if (typeof modelValue === 'string') {
-        const ref = decodeModelValue(modelValue);
-        const providerValue = config['provider'];
-        if (typeof providerValue === 'string' && providerValue !== ref.providerId) {
-          throw new ConfigValueInvalidError('Provider and model config values do not match.');
-        }
-        if (confirmed.model?.providerId !== ref.providerId || confirmed.model?.modelId !== ref.modelId) {
-          await this.transport.request('session/setModel', {
-            sessionId: nativeSessionId, model: ref,
-          });
-          confirmed.model = ref;
-        }
-      }
-      const thinkingValue = config['thinking'];
-      if (typeof thinkingValue === 'string' && thinkingValue !== confirmed.thoughtLevel) {
-        await this.transport.request('session/setThoughtLevel', {
-          sessionId: nativeSessionId, thoughtLevel: thinkingValue,
-        });
-        confirmed.thoughtLevel = thinkingValue;
-      }
-      const approvalValue = config['approval_mode'];
-      if (typeof approvalValue === 'string' && approvalValue !== confirmed.mode) {
-        await this.transport.request('session/setMode', {
-          sessionId: nativeSessionId, mode: approvalValue,
-        });
-        confirmed.mode = approvalValue;
-      }
+      confirmed = await this.applyTurnConfig(record, config);
     } catch (error) {
-      // Restore the previously confirmed snapshot; the session MUST NOT run
-      // with unknown config (§7.4).
-      await this.restoreConfirmed(record, previousConfirmed).catch(() => undefined);
+      // The idempotency entry must not block a corrected retry.
       this.turns.forget(sessionId, streamId, turnId);
-      if (error instanceof ConfigValueInvalidError) {
-        throw new ServiceError('CONFIG_VALUE_INVALID', error.message);
-      }
-      if (error instanceof InnerError) {
-        throw new ServiceError('RUNTIME_ERROR', redactSecrets(error.message) as string);
-      }
       throw error;
     }
 
-    // 2. Build the send payload. Only text in v1 (G3 gate pending).
-    const text = input
-      .filter((item) => item.type === 'text' && typeof item.text === 'string')
-      .map((item) => item.text)
-      .join('\n');
-    if (text === '') {
+    // Build the send payload. Attachment/skill validation happens before the
+    // send so a rejected input never starts a native turn.
+    let payload: { text: string; attachments: InnerAttachmentRef[] };
+    try {
+      payload = this.buildSendPayload(input);
+    } catch (error) {
       this.turns.forget(sessionId, streamId, turnId);
-      throw new ServiceError('INVALID_PARAMS', 'ZCode v1 accepts text input only.');
+      throw error;
     }
 
-    // 3. Send. Notifications emitted between accept and response stay inside
+    // Bind the projector turn BEFORE the send: the 0.16.9 runtime emits the
+    // typed turn-started operation event as soon as it admits the input,
+    // which can precede the sendText ack. Binding after the ack swallowed or
+    // mis-attributed every subsequent turn's turn.started (live E2E).
+    const projector = this.projectors.get(nativeSessionId);
+    projector?.bindTurn(turnId, ''); // nativeTurnId binds on typed turn-started
+
+    // Send. Notifications emitted between accept and response stay inside
     // this dispatch queue (response barrier), after the accepted result.
-    let sendResult: Record<string, unknown> | null;
     try {
-      sendResult = await this.transport.request('session/send', {
-        sessionId: nativeSessionId, content: text,
-      }, 60_000) as Record<string, unknown> | null;
+      await this.sendTextCommand({
+        nativeSessionId,
+        text: payload.text,
+        attachments: payload.attachments,
+        delivery: 'startNow',
+        commandId: commandIdFor(['sendText', sessionId, turnId]),
+        clientId: `gian:${sessionId}`,
+        // Carry the exact selection this turn was validated against so
+        // admission cannot resolve a different model/reasoning pair.
+        ...(confirmed.model !== undefined
+          ? {
+              modelSelection: {
+                providerId: confirmed.model.providerId,
+                modelId: confirmed.model.modelId,
+                ...(confirmed.thoughtLevel !== undefined
+                  ? { options: { reasoningLevel: confirmed.thoughtLevel } }
+                  : {}),
+              },
+            }
+          : {}),
+      });
     } catch (error) {
+      // No native turn exists; release the binding so a stale turn-started
+      // can never be attributed to this gian turn.
+      projector?.clearTurn();
       this.turns.forget(sessionId, streamId, turnId);
       if (error instanceof InnerError && error.code === -32004) {
         throw new ServiceError('SESSION_ERROR', 'ZCode reported the session as not active.');
       }
       throw error;
     }
-    if (sendResult === null || sendResult.accepted !== true) {
-      this.turns.forget(sessionId, streamId, turnId);
-      throw new ServiceError('RUNTIME_ERROR', 'ZCode did not accept the turn input.');
-    }
 
     record.confirmedNativeSettings = confirmed;
     this.turns.markAccepted(sessionId, streamId, turnId);
-    const projector = this.projectors.get(nativeSessionId);
-    if (projector !== undefined) {
-      projector.bindTurn(turnId, ''); // nativeTurnId binds on typed turn-started
-    }
     this.registry.markRunning(record, turnId, null);
     return { accepted: true, turnId };
   }
 
   private async restoreConfirmed(record: SessionRecord, confirmed: SessionRecord['confirmedNativeSettings']): Promise<void> {
     const nativeSessionId = record.nativeSessionId;
+    // Rollback restores the COMPLETE selection atomically: model and reasoning
+    // level travel in one `session/setModel` call — the split setModel +
+    // setThoughtLevel path no longer exists in the 0.16.9 flow.
     if (confirmed.model !== undefined) {
-      await this.transport.request('session/setModel', { sessionId: nativeSessionId, model: confirmed.model });
-    }
-    if (confirmed.thoughtLevel !== undefined) {
-      await this.transport.request('session/setThoughtLevel', {
-        sessionId: nativeSessionId, thoughtLevel: confirmed.thoughtLevel,
+      await this.transport.request('session/setModel', {
+        sessionId: nativeSessionId,
+        model: {
+          providerId: confirmed.model.providerId,
+          modelId: confirmed.model.modelId,
+          ...(confirmed.thoughtLevel !== undefined
+            ? { options: { reasoningLevel: confirmed.thoughtLevel } }
+            : {}),
+        },
       });
     }
     if (confirmed.mode !== undefined) {
@@ -758,8 +1235,8 @@ export class ZcodeV2Adapter {
     }
     const projector = this.projectors.get(record.nativeSessionId);
     const foregroundExecutionId = projector?.activeForegroundExecutionId() ?? null;
-    const stopped = await this.transport.request('v4/command', {
-      commandId: `gian-stop-${randomId()}`,
+    await this.transport.request('v4/command', {
+      commandId: commandIdFor(['stop', sessionId, turnId]),
       clientId: `gian:${sessionId}`,
       sessionId: record.nativeSessionId,
       type: 'stop',
@@ -768,19 +1245,55 @@ export class ZcodeV2Adapter {
       },
       issuedAt: Date.now(),
     }, 20_000) as Record<string, unknown> | null;
-    const ack = stopped?.ack !== null && typeof stopped?.ack === 'object'
-      ? stopped.ack as Record<string, unknown>
-      : stopped;
-    const status = typeof ack?.status === 'string' ? ack.status : null;
-    if (status !== 'accepted' && status !== 'duplicate' && status !== 'noop') {
-      const reasonCode = typeof ack?.reasonCode === 'string' ? ack.reasonCode : 'unknown';
+    // The stop command's ack is advisory: the authoritative fact is the
+    // native turn terminal event, which the projector maps (§9.3).
+    projector?.markInterruptAccepted();
+    return { accepted: true, turnId };
+  }
+
+  // ---- steer ----
+
+  /** `turn.steer` maps to v4 `sendText` with `requestedDelivery: "guide"`:
+   *  supplementary guidance inlined into the CURRENT turn at the next model
+   *  step boundary — the same turn continues (session.port.ts:272-278,
+   *  turn-guide-drain.ts:13-66). Queueing to the next turn is a different
+   *  delivery and is never presented as steer. */
+  private async turnSteer(params: Record<string, unknown>): Promise<unknown> {
+    const sessionId = stringField(params, 'sessionId');
+    const streamId = stringField(params, 'streamId');
+    const turnId = stringField(params, 'turnId');
+    const record = this.registry.requireStream(sessionId, streamId);
+    if (record.activeTurnId !== turnId) {
       throw new ServiceError(
-        'RUNTIME_ERROR',
-        `ZCode rejected the interrupt command (${reasonCode}).`,
-        status === 'stale',
+        'TURN_NOT_FOUND',
+        `No active turn ${turnId} to steer; ZCode guide routing only applies to a running turn.`,
       );
     }
-    projector?.markInterruptAccepted();
+    const input = Array.isArray(params.input) ? params.input as Array<Record<string, unknown>> : [];
+    for (const item of input) {
+      if (item.type !== 'text') {
+        throw new ServiceError(
+          'INVALID_PARAMS',
+          'ZCode guide routing is text-only (guide.attachmentsUnsupported); attachments cannot steer a running turn.',
+        );
+      }
+    }
+    const payload = this.buildSendPayload(input);
+    if (payload.text === '') {
+      throw new ServiceError('INVALID_PARAMS', 'Steer input resolved to empty text.');
+    }
+    const ack = await this.sendTextCommand({
+      nativeSessionId: record.nativeSessionId,
+      text: payload.text,
+      attachments: [],
+      delivery: 'guide',
+      // Deterministic commandId: an identical retry is deduped by the CLI
+      // command inbox (status "duplicate"); different text yields a new id,
+      // so multiple distinct steers per turn are allowed.
+      commandId: commandIdFor(['steer', sessionId, turnId, payload.text]),
+      clientId: `gian:${sessionId}`,
+    });
+    void ack;
     return { accepted: true, turnId };
   }
 
@@ -791,7 +1304,7 @@ export class ZcodeV2Adapter {
     const nativeSessionId = typeof params.sessionId === 'string' ? params.sessionId : null;
     const requestId = typeof params.requestId === 'string' ? params.requestId : null;
     const projector = nativeSessionId === null ? undefined : this.projectors.get(nativeSessionId);
-    if (projector === undefined || requestId === null) {
+    if (nativeSessionId === null || projector === undefined || requestId === null) {
       return {
         error: {
           code: -32601,
@@ -800,14 +1313,21 @@ export class ZcodeV2Adapter {
       };
     }
     const options = Array.isArray(params.options) ? params.options as Array<Record<string, unknown>> : [];
-    const accepted = projector.handlePermissionRequest({
+    const request = {
       requestId,
-      ...(typeof params.turnId === 'string' && params.turnId !== '' ? { nativeTurnId: params.turnId } : {}),
+      // The 0.16.9 permission request carries the native turnId; it can
+      // arrive BEFORE the typed turn-started event, so the projector binds
+      // the turn identity from this field (WP0 G2). The live E2E proved the
+      // real runtime relies on exactly this ordering.
+      ...(typeof params.turnId === 'string' && params.turnId !== ''
+        ? { turnId: params.turnId, nativeTurnId: params.turnId }
+        : {}),
       ...(typeof params.toolCallId === 'string' ? { toolCallId: params.toolCallId } : {}),
       ...(typeof params.toolName === 'string' ? { toolName: params.toolName } : {}),
       ...(typeof params.reason === 'string' ? { reason: params.reason } : {}),
       ...(typeof params.riskLevel === 'string' ? { riskLevel: params.riskLevel } : {}),
       input: params.input,
+      ...(params.origin !== undefined && params.origin !== null ? { origin: params.origin as Record<string, unknown> } : {}),
       options: options.map((option) => ({
         ...(typeof option.optionId === 'string' ? { optionId: option.optionId } : {}),
         ...(typeof option.kind === 'string' ? { kind: option.kind } : {}),
@@ -818,8 +1338,9 @@ export class ZcodeV2Adapter {
           : {}),
       })),
       raw: params,
-    });
-    if (accepted === false) {
+    };
+    const entry = projector.handlePermissionRequest(request);
+    if (entry === null) {
       return {
         error: {
           code: -32601,
@@ -827,19 +1348,66 @@ export class ZcodeV2Adapter {
         },
       };
     }
-    // The server request stays open; interaction.respond completes it with the
-    // user-selected EXACT native response payload (§11.1).
-    const ownedRecord = this.registry.byNativeSession(nativeSessionId ?? '');
-    this.pendingInteractions.set(`int:${requestId}`, {
+    return this.deferInteraction(entry, nativeSessionId, projector, transportId);
+  }
+
+  private handleUserInputReverseRequest(params: Record<string, unknown>, transportId: string):
+    { result: unknown } | { error: { code: number; message: string; data?: unknown } } | { defer: true } {
+    const nativeSessionId = typeof params.sessionId === 'string' ? params.sessionId : null;
+    const requestId = typeof params.requestId === 'string' ? params.requestId : null;
+    const projector = nativeSessionId === null ? undefined : this.projectors.get(nativeSessionId);
+    if (nativeSessionId === null || projector === undefined || requestId === null) {
+      return {
+        error: {
+          code: -32601,
+          message: 'interaction/requestUserInput has no relayable Gian turn.',
+        },
+      };
+    }
+    const questions: InnerUserInputQuestion[] = Array.isArray(params.questions)
+      ? params.questions as InnerUserInputQuestion[]
+      : [];
+    const request = {
+      requestId,
+      ...(typeof params.turnId === 'string' && params.turnId !== ''
+        ? { turnId: params.turnId, nativeTurnId: params.turnId }
+        : {}),
+      ...(typeof params.toolCallId === 'string' ? { toolCallId: params.toolCallId } : {}),
+      ...(typeof params.toolName === 'string' ? { toolName: params.toolName } : {}),
+      ...(typeof params.prompt === 'string' ? { prompt: params.prompt } : {}),
+      questions,
+      input: params.input,
+      ...(params.origin !== undefined && params.origin !== null ? { origin: params.origin as Record<string, unknown> } : {}),
+      ...(params.schema !== undefined && params.schema !== null ? { schema: params.schema as Record<string, unknown> } : {}),
+      raw: params,
+    };
+    const entry = projector.handleUserInputRequest(request);
+    if (entry === null) {
+      return {
+        error: {
+          code: -32601,
+          message: 'No faithfully relayable question set for this user input request.',
+        },
+      };
+    }
+    return this.deferInteraction(entry, nativeSessionId, projector, transportId);
+  }
+
+  private deferInteraction(
+    entry: { interactionId: string; respond: (actionId: string, values: Record<string, unknown>) => Record<string, unknown> },
+    nativeSessionId: string,
+    projector: SessionProjector,
+    transportId: string,
+  ): { defer: true } {
+    // The server request stays open; interaction.respond completes it with
+    // the EXACT native response payload (§11.1).
+    const ownedRecord = this.registry.byNativeSession(nativeSessionId);
+    this.pendingInteractions.set(entry.interactionId, {
       gianSessionId: ownedRecord?.sessionId ?? '',
       gianTurnId: projector.activeGianTurnId() ?? '',
       serverRequestId: transportId,
-      responses: new Map(
-        options
-          .filter((option) => typeof option.optionId === 'string' && option.response !== undefined && option.response !== null)
-          .map((option) => [option.optionId as string, option.response as Record<string, unknown>]),
-      ),
       resolved: false,
+      respond: entry.respond,
     });
     return { defer: true };
   }
@@ -854,10 +1422,11 @@ export class ZcodeV2Adapter {
     const responseId = stringField(params, 'responseId');
     const interactionId = stringField(params, 'interactionId');
     const actionId = stringField(params, 'actionId');
+    const values = (params.values ?? {}) as Record<string, unknown>;
     this.registry.requireStream(sessionId, streamId);
 
     const fingerprint = JSON.stringify({
-      interactionId, actionId, values: params.values ?? {},
+      interactionId, actionId, values,
     });
     const observed = this.responses.observe(responseId, fingerprint);
     if (observed === 'duplicate') {
@@ -871,9 +1440,15 @@ export class ZcodeV2Adapter {
     if (pending.gianSessionId !== sessionId || pending.gianTurnId !== turnId) {
       throw new ServiceError('INTERACTION_NOT_FOUND', 'Interaction belongs to a different session or turn.');
     }
-    const nativeResponse = pending.responses.get(actionId);
-    if (nativeResponse === undefined) {
-      throw new ServiceError('INTERACTION_ACTION_NOT_FOUND', `Action ${actionId} was not advertised.`);
+    let nativeResponse: Record<string, unknown>;
+    try {
+      nativeResponse = pending.respond(actionId, values);
+    } catch (error) {
+      if (error instanceof SessionInteractionActionError) {
+        this.responses.forget(responseId);
+        throw new ServiceError('INTERACTION_ACTION_NOT_FOUND', error.message);
+      }
+      throw error;
     }
 
     // Answer the stored server request with the EXACT native payload (§11.1).
@@ -907,6 +1482,167 @@ export class ZcodeV2Adapter {
     return next;
   }
 
+  // ---- rename ----
+
+  /** `session.rename` maps to the v4 `renameSession` command
+   *  (commands/handlers/session-mgmt.ts:140-152); the runtime then enforces
+   *  titleSource=custom stickiness and emits session.titleUpdated. */
+  private async sessionRename(params: Record<string, unknown>): Promise<unknown> {
+    const sessionId = stringField(params, 'sessionId');
+    const streamId = stringField(params, 'streamId');
+    const name = params.name;
+    if (typeof name !== 'string' || [...name].length === 0 || [...name].length > 200) {
+      throw new ServiceError('INVALID_PARAMS', 'params.name must be 1-200 Unicode code points.');
+    }
+    const record = this.registry.requireStream(sessionId, streamId);
+    const ackEnvelope = await this.transport.request('v4/command', {
+      commandId: commandIdFor(['renameSession', sessionId, name]),
+      clientId: `gian:${sessionId}`,
+      sessionId: record.nativeSessionId,
+      type: 'renameSession',
+      payload: { title: name },
+      issuedAt: Date.now(),
+    }, 20_000) as Record<string, unknown> | null;
+    const ack = (ackEnvelope?.ack ?? ackEnvelope ?? {}) as InnerCommandAck;
+    if (ack.status !== 'accepted' && ack.status !== 'duplicate' && ack.status !== 'noop') {
+      const reasonCode = typeof ack.reasonCode === 'string' ? ack.reasonCode : 'unknown';
+      throw new ServiceError('RUNTIME_ERROR', `ZCode rejected the rename command (${ack.status}: ${reasonCode}).`);
+    }
+    return { ok: true };
+  }
+
+  // ---- fork ----
+
+  /** Fetch conversation rows (tail-first) until `matcher` finds a target or
+   *  the walk budget is exhausted. rowsRange rows arrive in rowId ascending
+   *  order; atRevision/atLogEpoch name the consistent watermark the fork CAS
+   *  needs (transport.ts:478-502). */
+  private async findForkRow(nativeSessionId: string, anchor: { type: 'head' } | { type: 'turn'; sourceTurnId: string }): Promise<{
+    row: InnerConversationRow;
+    atRevision: number;
+    atLogEpoch: string;
+    nativeTurnId: string;
+  }> {
+    const MAX_PAGES = 6;
+    let beforeRowId: number | undefined = undefined;
+    let scanned: InnerConversationRow[] = [];
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const result = await this.transport.request('v4/conversation/rowsRange', {
+        sessionId: nativeSessionId,
+        limit: 200,
+        ...(beforeRowId !== undefined ? { beforeRowId } : {}),
+      }, 20_000) as InnerRowsRangeResult | null;
+      const rows = result?.rows ?? [];
+      if (rows.length === 0) break;
+      scanned = page === 0 ? rows : [...rows, ...scanned];
+      const match = matchForkAnchor(scanned, anchor);
+      if (match !== null) {
+        if (typeof result?.atRevision !== 'number' || typeof result?.atLogEpoch !== 'string') {
+          throw new ServiceError('RUNTIME_ERROR', 'ZCode rowsRange returned no fork CAS watermark.');
+        }
+        return {
+          row: match.row,
+          atRevision: result.atRevision,
+          atLogEpoch: result.atLogEpoch,
+          nativeTurnId: match.nativeTurnId,
+        };
+      }
+      if (result?.hasMore === true && typeof rows[0]?.rowId === 'number') {
+        beforeRowId = rows[0].rowId;
+        continue;
+      }
+      break;
+    }
+    throw new ServiceError(
+      'FORK_BOUNDARY_UNAVAILABLE',
+      anchor.type === 'head'
+        ? 'No completed, forkable assistant turn was found in the conversation projection.'
+        : `No completed, forkable assistant turn matches sourceTurnId ${anchor.sourceTurnId}.`,
+    );
+  }
+
+  /** `session.fork` maps to the v4 `forkAssistant` command — the stable
+   *  CONVERSATION-ONLY fork (fork-edit-retry.ts:6 "conversation-only copy;
+   *  running parent 与 workspace 不动"). The legacy checkpoint fork
+   *  (`session/fork`, which restores workspace files) is never used. */
+  private async sessionFork(params: Record<string, unknown>): Promise<unknown> {
+    const sourceSessionId = stringField(params, 'sourceSessionId');
+    const sourceStreamId = stringField(params, 'sourceStreamId');
+    const newSessionId = stringField(params, 'sessionId');
+    const anchorRaw = (params.anchor ?? {}) as Record<string, unknown>;
+    const anchorType = anchorRaw.type;
+    if (anchorType !== 'head' && anchorType !== 'turn') {
+      throw new ServiceError('INVALID_PARAMS', 'params.anchor.type must be "head" or "turn".');
+    }
+    if (this.registry.get(newSessionId) !== undefined) {
+      throw new ServiceError('CONFLICT', `Session ${newSessionId} already exists.`);
+    }
+    const source = this.registry.requireStream(sourceSessionId, sourceStreamId);
+    if (source.activeTurnId !== null) {
+      // The conversation-only fork does not require an idle parent
+      // (fork-edit-retry.ts:275-279), but Gian forks a snapshot identity:
+      // refuse mid-turn to keep the origin fact unambiguous.
+      throw new ServiceError('SESSION_BUSY', 'Refusing to fork while a turn is active.');
+    }
+    const anchor = anchorType === 'head'
+      ? { type: 'head' } as const
+      : { type: 'turn' as const, sourceTurnId: stringField(anchorRaw, 'sourceTurnId') };
+
+    let attempt = 0;
+    for (;;) {
+      const target = await this.findForkRow(source.nativeSessionId, anchor);
+      const ackEnvelope = await this.transport.request('v4/command', {
+        commandId: commandIdFor(['forkAssistant', sourceSessionId, anchorType === 'head' ? 'head' : anchor.sourceTurnId]),
+        clientId: `gian:${sourceSessionId}`,
+        sessionId: source.nativeSessionId,
+        baseRevision: target.atRevision,
+        baseLogEpoch: target.atLogEpoch,
+        type: 'forkAssistant',
+        payload: {
+          target: {
+            rowId: target.row.rowId,
+            entityId: target.row.entityId,
+          },
+        },
+        issuedAt: Date.now(),
+      }, 30_000) as Record<string, unknown> | null;
+      const ack = (ackEnvelope?.ack ?? ackEnvelope ?? {}) as InnerCommandAck;
+      if (ack.status === 'stale' && attempt === 0) {
+        // The projection moved between rowsRange and the command; refresh the
+        // watermark once and retry with the same deterministic commandId.
+        attempt += 1;
+        continue;
+      }
+      if (ack.status !== 'accepted' && ack.status !== 'duplicate') {
+        const reasonCode = typeof ack.reasonCode === 'string' ? ack.reasonCode : 'unknown';
+        throw new ServiceError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          `ZCode rejected the fork command (${ack.status}: ${reasonCode}).`,
+        );
+      }
+      const childNativeId = typeof ack.result?.sessionId === 'string' ? ack.result.sessionId : '';
+      if (childNativeId === '') {
+        throw new ServiceError('RUNTIME_ERROR', 'ZCode fork command returned no child session id.');
+      }
+      const record = this.registry.beginAttach(newSessionId, childNativeId, this.runtimeKey());
+      try {
+        await this.adoptNativeSession(record, childNativeId, false);
+      } catch (error) {
+        this.registry.detachForce(record);
+        throw error;
+      }
+      return {
+        session: this.snapshot(record),
+        origin: {
+          kind: 'fork',
+          sessionId: sourceSessionId,
+          turnId: target.nativeTurnId,
+          sourceTurnId: target.nativeTurnId,
+        },
+      };
+    }
+  }
+
   // ---- close / native list / replay ----
 
   private async sessionClose(params: Record<string, unknown>): Promise<unknown> {
@@ -915,8 +1651,11 @@ export class ZcodeV2Adapter {
     const record = this.registry.detach(sessionId, streamId);
     this.projectors.delete(record.nativeSessionId);
     this.turns.forgetStream(sessionId, streamId);
-    // Deliberately NO inner session/close: WP0 G7 proved it purges empty
-    // native sessions. Detach only drops adapter state (Revision 2 §5.3).
+    // Deliberately NO inner session/close: the 0.16.9 close tears the runtime
+    // down (and v4 publishers emit session.removed); the 0.16.9 deleteSession
+    // command is the same close. Detach only drops adapter state, so the
+    // provider history stays visible and re-attachable (session/list +
+    // session/resume adopt it later).
     return { ok: true };
   }
 
@@ -925,9 +1664,15 @@ export class ZcodeV2Adapter {
     const cursor = typeof params.cursor === 'string' && params.cursor !== '' ? params.cursor : null;
     const offset = cursor === null ? 0 : decodeOffsetCursor(cursor);
     if (offset < 0) throw new ServiceError('INVALID_PARAMS', 'cursor is not a valid native list cursor.');
-    const list = await this.transport.request('session/list', {}) as { sessions?: InnerSessionSummary[] } | null;
+    const cwd = typeof params.cwd === 'string' && params.cwd !== '' ? params.cwd : null;
+    const list = await this.transport.request('session/list', {
+      limit: 500,
+      includeArchived: false,
+      ...(cwd !== null ? { workspace: { workspacePath: cwd, workspaceKey: cwd } } : {}),
+    }, 20_000) as { sessions?: InnerSessionSummary[] } | null;
     const summaries = (list?.sessions ?? []).filter((session) => {
-      if (session.status !== 'idle' || session.sessionKind !== 'interactive') return false;
+      if (session.status !== undefined && LISTABLE_SESSION_STATUSES.has(session.status) === false) return false;
+      if (session.sessionKind !== undefined && ADOPTABLE_SESSION_KINDS.has(session.sessionKind) === false) return false;
       const nativeSessionId = session.sessionId ?? '';
       return this.registry.byNativeSession(nativeSessionId) === undefined
         && this.options.isNativeSessionOwned?.(nativeSessionId) !== true;
@@ -961,8 +1706,8 @@ export class ZcodeV2Adapter {
 
     const events = buildReplayEvents({
       gianSessionId: sessionId,
+      streamId: '',
       nativeSessionId: record.nativeSessionId,
-      replayStreamId,
       messages: all,
     });
     const offset = cursor === null ? 0 : decodeOffsetCursor(cursor);
@@ -974,6 +1719,161 @@ export class ZcodeV2Adapter {
       events: page,
       nextCursor: nextOffset < events.length ? encodeOffsetCursor(nextOffset) : null,
     };
+  }
+
+  // ---- customization (read-only inventory, gian.proxy/2.3) ----
+
+  private workspaceRefFor(cwd: string | null): Record<string, string> {
+    const workspace = cwd ?? this.options.catalogWorkspace;
+    return { workspacePath: workspace, workspaceKey: workspace };
+  }
+
+  private customizationItemId(kind: string, name: string, extra: string): string {
+    return `ci1_${createHash('sha256').update(`${kind}\u0000${name}\u0000${extra}`).digest('hex').slice(0, 32)}`;
+  }
+
+  private async customizationList(params: Record<string, unknown>): Promise<unknown> {
+    const kind = typeof params.kind === 'string' ? params.kind : '';
+    const cwd = typeof params.cwd === 'string' && params.cwd !== '' ? params.cwd : null;
+    if (kind === 'skill') return this.customizationSkills(cwd);
+    if (kind === 'mcp') return this.customizationMcp(cwd);
+    if (kind === 'hook') {
+      return customizationUnsupportedList(
+        'hook',
+        'ZCode 0.16.9 exposes no hook enumeration method on the app-server '
+        + '(grep listHooks|hooks/list over apps/zcode-cli + packages: 0 hits); '
+        + 'hook runs surface as transcript activities only.',
+      );
+    }
+    return customizationUnsupportedList(kind || 'rule', `ZCode has no ${kind || 'rule'} customization concept.`);
+  }
+
+  private async customizationSkills(cwd: string | null): Promise<unknown> {
+    // skills/referenceCatalog without sessionId performs a fresh workspace
+    // scan and never executes anything (skill-reference-catalog.ts:16-36).
+    const catalog = await this.transport.request('skills/referenceCatalog', {
+      workspace: this.workspaceRefFor(cwd),
+    }, 20_000) as { skills?: InnerSkillEntry[] } | null;
+    const skills = catalog?.skills ?? [];
+    const items = skills.slice(0, 500).map((skill) => {
+      const name = typeof skill.name === 'string' ? skill.name : '';
+      const path = typeof skill.path === 'string' ? skill.path : '';
+      const scope = skill.scope === 'workspace' ? 'workspace' : skill.scope === 'user' ? 'user' : 'unknown';
+      const originKind = skill.scope === 'plugin' ? 'plugin' : skill.scope === 'workspace' ? 'project_file' : 'user_file';
+      return {
+        id: this.customizationItemId('skill', name, path),
+        kind: 'skill',
+        name,
+        ...(typeof skill.description === 'string' ? { description: skill.description } : {}),
+        nativeType: 'skill',
+        ...(skill.enabled === false ? { nativeStatus: 'disabled' } : {}),
+        activation: 'enabled', // upstream catalog entries are enabled: literal true
+        scope: { level: scope, ...(path !== '' ? { root: path } : {}) },
+        origin: {
+          kind: originKind,
+          ...(path !== '' ? { path } : {}),
+          ...(typeof skill.pluginName === 'string' ? { label: skill.pluginName } : {}),
+        },
+        discovery: { method: 'provider_api' },
+        skill: {
+          format: 'agent-skill',
+          ...(path !== '' ? { entryPath: path } : {}),
+          ...(name !== '' ? { invocation: name } : {}),
+          userInvocable: true,
+          modelInvocable: true,
+        },
+      };
+    });
+    return {
+      kind: 'skill',
+      status: 'ok',
+      completeness: 'effective',
+      observedAt: new Date().toISOString(),
+      items,
+      truncated: skills.length > items.length,
+      diagnostics: [],
+    };
+  }
+
+  private async customizationMcp(cwd: string | null): Promise<unknown> {
+    // mode:"status" is the read-only surface: it never connects
+    // (mcp.ts:78-87 listMcpServerStatuses synthesizes without connecting).
+    const result = await this.transport.request('mcp/list', {
+      workspace: this.workspaceRefFor(cwd),
+      mode: 'status',
+    }, 20_000) as { statuses?: Record<string, Record<string, unknown>> } | null;
+    const statuses = result?.statuses ?? {};
+    const activationFor: Record<string, string> = {
+      connected: 'enabled',
+      disabled: 'disabled',
+      untrusted: 'pending_trust',
+      failed: 'invalid',
+      connecting: 'unknown',
+      disconnected: 'unknown',
+    };
+    const items = Object.entries(statuses).slice(0, 500).map(([name, status]) => {
+      const transport = typeof status.transport === 'string' ? status.transport : 'stdio';
+      const activation = activationFor[typeof status.status === 'string' ? status.status : ''] ?? 'unknown';
+      return {
+        id: this.customizationItemId('mcp', name, transport),
+        kind: 'mcp',
+        name,
+        description: `${status.toolCount ?? 0} tools`,
+        nativeType: transport,
+        ...(typeof status.status === 'string' ? { nativeStatus: status.status } : {}),
+        activation,
+        scope: { level: 'user' },
+        origin: { kind: 'unknown', label: name },
+        discovery: { method: 'provider_api' },
+        mcp: {
+          transport: transport === 'sse' ? 'http' : transport,
+          ...(activation !== 'enabled' ? {} : { targetSummary: name }),
+          ...(typeof status.toolCount === 'number' ? { toolCount: status.toolCount } : {}),
+        },
+      };
+    });
+    return {
+      kind: 'mcp',
+      status: 'ok',
+      completeness: 'configured',
+      observedAt: new Date().toISOString(),
+      items,
+      truncated: Object.keys(statuses).length > items.length,
+      diagnostics: [],
+    };
+  }
+
+  private async customizationDetail(params: Record<string, unknown>): Promise<unknown> {
+    const kind = typeof params.kind === 'string' ? params.kind : '';
+    const id = typeof params.id === 'string' ? params.id : '';
+    const cwd = typeof params.cwd === 'string' && params.cwd !== '' ? params.cwd : null;
+    if (kind === 'skill' || kind === 'mcp') {
+      const list = kind === 'skill' ? await this.customizationSkills(cwd) : await this.customizationMcp(cwd);
+      const item = (list as { items?: Array<{ id: string; [key: string]: unknown }> }).items
+        ?.find((entry) => entry.id === id);
+      if (item === undefined) {
+        return customizationUnavailableDetail(kind, id, `No ${kind} customization matches ${id}.`);
+      }
+      // Detail text is the provider-reported metadata only. For skills this
+      // is the catalog entry (upstream never exposes skill bodies over the
+      // protocol); for MCP it is the status snapshot, which carries no
+      // credentials (statuses only: status/transport/toolCount/updatedAt).
+      const text = JSON.stringify(item);
+      return {
+        kind,
+        id,
+        status: 'ok',
+        observedAt: new Date().toISOString(),
+        text: text.length > 16_000 ? text.slice(0, 16_000) : text,
+        truncated: text.length > 16_000,
+        diagnostics: [],
+      };
+    }
+    return customizationUnavailableDetail(
+      kind || 'rule',
+      id,
+      `ZCode 0.16.9 exposes no ${kind || 'rule'} detail surface.`,
+    );
   }
 
   private async shutdown(): Promise<unknown> {
@@ -994,6 +1894,39 @@ export class ZcodeV2Adapter {
       pendingInteractions: this.pendingInteractions.size,
     };
   }
+}
+
+/** Fork-anchor resolution over projection rows. A valid target is the LAST
+ *  assistant segment of a successfully completed turn whose canFork action
+ *  is advertised (product-projection.ts:895-932
+ *  resolveStableForkCandidate). */
+function matchForkAnchor(
+  rows: InnerConversationRow[],
+  anchor: { type: 'head' } | { type: 'turn'; sourceTurnId: string },
+): { row: InnerConversationRow; nativeTurnId: string } | null {
+  const turnState = new Map<string, string>();
+  for (const row of rows) {
+    if (row.kind === 'turnHeader') {
+      const key = row.productTurnId ?? row.turnId ?? '';
+      if (key !== '') turnState.set(key, row.state ?? '');
+    }
+  }
+  const turnOf = (row: InnerConversationRow): string => row.productTurnId ?? row.turnId ?? '';
+  let match: InnerConversationRow | null = null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]!;
+    if (row.kind !== 'assistantText') continue;
+    if (row.state !== 'complete') continue;
+    if (row.actions?.canFork !== true) continue;
+    const turnId = turnOf(row);
+    if (turnId === '') continue;
+    if (anchor.type === 'turn' && turnId !== anchor.sourceTurnId) continue;
+    if (turnState.get(turnId) !== 'completedSuccess') continue;
+    match = row;
+    break;
+  }
+  if (match === null) return null;
+  return { row: match, nativeTurnId: turnOf(match) };
 }
 
 // ---- helpers ----
@@ -1054,7 +1987,13 @@ function normalizeError(error: unknown): {
 } {
   if (error instanceof ServiceError || error instanceof SessionRegistryError) {
     if (error.domainCode === 'METHOD_NOT_FOUND') return { code: -32601, message: error.message };
-    if (error.domainCode === 'INVALID_PARAMS') return { code: -32602, message: error.message };
+    if (error.domainCode === 'INVALID_PARAMS') {
+      return {
+        code: -32602,
+        message: error.message,
+        data: { domainCode: 'INVALID_PARAMS', retryable: false, details: {} },
+      };
+    }
     return {
       code: -32000,
       message: error.message,
@@ -1080,14 +2019,16 @@ function normalizeError(error: unknown): {
 
 // ---- replay projection ----
 
+/** 0.16.9 `session/messages` shapes (packages/shared/src/
+ *  zcode-protocol-legacy-types.ts:212-252, 360-443). */
 interface ReplayMessage {
   info?: {
     role?: string;
+    messageId?: string;
     id?: string;
     finish?: string;
-    anchor?: { turnId?: string };
+    parentMessageId?: string;
     tokens?: Record<string, unknown>;
-    modelID?: string;
     time?: { created?: number };
   };
   parts?: Array<Record<string, unknown>>;
@@ -1095,8 +2036,9 @@ interface ReplayMessage {
 
 export function buildReplayEvents(context: {
   gianSessionId: string;
+  /** '' for session.replay (Host fills the stream), set for attach replay. */
+  streamId: string;
   nativeSessionId: string;
-  replayStreamId: string;
   messages: unknown[];
 }): Array<Record<string, unknown>> {
   const events: Array<Record<string, unknown>> = [];
@@ -1107,26 +2049,67 @@ export function buildReplayEvents(context: {
     return new Date(ms).toISOString();
   };
 
-  // Group messages by native turn (anchor.turnId), preserving order; messages
-  // without an anchor form a synthetic turn from their own id.
-  const turns = new Map<string, ReplayMessage[]>();
+  // Group messages into turns: a user message starts a turn; assistant
+  // messages whose parentMessageId points at that user message belong to it.
+  // The native turn id comes from a timeline part anchorTurnId when present
+  // (parts carry anchorTurnId/anchorMessageId, legacy-types.ts:311-358),
+  // falling back to the assistant message id so identity stays stable.
+  interface ReplayTurn {
+    nativeTurnId: string;
+    user: ReplayMessage | null;
+    assistants: ReplayMessage[];
+    anchorTime: unknown;
+  }
+  const turns: ReplayTurn[] = [];
+  const userToTurn = new Map<string, ReplayTurn>();
   for (const raw of context.messages) {
     const message = raw as ReplayMessage;
-    const turnId = message.info?.anchor?.turnId ?? message.info?.id ?? 'unknown-turn';
-    const bucket = turns.get(turnId);
-    if (bucket === undefined) turns.set(turnId, [message]);
-    else bucket.push(message);
+    const role = message.info?.role;
+    const messageId = message.info?.messageId ?? message.info?.id ?? '';
+    if (role === 'user') {
+      const turn: ReplayTurn = {
+        nativeTurnId: messageId || `turn-${turns.length}`,
+        user: message,
+        assistants: [],
+        anchorTime: message.info?.time?.created,
+      };
+      turns.push(turn);
+      if (messageId !== '') userToTurn.set(messageId, turn);
+      continue;
+    }
+    if (role === 'assistant') {
+      const parent = typeof message.info?.parentMessageId === 'string' ? message.info.parentMessageId : '';
+      const host = parent !== '' ? userToTurn.get(parent) : undefined;
+      if (host !== undefined) {
+        host.assistants.push(message);
+      } else {
+        // Assistant without a known parent: its own synthetic turn.
+        const anchorTurnId = readAnchorTurnId(message);
+        turns.push({
+          nativeTurnId: anchorTurnId ?? (messageId || `turn-${turns.length}`),
+          user: null,
+          assistants: [message],
+          anchorTime: message.info?.time?.created,
+        });
+      }
+    }
   }
 
-  for (const [nativeTurnId, messages] of turns) {
-    const sourceTurnId = nativeTurnId;
+  for (const turn of turns) {
+    // Native turn identity: a timeline part anchorTurnId wins (stable across
+    // live and replay), else the first assistant message id.
+    const anchorTurnId = turn.assistants.map(readAnchorTurnId).find((id) => id !== null) ?? null;
+    if (anchorTurnId !== null) turn.nativeTurnId = anchorTurnId;
+    const sourceTurnId = turn.nativeTurnId;
+    const allMessages = [...(turn.user !== null ? [turn.user] : []), ...turn.assistants];
+    const lastTime = allMessages.at(-1)?.info?.time?.created;
     const base = (): Record<string, unknown> => ({
       eventId: '',
       sessionId: context.gianSessionId,
-      replayStreamId: context.replayStreamId,
+      streamId: context.streamId,
       sequence: 0,
       sourceTurnId,
-      emittedAt: emittedAt(messages[0]?.info?.time?.created),
+      emittedAt: emittedAt(turn.anchorTime),
     });
     const push = (
       method: string,
@@ -1140,15 +2123,15 @@ export function buildReplayEvents(context: {
       event.eventId = stableEventId
         ?? `replay-${hashOf(JSON.stringify([context.nativeSessionId, eventIdParts]))}`;
       event.sequence = nextSequence();
-      event.emittedAt = emittedAt(time ?? messages[0]?.info?.time?.created);
+      event.emittedAt = emittedAt(time ?? turn.anchorTime);
       event.data = data;
       events.push(event);
     };
 
-    push('turn.started', [nativeTurnId, 'started'], {}, messages[0]?.info?.time?.created);
+    push('turn.started', [sourceTurnId, 'started'], {}, turn.anchorTime);
 
-    for (const message of messages) {
-      const messageId = message.info?.id ?? '';
+    for (const message of allMessages) {
+      const messageId = message.info?.messageId ?? message.info?.id ?? '';
       if (message.info?.role === 'user') {
         const text = (message.parts ?? [])
           .filter((part) => part.type === 'text' && typeof part.text === 'string')
@@ -1176,7 +2159,7 @@ export function buildReplayEvents(context: {
         if (part.type === 'reasoning') {
           push('content.completed', [partId, 'reasoning'], {
             contentId: partId, kind: 'reasoning', content: String(part.text ?? ''),
-          }, (part.time as { end?: unknown } | undefined)?.end ?? message.info?.time?.created);
+          }, message.info?.time?.created);
           continue;
         }
         if (part.type === 'tool') {
@@ -1192,7 +2175,7 @@ export function buildReplayEvents(context: {
             activityId: typeof part.callID === 'string' ? part.callID : partId,
             kind: `tool:${toolName}`,
             title: toolName,
-            status: state.status === 'failed' ? 'failed' : state.status === 'cancelled' ? 'cancelled' : 'succeeded',
+            status: state.status === 'failed' || state.status === 'error' ? 'failed' : state.status === 'cancelled' ? 'cancelled' : 'succeeded',
             presentation: {
               type: 'tool',
               data: {
@@ -1203,6 +2186,7 @@ export function buildReplayEvents(context: {
             },
             ...(output.truncated ? { details: { truncated: true } } : {}),
           }, state.time?.end ?? message.info?.time?.created);
+          continue;
         }
       }
       if (openText !== null) {
@@ -1224,18 +2208,25 @@ export function buildReplayEvents(context: {
       }
     }
 
-    const finish = messages.at(-1)?.info?.finish;
     push(
       'turn.completed',
-      [nativeTurnId, 'terminal'],
+      [sourceTurnId, 'terminal'],
       { stopReason: 'completed' },
-      messages.at(-1)?.info?.time?.created,
-      terminalEventIdFor(context.nativeSessionId, nativeTurnId, 'turn.completed'),
+      lastTime,
+      terminalEventIdFor(context.nativeSessionId, sourceTurnId, 'turn.completed'),
     );
-    void finish;
   }
 
   return events;
+}
+
+function readAnchorTurnId(message: ReplayMessage): string | null {
+  for (const part of message.parts ?? []) {
+    if (part.type === 'timeline' && typeof part.anchorTurnId === 'string' && part.anchorTurnId !== '') {
+      return part.anchorTurnId;
+    }
+  }
+  return null;
 }
 
 function numberField(value: unknown, key: string): number | null {

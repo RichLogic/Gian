@@ -287,6 +287,7 @@ export function TasksView({
       scope: { kind: 'task', id: taskId,
         ...(input.executionEnvironmentId ? { environmentId: input.executionEnvironmentId } : {}) },
       text: input.firstMessage,
+      ...(input.autoTranslate ? { autoTranslate: true } : {}),
       attachments: input.firstAttachments ?? [],
       ...(input.contextItems && input.contextItems.length > 0
         ? { contextItems: input.contextItems }

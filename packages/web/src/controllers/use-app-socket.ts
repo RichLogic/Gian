@@ -22,6 +22,7 @@ import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { dispatchAttachmentUpload, dispatchMessageSend } from '../operations/message.js';
+import { setAutoTranslation, translateText } from '../operations/translation.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { sidechatEntityKey } from '../operations/sidechat.js';
 import { taskEntityKey } from '../operations/task.js';
@@ -126,13 +127,46 @@ async function deliverCreatedSessionFirstMessage(
   session: Session,
   current: Pick<UseAppSocketInput, 'ops' | 'translate'>,
 ): Promise<void> {
+  const prepareTranslation = async (restoreDraft: () => void): Promise<string | null | undefined> => {
+    if (!pending.autoTranslate) return undefined;
+    try {
+      await setAutoTranslation(session.id, true, current.ops.dispatch);
+      window.dispatchEvent(new Event('gian:translation-settings'));
+      if (!pending.text.trim()) return undefined;
+      const record = await translateText(session.id, {
+        requestId: crypto.randomUUID(),
+        text: pending.text.trim(),
+        purpose: 'send',
+        ...(pending.composerDocument ? { document: pending.composerDocument } : {}),
+      }, new AbortController().signal, current.ops.dispatch);
+      return record.id;
+    } catch (error) {
+      restoreDraft();
+      toast({
+        kind: 'error',
+        message: `${current.translate?.('translation.firstSendFailed')
+          ?? 'Automatic translation failed. The first message was not sent.'} ${String(error)}`,
+      });
+      return null;
+    }
+  };
   if (pending.attachments.length === 0) {
+    const translationId = await prepareTranslation(() => {
+      if (pending.composerDocument) {
+        injectComposerDocumentDraft(session.id, pending.composerDocument, [], pending.contextItems ?? []);
+      } else {
+        if (pending.text.trim()) injectComposerDraft(session.id, pending.text.trim());
+        injectComposerContextItems(session.id, pending.contextItems ?? []);
+      }
+    });
+    if (translationId === null) return;
     const firstMessage = planCreatedSessionFirstMessage(pending.text);
     if (firstMessage.structuredText || (pending.contextItems?.length ?? 0) > 0) {
       dispatchMessageSend(current.ops.dispatch, {
         sessionId: session.id,
         text: firstMessage.structuredText ?? '',
         exec: session.executor,
+        ...(translationId ? { translationId } : {}),
         contextItems: pending.contextItems,
         composerDocument: pending.composerDocument,
       });
@@ -190,10 +224,26 @@ async function deliverCreatedSessionFirstMessage(
     return;
   }
 
+  const translationId = await prepareTranslation(() => {
+    if (pending.composerDocument) {
+      const restoredAttachments = pending.attachments.map((source, index) => ({
+        id: source.id,
+        ...uploaded[index]!,
+      }));
+      injectComposerDocumentDraft(session.id, pending.composerDocument, restoredAttachments, pending.contextItems ?? []);
+    } else {
+      if (pending.text.trim()) injectComposerDraft(session.id, pending.text.trim());
+      for (const attachment of uploaded) injectComposerAttachment(session.id, attachment);
+      injectComposerContextItems(session.id, pending.contextItems ?? []);
+    }
+  });
+  if (translationId === null) return;
+
   dispatchMessageSend(current.ops.dispatch, {
     sessionId: session.id,
     text: pending.text.trim(),
     exec: session.executor,
+    ...(translationId ? { translationId } : {}),
     attachments: uploaded.map(attachment => ({
       ...attachment,
       previewUrl: servedAttachmentUrl(session.id, attachment.path),

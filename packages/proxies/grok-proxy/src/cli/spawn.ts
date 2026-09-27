@@ -8,7 +8,7 @@ import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-prot
 import { planRuntimeInstallation } from '../runtime/install.js';
 
 import { GrokProxyService } from '../core/service.js';
-import { GrokProtocolV2Adapter } from '../protocol/v2-adapter.js';
+import { GrokProtocolV2Adapter, standardError } from '../protocol/v2-adapter.js';
 import { discoverGrokRuntimes, probeGrokRuntime } from '../runtime/discover.js';
 import {
   createProtocolWriter,
@@ -41,7 +41,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.3.4';
+  return '0.3.6';
 }
 
 const PLUGIN_VERSION = readPluginVersion();
@@ -149,6 +149,27 @@ async function main(): Promise<void> {
     crlfDelay: Infinity,
   });
 
+  // Live-runtime requirement (E2E-verified against grok 1.0.41): while a
+  // turn.start handle is still awaiting the native turn, the runtime can block
+  // on a permission reverse request. A strictly serial loop would deadlock —
+  // the Host's interaction.respond line sits unread behind the open
+  // turn.start. These methods therefore overtake the loop and run
+  // concurrently; their own notification barrier still holds (beginRequest /
+  // flushNotifications), so Response-before-Notification is preserved.
+  const OVERTAKE_METHODS = new Set(['interaction.respond', 'turn.interrupt', 'turn.steer']);
+
+  const runOvertakeRequest = async (request: { id: string; method: string; params: Record<string, unknown> }) => {
+    adapter.beginRequest();
+    try {
+      const result = await adapter.handle(request);
+      writer.result(request.id, result);
+      adapter.flushNotifications();
+    } catch (error) {
+      writer.error(request.id, standardError(error));
+      adapter.flushNotifications();
+    }
+  };
+
   for await (const line of input) {
     if (!line.trim()) continue;
     let request: { id: string; method: string; params: Record<string, unknown> };
@@ -164,6 +185,11 @@ async function main(): Promise<void> {
         }
       })();
       writer.error(id, error);
+      continue;
+    }
+
+    if (OVERTAKE_METHODS.has(request.method)) {
+      void runOvertakeRequest(request);
       continue;
     }
 
@@ -183,7 +209,9 @@ async function main(): Promise<void> {
         return;
       }
     } catch (error) {
-      writer.error(request.id, error);
+      // Domain-mapped: a raw GrokProxyError must never degrade to INTERNAL on
+      // the wire (the E2E rename path surfaced exactly that).
+      writer.error(request.id, standardError(error));
       adapter.flushNotifications();
     }
   }

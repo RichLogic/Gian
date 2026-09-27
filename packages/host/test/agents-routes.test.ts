@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import test from 'node:test';
 import type { ConfigValue, ProxyCatalog, UserAgentStatus } from '@gian/shared';
 import { AgentManager } from '../src/agents/manager.js';
+import type { CatalogService } from '../src/catalog/service.js';
 import { registerAgentRoutes } from '../src/web/routes/agents.js';
 import { developmentEntries, testResolver } from './runtime-test-harness.js';
 
@@ -69,9 +70,19 @@ async function makeApp(
     config: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> },
   ) => Promise<ProxyCatalog>,
   hasRunningSessionsForAgent?: (agentId: string) => number,
+  seedAgents?: Array<Record<string, unknown>>,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  if (seedAgents && seedAgents.length > 0) {
+    const dataDir = join(root, 'data');
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, 'agents.json'), `${JSON.stringify({
+      schemaVersion: 4,
+      agents: seedAgents,
+    }, null, 2)}\n`);
+  }
   const bins = {
     claude: join(root, 'bin', 'claude'),
     codex: join(root, 'bin', 'codex'),
@@ -146,6 +157,36 @@ test('GET /api/proxies/:id/logo/:variant serves validated Proxy-owned bytes', as
   assert.equal(Buffer.from(await response.arrayBuffer()).toString('utf8'), 'official-kimi-logo');
   assert.equal((await app.request('/api/proxies/kimi/logo/dark')).status, 404);
   assert.equal((await app.request('/api/proxies/grok/logo/light')).status, 404);
+});
+
+test('GET /api/proxies/:id/logo/:variant prefers the signed Catalog over an installed legacy Proxy logo', async t => {
+  const { agents } = await makeApp(t);
+  let legacyReads = 0;
+  agents.proxyLogo = async () => {
+    legacyReads += 1;
+    return { bytes: Buffer.from('old-zcode-logo'), mediaType: 'image/png', sha256: 'a'.repeat(64) };
+  };
+  const app = new Hono();
+  registerAgentRoutes(app, {
+    agents,
+    closeProxy: async () => undefined,
+    capabilities: async () => DSH_LIKE_CATALOG,
+    catalogService: {
+      logo: async (pluginId: string, variant: string) => pluginId === 'com.zhipu.zcode' && variant === 'light'
+        ? { bytes: Buffer.from('new-zcode-logo'), mediaType: 'image/png', sha256: 'b'.repeat(64) }
+        : null,
+    } as unknown as CatalogService,
+  });
+
+  const response = await app.request('/api/proxies/com.zhipu.zcode/logo/light');
+  assert.equal(response.status, 200);
+  assert.equal(Buffer.from(await response.arrayBuffer()).toString(), 'new-zcode-logo');
+  assert.equal(legacyReads, 0);
+
+  const fallback = await app.request('/api/proxies/com.zhipu.zcode/logo/dark');
+  assert.equal(fallback.status, 200);
+  assert.equal(Buffer.from(await fallback.arrayBuffer()).toString(), 'old-zcode-logo');
+  assert.equal(legacyReads, 1);
 });
 
 test('GET /api/agents returns saved Agents only, never unsaved catalog kinds', async t => {
@@ -361,19 +402,24 @@ test('GET /api/agents/:id serves kind status for drafts and Agent status for sav
 test('GET /api/proxies/:id/draft-defaults numbers names and exposes HOME plus read-only active path', async t => {
   const claude = join(await mkdtemp(join(tmpdir(), 'gian-agents-route-bin2-')), 'bin', 'claude');
   await executable(claude, 'claude 2.1.220');
-  const { app } = await makeApp(t, { claude });
+  const { app, root } = await makeApp(t, { claude });
 
   const second = await app.request('/api/proxies/claude/draft-defaults');
   assert.deepEqual(await second.json(), {
     name: 'Claude Code 2',
-    home: { kind: 'managed', path: null },
+    home: { kind: 'default', path: join(root, 'home', '.claude') },
     cliPath: claude,
   });
   const dsh = await app.request('/api/proxies/dsh/draft-defaults');
   assert.deepEqual(await dsh.json(), {
     name: 'DeepSeek Harness',
-    home: { kind: 'managed', path: null },
+    home: { kind: 'default', path: join(root, 'home', '.dsh') },
     cliPath: null,
+  });
+  const zcode = await app.request('/api/proxies/zcode/draft-defaults');
+  assert.equal(zcode.status, 200);
+  assert.deepEqual((await zcode.json() as { home: unknown }).home, {
+    kind: 'default', path: join(root, 'home', '.zcode'),
   });
 
   // Official-user / PATH locations are not Host-scanned. A draft without a
@@ -390,6 +436,7 @@ test('GET /api/proxies/:id/draft-defaults numbers names and exposes HOME plus re
     managedProxies: false,
     developmentProxyEntries: { kimi: proxy2 },
     homeDir,
+    kimiCodeHome: join(homeDir, '.kimi'),
     pathEnv: '',
   });
   const app2 = new Hono();
@@ -406,7 +453,7 @@ test('GET /api/proxies/:id/draft-defaults numbers names and exposes HOME plus re
   const kimi = await app2.request('/api/proxies/kimi/draft-defaults');
   assert.deepEqual(await kimi.json(), {
     name: 'Kimi Code',
-    home: { kind: 'managed', path: null },
+    home: { kind: 'default', path: join(homeDir, '.kimi') },
     cliPath: null,
   });
 
@@ -428,6 +475,63 @@ test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t 
     agents: unknown[];
   };
   assert.equal(persisted.agents.length, 0);
+});
+
+test('PATCH /api/agents/:id validates Grok defaults against its pluginId Catalog', async () => {
+  const defaults = { model: '', thinking: '', mode: '', options: {} };
+  const grok = {
+    id: 'agent-grok', name: 'Grok', pluginId: 'grok', proxy: null,
+    cliPath: null, home: null, defaults,
+  };
+  const catalog: ProxyCatalog = {
+    catalogRevision: 'grok-models', input: [{ type: 'text' }], slashCommands: [],
+    configOptions: [{
+      id: 'model', displayName: 'Model', binding: 'session', role: 'model',
+      control: 'select', required: false, defaultValue: 'grok-4.7',
+      choices: [{ value: 'grok-4.7', displayName: 'Grok 4.7' }],
+    }, {
+      id: 'permission_mode', displayName: 'Mode', binding: 'session', role: 'approval_mode',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: [{ value: 'default', displayName: 'Default' }],
+    }],
+  };
+  const seen: string[] = [];
+  const agents = {
+    getAgent: () => grok,
+    updateAgent: async (_id: string, patch: { defaults?: Partial<typeof defaults> }) => {
+      Object.assign(grok.defaults, patch.defaults);
+      return grok;
+    },
+    agentStatus: async () => ({
+      ...grok, ready: true, proxyName: 'Grok Build',
+      cli: { state: 'ready', path: '/managed/grok', version: '1.0.41', source: 'managed' },
+      plugin: { state: 'ready', path: '/managed/proxy', version: '0.3.6', source: 'github-release', defaults: grok.defaults },
+      runtimeProfile: null, officialInstallUrl: '',
+    }),
+  } as unknown as AgentManager;
+  const app = new Hono();
+  registerAgentRoutes(app, {
+    agents,
+    closeProxy: async () => undefined,
+    capabilities: async pluginId => { seen.push(pluginId); return catalog; },
+  });
+  const response = await app.request('/api/agents/agent-grok', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { model: 'grok-4.7', mode: 'default' } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(seen, ['grok']);
+  assert.equal(grok.defaults.model, 'grok-4.7');
+  assert.equal(grok.defaults.mode, 'default');
+
+  const unknown = await app.request('/api/agents/agent-grok', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { model: 'grok-unknown' } }),
+  });
+  assert.equal(unknown.status, 400);
+  assert.equal(grok.defaults.model, 'grok-4.7');
 });
 
 test('PATCH /api/agents/:id accepts role-less option defaults, deletes on null', async t => {
@@ -553,4 +657,95 @@ test('PATCH /api/agents/:id accepts option defaults shape-only on an empty catal
   });
   assert.equal(patched.status, 200);
   assert.deepEqual(agents.getAgent(agent.id).defaults.options, { provider: 'offline-value' });
+});
+
+// ---------------------------------------------------------------------------
+// Agent identity: pluginId is the live key; a null proxy alias never gates
+// ---------------------------------------------------------------------------
+
+const FIXTURE_SEED = {
+  id: 'agent-fixture-1',
+  name: 'Fixture Plugin Agent',
+  pluginId: 'io.gian.fixture',
+  proxy: null,
+  cliPath: null,
+  defaults: { model: '', thinking: '', mode: '', options: {} },
+};
+
+test('PATCH defaults succeeds for a pure-plugin Agent (null proxy alias)', async t => {
+  const { app, agents } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG, undefined, undefined, [FIXTURE_SEED]);
+  const agent = agents.getAgent('agent-fixture-1');
+  assert.equal(agent.pluginId, 'io.gian.fixture');
+  assert.equal(agent.proxy, null);
+
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { options: { provider: 'vendor-b' } } }),
+  });
+  assert.equal(patched.status, 200, JSON.stringify(await patched.json()));
+  assert.deepEqual(agents.getAgent(agent.id).defaults.options, { provider: 'vendor-b' });
+});
+
+/** A provider-native catalog above the `catalog.modeSemantics` gate: the
+ *  mode option carries modeKind='provider-native' and is turn-bound — binding
+ *  alone must not decide the Gian-preset vs native distinction. */
+const MODE_KIND_CATALOG: ProxyCatalog = {
+  catalogRevision: 'modekind-test',
+  input: [{ type: 'text' }],
+  configOptions: [
+    {
+      id: 'collab_mode',
+      displayName: 'Collaboration mode',
+      binding: 'turn',
+      role: 'approval_mode',
+      modeKind: 'provider-native',
+      control: 'select',
+      required: true,
+      defaultValue: 'vendor-a',
+      choices: [
+        { value: 'vendor-a', displayName: 'Vendor A mode' },
+        { value: 'vendor-b', displayName: 'Vendor B mode' },
+      ],
+    },
+  ],
+  slashCommands: [],
+};
+
+test('PATCH mode defaults validate via catalog semantics, not the proxy alias', async t => {
+  const { app, agents } = await makeApp(t, undefined, undefined, MODE_KIND_CATALOG, undefined, undefined, [FIXTURE_SEED]);
+  const agent = agents.getAgent('agent-fixture-1');
+  // The catalog stamps modeKind='provider-native'; the fixture pluginId is
+  // NOT on the legacy native allowlist, but the catalog decides — and the
+  // option being turn-bound is irrelevant to that distinction.
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { mode: 'vendor-a' } }),
+  });
+  assert.equal(patched.status, 200, JSON.stringify(await patched.json()));
+  assert.equal(agents.getAgent(agent.id).defaults.mode, 'vendor-a');
+
+  // An unadvertised native mode value still rejects.
+  const invalid = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ defaults: { mode: 'not-advertised' } }),
+  });
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json() as { error: string }).error, /not advertised by the Proxy/);
+});
+
+test('GET agent status keeps a null proxy alias readable without gating readiness text', async t => {
+  const { app, agents } = await makeApp(t, undefined, undefined, DSH_LIKE_CATALOG, undefined, undefined, [FIXTURE_SEED]);
+  const agent = agents.getAgent('agent-fixture-1');
+  const response = await app.request(`/api/agents/${agent.id}`);
+  assert.equal(response.status, 200);
+  const status = await response.json() as UserAgentStatus;
+  assert.equal(status.pluginId, 'io.gian.fixture');
+  assert.equal(status.proxy, null);
+  // proxy:null never maps to an "unsupported" product state: the Agent is
+  // listed and addressable, with readiness carried by the dedicated field.
+  assert.equal(status.ready, false, 'fixture plugin is not installed in this env');
+  assert.match(status.proxyName, /io\.gian\.fixture|Fixture/);
 });

@@ -18,16 +18,18 @@ import type {
   Workspace,
 } from '@gian/shared';
 import {
+  DEFAULT_TRANSLATION_PREFERENCES,
   MAX_MESSAGE_CONTEXT_ITEMS,
   MAX_PASTED_TEXT_BYTES,
   composerDocumentUserText,
   isApprovalMode,
+  isTranslationConfigured,
   normalizeBrowserElementCapture,
   normalizeComposerDocument,
   usesCliCapabilitySurface,
   usesNativeExecutorConfig,
 } from '@gian/shared';
-import { loadAgents, loadResolvedProxyCatalog, peekAgents } from '../api.js';
+import { loadAgents, loadResolvedProxyCatalog, loadSettings, peekAgents } from '../api.js';
 import { MAX_FILE_BYTES, dedupeAttachmentName, fmtBytes, isNativeImageMime } from '../attachments.js';
 import { desktopBridge } from '../desktop-bridge.js';
 import { useT } from '../i18n/index.js';
@@ -101,6 +103,7 @@ import {
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
+import '../translation/translation.css';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
 
@@ -120,6 +123,7 @@ export interface CreateSessionInput {
    *  create payload itself stays free of it (ses-001 contract); App hands it
    *  to the `session:created` socket handler via pendingFirstMessageRef. */
   firstMessage: string;
+  autoTranslate?: boolean;
   composerDocument?: ComposerDocument;
   /** Screenshots captured before the Session exists. They are uploaded into
    *  the newly-created Session before its first structured message is sent. */
@@ -215,6 +219,7 @@ interface NewSessionDraft extends StoredNewSession {
   sessionName?: string;
   message?: string;
   document?: ComposerDocument;
+  autoTranslate?: boolean;
   screenshotAttachments?: NewSessionScreenshotDraftAttachment[];
   contextItems?: MessageContextItem[];
 }
@@ -513,6 +518,9 @@ function SessionCreateForm({
   const [sessionName, setSessionName] = useState(draft?.sessionName ?? '');
   const [composerDocument, setComposerDocument] = useState(initial.composerDocument);
   const [message, setMessage] = useState(() => composerDocumentUserText(initial.composerDocument));
+  const [autoTranslate, setAutoTranslate] = useState(draft?.autoTranslate === true);
+  const [checkingTranslation, setCheckingTranslation] = useState(false);
+  const [translationSetupError, setTranslationSetupError] = useState('');
   const [contextItems, setContextItems] = useState<MessageContextItem[]>(
     () => savedContextItems(draft?.contextItems),
   );
@@ -529,7 +537,7 @@ function SessionCreateForm({
   const requestedAgentId = initialAgentId ?? draft?.agentId ?? null;
   const [agentId, setAgentId] = useState<string | null>(requestedAgentId);
   const selectedAgent = agents?.find(agent => agent.id === agentId) ?? null;
-  const executor = selectedAgent?.proxy ?? null;
+  const executor = selectedAgent?.pluginId ?? null;
   const configuredDefaults = selectedAgent?.defaults;
   // Capability chip state holds only explicit per-draft choices. Catalog-backed
   // native executors use the same state now that their options are available
@@ -598,7 +606,7 @@ function SessionCreateForm({
     }
     const rememberedKind = draft?.executor ?? last?.executor;
     if (rememberedKind) {
-      const ofKind = ready.find(agent => agent.proxy === rememberedKind);
+      const ofKind = ready.find(agent => agent.pluginId === rememberedKind || agent.proxy === rememberedKind);
       if (ofKind) {
         setAgentId(ofKind.id);
         return;
@@ -790,6 +798,7 @@ function SessionCreateForm({
       sessionName,
       message,
       document: composerDocument,
+      ...(autoTranslate ? { autoTranslate: true } : {}),
       ...(contextItems.some(item => referenceIds.has(item.id))
         ? { contextItems: contextItems.filter(item => referenceIds.has(item.id)) }
         : {}),
@@ -826,6 +835,7 @@ function SessionCreateForm({
     selectedWs,
     sessionName,
     message,
+    autoTranslate,
     composerDocument,
     contextItems,
     agentId,
@@ -1086,6 +1096,7 @@ function SessionCreateForm({
       setSessionName(nextDraft.sessionName ?? '');
       setComposerDocument(nextDocument);
       setMessage(composerDocumentUserText(nextDocument));
+      setAutoTranslate(nextDraft.autoTranslate === true);
       setContextItems(savedContextItems(nextDraft.contextItems));
       setScreenshotAttachments(nextDraft.screenshotAttachments ?? []);
       attachmentIdsRef.current = new Set(nextDraft.screenshotAttachments?.map(item => item.id) ?? []);
@@ -1103,14 +1114,57 @@ function SessionCreateForm({
     && selectedAgent?.ready === true
     && (composerDocument.segments.length > 0)
     && !creating
+    && !checkingTranslation
     && !preparingAttachments
     && !createUnknown;
 
+  async function translationSetupReady(): Promise<boolean> {
+    try {
+      const settings = await loadSettings();
+      const preferences = settings?.translation ?? DEFAULT_TRANSLATION_PREFERENCES;
+      if (!settings || !isTranslationConfigured(preferences)) {
+        setTranslationSetupError(t('translation.configureFirst'));
+        return false;
+      }
+      const currentAgents = await loadAgents({ refresh: true });
+      if (!currentAgents.some(agent => agent.id === preferences.agent_id && agent.ready && agent.enabled !== false)) {
+        setTranslationSetupError(t('translation.agentMissing'));
+        return false;
+      }
+      setTranslationSetupError('');
+      return true;
+    } catch (error) {
+      setTranslationSetupError(String(error));
+      return false;
+    }
+  }
+
+  async function toggleAutoTranslate(): Promise<void> {
+    if (autoTranslate) {
+      setAutoTranslate(false);
+      setTranslationSetupError('');
+      return;
+    }
+    setCheckingTranslation(true);
+    try {
+      if (await translationSetupReady()) setAutoTranslate(true);
+    } finally {
+      setCheckingTranslation(false);
+    }
+  }
+
   async function submit() {
     if (!canSend || !executor) return;
-    const owner = activeDraftScope();
-    if (!owner) return;
     setPreparingAttachments(true);
+    if (autoTranslate && !await translationSetupReady()) {
+      setPreparingAttachments(false);
+      return;
+    }
+    const owner = activeDraftScope();
+    if (!owner) {
+      setPreparingAttachments(false);
+      return;
+    }
     setAttachmentError(null);
     const referenceIds = newSessionReferenceIds(composerDocument);
     const referencedAttachments = screenshotAttachments.filter(item => referenceIds.has(item.id));
@@ -1177,6 +1231,7 @@ function SessionCreateForm({
     onCreate({
       ...payload,
       firstMessage: composerDocumentUserText(composerDocument).trim(),
+      ...(autoTranslate ? { autoTranslate: true } : {}),
       ...(composerDocument.segments.some(segment => segment.type === 'reference')
         ? { composerDocument }
         : {}),
@@ -1439,6 +1494,11 @@ function SessionCreateForm({
               {attachmentError}
             </p>
           )}
+          {translationSetupError && (
+            <p className="spaces-error" role="alert" data-testid="new-session-translation-error">
+              {translationSetupError}
+            </p>
+          )}
           {catalogResolveError && (
             <p className="spaces-error" role="alert" data-testid="new-session-catalog-error">
               {catalogResolveError}
@@ -1553,7 +1613,7 @@ function SessionCreateForm({
                   onClick={() => { setAgentId(agent.id); agentDrop.setOpen(false); }}
                 >
                   <span className="mp-check">{agentId === agent.id ? '✓' : ''}</span>
-                  <AgentLogo proxy={agent.proxy} environmentId={executionEnvironmentId} size={24} />
+                  <AgentLogo proxy={agent.pluginId} environmentId={executionEnvironmentId} size={24} />
                   <span className="mp-row-body">
                     <span className="mp-row-title">{agent.name}</span>
                     <span className={`mp-row-hint${agent.runtimeProfile?.verification === 'unverified' ? ' danger-text' : ''}`}>
@@ -1629,6 +1689,19 @@ function SessionCreateForm({
           document.body,
         )}
 
+        <div className="main-underbar ns-translation-underbar">
+          <button
+            type="button"
+            className={`translation-auto${autoTranslate ? ' on' : ''}`}
+            data-testid="ns-auto-translation"
+            title={t('translation.auto')}
+            aria-pressed={autoTranslate}
+            disabled={creating || createUnknown || checkingTranslation}
+            onClick={() => { void toggleAutoTranslate(); }}
+          >
+            {t('translation.auto')}
+          </button>
+        </div>
         <div className="composer">
           {/* Hidden file input — triggered by the plus button */}
           <input

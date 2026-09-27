@@ -500,31 +500,20 @@ export function Composer({ session }: { session: RemoteSession }) {
           />
         </div>
         <div className="composer-bar">
-          {mode === 'narrow' ? (
-            /* Narrow: the proxy icon opens the combined Model/Thinking/Fast
-               sheet (2026-09-15 owner sync with the main composer). */
-            <button
-              type="button"
-              className="composer-model icon-only"
-              title={t('chat.sheet.title')}
-              aria-expanded={sheetOpen}
-              onClick={() => toggleSheet('root')}
-            >
-              <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
-            </button>
-          ) : (
+          <button
+            type="button"
+            className={`composer-model${mode === 'narrow' ? ' icon-only' : ''}`}
+            title={t(mode === 'narrow' ? 'chat.sheet.title' : 'chat.model.title')}
+            aria-expanded={sheetOpen && (mode === 'narrow' || sheetPage === 'model')}
+            onClick={() => toggleSheet(mode === 'narrow' ? 'root' : 'model')}
+          >
+            <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
+            {mode !== 'narrow' && <><span className="name">{model}</span><span className="caret">▾</span></>}
+          </button>
+          <span className="rw-context-usage" tabIndex={0} role="img" aria-label={contextLabel} title={contextLabel}
+            style={{ background: `conic-gradient(var(--accent) ${(contextPercent ?? 0) * 3.6}deg, var(--accent-soft) 0)` }} />
+          {mode !== 'narrow' && (
             <>
-              <button
-                type="button"
-                className="composer-model"
-                title={t('chat.model.title')}
-                aria-expanded={sheetOpen && sheetPage === 'model'}
-                onClick={() => toggleSheet('model')}
-              >
-                <ProxyLogo proxy={session.agent.proxy} name={session.agent.name} size={14} />
-                <span className="name">{model}</span>
-                <span className="caret">▾</span>
-              </button>
               <span className="composer-sep" aria-hidden="true" />
               <button
                 type="button"
@@ -560,8 +549,6 @@ export function Composer({ session }: { session: RemoteSession }) {
             </>
           )}
           <span className="spacer" style={{ flex: 1 }} />
-          <span className="rw-context-usage" tabIndex={0} role="img" aria-label={contextLabel} title={contextLabel}
-            style={{ background: `conic-gradient(var(--accent) ${(contextPercent ?? 0) * 3.6}deg, var(--accent-soft) 0)` }} />
           {approvalModes.length > 0 && (
             <button
               type="button"

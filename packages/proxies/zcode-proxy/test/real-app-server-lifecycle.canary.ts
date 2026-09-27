@@ -8,16 +8,20 @@
  * local ZCode app-server — `session/create` then `session/read` succeed with
  * a fresh mkdtemp HOME and workspace.
  *
+ * Since the 0.16.9 open-source baseline (github.com/zai-org/ZCode @
+ * 328c1a0c), the standalone runtime requires the built-in provider config at
+ * `<entry>/provider/zcode-builtin.json`
+ * (packages/cli/src/provider-runtime-env.ts:150). The installed ZCode.app
+ * bundle does not ship that file and must never be modified, so with only
+ * the app bundle present this canary SKIPS with an explicit unavailable
+ * note — an honest "not executed", never a fake PASS. Point ZCODE_CJS at a
+ * standalone runtime (e.g. the managed-runtime build) to execute it.
+ *
  * Hard guarantees enforced by this test:
  *  - NO session/send (never any model/provider traffic, no quota);
  *  - no user data: the HOME/workspace are throwaway mkdtemp dirs; the user's
  *    real ~/.zcode is never read or written;
  *  - the app-server child is always stopped and temp dirs removed.
- *
- * When no real ZCode.app Runtime is installed (or ZCODE_CJS overrides to a missing
- * path), the test SKIPS with an explicit unavailable note — that is an
- * honest "not executed", never a fake PASS. On a machine with
- * /Applications/ZCode.app present, this test must PASS.
  */
 
 import { test } from 'node:test';
@@ -43,6 +47,17 @@ test('real app-server accepts the synthetic config: session/create then session/
     t.skip(
       `real ZCode app-server unavailable (no ${runtimeBin}); `
       + 'synthetic-config lifecycle regression NOT executed — report unavailable, not a pass',
+    );
+    return;
+  }
+  // The standalone 0.16.9 runtime needs its built-in provider config next to
+  // the entry; the installed app bundle neither ships it nor may be modified.
+  if (!existsSync(join(runtimeBin, '..', 'provider', 'zcode-builtin.json'))) {
+    t.skip(
+      `${runtimeBin} cannot start standalone: provider/zcode-builtin.json is missing `
+      + 'and the app bundle is never modified (provider-runtime-env.ts:150). '
+      + 'synthetic-config lifecycle regression NOT executed — report unavailable, not a pass. '
+      + 'Point ZCODE_CJS at a standalone runtime build to execute this canary.',
     );
     return;
   }

@@ -49,8 +49,9 @@ export function AgentDialog({
     ? initialPluginId!
     : integrations[0]?.pluginId ?? '';
   const [pluginId, setPluginId] = useState(initial);
-  const [homeMode, setHomeMode] = useState<'managed' | 'custom'>('managed');
+  const [homeMode, setHomeMode] = useState<'default' | 'managed' | 'custom'>('managed');
   const [customHome, setCustomHome] = useState('');
+  const [defaultHome, setDefaultHome] = useState('');
   const [homeSupported, setHomeSupported] = useState(true);
   const [checkingHome, setCheckingHome] = useState(false);
 
@@ -63,6 +64,7 @@ export function AgentDialog({
     let alive = true;
     setHomeMode('managed');
     setCustomHome('');
+    setDefaultHome('');
     const executor = productExecutorForPluginId(pluginId);
     if (!executor) {
       setHomeSupported(true);
@@ -71,7 +73,14 @@ export function AgentDialog({
     }
     setCheckingHome(true);
     void loadAgentDraftDefaults(executor)
-      .then(defaults => { if (alive) setHomeSupported(defaults.home !== null); })
+      .then(defaults => {
+        if (!alive) return;
+        setHomeSupported(defaults.home !== null);
+        const path = defaults.home?.path ?? '';
+        setDefaultHome(path);
+        setHomeMode(path && !agents.some(agent => agent.home?.path === path)
+          ? 'default' : 'managed');
+      })
       .catch(() => { if (alive) setHomeSupported(true); })
       .finally(() => { if (alive) setCheckingHome(false); });
     return () => { alive = false; };
@@ -79,14 +88,16 @@ export function AgentDialog({
 
   const selected = integrations.find(item => item.pluginId === pluginId) ?? null;
   const customValid = homeMode !== 'custom' || customHome.trim().length > 0;
-  const createDisabled = busy || checkingHome || !selected || !customValid;
+  const defaultHomeInUse = agents.some(agent => agent.home?.path === defaultHome);
+  const createDisabled = busy || checkingHome || !selected || !customValid
+    || (homeMode === 'default' && (!defaultHome || defaultHomeInUse));
 
   function create() {
     if (createDisabled || !selected) return;
     onSubmit({
       pluginId: selected.pluginId,
       name: nextAgentName(selected.displayName, agents),
-      ...(homeSupported
+      ...(homeSupported && homeMode !== 'default'
         ? { home: homeMode === 'managed'
           ? { kind: 'managed' as const }
           : { kind: 'custom' as const, path: customHome.trim() } }
@@ -136,6 +147,17 @@ export function AgentDialog({
                    value={t('agents.home.external')} disabled />
           ) : (
             <>
+              {defaultHome && (
+                <>
+                  <label className="home-custom">
+                    <input type="radio" name="agent-home-mode" value="default"
+                           checked={homeMode === 'default'} disabled={busy || checkingHome || defaultHomeInUse}
+                           onChange={() => setHomeMode('default')} />
+                    {t('agents.add.dialog.defaultHome')} <span className="mono">{defaultHome}</span>
+                  </label>
+                  {defaultHomeInUse && <p className="s2-help">{t('agents.add.dialog.defaultInUse')}</p>}
+                </>
+              )}
               <label className="home-custom">
                 <input type="radio" name="agent-home-mode" value="managed"
                        checked={homeMode === 'managed'} disabled={busy || checkingHome}
@@ -163,6 +185,8 @@ export function AgentDialog({
                   </button>
                 </div>
               )}
+              {homeMode === 'custom' && productExecutorForPluginId(pluginId) === 'zcode'
+                && <p className="s2-help">{t('agents.add.dialog.zcodeHomeHelp')}</p>}
             </>
           )}
         </div>

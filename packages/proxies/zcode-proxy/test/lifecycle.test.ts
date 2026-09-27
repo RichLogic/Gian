@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 
-import { startHarness, type Harness } from './harness.js';
+import { startHarness, type Harness, type OutgoingLine } from './harness.js';
 
 const TURN_SCRIPT = {
   turnId: 'turn_native_1',
@@ -235,7 +235,8 @@ test('interrupt maps to interrupted only when the native terminal agrees', async
       'interrupted',
       'accepted interrupt + cancelled native -> interrupted',
     );
-    const stopCalls = harness.fakeLog().filter((entry) => entry.method === 'v4/command');
+    const stopCalls = harness.fakeLog().filter((entry) => entry.method === 'v4/command'
+      && (entry.params as { type?: string })?.type === 'stop');
     assert.equal(stopCalls.length, 1, 'one v4 stop command sent');
     const stopParams = stopCalls[0]?.params as Record<string, unknown>;
     assert.equal(stopParams.type, 'stop');
@@ -347,7 +348,7 @@ test('session.create is idempotent and conflicts on different workspaces', async
   }
 });
 
-test('turn config applies model -> thinking -> approval with verified set* calls', async () => {
+test('turn config applies model -> thinking -> approval before the v4 sendText', async () => {
   const harness = startHarness({
     scenario: {
       availableModels: [
@@ -365,6 +366,9 @@ test('turn config applies model -> thinking -> approval with verified set* calls
   });
   try {
     await initialize(harness);
+    // 0.16.9 reports model facts from session snapshots, so the session is
+    // created first; catalog.list then projects the advertised marketplace.
+    await createSession(harness);
     const listed = await harness.request('catalog.list', {});
     const catalog = (listed.payload as { result: Record<string, unknown> }).result;
     const revision = catalog.catalogRevision as string;
@@ -380,7 +384,6 @@ test('turn config applies model -> thinking -> approval with verified set* calls
     });
     const turnConfig = ((resolved.payload as { result: Record<string, unknown> }).result.resolvedDefaults as Record<string, Record<string, string>>).turnConfig;
 
-    await createSession(harness);
     const snapshot = await harness.request('session.get', { sessionId: 's_1' });
     const streamId = ((snapshot.payload as { result: { session: { streamId: string } } }).result.session.streamId);
     const started = await harness.request('turn.start', {
@@ -392,11 +395,91 @@ test('turn config applies model -> thinking -> approval with verified set* calls
     const fakeLog = harness.fakeLog().filter((entry) => entry.kind === 'request');
     const setCalls = fakeLog.filter((entry) => String(entry.method).startsWith('session/set'));
     assert.ok(setCalls.length >= 1, 'changed settings are applied before send');
-    const sendIndex = fakeLog.findIndex((entry) => entry.method === 'session/send');
+    const sendIndex = fakeLog.findIndex((entry) => entry.method === 'v4/command'
+      && (entry.params as { type?: string })?.type === 'sendText');
     const lastSetIndex = fakeLog.reduce((last, entry, index) => (
       String(entry.method).startsWith('session/set') ? index : last
     ), -1);
-    assert.ok(lastSetIndex < sendIndex, 'all config applies BEFORE session/send');
+    assert.ok(lastSetIndex < sendIndex, 'all config applies BEFORE the v4 sendText');
+    const sendCommand = fakeLog[sendIndex] as { params?: { type?: string } } | undefined;
+    assert.equal(sendCommand?.params?.type, 'sendText', 'turns are driven by the v4 sendText command');
+    // 0.16.9 model + reasoning travel as ONE atomic ModelSelection: the
+    // setModel call carries options.reasoningLevel, and the independent
+    // session/setThoughtLevel path never fires.
+    const setModels = fakeLog.filter((entry) => entry.method === 'session/setModel');
+    const switched = setModels.some((entry) => {
+      const model = (entry.params as { model?: { providerId?: string; options?: { reasoningLevel?: string } } }).model;
+      return model?.providerId !== undefined
+        && model.providerId !== 'bigmodel'
+        || model?.options?.reasoningLevel !== undefined;
+    });
+    assert.ok(setModels.length >= 1, 'setModel is called');
+    if (switched === false && setModels.length > 0) {
+      // Even a same-model turn pins the reasoning level on the selection.
+      const model = (setModels.at(-1)!.params as { model: { options?: { reasoningLevel?: string } } }).model;
+      assert.ok(model.options?.reasoningLevel !== undefined, 'setModel carries the atomic reasoning level');
+    }
+    assert.equal(
+      fakeLog.filter((entry) => entry.method === 'session/setThoughtLevel').length,
+      0,
+      'the legacy setThoughtLevel path is gone from the turn flow',
+    );
+    const sendPayload = (fakeLog[sendIndex] as { params?: { payload?: { modelSelection?: { options?: { reasoningLevel?: string } } } } }).params?.payload;
+    assert.ok(
+      sendPayload?.modelSelection === undefined || sendPayload.modelSelection.options?.reasoningLevel !== undefined,
+      'sendText never carries a selection without its reasoning level',
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test('typed turn-started arriving BEFORE the sendText ack still emits turn.started once with the right turn id', async () => {
+  // Live 0.16.9: the runtime emits the typed turn-started operation event on
+  // input admission, which can precede the v4 sendText ack. Binding the
+  // projector turn after the ack swallowed (or mis-attributed) the fact for
+  // every turn after the first on a session (live E2E: t2 lost, t3/t4
+  // emitted with the PREVIOUS gian turn id).
+  const harness = startHarness({
+    scenario: {
+      behavior: { turnStartedBeforeAck: true },
+      turn: {
+        turnId: 'turn_preack',
+        events: [
+          { seq: 1, eventId: 'evt_preack_term', payload: { resultType: 'success' } },
+        ],
+      },
+    },
+  });
+  try {
+    await initialize(harness);
+    await createSession(harness);
+    const snapshot = await harness.request('session.get', { sessionId: 's_1' });
+    const streamId = ((snapshot.payload as { result: { session: { streamId: string } } }).result.session.streamId);
+    const started = await harness.request('turn.start', {
+      sessionId: 's_1', streamId, turnId: 't_preack',
+      input: [{ type: 'text', text: 'go' }], config: {},
+    });
+    assert.equal(started.kind, 'result', JSON.stringify(started.payload));
+
+    // Collect everything up to (and including) the terminal fact.
+    const before: OutgoingLine[] = [];
+    const completed = await harness.waitNotificationFor(
+      (line) => line.method === 'turn.completed',
+      8_000,
+      before,
+    );
+    const startedFacts = [...before, completed].filter((line) => line.method === 'turn.started');
+    assert.equal(startedFacts.length, 1, `exactly one turn.started (got ${startedFacts.length})`);
+    assert.equal(
+      (startedFacts[0]!.payload.params as { turnId?: string }).turnId,
+      't_preack',
+      'turn.started carries THIS gian turn id, not the previous one',
+    );
+    assert.equal(
+      (completed.payload.params as { turnId?: string }).turnId,
+      't_preack',
+    );
   } finally {
     await harness.close();
   }
@@ -419,9 +502,12 @@ test('invalid model config fails the turn before send and restores state', async
     assert.equal(failed.kind, 'error');
     assert.equal(
       ((failed.payload as { error: { data: { domainCode: string } } }).error.data?.domainCode),
-      'RUNTIME_ERROR',
+      'CONFIG_VALUE_INVALID',
     );
-    const sends = harness.fakeLog().filter((entry) => entry.method === 'session/send');
+    assert.equal(harness.fakeLog().filter((entry) => entry.method === 'gian/modelCatalog').length, 1,
+      'turn.start validates the full Registry even before catalog.list');
+    const sends = harness.fakeLog().filter((entry) => entry.method === 'v4/command'
+      && (entry.params as { type?: string })?.type === 'sendText');
     assert.equal(sends.length, 0, 'no prompt is ever sent with unknown config');
   } finally {
     await harness.close();
@@ -431,14 +517,15 @@ test('invalid model config fails the turn before send and restores state', async
 test('a partial config failure restores the previous model and leaves the turn retryable', async () => {
   const previousModel = { providerId: 'bigmodel', modelId: 'GLM-5.3-Flash' };
   const nextModel = { providerId: 'zai', modelId: 'glm-5.1' };
+  const reasoning = { enabled: true, levels: [{ value: 'low' }, { value: 'high' }, { value: 'max' }], defaultLevel: 'max' };
   const harness = startHarness({
     scenario: {
       initialModel: previousModel,
       availableModels: [
-        { ref: previousModel, label: 'GLM-5.3-Flash' },
-        { ref: nextModel, label: 'GLM-5.1' },
+        { ref: previousModel, label: 'GLM-5.3-Flash', reasoning: { enabled: true, levels: [{ value: 'max' }], defaultLevel: 'max' } },
+        { ref: nextModel, label: 'GLM-5.1', reasoning: { enabled: true, levels: [{ value: 'high' }], defaultLevel: 'high' } },
       ],
-      behavior: { failThoughtLevel: 'broken' },
+      behavior: { failMode: 'edit' },
     },
   });
   try {
@@ -451,11 +538,18 @@ test('a partial config failure restores the previous model and leaves the turn r
     const failed = await harness.request('turn.start', {
       sessionId: 's_1', streamId, turnId: 't_retryable',
       input: [{ type: 'text', text: 'go' }],
-      config: { provider: nextModel.providerId, model, thinking: 'broken' },
+      config: { provider: nextModel.providerId, model, thinking: 'high', approval_mode: 'edit' },
     });
     assert.equal(failed.kind, 'error');
+    // The fake registry rejects a level outside the TARGET model's vocabulary
+    // (the real 0.16.9 error surface for the old split setModel+thoughtLevel
+    // flow). Rollback restores the COMPLETE previous selection atomically.
     const setModels = harness.fakeLog().filter(entry => entry.method === 'session/setModel');
-    assert.deepEqual((setModels.at(-1)?.params as { model?: unknown } | undefined)?.model, previousModel);
+    assert.deepEqual((setModels[0]?.params as { model?: unknown } | undefined)?.model,
+      { ...nextModel, options: { reasoningLevel: 'high' } });
+    assert.deepEqual((setModels.at(-1)?.params as { model?: unknown } | undefined)?.model,
+      { ...previousModel, options: { reasoningLevel: 'max' } });
+    assert.equal(harness.fakeLog().some(entry => entry.method === 'session/setThoughtLevel'), false);
 
     const retried = await harness.request('turn.start', {
       sessionId: 's_1', streamId, turnId: 't_retryable',
@@ -468,7 +562,8 @@ test('a partial config failure restores the previous model and leaves the turn r
       },
     });
     assert.equal(retried.kind, 'result', JSON.stringify(retried.payload));
-    assert.equal(harness.fakeLog().filter(entry => entry.method === 'session/send').length, 1);
+    assert.equal(harness.fakeLog().filter(entry => entry.method === 'v4/command'
+      && (entry.params as { type?: string })?.type === 'sendText').length, 1);
   } finally {
     await harness.close();
   }
@@ -520,20 +615,29 @@ test('shared outer Proxy reuses one inner runtime per workspace and isolates ano
     assert.equal((await create('s_pool_b', '/tmp/zcode-ws')).kind, 'result');
     assert.equal((await create('s_pool_c', '/tmp/zcode-ws-two')).kind, 'result');
 
-    const creates = harness.fakeLog().filter((entry) => entry.method === 'session/create');
-    const bySession = new Map(creates.map((entry) => [
-      ((entry.params as { workspace: { workspacePath: string } }).workspace.workspacePath),
+    // Fresh sessions are created through the v4 createSession command (the
+    // legacy session/create surface produces a session the v4 store cannot
+    // attach turns to).
+    const creates = harness.fakeLog().filter((entry) => entry.method === 'v4/command'
+      && (entry.params as { type?: string })?.type === 'createSession');
+    const byWorkspace = new Map(creates.map((entry) => [
+      ((entry.params as { payload: { workspaceId: string } }).payload.workspaceId),
       entry.pid,
     ]));
     const firstWorkspacePids = creates
-      .filter((entry) => ((entry.params as { workspace: { workspacePath: string } }).workspace.workspacePath) === '/tmp/zcode-ws')
+      .filter((entry) => ((entry.params as { payload: { workspaceId: string } }).payload.workspaceId) === '/tmp/zcode-ws')
       .map((entry) => entry.pid);
     assert.equal(firstWorkspacePids.length, 2);
     assert.equal(firstWorkspacePids[0], firstWorkspacePids[1], 'same workspace reuses one app-server');
     assert.notEqual(
       firstWorkspacePids[0],
-      bySession.get('/tmp/zcode-ws-two'),
+      byWorkspace.get('/tmp/zcode-ws-two'),
       'different workspace gets a different app-server',
+    );
+    assert.equal(
+      harness.fakeLog().filter((entry) => entry.method === 'session/create').length,
+      0,
+      'fresh sessions never touch the legacy create surface (its sessions cannot take v4 turns)',
     );
 
     for (const sessionId of ['s_pool_a', 's_pool_b', 's_pool_c']) {

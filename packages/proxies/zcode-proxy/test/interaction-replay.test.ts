@@ -40,6 +40,48 @@ async function beginTurn(harness: Harness): Promise<string> {
   return streamId;
 }
 
+test('permission request arriving BEFORE the typed turn-started still relays (0.16.9 live ordering)', async () => {
+  // Live 0.16.9 sends interaction/requestPermission with the native turnId
+  // before the typed turn-started event reaches the projector. The request
+  // itself carries the native turn identity, so the interaction must still
+  // be relayed instead of failing closed (which silently denies the tool).
+  const scenario = {
+    turn: {
+      turnId: 'turn_perm_early',
+      turnStartedEvent: false,
+      permissionRequest: { requestId: 'perm-early', toolName: 'Write', command: 'x', riskLevel: 'medium' },
+      events: [
+        { channel: 'computer-use', kind: 'turn-started', eventId: 'evt_early_start' },
+        { seq: 1, eventId: 'evt_early_term', payload: { kind: 'turn_completed', resultType: 'success' } },
+      ],
+    },
+  };
+  const harness = startHarness({ scenario });
+  try {
+    await initialize(harness);
+    const streamId = await beginTurn(harness);
+
+    const requested = await harness.waitNotificationFor((line) => line.method === 'interaction.requested');
+    const data = (requested.payload.params as { data: Record<string, unknown> }).data;
+    assert.equal(data.title, 'Write');
+    const interactionId = data.interactionId as string;
+    const responded = await harness.request('interaction.respond', {
+      sessionId: 's_1', streamId, turnId: 't_1',
+      responseId: 'resp-early', interactionId, actionId: 'allow_once', values: {},
+    });
+    assert.equal(responded.kind, 'result', JSON.stringify(responded.payload));
+    let answer: Record<string, unknown> | undefined;
+    for (let i = 0; i < 40 && answer === undefined; i += 1) {
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
+      answer = harness.fakeLog().find((entry) => entry.kind === 'reverse-answer'
+        && (entry.result as { decision?: string } | undefined)?.decision !== undefined);
+    }
+    assert.ok(answer, 'the early permission request was answered with the native payload');
+  } finally {
+    await harness.close();
+  }
+});
+
 test('permission request round-trips the EXACT native response payload', async () => {
   const harness = startHarness({ scenario: { turn: PERMISSION_TURN } });
   try {
@@ -178,17 +220,18 @@ test('replay projects messages into canonical events with continuous sequence', 
       knownSessions: ['sess_known_1'],
       messages: [
         {
-          info: { role: 'user', id: 'msg_u1', anchor: { turnId: 'turn_r1' }, time: { created: 1_700_000_000_000 } },
+          info: { role: 'user', messageId: 'msg_u1', time: { created: 1_700_000_000_000 } },
           parts: [{ type: 'text', id: 'part_u1', text: 'please run echo' }],
         },
         {
           info: {
-            role: 'assistant', id: 'msg_a1', finish: 'stop', modelID: 'GLM-5.3-Flash',
-            anchor: { turnId: 'turn_r1' }, time: { created: 1_700_000_000_500 },
+            role: 'assistant', messageId: 'msg_a1', parentMessageId: 'msg_u1', finish: 'stop',
+            time: { created: 1_700_000_000_500 },
             tokens: { total: 55, input: 50, output: 5, cache: { read: 20, write: 0 } },
           },
           parts: [
             { type: 'step-start', id: 'part_s0' },
+            { type: 'timeline', id: 'part_tl1', anchorTurnId: 'turn_r1' },
             { type: 'reasoning', id: 'part_r1', text: 'thinking' },
             {
               type: 'tool', id: 'part_t1', callID: 'call_r1', tool: 'Bash',
@@ -272,16 +315,18 @@ test('live and replay terminal facts have the same event identity', () => {
   const replay = buildReplayEvents({
     gianSessionId: 's_replay',
     nativeSessionId: 'sess_identity',
-    replayStreamId: 'replay_stream',
+    streamId: 'replay_stream',
     messages: [{
       info: {
         role: 'assistant',
-        id: 'msg_identity',
-        anchor: { turnId: 'turn_native_identity' },
+        messageId: 'msg_identity',
         finish: 'stop',
         time: { created: 1_700_000_000_000 },
       },
-      parts: [{ type: 'text', id: 'part_identity', text: 'done' }],
+      parts: [
+        { type: 'timeline', id: 'part_tl', anchorTurnId: 'turn_native_identity' },
+        { type: 'text', id: 'part_identity', text: 'done' },
+      ],
     }],
   });
   const replayTerminal = replay.find(event => event.method === 'turn.completed');
@@ -312,13 +357,17 @@ test('repeated Desktop permission requests emit one interaction fact', () => {
     }],
     raw: {},
   };
-  assert.equal(projector.handlePermissionRequest(request), true);
-  assert.equal(projector.handlePermissionRequest(request), true);
+  const firstEntry = projector.handlePermissionRequest(request);
+  assert.ok(firstEntry, 'the permission request relays with an answer builder');
+  const secondEntry = projector.handlePermissionRequest(request);
+  assert.ok(secondEntry, 'retries stay pending');
   assert.equal(
     emitted.filter(notification => notification.method === 'interaction.requested').length,
     1,
   );
   assert.equal(sequence, 1);
+  // The exact native answer payload is preserved through the builder.
+  assert.deepEqual(firstEntry!.respond('allow_once', {}), { decision: 'allow' });
 });
 
 test('Desktop turn-started payload captures the optional v4 foreground guard', () => {

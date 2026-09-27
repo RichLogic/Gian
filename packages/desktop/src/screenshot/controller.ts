@@ -497,7 +497,8 @@ export class ScreenshotController {
     } catch {
       const currentPermission = this.dependencies.getScreenPermissionStatus();
       const error: GianScreenshotErrorCode =
-        this.dependencies.platform === 'darwin' && currentPermission !== 'granted'
+        this.dependencies.platform === 'darwin'
+          && (currentPermission === 'denied' || currentPermission === 'restricted')
           ? 'permission-denied'
           : 'capture-failed';
       await this.cleanupCapture(capture, 'cancel');

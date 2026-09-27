@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { extractManagedRuntimeArchive } from '../packages/host/dist/runtime/safe-extract.js';
+import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
+import { verifyZcodeRuntimeProtocol } from './verify-zcode-runtime-protocol.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -43,13 +45,27 @@ export async function verifyManagedRuntimeCandidates(directory = join(rootDir, '
         entryPath = join(destination, candidate.entryRelativePath);
       }
       await chmod(entryPath, 0o700);
+      if (candidate.provider === 'zcode') {
+        assertZcodeSourceBinding(candidate);
+        const provenance = JSON.parse(await readFile(join(dirname(entryPath), '../gian-source.json'), 'utf8'));
+        assertZcodeSourceBinding({ ...candidate, source: provenance });
+        const integration = JSON.parse(await readFile(join(dirname(entryPath), '../gian-integration.json'), 'utf8'));
+        if (integration.schemaVersion !== provenance.integrationVersion
+          || integration.upstreamEntrypointSha256 !== provenance.protocolEntrypointSha256
+          || !/^[a-f0-9]{64}$/.test(integration.integratedEntrypointSha256 ?? '')
+          || !/^[a-f0-9]{64}$/.test(integration.catalogProjectionSha256 ?? '')) {
+          throw new Error('ZCode Runtime integration provenance is invalid.');
+        }
+        await readFile(join(dirname(entryPath), 'provider/zcode-builtin.json'));
+      }
       const entry = await readFile(entryPath);
       if (digest(entry) !== candidate.entry.sha256 || entry.length !== candidate.entry.size) {
         throw new Error(`${candidate.provider} Runtime entry differs from its manifest.`);
       }
       const home = join(tempRoot, `${candidate.provider}-home`);
       await mkdir(home, { recursive: true, mode: 0o700 });
-      const result = await execFileAsync(entryPath, ['--version'], {
+      const script = /\.(?:c?js|mjs)$/.test(entryPath);
+      const result = await execFileAsync(script ? process.execPath : entryPath, script ? [entryPath, '--version'] : ['--version'], {
         cwd: tempRoot,
         encoding: 'utf8',
         timeout: 20_000,
@@ -68,6 +84,7 @@ export async function verifyManagedRuntimeCandidates(directory = join(rootDir, '
       if (!`${result.stdout}\n${result.stderr}`.includes(candidate.version)) {
         throw new Error(`${candidate.provider} extracted Runtime reports a different version.`);
       }
+      if (candidate.provider === 'zcode') await verifyZcodeRuntimeProtocol(entryPath, home, tempRoot);
     }
     return manifest.candidates.length;
   } finally {

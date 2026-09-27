@@ -50,7 +50,7 @@ export function makeWorkbenchWire(
   options: {
     cwd?: string;
     shell?: string;
-    target?: { kind: 'agent_cli'; agent_id: string };
+    target?: { kind: 'agent_cli'; agent_id: string; action?: 'login' };
   } = {},
   dispatch?: OperationDispatcher['dispatch'],
 ): TerminalWire {

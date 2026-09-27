@@ -50,4 +50,14 @@ describe('accessibility / keyboard basics', () => {
     expect(css).toContain('100dvh');
     expect(css).toMatch(/@media \(max-width: 767px\)[\s\S]*:is\(input, select, textarea\)[\s\S]*font-size: 16px/);
   });
+
+  it('narrow layout: the context ring stays compact beside larger touch targets', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/styles/remote-web.css'), 'utf8');
+    const ring = css.match(/\.rw-app\[data-mode="narrow"\] \.rw-context-usage \{([^}]+)\}/)?.[1];
+    expect(ring).toMatch(/width: 20px;/);
+    expect(ring).toMatch(/height: 20px;/);
+    expect(css).toMatch(/\.composer-model\.icon-only, \.rw-approval, \.composer-act\) \{[\s\S]*min-width: 44px;/);
+  });
 });

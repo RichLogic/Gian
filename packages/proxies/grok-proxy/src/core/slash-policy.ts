@@ -16,6 +16,9 @@ const BLOCKED_EXACT = new Set([
   '/plugins install',
   '/plugins uninstall',
   '/plugins update',
+  // Destructive session management must go through the guarded
+  // session.native.delete path, not an in-band slash command.
+  '/delete',
 ]);
 
 const BLOCKED_PREFIXES = [

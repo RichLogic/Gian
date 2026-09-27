@@ -480,3 +480,153 @@ test('same DSH session completes two stdio Turns across authenticated native rea
   assert.equal(await waitForExit(core.child), 0);
   core.assertCleanWire();
 });
+
+test('Mock Gian Core drives the Side Chat lifecycle with a wire-verified close barrier', async (t) => {
+  const core = new MockGianCore();
+  t.after(() => { if (core.child.exitCode === null) core.child.kill('SIGKILL'); });
+  await initialize(core);
+  await core.request('catalog.list', {});
+  const sessionId = 'dsh-sidechat-parent';
+  const parent = await createSession(core, sessionId);
+
+  const parentTurn = await core.request('turn.start', {
+    sessionId, streamId: parent.streamId, turnId: 'parent-turn',
+    input: [{ type: 'text', text: 'parent work' }], config: { model: 'deepseek-chat' },
+  });
+  assert.equal(parentTurn.error, undefined);
+  await core.waitForNotification('turn.completed', n => 'turnId' in n.params && n.params.turnId === 'parent-turn');
+
+  // The parent snapshot gates the action only while the parent is idle and a
+  // terminal turn (or empty history) exists.
+  const snapshot = await core.request('session.get', { sessionId });
+  const available = (snapshot.result as { session: { availableActions: Record<string, { enabled: boolean }> } })
+    .session.availableActions;
+  assert.equal(available['sidechat.create']?.enabled, true);
+
+  const created = await core.request('sidechat.create', {
+    parentSessionId: sessionId,
+    parentStreamId: parent.streamId,
+    sidechatId: 'dsh-sidechat-1',
+  });
+  assert.equal(created.error, undefined);
+  const sidechat = (created.result as {
+    sidechat: {
+      id: string;
+      parentSessionId: string;
+      streamId: string;
+      resumeRef: { id: string };
+      anchor: { type: string; turnId?: string; sourceTurnId?: string };
+    };
+  }).sidechat;
+  assert.equal(sidechat.id, 'dsh-sidechat-1');
+  assert.equal(sidechat.parentSessionId, sessionId);
+  assert.notEqual(sidechat.streamId, parent.streamId);
+  assert.ok(sidechat.resumeRef.id.length > 0);
+  assert.deepEqual(sidechat.anchor, { type: 'turn', turnId: 'parent-turn', sourceTurnId: 'native-1:turn:0' });
+  // The Side Chat route turns through the standard envelope.
+  const sideTurn = await core.request('turn.start', {
+    sessionId: sidechat.id, streamId: sidechat.streamId, turnId: 'side-turn',
+    input: [{ type: 'text', text: 'parallel question' }], config: { model: 'deepseek-chat' },
+  });
+  assert.equal(sideTurn.error, undefined);
+
+  // Closing the running Side Chat must converge before the Success and the
+  // wire order must put the teardown events BEFORE the close response.
+  const closed = await core.request('sidechat.close', {
+    sidechatId: sidechat.id,
+    streamId: sidechat.streamId,
+    resumeRef: sidechat.resumeRef,
+  });
+  assert.deepEqual(closed.result, { ok: true, sidechatId: sidechat.id, providerDataDeleted: false });
+
+  const parsed = core.rawLines.map(line => JSON.parse(line) as WireMessage);
+  const barrierResponseIndex = findCloseResponseIndex(parsed, sidechat.id);
+  assert.ok(barrierResponseIndex >= 0, 'close response must be on the wire');
+  const sideCompletedIndex = parsed.findIndex(line => 'method' in line
+    && line.method === 'turn.completed'
+    && (line.params as { sessionId?: unknown }).sessionId === sidechat.id);
+  assert.ok(sideCompletedIndex >= 0, 'sidechat terminal turn event must be on the wire');
+  assert.ok(sideCompletedIndex < barrierResponseIndex, 'sidechat events must precede the close Success');
+
+  // After the Success no notification may reference the closed Side Chat.
+  const afterClose = parsed.slice(barrierResponseIndex + 1)
+    .filter(line => 'method' in line && (line.params as { sessionId?: unknown }).sessionId === sidechat.id);
+  assert.equal(afterClose.length, 0, `closed sidechat emitted ${afterClose.map(l => JSON.stringify(l)).join(', ')}`);
+
+  await core.request('session.close', { sessionId, streamId: parent.streamId });
+  await core.request('shutdown', {});
+  assert.equal(await waitForExit(core.child), 0);
+  core.assertCleanWire();
+});
+
+function findCloseResponseIndex(lines: WireMessage[], sidechatId: string): number {
+  return lines.findIndex(line => !('method' in line)
+    && line.result !== null && typeof line.result === 'object'
+    && (line.result as { ok?: unknown }).ok === true
+    && (line.result as { sidechatId?: unknown }).sidechatId === sidechatId);
+}
+
+test('closing a Side Chat with a running turn tears down before the Success response', async (t) => {
+  // The approval script parks the sidechat turn on a pending interaction, so
+  // the close barrier must interrupt it, settle the interaction, and emit the
+  // terminal turn event BEFORE the close Success hits the wire.
+  const core = new MockGianCore('approval');
+  t.after(() => { if (core.child.exitCode === null) core.child.kill('SIGKILL'); });
+  await initialize(core);
+  await core.request('catalog.list', {});
+  const sessionId = 'dsh-sidechat-teardown';
+  const parent = await createSession(core, sessionId);
+
+  const created = await core.request('sidechat.create', {
+    parentSessionId: sessionId,
+    parentStreamId: parent.streamId,
+    sidechatId: 'dsh-sidechat-live',
+  });
+  assert.equal(created.error, undefined);
+  const sidechat = (created.result as {
+    sidechat: { id: string; streamId: string; resumeRef: { id: string }; anchor: { type: string } };
+  }).sidechat;
+  assert.deepEqual(sidechat.anchor, { type: 'empty' });
+
+  const sideTurn = await core.request('turn.start', {
+    sessionId: sidechat.id, streamId: sidechat.streamId, turnId: 'side-live-turn',
+    input: [{ type: 'text', text: 'run while closing' }],
+    config: { model: 'deepseek-chat', permission_preset: 'workspace-write' },
+  });
+  assert.equal(sideTurn.error, undefined);
+  const requested = await core.waitForNotification('interaction.requested');
+  assert.equal((requested.params as { sessionId?: unknown }).sessionId, sidechat.id);
+
+  const closed = await core.request('sidechat.close', {
+    sidechatId: sidechat.id,
+    streamId: sidechat.streamId,
+    resumeRef: sidechat.resumeRef,
+  });
+  assert.deepEqual(closed.result, { ok: true, sidechatId: sidechat.id, providerDataDeleted: false });
+
+  const parsed = core.rawLines.map(line => JSON.parse(line) as WireMessage);
+  const barrierResponseIndex = findCloseResponseIndex(parsed, sidechat.id);
+  assert.ok(barrierResponseIndex >= 0, 'close response must be on the wire');
+  const before = parsed.slice(0, barrierResponseIndex);
+  const terminalTurn = before.find(line => 'method' in line
+    && line.method === 'turn.completed'
+    && (line.params as { sessionId?: unknown }).sessionId === sidechat.id);
+  const settledInteraction = before.find(line => 'method' in line
+    && line.method === 'interaction.resolved'
+    && (line.params as { sessionId?: unknown }).sessionId === sidechat.id);
+  assert.ok(terminalTurn, 'the terminal turn event must precede the close Success');
+  const stopReason = ((terminalTurn as WireNotification).params as {
+    data?: { stopReason?: string };
+  }).data?.stopReason;
+  assert.equal(stopReason, 'cancelled');
+  assert.ok(settledInteraction, 'the pending interaction must settle before the close Success');
+
+  const afterClose = parsed.slice(barrierResponseIndex + 1)
+    .filter(line => 'method' in line && (line.params as { sessionId?: unknown }).sessionId === sidechat.id);
+  assert.equal(afterClose.length, 0, 'no notification may follow the close Success');
+
+  await core.request('session.close', { sessionId, streamId: parent.streamId });
+  await core.request('shutdown', {});
+  assert.equal(await waitForExit(core.child), 0);
+  core.assertCleanWire();
+});

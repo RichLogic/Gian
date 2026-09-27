@@ -728,7 +728,7 @@ export interface TermSpawnMessage {
   term_id: string;
   /** Host-authorized command profile. Clients select an Agent identity and
    * never provide its executable, argv, HOME environment, or installer. */
-  target?: { kind: 'agent_cli'; agent_id: string };
+  target?: { kind: 'agent_cli'; agent_id: string; action?: 'login' };
   /** Optional cwd; falls back to $HOME server-side. */
   cwd?: string;
   cols: number;

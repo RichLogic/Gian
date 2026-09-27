@@ -11,7 +11,7 @@ import {
   loadProxyRealAcceptanceCatalog,
   validateProxyRealAcceptanceCatalog,
 } from './proxy-real-acceptance-catalog.mjs';
-import { reviewedExternalRuntimeCandidates } from './proxy-release-metadata.mjs';
+import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -251,19 +251,17 @@ export async function buildArtifactCandidateTuple(
         || manifest.process?.scope !== expected.processScope) {
         issues.push(`${expected.provider} packaged Manifest differs from candidate package metadata`);
       }
-      const external = reviewedExternalRuntimeCandidates[expected.provider];
       const runtime = runtimes.get(expected.provider);
-      const cli = external
-        ? { ...external, verified: true }
-        : runtime
-          ? {
-            source: 'managed-runtime-artifact',
-            version: runtime.version,
-            verified: true,
-            sha256: runtime.entry?.sha256,
-            size: runtime.entry?.size,
-          }
-          : null;
+      const cli = runtime
+        ? {
+          source: 'managed-runtime-artifact',
+          version: runtime.version,
+          verified: true,
+          sha256: runtime.entry?.sha256,
+          size: runtime.entry?.size,
+          ...(runtime.source ? { sourceCommit: runtime.source.commit } : {}),
+        }
+        : null;
       if (!cli) issues.push(`${expected.provider} has no managed Runtime artifact candidate`);
       tuples.push({
         provider: expected.provider,
@@ -290,7 +288,7 @@ export function validateRuntimeArtifactTuple(certificate, runtimeManifest) {
   const candidates = Array.isArray(runtimeManifest.candidates) ? runtimeManifest.candidates : [];
   const artifacts = new Map(candidates.map(candidate => [candidate.provider, candidate]));
   const tuples = new Map((certificate.candidateTuple ?? []).map(tuple => [tuple.provider, tuple]));
-  for (const provider of shippingProxyIds.filter(id => id !== 'zcode')) {
+  for (const provider of shippingProxyIds) {
     const candidate = artifacts.get(provider);
     const tuple = tuples.get(provider);
     if (!candidate || !tuple) {
@@ -301,6 +299,12 @@ export function validateRuntimeArtifactTuple(certificate, runtimeManifest) {
       || candidate.entry?.sha256 !== tuple.cli?.sha256
       || candidate.entry?.size !== tuple.cli?.size) {
       issues.push(`${provider} Runtime entry differs from the qualified artifact candidate`);
+    }
+    if (provider === 'zcode') {
+      try {
+        assertZcodeSourceBinding(candidate);
+        if (tuple.cli?.sourceCommit !== candidate.source.commit) throw new Error('ZCode CLI source commit differs from the Runtime.');
+      } catch (error) { issues.push(error.message); }
     }
     if (!['raw', 'tar.gz'].includes(candidate.format)
       || !/^[a-f0-9]{64}$/u.test(candidate.asset?.sha256 ?? '')

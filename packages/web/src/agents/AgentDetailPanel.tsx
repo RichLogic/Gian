@@ -5,6 +5,7 @@ import type {
   ConfigValue,
   UserAgentStatus,
 } from '@gian/shared';
+import { executorIdForPluginId } from '@gian/shared';
 import { loadProxyCapabilities, loadResolvedProxyCatalog } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
@@ -45,6 +46,7 @@ export function AgentDetailPanel({
   onSetDefaults,
   onSetEnabled,
   onChangeHome,
+  onLogin,
   onDelete,
   onOpenProxy,
   onClose,
@@ -56,16 +58,19 @@ export function AgentDetailPanel({
   onRename: (name: string) => Promise<boolean>;
   onSetDefaults: (defaults: Partial<AgentProxyDefaults>) => Promise<boolean>;
   onSetEnabled: (enabled: boolean) => Promise<boolean>;
-  /** Native HOME picker + patch, wired by the view; absent for external-App
-   *  Agents whose HOME is not Gian-managed. */
+  /** Native HOME picker + patch, wired by the view. */
   onChangeHome?: () => Promise<void>;
+  onLogin?: () => void;
   onDelete: () => void;
   /** Present only when the Agent's pluginId has a Catalog entry. */
   onOpenProxy?: () => void;
   onClose: () => void;
 }) {
   const t = useT();
-  const kind = agent.proxy;
+  // Live identity: capabilities and defaults resolve per exact pluginId
+  // (plugin + Runtime + HOME), never via the legacy proxy alias.
+  const pluginId = agent.pluginId;
+  const executorId = executorIdForPluginId(pluginId);
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
   const busy = agentRuns.length > 0;
   const [enabledPending, setEnabledPending] = useState(false);
@@ -79,8 +84,7 @@ export function AgentDetailPanel({
   const resolveSequence = useRef(0);
   const [capabilityError, setCapabilityError] = useState(false);
   useEffect(() => setName(agent.name), [agent.name]);
-  // Capability-driven Defaults exist only for official Proxy kinds: the
-  // capabilities endpoint and the defaults validator are still kind-keyed.
+  // Capability-driven Defaults exist for every Agent with a ready plugin.
   useEffect(() => {
     let alive = true;
     resolveSequence.current += 1;
@@ -89,8 +93,8 @@ export function AgentDetailPanel({
     setResolvedSignature('');
     setResolvingDefaults(false);
     setCapabilityError(false);
-    if (!kind || agent.plugin.state !== 'ready') return () => { alive = false; };
-    loadProxyCapabilities(kind, agent.id)
+    if (agent.plugin.state !== 'ready') return () => { alive = false; };
+    loadProxyCapabilities(pluginId, agent.id)
       .then(value => {
         if (alive) setCapabilities(value);
       })
@@ -98,7 +102,7 @@ export function AgentDetailPanel({
         if (alive) setCapabilityError(true);
       });
     return () => { alive = false; };
-  }, [agent.id, kind, agent.cliPath, agent.plugin.state, agent.plugin.version]);
+  }, [agent.id, pluginId, agent.cliPath, agent.plugin.state, agent.plugin.version]);
 
   async function commitName() {
     const next = name.trim();
@@ -130,7 +134,7 @@ export function AgentDetailPanel({
     }
   }
   const { models, thinkingLevels: catalogThinking, modes } =
-    executorSettingsFromCapabilities(kind, settingsCapabilities);
+    executorSettingsFromCapabilities(pluginId, settingsCapabilities);
   const baseCatalog = catalogFromCapabilities(capabilities);
   const effectiveCatalog = catalogFromCapabilities(settingsCapabilities);
   // Role-less select options (e.g. provider) persist as per-Agent defaults in
@@ -218,7 +222,6 @@ export function AgentDetailPanel({
     patch: Partial<AgentProxyDefaults>,
     { writeAlways = true }: { writeAlways?: boolean } = {},
   ): Promise<void> {
-    if (!kind) return;
     const next = mergedDefaults(patch);
     const config = configsFromDefaults(next);
     const canResolve = !!baseCatalog.catalogRevision
@@ -253,7 +256,7 @@ export function AgentDetailPanel({
     const sequence = ++resolveSequence.current;
     setResolvingDefaults(true);
     try {
-      const resolved = await loadResolvedProxyCatalog(kind, {
+      const resolved = await loadResolvedProxyCatalog(pluginId, {
         catalogRevision: baseCatalog.catalogRevision!,
         ...config,
       }, agent.id);
@@ -261,7 +264,7 @@ export function AgentDetailPanel({
       setResolvedCapabilities(resolved);
       setResolvedSignature(JSON.stringify(config));
       const resolvedCatalog = catalogFromCapabilities(resolved);
-      const resolvedSettings = executorSettingsFromCapabilities(kind, resolved);
+      const resolvedSettings = executorSettingsFromCapabilities(pluginId, resolved);
       const atomic: Partial<AgentProxyDefaults> = {
         ...patch,
         ...(patch.options ? { options: { ...patch.options } } : {}),
@@ -330,7 +333,7 @@ export function AgentDetailPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capabilities, defaultsSignature]);
 
-  const defaultsEditable = !!kind && agent.ready
+  const defaultsEditable = agent.ready
     && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0
       || extraOptions.length > 0 || capabilityError);
   const externalHome = agent.home === null;
@@ -347,7 +350,7 @@ export function AgentDetailPanel({
             </svg>
           </button>
         )}
-        <AgentLogo proxy={kind} logo={display.logo ?? undefined} fallback={display.name} size={28} />
+        <AgentLogo proxy={pluginId} logo={display.logo ?? undefined} fallback={display.name} size={28} />
         <input
           className="exec-name-input"
           value={name}
@@ -406,9 +409,19 @@ export function AgentDetailPanel({
                     {t('agents.detail.changeHome')}
                   </button>
                 )}
+                {onLogin && (
+                  <button type="button" className="btn xs secondary"
+                          data-testid="agent-login"
+                          disabled={busy || !agent.home?.path || !agent.cli.path}
+                          onClick={onLogin}>
+                    {t('agents.detail.login')}
+                  </button>
+                )}
               </span>
             </div>
           )}
+          {executorId === 'dsh' && <p className="s2-help">{t('agents.detail.dshLoginHelp')}</p>}
+          {executorId === 'zcode' && <p className="s2-help">{t('agents.detail.zcodeHomeHelp')}</p>}
         </section>
 
         <section className="ag-sec">
@@ -505,8 +518,6 @@ export function AgentDetailPanel({
                   );
                 })}
               </div>
-            ) : !kind ? (
-              <p className="exec-note">{t('agents.detail.defaultsReadonly')}</p>
             ) : !agent.ready ? (
               <>
                 <div className="exec-defaults">

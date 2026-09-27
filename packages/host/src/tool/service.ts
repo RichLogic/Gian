@@ -11,11 +11,13 @@ import type {
   GianToolQueueEntry,
   GianToolResult,
   InteractionInput,
+  ProxyCatalog,
   Session,
   UserAgent,
   Workspace,
 } from '@gian/shared';
 import {
+  catalogModeSemantics,
   isApprovalMode,
   isGianToolMutation,
   usesNativeExecutorConfig,
@@ -165,6 +167,9 @@ export class GianToolService {
     promise: Promise<GianToolResult<AnyData>>;
   }>();
   private closing = false;
+  /** Per-Agent Catalog cache keyed by the Agent's exact runtime identity
+   *  (pluginId + Proxy version + Runtime Profile + HOME). */
+  private readonly agentCatalogs = new Map<string, { fingerprint: string; catalog: ProxyCatalog }>();
 
   constructor(private deps: ServiceDependencies) {
     this.ledger = new GianToolLedger(deps.db);
@@ -390,34 +395,32 @@ export class GianToolService {
     const agents: GianToolCatalogAgent[] = [];
     for (const agent of this.deps.agents.listAgents()) {
       const status = await this.deps.agents.agentStatus(agent.id, params.refresh === true);
-      if (!agent.proxy) {
-        agents.push({
-          id: agent.id,
-          name: agent.name,
-          proxy: null,
-          ready: false,
-          defaults: {
-            model: agent.defaults.model || null,
-            thinking: agent.defaults.thinking || null,
-            mode: agent.defaults.mode || null,
-            option_defaults: { ...(agent.defaults.options ?? {}) },
-          },
-          models: [],
-          modes: [],
-          config_kind: 'gian',
-          session_config: [],
-          turn_config: [],
-        });
-        continue;
+      // Identity is `agent.pluginId`; a null legacy `proxy` alias never means
+      // "not ready" or "unsupported". Catalogs resolve per exact Agent
+      // (pluginId + HOME), not per kind.
+      let options: ConfigOption[] = [];
+      if (status.ready) {
+        const fingerprint = [
+          agent.pluginId,
+          status.plugin.version ?? '',
+          status.runtimeProfile?.id ?? '',
+          agent.home?.path ?? '',
+        ].join('\u0000');
+        const cached = this.agentCatalogs.get(agent.id);
+        let catalog = !params.refresh && cached?.fingerprint === fingerprint ? cached.catalog : null;
+        if (catalog === null) {
+          catalog = (await this.deps.sessions.agentCapabilities(agent.pluginId, agent.id)).catalog;
+          this.agentCatalogs.set(agent.id, { fingerprint, catalog });
+        }
+        options = catalog.configOptions;
+      } else {
+        this.agentCatalogs.delete(agent.id);
       }
-      const cliPath = this.deps.agents.agentRuntimePath(agent.id).cliPath;
-      let catalog = this.deps.sessions.getCapabilities(agent.proxy, cliPath);
-      if (params.refresh && status.ready) catalog = await this.deps.sessions.warmCapabilities(agent.proxy, cliPath);
-      const options = catalog?.configOptions ?? [];
       const efforts = configChoices(options, 'effort').map(choice => choice.id);
       agents.push({
         id: agent.id,
         name: agent.name,
+        plugin_id: agent.pluginId,
         proxy: agent.proxy,
         ready: status.ready,
         defaults: {
@@ -435,7 +438,7 @@ export class GianToolService {
           ...choice,
           is_default: choice.id === agent.defaults.mode,
         })),
-        config_kind: usesNativeExecutorConfig(agent.proxy) ? 'executor-native' : 'gian',
+        config_kind: usesNativeExecutorConfig(agent.pluginId) ? 'executor-native' : 'gian',
         session_config: options.filter(option => option.binding === 'session'),
         turn_config: options.filter(option => option.binding === 'turn'),
       });
@@ -557,7 +560,7 @@ export class GianToolService {
     }
     const agent = await this.readyAgent(params.agent_id);
     const config = params.config;
-    if (config) this.validateToolConfig(agent.proxy, config, await this.agentOptions(agent));
+    if (config) this.validateToolConfig(agent.pluginId, config, await this.agentOptions(agent));
     const defaults = agent.defaults;
     const approvalMode = config?.approval_mode === null
       ? isApprovalMode(defaults.mode) ? defaults.mode : undefined
@@ -1103,13 +1106,14 @@ export class GianToolService {
     try { return this.deps.sessions.getSession(id); } catch { return null; }
   }
 
-  private async readyAgent(agentId: string): Promise<UserAgent & { proxy: NonNullable<UserAgent['proxy']> }> {
+  private async readyAgent(agentId: string): Promise<UserAgent> {
     if (!this.deps.agents) fail('AGENT_NOT_READY', 'Agent catalog is unavailable');
     let agent: UserAgent;
     try { agent = this.deps.agents.getAgent(agentId); } catch { fail('NOT_FOUND', `agent not found: ${agentId}`); }
     const status = await this.deps.agents.agentStatus(agentId);
-    if (!status.ready || !agent.proxy) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
-    return agent as UserAgent & { proxy: NonNullable<UserAgent['proxy']> };
+    // A null legacy `proxy` alias is a pure-plugin Agent, not an unready one.
+    if (!status.ready) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
+    return agent;
   }
 
   private agentSnapshot(agent: UserAgent): GianToolMethodData['session.create']['agent'] {
@@ -1123,10 +1127,7 @@ export class GianToolService {
 
   private async agentOptions(agent: UserAgent): Promise<ConfigOption[]> {
     if (!this.deps.agents) fail('AGENT_NOT_READY', 'Agent catalog is unavailable');
-    if (!agent.proxy) fail('AGENT_NOT_READY', `Agent is not ready: ${agent.name}`);
-    const path = this.deps.agents.agentRuntimePath(agent.id).cliPath;
-    const cached = this.deps.sessions.getCapabilities(agent.proxy, path);
-    return (cached ?? await this.deps.sessions.warmCapabilities(agent.proxy, path)).configOptions;
+    return (await this.deps.sessions.agentCapabilities(agent.pluginId, agent.id)).catalog.configOptions;
   }
 
   private validateToolConfig(
@@ -1135,7 +1136,7 @@ export class GianToolService {
     options: ConfigOption[],
   ): void {
     if (!config) return;
-    if (usesNativeExecutorConfig(executor)) {
+    if (catalogModeSemantics(executor, { configOptions: options }) === 'provider-native') {
       const standard = [
         ['model', config.model],
         ['thinking_effort', config.thinking_effort],

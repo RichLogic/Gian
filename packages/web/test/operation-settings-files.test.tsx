@@ -334,4 +334,21 @@ describe('Phase 3b settings/files operations', () => {
     expect(transport.sent[0]).not.toHaveProperty('cwd');
     expect(transport.sent[0]).not.toHaveProperty('shell');
   });
+
+  it('term.spawn requests login without sending executable, argv, or HOME', () => {
+    dispatcher.dispatch('term.spawn', {
+      termId: 'agent-login-a1',
+      cols: 96,
+      rows: 18,
+      target: { kind: 'agent_cli', agent_id: 'a1', action: 'login' },
+    });
+    expect(transport.sent[0]).toMatchObject({
+      type: 'term:spawn',
+      target: { kind: 'agent_cli', agent_id: 'a1', action: 'login' },
+    });
+    expect(transport.sent[0]).not.toHaveProperty('cwd');
+    expect(transport.sent[0]).not.toHaveProperty('shell');
+    expect(transport.sent[0]).not.toHaveProperty('args');
+    expect(transport.sent[0]).not.toHaveProperty('env');
+  });
 });

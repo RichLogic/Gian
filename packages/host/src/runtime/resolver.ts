@@ -195,6 +195,7 @@ export class RuntimeResolver {
     bootstrapTimeoutMs?: number;
     bootstrapEnv?: Readonly<Record<string, string>>;
     homeDir?: string;
+    managedStoreRoot?: string;
     acquireLock?: typeof acquireAgentRuntimeUseLock;
   }) {}
 
@@ -443,6 +444,7 @@ export class RuntimeResolver {
         selectedPath: authorized,
         configHome: probe.configHome,
         contentRoots: probe.contentRoots,
+        ...(this.options.managedStoreRoot ? { managedStoreRoot: this.options.managedStoreRoot } : {}),
         ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
       });
       const fingerprintAfter = await this.safeLauncherFingerprint(authorized, probe.configHome);
@@ -518,6 +520,7 @@ export class RuntimeResolver {
       selectedPath: active.path,
       configHome: active.probe.configHome,
       contentRoots: active.probe.contentRoots,
+      ...(this.options.managedStoreRoot ? { managedStoreRoot: this.options.managedStoreRoot } : {}),
       ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
     });
     if (current !== active.fingerprint) {
@@ -650,6 +653,7 @@ export class RuntimeResolver {
       selectedPath: observation.selectedPath,
       configHome: observation.configHome,
       contentRoots: observation.contentRoots,
+      ...(this.options.managedStoreRoot ? { managedStoreRoot: this.options.managedStoreRoot } : {}),
       ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
     });
     if (current !== observation.fingerprint) {

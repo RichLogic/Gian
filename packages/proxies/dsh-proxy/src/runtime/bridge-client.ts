@@ -16,6 +16,10 @@ export interface BridgeClientOptions {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  /** Bound on one bridge request round-trip (default 30 s). */
+  requestTimeoutMs?: number;
+  /** Bound between spawn and a live stdio channel (default 60 s). */
+  startTimeoutMs?: number;
 }
 
 export interface BridgeNotification {
@@ -26,6 +30,7 @@ export interface BridgeNotification {
 interface Pending {
   resolve: (result: Record<string, unknown>) => void;
   reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 export class BridgeClientError extends Error {
@@ -44,6 +49,7 @@ export class BridgeClient {
   private nextId = 1;
   private readonly pending = new Map<string, Pending>();
   private readonly listeners = new Set<(notification: BridgeNotification) => void>();
+  private readonly exitListeners = new Set<(info: { code: number | null; signal: string | null }) => void>();
   private initialized = false;
 
   constructor(private readonly options: BridgeClientOptions) {}
@@ -58,20 +64,48 @@ export class BridgeClient {
         resolve();
         return;
       }
+      let settled = false;
+      const startTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new BridgeClientError(
+          -32000,
+          `DSH bridge did not open stdio within ${this.startTimeoutMs}ms.`,
+          'RUNTIME_UNAVAILABLE',
+        ));
+        void this.stop();
+      }, this.startTimeoutMs);
+      startTimer.unref();
+      const settle = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(startTimer);
+        if (error) reject(error);
+        else resolve();
+      };
       const child = spawn(this.options.command, this.options.args ?? [], {
         env: { ...process.env, ...(this.options.env ?? {}) },
         cwd: this.options.cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
+        // Own process group on POSIX so shutdown takes the whole DSH tree
+        // (the launcher spawns profile bundles as children) without touching
+        // processes this proxy did not start.
+        detached: process.platform !== 'win32',
       });
       this.child = child;
-      child.once('error', (error) => reject(error));
-      child.once('spawn', () => resolve());
+      child.once('error', (error) => settle(error));
+      child.once('spawn', () => settle());
       child.once('exit', (code, signal) => {
+        settle(new BridgeClientError(-32000, `bridge child exited (code=${code}, signal=${signal})`, 'RUNTIME_UNAVAILABLE'));
         const reason = `bridge child exited (code=${code}, signal=${signal})`;
         for (const [, pending] of this.pending) {
+          clearTimeout(pending.timer);
           pending.reject(new BridgeClientError(-32000, reason, 'RUNTIME_UNAVAILABLE'));
         }
         this.pending.clear();
+        for (const listener of this.exitListeners) {
+          listener({ code, signal });
+        }
       });
       child.stderr?.on('data', (chunk: Buffer) => {
         process.stderr.write(`[dsh-proxy] ${chunk.toString('utf8')}`);
@@ -91,6 +125,10 @@ export class BridgeClient {
     });
   }
 
+  private get startTimeoutMs(): number {
+    return this.options.startTimeoutMs ?? 60_000;
+  }
+
   private handleLine(value: unknown): void {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
     const record = value as Record<string, unknown>;
@@ -99,6 +137,7 @@ export class BridgeClient {
       const pending = this.pending.get(record.id);
       if (!pending) return;
       this.pending.delete(record.id);
+      clearTimeout(pending.timer);
       if ('error' in record && record.error !== undefined) {
         const error = record.error as { code?: unknown; message?: unknown; data?: unknown };
         const data = error.data as { domainCode?: unknown } | undefined;
@@ -128,7 +167,16 @@ export class BridgeClient {
     const id = `dsh-${this.nextId}`;
     this.nextId += 1;
     return new Promise<Record<string, unknown>>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new BridgeClientError(
+          -32000,
+          `bridge request ${method} exceeded ${this.options.requestTimeoutMs ?? 30_000}ms.`,
+          'RUNTIME_UNAVAILABLE',
+        ));
+      }, this.options.requestTimeoutMs ?? 30_000);
+      timer.unref();
+      this.pending.set(id, { resolve, reject, timer });
       this.child!.stdin!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
   }
@@ -136,6 +184,12 @@ export class BridgeClient {
   onNotification(listener: (notification: BridgeNotification) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Subscribe to the shared child's exit to terminalize open Gian turns. */
+  onExit(listener: (info: { code: number | null; signal: string | null }) => void): () => void {
+    this.exitListeners.add(listener);
+    return () => this.exitListeners.delete(listener);
   }
 
   /** Kill the shared DSH child and all its managed descendants. */
@@ -148,10 +202,26 @@ export class BridgeClient {
       }
       this.child = null;
       child.once('exit', () => resolve());
-      child.kill('SIGTERM');
+      const pid = child.pid;
+      if (process.platform !== 'win32' && pid !== undefined) {
+        // Negative pid targets the process group this proxy spawned.
+        try {
+          process.kill(-pid, 'SIGTERM');
+        } catch {
+          child.kill('SIGTERM');
+        }
+      } else {
+        child.kill('SIGTERM');
+      }
       // Bounded descendant cleanup for shared process scope (plan §11.3).
       const timer = setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGKILL');
+        if (child.exitCode !== null) return;
+        try {
+          if (process.platform !== 'win32' && pid !== undefined) process.kill(-pid, 'SIGKILL');
+          else child.kill('SIGKILL');
+        } catch {
+          child.kill('SIGKILL');
+        }
       }, 1500);
       timer.unref();
     });

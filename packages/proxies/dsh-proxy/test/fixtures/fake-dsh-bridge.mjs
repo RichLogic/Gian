@@ -4,8 +4,13 @@ import { createInterface } from 'node:readline';
 
 const script = process.env.DSH_FAKE_SCRIPT ?? 'success';
 const sessions = new Map();
+// Native sessions ever created, keyed by nativeId, for session.resume
+// re-attachment (Side Chat resume survives bridge-session loss).
+const nativeSessions = new Map();
 let sessionCounter = 0;
 let interactionCounter = 0;
+
+const SKILL_ID = `ci1_${'7'.repeat(32)}`;
 
 function write(value) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...value })}\n`);
@@ -19,6 +24,16 @@ function session(sessionId) {
   const found = sessions.get(sessionId);
   if (!found) throw new Error(`missing fake session ${sessionId}`);
   return found;
+}
+
+function openTurnAt(events, boundary) {
+  let open = null;
+  for (let index = 0; index <= boundary && index < events.length; index += 1) {
+    const candidate = events[index];
+    if (candidate.type === 'turn/start' && typeof candidate.data.turn === 'number') open = candidate.data.turn;
+    if (candidate.type === 'turn/end' && candidate.data.turn === open) open = null;
+  }
+  return open;
 }
 
 function append(sessionId, type, data) {
@@ -69,6 +84,7 @@ function startTurn(params) {
   const state = session(params.sessionId);
   const turn = state.turns;
   state.turns += 1;
+  state.openTurn = turn;
   append(params.sessionId, 'turn/start', { turn });
   append(params.sessionId, 'user/message', {
     turn,
@@ -142,10 +158,19 @@ function startTurn(params) {
     model: 'deepseek-chat',
     contextWindow: 128000,
   });
-  append(params.sessionId, 'assistant/chunk', {
-    turn,
-    step: 0,
-    chunk: { type: 'text-delta', text: 'hello from fake DSH' },
+  // Transient stream chunk: emitted on the live wire but NOT appended to the
+  // durable event log, matching DSH 0.1.5 behavior. The attempt/index pair is
+  // the transient identity the proxy hashes for chunk deltas.
+  notify('session.event', {
+    sessionId: params.sessionId,
+    type: 'assistant/chunk',
+    data: {
+      turn,
+      step: 0,
+      liveAttemptId: `attempt-${turn}`,
+      liveChunkIndex: 0,
+      chunk: { type: 'text-delta', text: 'hello from fake DSH' },
+    },
   });
   append(params.sessionId, 'assistant/message', {
     turn,
@@ -158,6 +183,7 @@ function startTurn(params) {
   });
   append(params.sessionId, 'step/end', { turn, step: 0 });
   append(params.sessionId, 'turn/end', { turn, reason: { kind: 'completed' } });
+  state.openTurn = null;
   return { accepted: true };
 }
 
@@ -174,12 +200,14 @@ function resolveInteraction(params) {
     outcome: 'submitted',
     actionId: params.actionId,
     displaySummary: 'A',
+    nativeSeq: state.events.length - 1,
   });
   append(params.sessionId, 'step/end', { turn: pending.turn, step: pending.step });
   append(params.sessionId, 'turn/end', {
     turn: pending.turn,
     reason: { kind: 'completed' },
   });
+  state.openTurn = null;
   return { accepted: true };
 }
 
@@ -191,19 +219,24 @@ async function handle(method, params) {
         plugin: {
           id: 'ai.deepseek.harness',
           bundle: '@gian/dsh-bridge',
-          version: '0.1.0',
+          version: '0.1.6',
         },
         runtime: {
           id: 'deepseek-harness',
           package: '@deepseek-ai/dsh',
-          version: '0.1.0-rc.7',
-          sessionFormatVersion: 0,
+          version: '0.1.5-rc.3',
+          sessionFormatVersion: 3,
         },
         capabilities: {
-          'session.resume': 1,
           'session.events.read': 1,
+          'session.fork': 1,
+          'session.native.list': 1,
           'turn.interrupt': 1,
+          'turn.steer': 1,
           interaction: 1,
+          'input.attachments': 1,
+          'input.skill': 1,
+          'customization.skill': 1,
           'event.step': 1,
           'event.request': 1,
           'event.usage': 1,
@@ -233,6 +266,7 @@ async function handle(method, params) {
         pending: null,
       };
       sessions.set(params.sessionId, state);
+      nativeSessions.set(nativeId, { cwd: state.cwd, roots: state.roots, config: state.config });
       notify('agent.status', {
         sessionId: params.sessionId,
         nativeId,
@@ -247,6 +281,41 @@ async function handle(method, params) {
           state: 'idle',
           config: state.config,
           createdAt: state.createdAt,
+        },
+      };
+    }
+    case 'session.resume': {
+      if (sessions.has(params.sessionId)) {
+        throw new Error(`CONFLICT: fake session ${params.sessionId} already exists`);
+      }
+      const known = nativeSessions.get(params.nativeSessionId);
+      if (known === undefined) {
+        throw new Error(`session "${params.nativeSessionId}" not found`);
+      }
+      sessions.set(params.sessionId, {
+        nativeId: params.nativeSessionId,
+        cwd: known.cwd,
+        roots: known.roots,
+        config: { ...known.config },
+        createdAt: new Date().toISOString(),
+        events: [],
+        turns: 0,
+        pending: null,
+      });
+      notify('agent.status', {
+        sessionId: params.sessionId,
+        nativeId: params.nativeSessionId,
+        status: 'idle',
+      });
+      return {
+        session: {
+          id: params.sessionId,
+          nativeId: params.nativeSessionId,
+          cwd: known.cwd,
+          roots: known.roots,
+          state: 'idle',
+          config: known.config,
+          createdAt: new Date().toISOString(),
         },
       };
     }
@@ -283,9 +352,134 @@ async function handle(method, params) {
     case 'session.close':
       sessions.delete(params.sessionId);
       return { ok: true };
+    case 'session.native.list': {
+      const summaries = [...sessions.entries()]
+        .filter(([, state]) => state.parentNativeId === undefined)
+        .map(([gianId, state]) => ({
+          id: state.nativeId,
+          cwd: state.cwd,
+          updatedAt: state.createdAt,
+        }));
+      return { sessions: summaries, nextCursor: null };
+    }
+    case 'session.fork': {
+      const source = session(params.sessionId);
+      if (sessions.has(params.newSessionId)) {
+        throw new Error(`CONFLICT: fake session ${params.newSessionId} already exists`);
+      }
+      if (params.anchor?.kind === 'turn') {
+        const turnEnd = [...source.events]
+          .reverse()
+          .find((event) => event.type === 'turn/end' && event.data.turn === params.anchor.nativeTurn);
+        if (turnEnd === undefined) {
+          throw new Error(`FORK_BOUNDARY_UNAVAILABLE: native turn ${params.anchor.nativeTurn} has no verifiable turn/end boundary`);
+        }
+      } else {
+        const open = openTurnAt(source.events, source.events.length - 1);
+        if (open !== null) {
+          throw new Error(`FORK_BOUNDARY_UNAVAILABLE: native head boundary is inside open turn ${open}`);
+        }
+      }
+      sessionCounter += 1;
+      const childNativeId = `native-${sessionCounter}`;
+      sessions.set(params.newSessionId, {
+        nativeId: childNativeId,
+        cwd: source.cwd,
+        roots: source.roots,
+        config: { ...source.config },
+        createdAt: new Date().toISOString(),
+        events: [],
+        turns: 0,
+        pending: null,
+        parentNativeId: source.nativeId,
+      });
+      nativeSessions.set(childNativeId, { cwd: source.cwd, roots: source.roots, config: source.config });
+      notify('agent.status', { sessionId: params.newSessionId, nativeId: childNativeId, status: 'idle' });
+      return {
+        session: {
+          id: params.newSessionId,
+          nativeId: childNativeId,
+          cwd: source.cwd,
+          roots: source.roots,
+          state: 'idle',
+          config: source.config,
+          createdAt: new Date().toISOString(),
+        },
+        parentNativeId: source.nativeId,
+        atSeq: source.events.length - 1,
+        seedEventCount: source.events.length,
+        inheritedEventCount: source.events.length,
+      };
+    }
+    case 'customization.list':
+      if (params.kind !== 'skill') {
+        return {
+          kind: params.kind,
+          status: 'provider_unsupported',
+          completeness: 'none',
+          observedAt: new Date().toISOString(),
+          items: [],
+          truncated: false,
+          diagnostics: [{
+            code: 'SOURCE_NOT_ENUMERABLE',
+            message: 'This DSH build exposes no runtime enumeration API for this customization kind.',
+          }],
+        };
+      }
+      return {
+        kind: 'skill',
+        status: 'ok',
+        completeness: 'effective',
+        observedAt: new Date().toISOString(),
+        items: [{
+          id: SKILL_ID,
+          kind: 'skill',
+          name: 'fake-skill',
+          description: 'Deterministic fake skill',
+          activation: 'enabled',
+          scope: { level: 'user', native: 'bundled' },
+          origin: { kind: 'builtin', path: '/tmp/fake-skill/SKILL.md' },
+          discovery: { method: 'provider_api' },
+          skill: {
+            format: 'agent-skill',
+            entryPath: '/tmp/fake-skill/SKILL.md',
+            invocation: 'bundled',
+            userInvocable: true,
+            modelInvocable: true,
+          },
+        }],
+        truncated: false,
+        diagnostics: [],
+      };
+    case 'customization.detail':
+      if (params.kind !== 'skill' || params.id !== SKILL_ID) {
+        return {
+          kind: params.kind,
+          id: params.id,
+          status: 'unavailable',
+          observedAt: new Date().toISOString(),
+          text: '',
+          truncated: false,
+          diagnostics: [{ code: 'SOURCE_UNREADABLE', message: 'No skill matches this id in the runtime catalog.' }],
+        };
+      }
+      return {
+        kind: 'skill',
+        id: params.id,
+        status: 'ok',
+        observedAt: new Date().toISOString(),
+        text: 'Fake skill body.',
+        truncated: false,
+      };
     case 'turn.start':
       return startTurn(params);
-    case 'turn.steer':
+    case 'turn.steer': {
+      const state = session(params.sessionId);
+      if (state.openTurn === undefined || state.openTurn === null) {
+        throw new Error('TURN_NOT_FOUND: steering requires an open native turn; queue the input as a new turn instead.');
+      }
+      return { accepted: true, openTurn: state.openTurn };
+    }
     case 'turn.interrupt':
       return { accepted: true };
     case 'interaction.respond':

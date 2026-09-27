@@ -18,12 +18,16 @@ import {
   locateBuiltinProviderConfig,
   probeZcodeRuntime,
   ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE,
+  ZCODE_SOURCE_READINESS_ISSUE,
+  discoverZcodeRuntimes,
 } from '../src/runtime/discover.js';
+import { planRuntimeInstallation } from '../src/runtime/install.js';
+import source from '../src/runtime/source.json' with { type: 'json' };
 
 /** Minimal executable entry so probeZcodeRuntime's `--version` call succeeds. */
 function fakeEntry(dir: string): string {
   const entry = join(dir, 'zcode.cjs');
-  writeFileSync(entry, "process.stdout.write('0.16.5\\n');\n");
+  writeFileSync(entry, `process.stdout.write('${source.cliVersion}\\n');\n`);
   chmodSync(entry, 0o755);
   return entry;
 }
@@ -73,7 +77,7 @@ test('probe reports the builtin-config readiness issue when unlocatable', async 
     const root = mkdtempSync(join(tmpdir(), 'zc-discover-probe-'));
     const entry = fakeEntry(root);
     const probe = await probeZcodeRuntime(entry);
-    assert.equal(probe.version, '0.16.5');
+    assert.equal(probe.version, source.cliVersion);
     assert.deepEqual(probe.readinessIssue, { ...ZCODE_BUILTIN_PROVIDER_CONFIG_READINESS_ISSUE });
   });
 });
@@ -86,10 +90,44 @@ test('probe stays quiet when the builtin config is reachable next to the entry',
     mkdirSync(join(home, '.zcode', 'cli'), { recursive: true });
     writeFileSync(join(home, '.zcode', 'cli', 'config.json'), '{}');
     const root = mkdtempSync(join(tmpdir(), 'zc-discover-ok-'));
-    const entry = fakeEntry(root);
-    mkdirSync(join(root, 'provider'));
-    writeFileSync(join(root, 'provider', 'zcode-builtin.json'), '{}');
+    const agent = join(root, 'agent');
+    mkdirSync(agent);
+    const entry = fakeEntry(agent);
+    mkdirSync(join(agent, 'provider'));
+    writeFileSync(join(agent, 'provider', 'zcode-builtin.json'), '{}');
+    writeFileSync(join(root, 'gian-source.json'), JSON.stringify(source));
+    writeFileSync(join(root, 'gian-integration.json'), JSON.stringify({
+      schemaVersion: source.integrationVersion, upstreamEntrypointSha256: source.protocolEntrypointSha256,
+      integratedEntrypointSha256: 'a'.repeat(64), catalogProjectionSha256: 'b'.repeat(64),
+    }));
     const probe = await probeZcodeRuntime(entry);
     assert.equal(probe.readinessIssue, undefined);
+    assert.deepEqual(probe.contentRoots, [{ path: root, mode: 'directory' }]);
+    writeFileSync(join(root, 'gian-source.json'), JSON.stringify({ ...source, commit: 'f'.repeat(40) }));
+    assert.deepEqual((await probeZcodeRuntime(entry)).readinessIssue, ZCODE_SOURCE_READINESS_ISSUE);
   });
+});
+
+test('ZCode installs the pinned archive in a content-addressed managed directory', () => {
+  const input = {
+    installerVersion: 1 as const, runtimeId: 'zcode', version: source.cliVersion,
+    artifactSha256: 'a'.repeat(64), platform: 'darwin-arm64' as const,
+    distribution: { kind: 'managed' as const, format: 'tar.gz' as const, entryRelativePath: source.entryRelativePath },
+  };
+  const plan = planRuntimeInstallation(input);
+  assert.deepEqual(plan.operation, {
+    ...input.distribution, directory: `zcode/${source.cliVersion}/${input.artifactSha256}`, candidates: [],
+  });
+  assert.throws(() => planRuntimeInstallation({ ...input, version: '0.16.5' }), /pinned/);
+  assert.throws(() => planRuntimeInstallation({ ...input, platform: 'linux-x64' }), /platform/);
+  assert.throws(() => planRuntimeInstallation({ ...input,
+    distribution: { kind: 'external-app', entryPath: '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs' },
+  }), /does not match/);
+  assert.throws(() => planRuntimeInstallation({ ...input,
+    distribution: { ...input.distribution, entryRelativePath: 'bin/zcode' },
+  }), /layout/);
+});
+
+test('managed CLI discovery does not offer an unrelated installed Desktop runtime', async () => {
+  assert.deepEqual((await discoverZcodeRuntimes()).candidates, []);
 });

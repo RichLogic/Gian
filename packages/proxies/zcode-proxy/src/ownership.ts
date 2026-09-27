@@ -38,7 +38,7 @@ export interface SessionRecord {
   updatedAt: string;
   /** Last confirmed native settings snapshot for restore-on-failure (§7.4). */
   confirmedNativeSettings: {
-    model?: { providerId: string; modelId: string };
+    model?: { providerId: string; modelId: string; options?: { reasoningLevel?: string } };
     thoughtLevel?: string;
     mode?: string;
   };
@@ -46,6 +46,9 @@ export interface SessionRecord {
   activeTurnId: string | null;
   /** Native turn id bound to the active outer turn. */
   activeNativeTurnId: string | null;
+  /** Session-scoped Host MCP servers injected at create; re-injected on
+   *  resume (session/resume accepts mcpServers, shared/zp/index.ts:1583). */
+  hostMcpServers?: Array<Record<string, unknown>>;
 }
 
 export interface PersistedOwnershipFile {
@@ -335,7 +338,7 @@ export class TurnLedger {
   }
 }
 
-/** responseId -> fingerprint map for interaction.respond idempotency (§11.2). */
+  /** responseId -> fingerprint map for interaction.respond idempotency (§11.2). */
 export class InteractionResponseLedger {
   private readonly entries = new Map<string, string>();
 
@@ -352,5 +355,11 @@ export class InteractionResponseLedger {
     }
     this.entries.set(responseId, fingerprint);
     return 'new';
+  }
+
+  /** Drop a responseId whose first use failed validation, so a corrected
+   *  retry is not falsely rejected as conflicting content. */
+  forget(responseId: string): void {
+    this.entries.delete(responseId);
   }
 }

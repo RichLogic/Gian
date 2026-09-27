@@ -422,6 +422,18 @@ describe('screenshot controller lifecycle', () => {
     assert.deepEqual(harness.errors, ['permission-denied']);
   });
 
+  it('does not blame screen permission for an unrelated capture failure when status is unknown', async () => {
+    const harness = createHarness({
+      getScreenPermissionStatus: () => 'unknown',
+      captureScreens: async () => { throw new Error('capture service unavailable'); },
+    });
+    setSessionTarget(harness.controller);
+
+    assert.deepEqual(await harness.controller.start(), { ok: false, error: 'capture-failed' });
+    assert.equal(harness.permissionHelp.count, 0);
+    assert.deepEqual(harness.errors, ['capture-failed']);
+  });
+
   it('waits for every overlay to draw before showing them, without a black flash', async () => {
     const harness = createHarness({}, { autoPaint: false });
     setSessionTarget(harness.controller);

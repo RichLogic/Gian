@@ -8,13 +8,23 @@
  */
 
 import { createHash } from 'node:crypto';
-import { verifyNativeSessionHostBinding } from '@gian/proxy-protocol';
+import {
+  OpaqueSidechatResumeStore,
+  verifyNativeSessionHostBinding,
+  type SidechatAnchor,
+} from '@gian/proxy-protocol';
 import {
   PLUGIN_ID,
   PLUGIN_NAME,
   PLUGIN_VERSION,
   DshProxyService,
   ServiceError,
+  diffStatusFor,
+  diffsFromMeta,
+  hashId,
+  todoStatusFor,
+  unifiedDiff,
+  type AttachedSession,
   type ConfigValue,
   type SessionStateName,
 } from '../core/service.js';
@@ -50,7 +60,7 @@ export interface ConfigOption {
   choices?: Array<{ value: ConfigValue; displayName: string; description?: string }>;
 }
 
-function customizationUnsupportedList(kind: string, status: 'proxy_unsupported' | 'provider_unsupported') {
+function customizationUnsupportedList(kind: string, status: 'proxy_unsupported' | 'provider_unsupported' | 'unavailable') {
   return {
     kind,
     status,
@@ -84,6 +94,33 @@ const BASE_CAPABILITIES: Record<string, number> = {
   'event.request': 1,
 };
 
+/**
+ * Bridge capability key → Gian capability names it earns. The mapping only
+ * runs for capabilities the connected bridge actually advertised, so the
+ * wire capabilities always sit on verified native boundaries.
+ */
+const BRIDGE_CAPABILITY_MAP: Record<string, string[]> = {
+  'turn.steer': ['turn.steer'],
+  'input.attachments': ['input.localFile', 'input.localImage'],
+  'input.skill': ['input.skill'],
+  'session.fork': ['session.fork', 'session.fork.atTurn', 'sidechat'],
+  'session.native.list': ['session.native.list'],
+};
+
+/**
+ * One open Side Chat route. The transient conversation itself lives as an
+ * attached session keyed by the sidechatId; this record only carries the
+ * parent binding, the sealed resume reference, and the creation anchor.
+ */
+interface SidechatRecord {
+  parentSessionId: string;
+  resumeRefId: string;
+  anchor: SidechatAnchor;
+  createFingerprint: string;
+  /** Set on resume so a retried identical resume replays the first result. */
+  resumeFingerprint?: string;
+}
+
 function canonicalJson(value: unknown): string {
   const canonicalize = (input: unknown): unknown => {
     if (Array.isArray(input)) return input.map(canonicalize);
@@ -107,6 +144,8 @@ interface CatalogState {
   configOptions: ConfigOption[];
 }
 
+const CATALOG_INPUT_TYPES = new Set(['text', 'localFile', 'localImage', 'skill']);
+
 export class DshV2Adapter {
   private initialized = false;
   private protocolVersion: '2.1' | '2.2' | '2.3' = '2.1';
@@ -116,7 +155,24 @@ export class DshV2Adapter {
     catalogRevision: `dsh-catalog-${PLUGIN_VERSION}-bootstrap`,
     configOptions: this.defaultConfigOptions(),
   };
+  private catalogInput: Array<{ type: string }> = [{ type: 'text' }];
   private queue: Array<{ method: string; params: Record<string, unknown> }> | null = null;
+  /** responseId → settled interaction identity for idempotent/conflict replies. */
+  private readonly interactionResponses = new Map<string, {
+    interactionId: string;
+    actionId: string;
+    fingerprint: string;
+  }>();
+  /** turnId → last steer fingerprint for retry-idempotent steering. */
+  private readonly steerFingerprints = new Map<string, string>();
+  /** sidechatId → parent binding / sealed resumeRef / anchor. */
+  private readonly sidechats = new Map<string, SidechatRecord>();
+  /**
+   * Seals Provider-owned recovery data into opaque resumeRefs and persists
+   * hashed close tombstones (GIAN_PLUGIN_DATA_DIR). The ref is never logged
+   * and only travels inside sidechat results.
+   */
+  private readonly resumeStore = new OpaqueSidechatResumeStore();
 
   constructor(
     private readonly bridge: BridgeClient,
@@ -129,6 +185,14 @@ export class DshV2Adapter {
     this.bridge.onNotification((notification) => {
       this.service.handleBridgeNotification(notification);
     });
+    // A shared-Host crash must terminalize every open turn and pending
+    // interaction instead of leaving the Host waiting on events that can no
+    // longer arrive.
+    if (typeof this.bridge.onExit === 'function') {
+      this.bridge.onExit(() => {
+        this.service.handleRuntimeExited();
+      });
+    }
   }
 
   private emit(method: string, params: Record<string, unknown>): void {
@@ -187,6 +251,9 @@ export class DshV2Adapter {
       case 'turn.interrupt':
         return this.turnInterrupt(params);
       case 'turn.steer':
+        if (this.capabilities['turn.steer'] === undefined) {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'turn.steer is not advertised for DSH.');
+        }
         return this.turnSteer(params);
       case 'interaction.respond':
         if (this.capabilities.interaction === undefined) {
@@ -198,11 +265,40 @@ export class DshV2Adapter {
       case 'session.replay':
         return this.sessionReplay(params);
       case 'session.native.list':
-        throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.native.list is not advertised for DSH.');
+        if (this.capabilities['session.native.list'] === undefined) {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.native.list is not advertised for DSH.');
+        }
+        return this.bridge.request('session.native.list', {
+          ...(typeof params.cwd === 'string' ? { cwd: params.cwd } : {}),
+          ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+          ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
+        });
       case 'session.native.delete':
+        // Verified absence in @deepseek-ai/dsh@0.1.5-rc.3: the persistence
+        // contract has no delete (create/open/flush/stat/list only), so there
+        // is no durable-history deletion to expose.
         throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.native.delete is not advertised for DSH.');
       case 'session.rename':
+        // Verified absence in @deepseek-ai/dsh@0.1.5-rc.3: SessionHeader has
+        // no title field and no rename surface exists in the runtime.
         throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.rename is not advertised for DSH.');
+      case 'session.fork':
+        if (this.capabilities['session.fork'] === undefined) {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.fork is not advertised for DSH.');
+        }
+        return this.sessionFork(params);
+      case 'sidechat.create':
+        if (this.capabilities.sidechat === undefined) {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'sidechat is not advertised for DSH.');
+        }
+        return this.createSidechat(params);
+      case 'sidechat.resume':
+        if (this.capabilities.sidechat === undefined) {
+          throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'sidechat is not advertised for DSH.');
+        }
+        return this.resumeSidechat(params);
+      case 'sidechat.close':
+        return this.closeSidechat(params);
       case 'runtime.discover':
         if (this.protocolVersion === '2.1') {
           throw new ServiceError('METHOD_NOT_FOUND', 'runtime.discover requires gian.proxy/2.2.');
@@ -218,13 +314,7 @@ export class DshV2Adapter {
         if (this.protocolVersion !== '2.3') {
           throw new ServiceError('CAPABILITY_NOT_SUPPORTED', `${request.method} requires gian.proxy/2.3.`);
         }
-        return request.method === 'customization.list'
-          ? customizationUnsupportedList(String(request.params.kind ?? ''), 'proxy_unsupported')
-          : customizationUnavailableDetail(
-              String(request.params.kind ?? ''),
-              String(request.params.id ?? ''),
-              'DeepSeek Harness customization detail is not supported.',
-            );
+        return this.customization(request.method, request.params);
       case 'shutdown':
         return this.shutdown();
       default:
@@ -301,8 +391,25 @@ export class DshV2Adapter {
         && !Array.isArray(bridgeInitialized.capabilities)
         ? bridgeInitialized.capabilities as Record<string, unknown>
         : {};
+      const runtimeCapabilities: Record<string, number> = {};
+      for (const [bridgeKey, gianNames] of Object.entries(BRIDGE_CAPABILITY_MAP)) {
+        if (bridgeCapabilities[bridgeKey] === undefined) continue;
+        for (const name of gianNames) runtimeCapabilities[name] = 1;
+      }
+      // Structured native projections (todo/write → plan.updated,
+      // tool/result meta → diff.updated) exist on the DSH session format 3
+      // event vocabulary; older format bridges stay unadvertised.
+      const bridgeRuntime = bridgeInitialized.runtime !== null
+        && typeof bridgeInitialized.runtime === 'object'
+        ? bridgeInitialized.runtime as { sessionFormatVersion?: unknown }
+        : {};
+      const structuredEvents = bridgeRuntime.sessionFormatVersion === 3
+        ? { 'event.plan': 1, 'event.diff': 1 }
+        : {};
       this.capabilities = {
         ...BASE_CAPABILITIES,
+        ...structuredEvents,
+        ...runtimeCapabilities,
         ...(bridgeCapabilities.interaction === undefined ? {} : { interaction: 1 }),
         ...(selected === '2.1'
           ? {}
@@ -314,6 +421,7 @@ export class DshV2Adapter {
         catalogRevision: this.catalogRevisionFrom(catalog),
         configOptions: this.catalogOptionsFrom(catalog),
       };
+      this.catalogInput = this.catalogInputFrom(catalog);
     } else {
       this.capabilities = {
         ...BASE_CAPABILITIES,
@@ -496,12 +604,23 @@ export class DshV2Adapter {
     return `dsh-catalog-${PLUGIN_VERSION}-${digest}`;
   }
 
+  /** Project the bridge's runtime-truth input descriptors onto the wire. */
+  private catalogInputFrom(catalog: Record<string, unknown>): Array<{ type: string }> {
+    const raw = Array.isArray(catalog.input) ? catalog.input as unknown[] : [];
+    const projected = raw
+      .map(entry => (entry !== null && typeof entry === 'object' ? (entry as { type?: unknown }).type : entry))
+      .filter((type): type is string => typeof type === 'string' && CATALOG_INPUT_TYPES.has(type));
+    const unique = [...new Set(projected)];
+    return unique.length > 0 ? unique.map(type => ({ type })) : [{ type: 'text' }];
+  }
+
   private async catalogList(): Promise<unknown> {
     const native = await this.bridge.request('catalog.list', {});
     this.catalogState = {
       catalogRevision: this.catalogRevisionFrom(native),
       configOptions: this.catalogOptionsFrom(native),
     };
+    this.catalogInput = this.catalogInputFrom(native);
     return this.catalog();
   }
 
@@ -513,13 +632,30 @@ export class DshV2Adapter {
     const hasApproval = configOptions.some(option => option.id === 'permission_preset');
     return {
       catalogRevision,
-      input: [{ type: 'text' }],
+      input: this.catalogInput,
       configOptions,
       specialCatalogs: {
         model: 'model',
         ...(hasThinking ? { thinking: 'effort' } : {}),
         ...(hasApproval ? { approvalMode: 'permission_preset' } : {}),
       },
+      actions: [
+        {
+          id: 'sidechat.create',
+          supported: this.capabilities.sidechat !== undefined,
+          ...(this.capabilities.sidechat === undefined
+            ? { reason: 'Requires the native fork surface.' }
+            : {}),
+        },
+        { id: 'session.fork', supported: this.capabilities['session.fork'] !== undefined },
+        {
+          id: 'session.fork.atTurn',
+          supported: this.capabilities['session.fork.atTurn'] !== undefined,
+          ...(this.capabilities['session.fork.atTurn'] === undefined
+            ? { reason: 'Requires the native fork boundary.' }
+            : {}),
+        },
+      ],
       slashCommands: [],
     };
   }
@@ -538,6 +674,7 @@ export class DshV2Adapter {
       sessionConfig: resolvedSessionConfig,
       turnConfig: resolvedTurnConfig,
     };
+    this.catalogInput = this.catalogInputFrom(bridgeResolved);
     const base = this.catalog(options, catalogRevision) as Record<string, unknown>;
     return { ...base, resolvedDefaults };
   }
@@ -617,6 +754,10 @@ export class DshV2Adapter {
     if (parsed.hostServices.length > 0) {
       throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'integration.mcp.streamableHttp is not declared.');
     }
+    // An ordinary session.create must never adopt or revive a Side Chat route.
+    if (this.sidechats.has(parsed.sessionId)) {
+      throw new ServiceError('SESSION_NOT_FOUND', `Session ${parsed.sessionId} is not attached.`);
+    }
     if (parsed.nativeSessionId !== null) {
       const key = this.options.hostBindingKey;
       const binding = {
@@ -674,7 +815,7 @@ export class DshV2Adapter {
   }
 
   private async sessionGet(params: Record<string, unknown>): Promise<unknown> {
-    const session = this.service.requireSession(stringField(params, 'sessionId'));
+    const session = this.requireOrdinarySession(stringField(params, 'sessionId'));
     const remote = await this.bridge.request('session.get', { sessionId: session.id }).catch(() => null);
     return { session: this.snapshot(session.id, session.streamId, remote) };
   }
@@ -769,9 +910,28 @@ export class DshV2Adapter {
     const sessionId = stringField(params, 'sessionId');
     const streamId = stringField(params, 'streamId');
     const turnId = stringField(params, 'turnId');
-    this.service.requireStream(sessionId, streamId);
+    const session = this.service.requireStream(sessionId, streamId);
+    // Steering is a mid-turn primitive: it only applies to the session's
+    // current active turn. Queueing for a later turn is turn.start's job and
+    // is never silently substituted here.
+    if (session.activeTurn !== turnId) {
+      throw new ServiceError(
+        'TURN_NOT_FOUND',
+        session.activeTurn === null
+          ? `Session ${sessionId} has no active turn to steer.`
+          : `Turn ${turnId} is not the active turn of session ${sessionId}.`,
+      );
+    }
     const input = Array.isArray(params.input) ? params.input as unknown[] : [];
+    // A retried identical steer is idempotent (no second native delivery);
+    // different content on the same open turn is a deliberate new steer.
+    const fingerprint = createHash('sha256').update(canonicalJson({ input })).digest('hex');
+    const key = `${sessionId}:${turnId}`;
+    if (this.steerFingerprints.get(key) === fingerprint) {
+      return { accepted: true, turnId };
+    }
     await this.bridge.request('turn.steer', { sessionId, turnId, input: coerceInput(input) });
+    this.steerFingerprints.set(key, fingerprint);
     return { accepted: true, turnId };
   }
 
@@ -781,21 +941,396 @@ export class DshV2Adapter {
     const turnId = stringField(params, 'turnId');
     const interactionId = stringField(params, 'interactionId');
     const actionId = stringField(params, 'actionId');
+    const responseId = stringField(params, 'responseId');
     const values = (params.values ?? {}) as Record<string, unknown>;
     this.service.requireStream(sessionId, streamId);
+    const fingerprint = createHash('sha256')
+      .update(canonicalJson({ actionId, values }))
+      .digest('hex');
+    const previous = this.interactionResponses.get(responseId);
+    if (previous !== undefined) {
+      if (previous.interactionId !== interactionId
+        || previous.actionId !== actionId
+        || previous.fingerprint !== fingerprint) {
+        throw new ServiceError(
+          'CONFLICT',
+          `Response id ${responseId} was already used with a different answer.`,
+        );
+      }
+      // Retried identical response: the first delivery settled the native
+      // interaction; the retry is acknowledged without a second delivery.
+      return { accepted: true, interactionId, responseId };
+    }
     const bridgeResult = await this.bridge.request('interaction.respond', {
       sessionId,
       interactionId,
       actionId,
       values,
     });
-    return { accepted: true, interactionId, responseId: params.responseId as string, ...bridgeResult };
+    this.interactionResponses.set(responseId, { interactionId, actionId, fingerprint });
+    return { accepted: true, interactionId, responseId, ...bridgeResult };
+  }
+
+  /**
+   * Native fork through the DSH agent factory: the child carries the parent's
+   * balanced completed-turn prefix as its durable seed, native
+   * `parentSession`/`isSeeded` lineage, and a fresh live agent. The parent
+   * record is only read.
+   */
+  private async sessionFork(params: Record<string, unknown>): Promise<unknown> {
+    const sourceSessionId = stringField(params, 'sourceSessionId');
+    const sourceStreamId = stringField(params, 'sourceStreamId');
+    const newSessionId = stringField(params, 'sessionId');
+    // A Side Chat is a one-off context snapshot and can never seed a
+    // persistent fork (10.5.1).
+    const source = this.requireOrdinaryStream(sourceSessionId, sourceStreamId);
+    const anchor = (params.anchor ?? {}) as Record<string, unknown>;
+    const sourceNativeId = source.nativeSessionId ?? sourceSessionId;
+    let bridgeAnchor: { kind: 'head' } | { kind: 'turn'; nativeTurn: number };
+    let anchorTurnId: string;
+    let anchorSourceTurnId: string;
+    if (anchor.type === 'head') {
+      const latest = this.latestCompletedTurn(source);
+      if (latest === null) {
+        throw new ServiceError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          'A head fork requires at least one completed native turn to anchor on.',
+        );
+      }
+      bridgeAnchor = { kind: 'head' };
+      anchorTurnId = latest.turnId;
+      anchorSourceTurnId = latest.sourceTurnId;
+    } else if (anchor.type === 'turn') {
+      const anchorTurnIdParam = typeof anchor.turnId === 'string' ? anchor.turnId : '';
+      const anchorSourceTurnIdParam = typeof anchor.sourceTurnId === 'string' ? anchor.sourceTurnId : '';
+      const nativeTurn = nativeTurnFromSourceId(anchorSourceTurnIdParam, sourceNativeId);
+      if (anchorTurnIdParam.length === 0 || nativeTurn === null) {
+        throw new ServiceError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          `Anchor sourceTurnId ${anchorSourceTurnIdParam} does not resolve to a native turn of session ${sourceSessionId}.`,
+        );
+      }
+      bridgeAnchor = { kind: 'turn', nativeTurn };
+      anchorTurnId = anchorTurnIdParam;
+      anchorSourceTurnId = anchorSourceTurnIdParam;
+    } else {
+      throw new ServiceError('INVALID_PARAMS', 'params.anchor.type must be "head" or "turn".');
+    }
+    const forked = await this.bridge.request('session.fork', {
+      sessionId: sourceSessionId,
+      newSessionId,
+      anchor: bridgeAnchor,
+    });
+    const session = (forked.session ?? null) as Record<string, unknown> | null;
+    const nativeId = session !== null && typeof session.nativeId === 'string' ? session.nativeId : null;
+    const cwd = session !== null && typeof session.cwd === 'string' ? session.cwd : source.cwd;
+    const roots = session !== null && Array.isArray(session.roots)
+      ? (session.roots as unknown[]).map(String)
+      : source.roots;
+    const createdAt = session !== null && typeof session.createdAt === 'string'
+      ? session.createdAt
+      : new Date().toISOString();
+    const attached = this.service.attach({
+      sessionId: newSessionId,
+      cwd,
+      roots,
+      sessionConfig: source.sessionConfig,
+      nativeSessionId: nativeId,
+      createFingerprint: createHash('sha256')
+        .update(canonicalJson({ forkOf: sourceSessionId, newSessionId, anchor: bridgeAnchor }))
+        .digest('hex'),
+    });
+    if (nativeId !== null) attached.nativeSessionId = nativeId;
+    attached.createdAt = createdAt;
+    attached.updatedAt = createdAt;
+    return {
+      session: this.snapshot(newSessionId, attached.streamId),
+      origin: {
+        kind: 'fork',
+        sessionId: sourceSessionId,
+        turnId: anchorTurnId,
+        sourceTurnId: anchorSourceTurnId,
+      },
+    };
+  }
+
+  private latestCompletedTurn(
+    session: { turnState: Map<string, { terminal: boolean; gianTurnId: string; sourceTurnId: string }> },
+  ): { turnId: string; sourceTurnId: string } | null {
+    let latest: { turnId: string; sourceTurnId: string } | null = null;
+    for (const turn of session.turnState.values()) {
+      if (turn.terminal) latest = { turnId: turn.gianTurnId, sourceTurnId: turn.sourceTurnId };
+    }
+    return latest;
+  }
+
+  /* ------------------------------- Side Chat ------------------------------- */
+
+  /**
+   * Ordinary-session lookup: Side Chat routes stay invisible to every core
+   * Session Method; a sidechatId must answer SESSION_NOT_FOUND (10.5.1).
+   */
+  private requireOrdinarySession(sessionId: string) {
+    if (this.sidechats.has(sessionId)) {
+      throw new ServiceError('SESSION_NOT_FOUND', `Session ${sessionId} is not attached.`);
+    }
+    return this.service.requireSession(sessionId);
+  }
+
+  private requireOrdinaryStream(sessionId: string, streamId: string) {
+    const session = this.requireOrdinarySession(sessionId);
+    if (session.streamId !== streamId) {
+      throw new ServiceError('SESSION_STALE', `Stream ${streamId} is no longer active.`);
+    }
+    return session;
+  }
+
+  /**
+   * The Side Chat context boundary follows ADR-0041's idle-only rule: DSH's
+   * native fork only certifies completed-turn cuts, so creation requires an
+   * idle parent and anchors on its latest terminal turn (empty when the
+   * parent never accepted a turn). The activeInput anchor is unavailable
+   * until DSH proves a live-turn boundary.
+   */
+  private sidechatAnchorFor(parent: AttachedSession): {
+    anchor: SidechatAnchor;
+    bridgeAnchor: { kind: 'head' } | { kind: 'turn'; nativeTurn: number };
+  } {
+    if (parent.activeTurn !== null || parent.pendingGianTurns.length > 0 || parent.state === 'running') {
+      throw new ServiceError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
+    }
+    const latest = this.latestCompletedTurn(parent);
+    if (latest) {
+      const nativeTurn = nativeTurnFromSourceId(latest.sourceTurnId, parent.nativeSessionId ?? parent.id);
+      if (nativeTurn === null) {
+        throw new ServiceError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          `Side Chat anchor ${latest.sourceTurnId} does not resolve to a native turn.`,
+        );
+      }
+      return {
+        anchor: { type: 'turn', turnId: latest.turnId, sourceTurnId: latest.sourceTurnId },
+        bridgeAnchor: { kind: 'turn', nativeTurn },
+      };
+    }
+    return { anchor: { type: 'empty' }, bridgeAnchor: { kind: 'head' } };
+  }
+
+  private async createSidechat(params: Record<string, unknown>): Promise<unknown> {
+    const parentSessionId = stringField(params, 'parentSessionId');
+    const parentStreamId = stringField(params, 'parentStreamId');
+    const sidechatId = stringField(params, 'sidechatId');
+    const parent = this.requireOrdinaryStream(parentSessionId, parentStreamId);
+    const fingerprint = JSON.stringify({ parentSessionId, parentStreamId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.createFingerprint !== fingerprint) {
+        throw new ServiceError('CONFLICT', `Side Chat ${sidechatId} was reused with a different parent.`);
+      }
+      return { sidechat: this.serializeSidechat(this.service.requireSession(sidechatId), existing) };
+    }
+    if (this.service.hasSession(sidechatId)) {
+      throw new ServiceError('CONFLICT', `Side Chat ${sidechatId} already belongs to an ordinary Session.`);
+    }
+    const { anchor, bridgeAnchor } = this.sidechatAnchorFor(parent);
+    const forked = await this.bridge.request('session.fork', {
+      sessionId: parentSessionId,
+      newSessionId: sidechatId,
+      anchor: bridgeAnchor,
+    });
+    const session = (forked.session ?? null) as Record<string, unknown> | null;
+    const nativeId = session !== null && typeof session.nativeId === 'string' ? session.nativeId : null;
+    const attached = this.service.attach({
+      sessionId: sidechatId,
+      cwd: nonEmptyOrDefault(session !== null ? session.cwd : undefined, parent.cwd),
+      roots: session !== null && Array.isArray(session.roots)
+        ? (session.roots as unknown[]).map(String)
+        : parent.roots,
+      // sidechat.create carries no config: the Session-bound config is
+      // inherited verbatim from the parent (10.5.1).
+      sessionConfig: parent.sessionConfig,
+      nativeSessionId: nativeId,
+      createFingerprint: createHash('sha256')
+        .update(canonicalJson({ sidechat: sidechatId, parent: fingerprint }))
+        .digest('hex'),
+    });
+    if (nativeId !== null) attached.nativeSessionId = nativeId;
+    const sealed = this.resumeStore.seal({
+      sidechatId,
+      parentSessionId,
+      nativeSessionId: attached.nativeSessionId ?? sidechatId,
+      anchor,
+      sessionConfig: parent.sessionConfig,
+      createdAt: attached.createdAt,
+    });
+    const record: SidechatRecord = {
+      parentSessionId,
+      resumeRefId: sealed.id,
+      anchor,
+      createFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, record);
+    return { sidechat: this.serializeSidechat(attached, record) };
+  }
+
+  private async resumeSidechat(params: Record<string, unknown>): Promise<unknown> {
+    const sidechatId = stringField(params, 'sidechatId');
+    const parentSessionId = stringField(params, 'parentSessionId');
+    const resumeRef = (params.resumeRef ?? null) as Record<string, unknown> | null;
+    const resumeRefId = resumeRef !== null && typeof resumeRef.id === 'string' ? resumeRef.id : '';
+    if (resumeRefId.length === 0) {
+      throw new ServiceError('INVALID_PARAMS', 'params.resumeRef.id must be a non-empty string.');
+    }
+    if (this.resumeStore.closed(resumeRefId)) {
+      throw new ServiceError('SIDECHAT_UNAVAILABLE', 'Side Chat was already closed.');
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (!payload) {
+      throw new ServiceError('SIDECHAT_UNAVAILABLE', 'Side Chat resume reference is unavailable.');
+    }
+    if (payload.sidechatId !== sidechatId || payload.parentSessionId !== parentSessionId) {
+      throw new ServiceError('CONFLICT', 'Side Chat resume identity does not match.');
+    }
+    const parent = this.requireOrdinarySession(parentSessionId);
+    const fingerprint = JSON.stringify({ parentSessionId, resumeRefId });
+    const existing = this.sidechats.get(sidechatId);
+    if (existing) {
+      if (existing.resumeFingerprint !== fingerprint) {
+        throw new ServiceError('CONFLICT', `Side Chat ${sidechatId} is attached with another resume reference.`);
+      }
+      return { sidechat: this.serializeSidechat(this.service.requireSession(sidechatId), existing, payload.createdAt) };
+    }
+    if (this.service.hasSession(sidechatId)) {
+      throw new ServiceError('CONFLICT', `Side Chat ${sidechatId} already belongs to an ordinary Session.`);
+    }
+    const resumed = await this.bridge.request('session.resume', {
+      sessionId: sidechatId,
+      nativeSessionId: payload.nativeSessionId,
+    });
+    const session = (resumed.session ?? null) as Record<string, unknown> | null;
+    const nativeId = session !== null && typeof session.nativeId === 'string' ? session.nativeId : null;
+    const attached = this.service.attach({
+      sessionId: sidechatId,
+      cwd: nonEmptyOrDefault(session !== null ? session.cwd : undefined, parent.cwd),
+      roots: session !== null && Array.isArray(session.roots)
+        ? (session.roots as unknown[]).map(String)
+        : parent.roots,
+      sessionConfig: payload.sessionConfig,
+      nativeSessionId: nativeId ?? payload.nativeSessionId,
+      createFingerprint: createHash('sha256')
+        .update(canonicalJson({ sidechatResume: sidechatId, resumeRefId }))
+        .digest('hex'),
+    });
+    if (nativeId !== null) attached.nativeSessionId = nativeId;
+    const record: SidechatRecord = {
+      parentSessionId,
+      resumeRefId,
+      anchor: payload.anchor,
+      createFingerprint: fingerprint,
+      resumeFingerprint: fingerprint,
+    };
+    this.sidechats.set(sidechatId, record);
+    return { sidechat: this.serializeSidechat(attached, record, payload.createdAt) };
+  }
+
+  /**
+   * Close barrier (10.5.4): terminalize the active turn and every open child
+   * lifecycle BEFORE the Success response (the CLI writes the queued events
+   * first for this method), keep the Provider session intact — DSH's
+   * persistence contract has no delete, so providerDataDeleted stays false —
+   * and converge unknown references idempotently.
+   */
+  private async closeSidechat(params: Record<string, unknown>): Promise<unknown> {
+    const sidechatId = stringField(params, 'sidechatId');
+    const resumeRef = (params.resumeRef ?? null) as Record<string, unknown> | null;
+    const resumeRefId = resumeRef !== null && typeof resumeRef.id === 'string' ? resumeRef.id : '';
+    if (resumeRefId.length === 0) {
+      throw new ServiceError('INVALID_PARAMS', 'params.resumeRef.id must be a non-empty string.');
+    }
+    const streamId = typeof params.streamId === 'string' && params.streamId.length > 0
+      ? params.streamId
+      : null;
+    const closed = this.resumeStore.closed(resumeRefId);
+    if (closed) {
+      return {
+        ok: true as const,
+        sidechatId,
+        providerDataDeleted: closed.sidechatId === sidechatId ? closed.providerDataDeleted : false,
+      };
+    }
+    const payload = this.resumeStore.open(resumeRefId);
+    if (payload && payload.sidechatId !== sidechatId) {
+      throw new ServiceError('CONFLICT', 'resumeRef belongs to another live Side Chat.');
+    }
+    const live = this.sidechats.get(sidechatId);
+    if (live) {
+      if (live.resumeRefId !== resumeRefId) {
+        throw new ServiceError('CONFLICT', 'resumeRef belongs to another Side Chat attachment.');
+      }
+      const session = this.service.requireSession(sidechatId);
+      if (streamId !== null && session.streamId !== streamId) {
+        throw new ServiceError('SESSION_STALE', `Stream ${streamId} is no longer active.`);
+      }
+      this.service.closeSidechatRoute(sidechatId);
+      await this.bridge.request('session.close', { sessionId: sidechatId });
+      this.sidechats.delete(sidechatId);
+    }
+    const providerDataDeleted = false;
+    this.resumeStore.rememberClosed(resumeRefId, { sidechatId, providerDataDeleted });
+    return { ok: true as const, sidechatId, providerDataDeleted };
+  }
+
+  private serializeSidechat(
+    session: AttachedSession,
+    sidechat: SidechatRecord,
+    createdAt = session.createdAt,
+  ): Record<string, unknown> {
+    return {
+      id: session.id,
+      parentSessionId: sidechat.parentSessionId,
+      streamId: session.streamId,
+      state: session.state,
+      resumeRef: { id: sidechat.resumeRefId },
+      anchor: sidechat.anchor,
+      sessionConfig: session.sessionConfig,
+      createdAt,
+      updatedAt: session.updatedAt,
+    };
+  }
+
+  private async customization(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const kind = String(params.kind ?? '');
+    if (kind !== 'skill' && kind !== 'mcp' && kind !== 'hook' && kind !== 'rule') {
+      throw new ServiceError('CONFIG_VALUE_INVALID', `params.kind must be one of skill, mcp, hook, rule; got ${kind}.`);
+    }
+    try {
+      if (method === 'customization.list') {
+        return await this.bridge.request('customization.list', {
+          kind,
+          ...(typeof params.cwd === 'string' ? { cwd: params.cwd } : {}),
+        });
+      }
+      return await this.bridge.request('customization.detail', {
+        kind,
+        id: stringField(params, 'id'),
+        ...(typeof params.cwd === 'string' ? { cwd: params.cwd } : {}),
+      });
+    } catch (error) {
+      // Bridges without the customization methods fail closed to the honest
+      // empty-inventory shape instead of an opaque transport error.
+      if (method === 'customization.list') {
+        return customizationUnsupportedList(kind, 'unavailable');
+      }
+      return customizationUnavailableDetail(kind, String(params.id ?? ''), error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async sessionClose(params: Record<string, unknown>): Promise<unknown> {
     const sessionId = stringField(params, 'sessionId');
     const streamId = stringField(params, 'streamId');
-    const session = this.service.requireStream(sessionId, streamId);
+    // session.close(sidechatId) never closes a Side Chat; only the explicit
+    // sidechat.close barrier may tear the transient route down (10.5.1).
+    const session = this.requireOrdinaryStream(sessionId, streamId);
     if (session.closed) return { ok: true };
     await this.bridge.request('session.close', { sessionId });
     this.service.closeSession(sessionId, streamId);
@@ -805,7 +1340,7 @@ export class DshV2Adapter {
   private async sessionReplay(params: Record<string, unknown>): Promise<unknown> {
     const sessionId = stringField(params, 'sessionId');
     const streamId = stringField(params, 'streamId');
-    const session = this.service.requireStream(sessionId, streamId);
+    const session = this.requireOrdinaryStream(sessionId, streamId);
     const cursor = params.cursor === null || params.cursor === undefined ? null : String(params.cursor);
     const limit = typeof params.limit === 'number' ? params.limit : 500;
     const page = await this.bridge.request('session.events.read', { sessionId, cursor, limit });
@@ -813,9 +1348,8 @@ export class DshV2Adapter {
       ? (page as { events: Array<{ type: string; data: Record<string, unknown>; seq: number }> }).events
       : [];
     const replayStreamId = `replay-${session.id}-${(page as { formatVersion?: unknown }).formatVersion ?? 0}`;
-    const replayEvents = events.map((event) => this.replayEventFor(
-      session.id,
-      session.nativeSessionId ?? session.id,
+    const replayEvents = events.flatMap((event) => this.replayEventsFor(
+      session,
       replayStreamId,
       event,
     ));
@@ -826,27 +1360,357 @@ export class DshV2Adapter {
     };
   }
 
-  private replayEventFor(
-    sessionId: string,
-    nativeSessionId: string,
+  /**
+   * Project one durable native event onto replay events whose identities are
+   * derived exactly like the live projection: same sourceTurnId / stepId /
+   * contentId / planId / diffId recipes and the same eventId hash inputs, so
+   * a Host can reconcile live and replayed facts without duplicates. Native
+   * events with no durable surface (assistant chunks are transient in
+   * 0.1.5; agent/inbox bookkeeping; the fork cut marker) are skipped rather
+   * than fabricated.
+   */
+  private replayEventsFor(
+    session: {
+      id: string;
+      nativeSessionId: string | null;
+      turnConfigOptionsRevision: string | null;
+    },
     replayStreamId: string,
     event: { type: string; data: Record<string, unknown>; seq: number },
-  ): Record<string, unknown> {
-    const turn = typeof event.data.turn === 'number' ? event.data.turn : 0;
-    const step = typeof event.data.step === 'number' ? event.data.step : 0;
-    const sourceId = `${nativeSessionId}:turn:${turn}`;
+  ): Array<Record<string, unknown>> {
+    const nativeSessionId = session.nativeSessionId ?? session.id;
+    const data = event.data;
+    const nativeTurn = typeof data.turn === 'number' ? data.turn : 0;
+    const step = typeof data.step === 'number' ? data.step : 0;
+    const sourceId = `${nativeSessionId}:turn:${nativeTurn}`;
+    const identityRevision = session.turnConfigOptionsRevision ?? `dsh-catalog-${PLUGIN_VERSION}`;
+
+    const replayEventId = (projectionKind: string, ...identity: unknown[]): string =>
+      hashId([PLUGIN_ID, nativeSessionId, projectionKind, event.seq, ...identity, identityRevision]);
+
     const base = {
-      method: replayMethod(event.type),
-      eventId: hashIdLocal(['replay', PLUGIN_ID, nativeSessionId, event.type, event.seq, 0]),
-      sessionId,
+      sessionId: session.id,
       replayStreamId,
       sequence: event.seq + 1,
-      sourceTurnId: sourceId,
       emittedAt: new Date().toISOString(),
-      data: {},
     };
-    const data = replayData(event, sourceId, step);
-    return { ...base, data };
+    // Replay events carry sourceTurnId only (no stream turnId): the replay
+    // stream schema is a strict object keyed by durable native identity.
+    const turnEnvelope = {
+      ...base,
+      sourceTurnId: sourceId,
+    };
+
+    switch (event.type) {
+      case 'turn/start':
+        return [{ ...turnEnvelope, method: 'turn.started', eventId: replayEventId('turn-started'), data: {} }];
+      case 'turn/end': {
+        const reason = (data.reason ?? {}) as Record<string, unknown>;
+        const kind = typeof reason.kind === 'string' ? reason.kind : 'completed';
+        const abortReason = (reason.reason ?? {}) as Record<string, unknown>;
+        const abortKind = typeof abortReason.kind === 'string' ? abortReason.kind : 'unknown';
+        if (kind === 'completed') {
+          return [{ ...turnEnvelope, method: 'turn.completed', eventId: replayEventId('turn.completed'), data: { stopReason: 'completed' } }];
+        }
+        if (kind === 'max-tokens') {
+          return [{ ...turnEnvelope, method: 'turn.completed', eventId: replayEventId('turn.completed'), data: { stopReason: 'limit_reached' } }];
+        }
+        if (kind === 'blocked') {
+          return [{ ...turnEnvelope, method: 'turn.completed', eventId: replayEventId('turn.completed'), data: { stopReason: 'refused' } }];
+        }
+        if (kind === 'aborted') {
+          return [{
+            ...turnEnvelope,
+            method: 'turn.completed',
+            eventId: replayEventId('turn.completed'),
+            data: { stopReason: abortKind === 'user' ? 'interrupted' : 'cancelled' },
+          }];
+        }
+        if (kind === 'interrupted') {
+          return [{
+            ...turnEnvelope,
+            method: 'turn.failed',
+            eventId: replayEventId('turn.failed'),
+            data: {
+              error: {
+                domainCode: 'RUNTIME_ERROR',
+                message: 'Native turn was interrupted by persistence crash repair.',
+                retryable: false,
+                details: { crashRepaired: true },
+              },
+            },
+          }];
+        }
+        if (kind === 'error') {
+          return [{
+            ...turnEnvelope,
+            method: 'turn.failed',
+            eventId: replayEventId('turn.failed'),
+            data: {
+              error: {
+                domainCode: 'RUNTIME_ERROR',
+                message: 'Native turn failed.',
+                retryable: false,
+                details: { native: (reason.error ?? null) as unknown },
+              },
+            },
+          }];
+        }
+        return [{ ...turnEnvelope, method: 'turn.completed', eventId: replayEventId('turn.completed'), data: { stopReason: 'other' } }];
+      }
+      case 'step/start':
+      case 'step/end':
+        return [{
+          ...turnEnvelope,
+          method: 'step.updated',
+          eventId: replayEventId('step-updated'),
+          data: {
+            stepId: `${sourceId}:step:${step}`,
+            index: step,
+            status: event.type === 'step/start' ? 'running' : 'completed',
+          },
+        }];
+      case 'assistant/message': {
+        const message = (data.message ?? {}) as Record<string, unknown>;
+        const blocks = Array.isArray(message.content) ? message.content as Array<Record<string, unknown>> : [];
+        const out: Array<Record<string, unknown>> = [];
+        for (const [index, block] of blocks.entries()) {
+          const kind = block.type === 'reasoning' ? 'reasoning' : block.type === 'text' ? 'text' : null;
+          if (!kind) continue;
+          const stepId = `${sourceId}:step:${step}`;
+          const contentId = contentIdForIdentity(sourceId, step, kind, index);
+          out.push({
+            ...turnEnvelope,
+            method: 'content.completed',
+            eventId: replayEventId('content-completed', contentId),
+            data: {
+              contentId,
+              kind,
+              ...(kind === 'text' ? { format: 'markdown' } : {}),
+              stepId,
+              content: String(block.text ?? ''),
+            },
+          });
+        }
+        const usage = data.usage as Record<string, unknown> | undefined;
+        if (usage && blocks.length > 0) {
+          const inputTokens = typeof usage.inputTokens === 'number' ? usage.inputTokens : 0;
+          const outputTokens = typeof usage.outputTokens === 'number' ? usage.outputTokens : 0;
+          const cacheReadTokens = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0;
+          const cacheWriteTokens = typeof usage.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0;
+          const cachedInputTokens = cacheReadTokens + cacheWriteTokens;
+          out.push({
+            ...turnEnvelope,
+            method: 'usage.updated',
+            eventId: replayEventId('usage-updated'),
+            data: {
+              stepId: `${sourceId}:step:${step}`,
+              conversation: {
+                mode: 'delta',
+                inputTokens,
+                outputTokens,
+                ...(cachedInputTokens === 0 ? {} : { cachedInputTokens }),
+                totalTokens: inputTokens + outputTokens + cachedInputTokens,
+              },
+            },
+          });
+        }
+        return out;
+      }
+      case 'tool/call': {
+        const callId = typeof data.callId === 'string' ? data.callId : '';
+        const name = typeof data.name === 'string' ? data.name : '';
+        if (callId.length === 0 || name.length === 0) return [];
+        return [{
+          ...turnEnvelope,
+          method: 'activity.updated',
+          eventId: replayEventId('activity-updated', callId, 'running'),
+          data: {
+            activityId: callId,
+            kind: name,
+            title: name,
+            status: 'running',
+            stepId: `${sourceId}:step:${step}`,
+            presentation: { type: 'tool', data: { name, input: typeof data.arguments === 'string' ? data.arguments : '' } },
+          },
+        }];
+      }
+      case 'tool/result': {
+        const message = (data.message ?? {}) as Record<string, unknown>;
+        const callId = typeof message.callId === 'string' ? message.callId : `tool-${event.seq}`;
+        const status = data.error !== undefined ? 'failed' : 'succeeded';
+        const out: Array<Record<string, unknown>> = [{
+          ...turnEnvelope,
+          method: 'activity.updated',
+          eventId: replayEventId('activity-updated', callId, 'terminal'),
+          data: {
+            activityId: callId,
+            kind: callId,
+            title: callId,
+            status,
+            presentation: {
+              type: 'tool',
+              data: { name: callId, output: JSON.stringify(message.content ?? '') },
+            },
+            details: { native: (message.content ?? null) as unknown },
+          },
+        }];
+        const diffs = diffsFromMeta(data.meta);
+        if (diffs !== null) {
+          for (const [fileIndex, file] of diffs.entries()) {
+            const diffId = hashId([nativeSessionId, 'diff', callId, file.path, fileIndex]);
+            out.push({
+              ...turnEnvelope,
+              method: 'diff.updated',
+              eventId: replayEventId('diff-updated', diffId),
+              data: {
+                diffId,
+                diff: unifiedDiff(file),
+                truncated: false,
+                files: [{ path: file.path, status: diffStatusFor(file) }],
+              },
+            });
+          }
+        }
+        return out;
+      }
+      case 'user/message': {
+        const source = typeof data.source === 'string' ? data.source : 'gian';
+        // Gian-issued input is already covered by turn.started's lifecycle;
+        // only externally produced user messages are imported on replay.
+        if (source === 'gian') return [];
+        const message = (data.message ?? {}) as Record<string, unknown>;
+        const blocks = Array.isArray(message.content) ? message.content as Array<Record<string, unknown>> : [];
+        const input = blocks
+          .filter(block => block.type === 'text' && typeof block.text === 'string')
+          .map(block => ({ type: 'text', text: String(block.text) }));
+        if (input.length === 0) return [];
+        return [{
+          ...turnEnvelope,
+          method: 'input.recorded',
+          eventId: replayEventId('input-recorded'),
+          data: { input },
+        }];
+      }
+      case 'request/header': {
+        const reason = data.reason === 'resume' ? 'resume' : data.reason === 'change' || data.reason === 'series' ? 'change' : 'initial';
+        const header = (data.header ?? {}) as Record<string, unknown>;
+        const config = (header.config ?? {}) as Record<string, unknown>;
+        const model = config.model !== undefined ? String(config.model) : 'deepseek-chat';
+        const provider = config.provider !== undefined ? String(config.provider) : 'deepseek';
+        return [{
+          ...turnEnvelope,
+          method: 'request.updated',
+          eventId: replayEventId('request-updated'),
+          data: {
+            requestId: `request-${sourceId}:step:${step}`,
+            reason,
+            stepId: `${sourceId}:step:${step}`,
+            model: { provider, id: model },
+            ...(typeof header.system === 'string' ? { systemPrompt: { text: header.system, truncated: false } } : {}),
+            ...(Array.isArray(header.tools)
+              ? { tools: (header.tools as Array<Record<string, unknown>>).map((tool) => ({ name: String(tool.name ?? '') })) }
+              : {}),
+          },
+        }];
+      }
+      case 'request/context': {
+        const contextWindow = typeof data.contextWindow === 'number' ? data.contextWindow : undefined;
+        return [{
+          ...turnEnvelope,
+          method: 'request.updated',
+          eventId: replayEventId('request-context'),
+          data: {
+            requestId: `request-${sourceId}`,
+            reason: 'change',
+            ...(contextWindow === undefined ? {} : { context: { window: contextWindow } }),
+          },
+        }];
+      }
+      case 'todo/write': {
+        const todos = Array.isArray(data.todos) ? data.todos as Array<Record<string, unknown>> : [];
+        const planId = `plan-${nativeSessionId}`;
+        return [{
+          ...turnEnvelope,
+          method: 'plan.updated',
+          eventId: replayEventId('plan-updated'),
+          data: {
+            planId,
+            title: 'Todo list',
+            steps: todos.map((todo, index) => ({
+              id: hashId([nativeSessionId, 'todo', index, String(todo.content ?? '')]),
+              text: String(todo.content ?? ''),
+              status: todoStatusFor(todo.status),
+            })),
+          },
+        }];
+      }
+      case 'assistant/chunk':
+        // Transient in DSH 0.1.5: chunks live only on the assistant stream,
+        // never in the durable log — replay must not fabricate them.
+        return [];
+      case 'approval/asked': {
+        const askedId = typeof data.id === 'string' ? data.id : `asked-${event.seq}`;
+        const interactionId = `dsh-approval-asked-${askedId}`;
+        const toolName = typeof data.toolName === 'string' ? data.toolName : 'tool';
+        return [{
+          ...turnEnvelope,
+          method: 'interaction.requested',
+          eventId: hashId([PLUGIN_ID, nativeSessionId, 'interaction-requested', event.seq, interactionId, identityRevision]),
+          data: {
+            interactionId,
+            title: `Approve ${toolName}`,
+            ...(typeof data.reason === 'string' ? { description: data.reason } : {}),
+            presentation: { kind: 'permission' },
+            inputs: [],
+            actions: [
+              { id: 'allow-once', label: 'Allow once', style: 'primary' },
+              { id: 'reject', label: 'Reject', style: 'danger' },
+            ],
+          },
+        }];
+      }
+      case 'approval/decided': {
+        const askedId = typeof data.id === 'string' ? data.id : `asked-${event.seq}`;
+        const interactionId = `dsh-approval-asked-${askedId}`;
+        const outcome = data.outcome === 'allowed-once' || data.outcome === 'rejected'
+          ? 'submitted'
+          : 'cancelled';
+        return [{
+          ...turnEnvelope,
+          method: 'interaction.resolved',
+          eventId: hashId([PLUGIN_ID, nativeSessionId, 'interaction-resolved', event.seq, interactionId, identityRevision]),
+          data: {
+            interactionId,
+            outcome,
+            ...(outcome === 'submitted'
+              ? { actionId: data.outcome === 'allowed-once' ? 'allow-once' : 'reject' }
+              : {}),
+          },
+        }];
+      }
+      default:
+        // Unknown durable events project exactly like the live generic path.
+        if (event.type.startsWith('agent/inbox/') || event.type === 'session/end-seed') return [];
+        const turn = typeof data.turn === 'number' ? data.turn : 0;
+        const genericSourceId = `${nativeSessionId}:turn:${turn}`;
+        const activityId = `generic-${genericSourceId}-${event.seq}`;
+        return [{
+          ...base,
+          sourceTurnId: genericSourceId,
+          turnId: `t-${turn}`,
+          method: 'activity.updated',
+          eventId: replayEventId('activity-generic', activityId),
+          data: {
+            activityId,
+            kind: event.type,
+            title: event.type,
+            status: 'succeeded',
+            presentation: { type: 'generic' },
+            details: data as unknown,
+          },
+        }];
+    }
   }
 
   private async shutdown(): Promise<unknown> {
@@ -856,6 +1720,17 @@ export class DshV2Adapter {
 
   private snapshot(sessionId: string, streamId: string, _remote: Record<string, unknown> | null = null): Record<string, unknown> {
     const session = this.service.requireSession(sessionId);
+    const busy = session.activeTurn !== null
+      || session.pendingGianTurns.length > 0
+      || session.state === 'running';
+    const boundary = this.latestCompletedTurn(session) !== null;
+    const everAccepted = session.acceptedTurns.size > 0;
+    const idleAnchor = !busy && (boundary || !everAccepted);
+    const idleBoundary = !busy && boundary;
+    const forkSupported = this.capabilities['session.fork'] !== undefined;
+    const atTurnSupported = this.capabilities['session.fork.atTurn'] !== undefined;
+    const busyReason = 'Wait for the active turn to finish.';
+    const boundaryReason = 'No stable terminal turn is available in this attach generation.';
     return {
       id: session.id,
       ...(session.nativeSessionId ? { nativeSession: { id: session.nativeSessionId } } : {}),
@@ -864,6 +1739,26 @@ export class DshV2Adapter {
       sessionConfig: session.sessionConfig,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
+      availableActions: {
+        ...(this.capabilities.sidechat === undefined ? {} : {
+          'sidechat.create': {
+            enabled: idleAnchor,
+            ...(idleAnchor ? {} : { reason: busy ? busyReason : boundaryReason }),
+          },
+        }),
+        ...(forkSupported ? {
+          'session.fork': {
+            enabled: idleBoundary,
+            ...(idleBoundary ? {} : { reason: busy ? busyReason : boundaryReason }),
+          },
+        } : {}),
+        ...(atTurnSupported ? {
+          'session.fork.atTurn': {
+            enabled: idleBoundary,
+            ...(idleBoundary ? {} : { reason: busy ? busyReason : boundaryReason }),
+          },
+        } : {}),
+      },
     };
   }
 
@@ -942,6 +1837,11 @@ function nativeIdFromBridge(remote: unknown): string | null {
   return typeof nativeId === 'string' && nativeId.length > 0 ? nativeId : null;
 }
 
+/** Bridge cwd values may be empty on resume paths; fall back to the parent's. */
+function nonEmptyOrDefault(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
 function coerceInput(input: unknown[]): Array<Record<string, unknown>> {
   return input.map((raw) => {
     const record = (raw ?? {}) as Record<string, unknown>;
@@ -953,6 +1853,7 @@ function coerceInput(input: unknown[]): Array<Record<string, unknown>> {
       ...(typeof record.name === 'string' ? { name: record.name } : {}),
       ...(typeof record.mime === 'string' ? { mime: record.mime } : {}),
       ...(typeof record.size === 'number' ? { size: record.size } : {}),
+      ...(typeof record.skill === 'string' ? { skill: record.skill } : {}),
     };
   });
 }
@@ -963,59 +1864,26 @@ function hashIdLocal(parts: unknown[]): string {
   return hash.digest('hex').slice(0, 32);
 }
 
-function replayMethod(type: string): string {
-  switch (type) {
-    case 'turn/start': return 'turn.started';
-    case 'turn/end': return 'turn.completed';
-    case 'step/start': return 'step.updated';
-    case 'step/end': return 'step.updated';
-    case 'assistant/chunk': return 'content.delta';
-    case 'assistant/message': return 'content.completed';
-    case 'tool/call': return 'activity.updated';
-    case 'tool/result': return 'activity.updated';
-    case 'user/message': return 'input.recorded';
-    case 'request/header': return 'request.updated';
-    case 'request/context': return 'request.updated';
-    default: return 'activity.updated';
-  }
+/** Parse `${nativeSessionId}:turn:${n}` into n when the native id matches. */
+function nativeTurnFromSourceId(sourceTurnId: string, nativeSessionId: string): number | null {
+  const prefix = `${nativeSessionId}:turn:`;
+  if (sourceTurnId.startsWith(prefix) === false) return null;
+  const suffix = sourceTurnId.slice(prefix.length);
+  const turn = Number(suffix);
+  return Number.isSafeInteger(turn) && turn >= 0 ? turn : null;
 }
 
-function replayData(
-  event: { type: string; data: Record<string, unknown> },
-  sourceId: string,
-  step: number,
-): Record<string, unknown> {
-  const data = event.data;
-  switch (event.type) {
-    case 'turn/start':
-      return {};
-    case 'turn/end':
-      return { stopReason: 'completed' };
-    case 'step/start':
-      return { stepId: `${sourceId}:step:${step}`, index: step, status: 'running' };
-    case 'step/end':
-      return { stepId: `${sourceId}:step:${step}`, index: step, status: 'completed' };
-    case 'assistant/chunk':
-      return { contentId: 'assistant', kind: 'text', delta: '' };
-    case 'assistant/message':
-      return { contentId: 'assistant', kind: 'text', content: '' };
-    case 'user/message':
-      return { input: [{ type: 'text', text: '' }] };
-    case 'request/header':
-      return { requestId: `request-${sourceId}:step:${step}`, reason: 'initial' };
-    case 'request/context': {
-      const contextWindow = typeof data.contextWindow === 'number'
-        ? data.contextWindow
-        : undefined;
-      return {
-        requestId: `request-${sourceId}`,
-        reason: 'change',
-        ...(contextWindow === undefined ? {} : { context: { window: contextWindow } }),
-      };
-    }
-    default:
-      return { activityId: `activity-${event.type}`, kind: event.type, title: event.type, status: 'succeeded', presentation: { type: 'generic' } };
-  }
+/** Same content identity recipe as the live projection (service.ts). */
+function contentIdForIdentity(
+  sourceTurnId: string,
+  nativeStep: number,
+  kind: string,
+  index: number,
+): string {
+  const stepId = `${sourceTurnId}:step:${nativeStep}`;
+  return kind === 'text' && index === 0
+    ? `assistant-${stepId}`
+    : `assistant-${kind}-${index}-${stepId}`;
 }
 
 export const DSH_CAPABILITIES = BASE_CAPABILITIES;

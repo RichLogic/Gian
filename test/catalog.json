@@ -670,7 +670,6 @@
     {
       "id": "kimi-proxy-unit",
       "patterns": [
-        "packages/proxies/kimi-proxy/test/input-localfile.test.ts",
         "packages/proxies/kimi-proxy/test/customization.test.ts",
         "packages/proxies/kimi-proxy/test/task-queue.test.ts"
       ],
@@ -690,9 +689,7 @@
     {
       "id": "kimi-proxy-integration",
       "patterns": [
-        "packages/proxies/kimi-proxy/test/service.test.ts",
-        "packages/proxies/kimi-proxy/test/session-store.test.ts",
-        "packages/proxies/kimi-proxy/test/rpc-deadline.test.ts"
+        "packages/proxies/kimi-proxy/test/session-store.test.ts"
       ],
       "module": "kimi-proxy",
       "scope": "integration",
@@ -711,10 +708,7 @@
     {
       "id": "kimi-proxy-system",
       "patterns": [
-        "packages/proxies/kimi-proxy/test/kimi-acp-client.test.ts",
-        "packages/proxies/kimi-proxy/test/protocol-v2-cli.test.ts",
-        "packages/proxies/kimi-proxy/test/terminal-service.test.ts",
-        "packages/proxies/kimi-proxy/test/terminal-lifecycle-race.test.ts"
+        "packages/proxies/kimi-proxy/test/kimi-proxy.test.ts"
       ],
       "module": "kimi-proxy",
       "scope": "system",
@@ -740,7 +734,10 @@
         "packages/proxies/grok-proxy/test/catalog.test.ts",
         "packages/proxies/grok-proxy/test/events.test.ts",
         "packages/proxies/grok-proxy/test/permissions.test.ts",
-        "packages/proxies/grok-proxy/test/customization.test.ts"
+        "packages/proxies/grok-proxy/test/customization.test.ts",
+        "packages/proxies/grok-proxy/test/fork-capabilities.test.ts",
+        "packages/proxies/grok-proxy/test/grok-extensions.test.ts",
+        "packages/proxies/grok-proxy/test/grok-home-mapping.test.ts"
       ],
       "module": "grok-proxy",
       "scope": "unit",
@@ -758,7 +755,10 @@
     {
       "id": "grok-proxy-integration",
       "patterns": [
-        "packages/proxies/grok-proxy/test/service.test.ts"
+        "packages/proxies/grok-proxy/test/service.test.ts",
+        "packages/proxies/grok-proxy/test/interactions.test.ts",
+        "packages/proxies/grok-proxy/test/mcp-isolation.test.ts",
+        "packages/proxies/grok-proxy/test/native-fork.test.ts"
       ],
       "module": "grok-proxy",
       "scope": "integration",
@@ -982,7 +982,9 @@
         "packages/proxies/dsh-proxy/test/contract.test.ts",
         "packages/proxies/dsh-proxy/test/host-validator.test.ts",
         "packages/proxies/dsh-proxy/test/idempotency-replay.test.ts",
-        "packages/proxies/dsh-proxy/test/customization.test.ts"
+        "packages/proxies/dsh-proxy/test/customization.test.ts",
+        "packages/proxies/dsh-proxy/test/capabilities.test.ts",
+        "packages/proxies/dsh-proxy/test/sidechat.test.ts"
       ],
       "module": "dsh-proxy",
       "scope": "unit",
@@ -1022,6 +1024,7 @@
       "id": "zcode-proxy-unit",
       "patterns": [
         "packages/proxies/zcode-proxy/test/catalog.test.ts",
+        "packages/proxies/zcode-proxy/test/capabilities.test.ts",
         "packages/proxies/zcode-proxy/test/customization.test.ts",
         "packages/proxies/zcode-proxy/test/interaction-replay.test.ts",
         "packages/proxies/zcode-proxy/test/lifecycle.test.ts",

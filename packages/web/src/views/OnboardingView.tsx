@@ -18,6 +18,7 @@ import {
   waitForRunSettle,
 } from '../operations/use-operations.js';
 import type { AppIdentity } from '../controllers/use-app-auth.js';
+import { pluginIdForExecutorId } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 
 export function OnboardingSteps({ active }: { active: 1 | 2 | 3 }) {
@@ -87,7 +88,8 @@ export function OnboardingView({
 
   const anyReady = agents.some(agent => agent.ready);
   const missingKinds = useMemo(
-    () => proxies.filter(entry => !agents.some(agent => agent.proxy === entry.id)),
+    () => proxies.filter(entry => !agents.some(agent =>
+      agent.pluginId === entry.id || agent.proxy === entry.id)),
     [proxies, agents],
   );
 
@@ -119,7 +121,7 @@ export function OnboardingView({
       store,
       dispatch('agent.create', {
         name,
-        proxy: kind,
+        pluginId: pluginIdForExecutorId(kind),
         ...(cliPath ? { cliPath } : {}),
       }).id,
     );
@@ -350,7 +352,7 @@ function OnboardingAgentRow({
   const t = useT();
   // Busy = any in-flight operation for THIS Agent or its kind (Phase 3b).
   const agentRuns = usePendingOperations(agentIdEntityKey(agent.id));
-  const kindRuns = usePendingOperations(agentEntityKey(agent.proxy));
+  const kindRuns = usePendingOperations(agentEntityKey(agent.pluginId));
   const runtimeRuns = usePendingOperations(runtimeEntityKey(agent.pluginId));
   const busy = agentRuns.length > 0 || kindRuns.length > 0 || runtimeRuns.length > 0;
   const cliReady = agent.cli.state === 'ready';

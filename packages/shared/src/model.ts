@@ -39,6 +39,32 @@ export function supportsNativeSessions(executor: Executor): executor is LegacyEx
   return legacyExecutorFeatures(executor)?.nativeSessions === true;
 }
 
+/** How a catalog expresses its mode vocabulary. */
+export type CatalogModeSemantics = 'gian-preset' | 'provider-native';
+
+/**
+ * Resolve whether `pluginId`'s catalog speaks Gian approval presets or
+ * Proxy-native collaboration modes.
+ *
+ * Version gate: a Proxy above the `catalog.modeSemantics` gate stamps its
+ * mode-role options with `modeKind`, and that marker wins — binding alone is
+ * never consulted (`provider-native` options may be turn-bound). Proxies
+ * below the gate omit `modeKind`; the legacy product-kind allowlist
+ * (`usesNativeExecutorConfig`) keeps them working unchanged.
+ */
+export function catalogModeSemantics(
+  pluginId: Executor,
+  catalog: { configOptions: Array<{ role?: string; modeKind?: 'gian-preset' | 'provider-native' }> } | null | undefined,
+): CatalogModeSemantics {
+  const modeOptions = (catalog?.configOptions ?? []).filter(option => (
+    option.role === 'approval_mode' || option.role === 'execution_mode'
+  ));
+  const marked = modeOptions.map(option => option.modeKind);
+  if (marked.some(kind => kind === 'provider-native')) return 'provider-native';
+  if (marked.some(kind => kind === 'gian-preset')) return 'gian-preset';
+  return usesNativeExecutorConfig(pluginId) ? 'provider-native' : 'gian-preset';
+}
+
 export type SessionType = 'coding' | 'subtask' | 'manager';
 
 /**
@@ -128,6 +154,10 @@ export interface ConfigOption {
   description?: string;
   binding: 'session' | 'turn';
   role?: string;
+  /** Version-gated (`catalog.modeSemantics`): explicit Gian-preset vs
+   *  Proxy-native classification for mode-role options. Absent on Proxies
+   *  below the gate — consumers fall back to the legacy kind allowlist. */
+  modeKind?: 'gian-preset' | 'provider-native';
   control: 'select' | 'boolean' | 'number' | 'text';
   required: boolean;
   defaultValue: ConfigValue;

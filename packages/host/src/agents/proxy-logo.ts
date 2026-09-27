@@ -9,20 +9,21 @@ export interface ProxyLogoBytes {
 }
 
 /** Logo resolution shared by the local HTTP route and the Remote `proxy.logo`
- *  command: official (vendored) Proxies first, then synced catalog entries.
- *  Kept out of `web/` so the plugin-id source scan stays at its baseline. */
+ *  command: the signed Catalog sequence is the brand source of truth; the
+ *  installed (vendored) Proxy package is only the local fallback. Kept out of
+ *  `web/` so the plugin-id source scan stays at its baseline. */
 export async function resolveProxyLogo(
   deps: { agents: AgentManager; catalogService?: CatalogService },
   proxy: string,
   variant: 'light' | 'dark',
 ): Promise<ProxyLogoBytes | null> {
+  if (deps.catalogService && isProxyPluginId(proxy)) {
+    const catalogLogo = await deps.catalogService.logo(proxy, variant);
+    if (catalogLogo) return catalogLogo;
+  }
   const official = executorIdForPluginId(proxy);
   if (official && isProductExecutor(official)) {
-    const logo = await deps.agents.proxyLogo(official, variant);
-    if (logo) return logo;
-  }
-  if (deps.catalogService && isProxyPluginId(proxy)) {
-    return deps.catalogService.logo(proxy, variant);
+    return deps.agents.proxyLogo(official, variant);
   }
   return null;
 }

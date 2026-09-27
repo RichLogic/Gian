@@ -18,6 +18,7 @@ import { __resetFeedback } from '../src/feedback.js';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { localizeCatalogItem } from '../src/agents/catalog-model.js';
 import * as api from '../src/api.js';
+import type { GianWs } from '../src/ws.js';
 
 // Agents page = My Agents + shared Agent Integrations, driven by the
 // Host catalog projection (catalog.items) and the open pluginId contract.
@@ -50,6 +51,12 @@ vi.mock('../src/api.js', async () => {
     uninstallIntegration: vi.fn(),
   };
 });
+
+vi.mock('../src/agents/AgentLoginTerminal.js', () => ({
+  AgentLoginTerminal: ({ agentId, homePath }: { agentId: string; homePath: string }) => (
+    <div data-testid="agent-login-terminal">{agentId}: {homePath}</div>
+  ),
+}));
 
 let seq = 0;
 
@@ -148,6 +155,16 @@ const UPDATABLE = catalogItem({
     updateAvailable: true, source: 'gian-official',
   },
   availableActions: ['update_proxy', 'create_agent'],
+});
+const MANAGED_UPDATABLE = catalogItem({
+  pluginId: 'io.acme.managed-update',
+  displayName: 'Acme Managed Update',
+  installation: {
+    state: 'installed', installedVersion: '1.0.0', latestVersion: '1.2.0',
+    updateAvailable: true, source: 'gian-official',
+  },
+  runtime: { state: 'ready', displayName: 'Acme CLI' },
+  availableActions: ['install_runtime', 'create_agent'],
 });
 
 const CATALOG_ITEMS = [READY, INSTALLABLE, NEEDS_APP, NEEDS_PROXY, UPDATABLE];
@@ -251,11 +268,11 @@ function mockApi(agents: UserAgentStatus[], catalog: ProxyCatalogList | Error = 
   });
 }
 
-function renderAgents() {
+function renderAgents(ws?: GianWs) {
   return renderWithOperations(
     <>
       <Toaster />
-      <AgentsView />
+      <AgentsView ws={ws} />
     </>,
   );
 }
@@ -488,6 +505,23 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       .toHaveBeenCalledWith('io.acme.updatable'));
     expect((await within(panel).findByTestId('proxy-install-terminal')).getAttribute('data-status'))
       .toBe('completed');
+  });
+
+  it('updates a certified Proxy and Runtime combination without uninstalling it', async () => {
+    mockApi([], catalogList([MANAGED_UPDATABLE]));
+    renderAgents();
+    const card = await screen.findByTestId('catalog-item-io.acme.managed-update');
+    fireEvent.click(within(card).getByTestId(/^catalog-open-/));
+    const panel = await screen.findByTestId('proxy-detail-panel');
+    const update = within(panel).getByTestId('proxy-action-update');
+    expect(update).toHaveTextContent('Update');
+    expect(within(panel).getByTestId('proxy-action-uninstall')).toBeTruthy();
+    fireEvent.click(update);
+    await waitFor(() => expect(api.installManagedRuntime).toHaveBeenCalledWith(
+      'io.acme.managed-update', undefined, expect.any(Function),
+    ));
+    expect(api.updateCatalogProxy).not.toHaveBeenCalled();
+    expect(api.uninstallIntegration).not.toHaveBeenCalled();
   });
 
   it('renders Install in the footer only when installable, and no footer without actions', async () => {
@@ -808,6 +842,54 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(api.installCatalogProxy).not.toHaveBeenCalled();
   });
 
+  it('selects the native CLI HOME by default for an official Agent', async () => {
+    mockApi([], catalogList([catalogItem({
+      pluginId: 'claude', displayName: 'Claude Code',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      availableActions: ['create_agent'],
+    })]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Claude Code', cliPath: null,
+      home: { kind: 'default', path: '/Users/test/.claude' },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const nativeHome = await within(dialog).findByLabelText(/Use default HOME/);
+    expect((nativeHome as HTMLInputElement).checked).toBe(true);
+    expect(within(dialog).getByText('/Users/test/.claude')).toBeTruthy();
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Claude Code', pluginId: 'claude',
+    }));
+  });
+
+  it('opens the login terminal for the selected Agent HOME', async () => {
+    mockApi([agent({
+      id: 'codex-agent', name: 'Codex', pluginId: 'codex', proxy: 'codex',
+      home: { kind: 'custom', path: '/Users/test/.codex' },
+      cli: { state: 'ready', path: '/bin/codex', version: '1.0.0', source: 'path' },
+    })]);
+    renderAgents({} as GianWs);
+    fireEvent.click(await screen.findByTestId('agent-row-codex-agent'));
+    fireEvent.click(within(await screen.findByTestId('agents-detail-panel')).getByTestId('agent-login'));
+    expect(screen.getByTestId('agent-login-terminal').textContent)
+      .toContain('codex-agent: /Users/test/.codex');
+  });
+
+  it('offers login for the managed ZCode CLI HOME', async () => {
+    mockApi([agent({
+      id: 'zcode-agent', name: 'ZCode', pluginId: 'com.zhipu.zcode', proxy: 'zcode',
+      home: { kind: 'custom', path: '/Users/test/.zcode' },
+      cli: { state: 'ready', path: '/managed/zcode.cjs', version: '0.16.9', source: 'managed' },
+    })]);
+    renderAgents({} as GianWs);
+    fireEvent.click(await screen.findByTestId('agent-row-zcode-agent'));
+    fireEvent.click(within(await screen.findByTestId('agents-detail-panel')).getByTestId('agent-login'));
+    expect(screen.getByTestId('agent-login-terminal').textContent)
+      .toContain('zcode-agent: /Users/test/.zcode');
+  });
+
   it('creates an Agent with a user-selected existing HOME', async () => {
     mockApi([]);
     renderAgents();
@@ -926,7 +1008,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(within(panel).queryByTestId('agent-open-integration')).toBeNull();
     // No kind-scoped affordances for an open pluginId.
     expect(within(panel).queryByRole('button', { name: /Install official CLI/ })).toBeNull();
-    expect(within(panel).getByText(/manages its own defaults/)).toBeTruthy();
+    // proxy:null no longer forces a read-only "manages its own defaults"
+    // state: defaults resolve per exact pluginId like every other Agent.
+    expect(within(panel).queryByText(/manages its own defaults/)).toBeNull();
     expect(within(panel).getByRole('button', { name: 'Delete' })).toBeTruthy();
   });
 
@@ -1152,7 +1236,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
   it('renders a Provider default select for a dsh-like catalog, never for claude-like', async () => {
     mockApi([dshAgent(), agent({ id: 'a-claude', name: 'Claude Agent' })]);
     vi.mocked(api.loadProxyCapabilities).mockImplementation(async kind => (
-      kind === 'dsh' ? dshLikeCapabilities() as never : capabilities()
+      kind === 'ai.deepseek.harness' || kind === 'dsh'
+        ? dshLikeCapabilities() as never
+        : capabilities()
     ));
     mockProviderDependentResolve();
     renderAgents();
