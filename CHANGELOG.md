@@ -7,7 +7,7 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
-## [0.6.4] - 2026-09-27
+## [0.6.4] - 2026-09-28
 
 ### Added
 
