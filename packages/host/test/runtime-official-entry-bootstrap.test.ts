@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import zcodeSource from '../../proxies/zcode-proxy/src/runtime/source.json' with { type: 'json' };
 
 import { PROTOCOL_NAME, PROTOCOL_V22, type RuntimeInstallPlanResult } from '@gian/proxy-protocol';
 import { parseProxyPluginId } from '@gian/shared';
@@ -22,7 +23,7 @@ const OFFICIAL = [
     packageDir: 'cc-proxy',
     processScope: 'session' as const,
     command: 'claude',
-    version: '2.1.159',
+    version: '2.1.280',
     runtimeId: 'claude',
     displayName: 'Claude Code',
   },
@@ -32,7 +33,7 @@ const OFFICIAL = [
     packageDir: 'codex-proxy',
     processScope: 'shared' as const,
     command: 'codex',
-    version: '0.146.0',
+    version: '0.159.2',
     runtimeId: 'codex',
     displayName: 'Codex CLI',
   },
@@ -42,7 +43,7 @@ const OFFICIAL = [
     packageDir: 'kimi-proxy',
     processScope: 'shared' as const,
     command: 'kimi',
-    version: '0.38.0',
+    version: '2.1.1',
     runtimeId: 'kimi',
     displayName: 'Kimi Code',
   },
@@ -52,7 +53,7 @@ const OFFICIAL = [
     packageDir: 'grok-proxy',
     processScope: 'session' as const,
     command: 'grok',
-    version: '1.0.4',
+    version: '1.0.41',
     runtimeId: 'grok',
     displayName: 'Grok CLI',
   },
@@ -62,7 +63,7 @@ const OFFICIAL = [
     packageDir: 'dsh-proxy',
     processScope: 'shared' as const,
     command: 'dsh',
-    version: '0.1.1-rc.2',
+    version: '0.1.5-rc.3',
     runtimeId: 'deepseek-harness',
     displayName: 'DeepSeek Harness',
   },
@@ -72,7 +73,7 @@ const OFFICIAL = [
     packageDir: 'zcode-proxy',
     processScope: 'shared' as const,
     command: 'zcode',
-    version: '0.16.5',
+    version: '0.16.9',
     runtimeId: 'zcode',
     displayName: 'ZCode Runtime',
   },
@@ -91,6 +92,15 @@ async function writeZcodeBuiltinConfig(entry: string): Promise<void> {
   const provider = join(dirname(entry), 'provider');
   await mkdir(provider, { recursive: true });
   await writeFile(join(provider, 'zcode-builtin.json'), '{}\n');
+  // Synthetic provenance exercises the managed-CLI probe contract. It is not
+  // an artifact certificate or evidence for a real upstream distribution.
+  const runtimeRoot = join(dirname(entry), '..');
+  await writeFile(join(runtimeRoot, 'gian-source.json'), JSON.stringify(zcodeSource));
+  await writeFile(join(runtimeRoot, 'gian-integration.json'), JSON.stringify({
+    schemaVersion: zcodeSource.integrationVersion,
+    upstreamEntrypointSha256: zcodeSource.protocolEntrypointSha256,
+    integratedEntrypointSha256: 'a'.repeat(64), catalogProjectionSha256: 'b'.repeat(64),
+  }));
 }
 
 async function pluginVersion(packageDir: string): Promise<string> {
@@ -142,13 +152,13 @@ test('official spawn.js bootstraps 2.2 without Runtime and without vendor childr
     if (item.name === 'zcode') continue;
     await writeExecutable(join(bins, item.command), `#!/bin/sh\necho ${item.command} ${item.version}\n`);
   }
-  const zcode = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
+  const zcode = join(root, 'runtimes', 'zcode', zcodeSource.cliVersion, 'a'.repeat(64), 'zcode', 'agent', 'zcode.cjs');
+  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.9");\n');
   await writeZcodeBuiltinConfig(zcode);
   await mkdir(join(root, '.zcode', 'cli'), { recursive: true });
   await writeFile(join(root, '.zcode', 'cli', 'config.json'), '{"ok":true}\n');
   await mkdir(join(root, '.kimi-code', 'bin'), { recursive: true });
-  await writeExecutable(join(root, '.kimi-code', 'bin', 'kimi'), '#!/bin/sh\necho kimi 0.38.0\n');
+  await writeExecutable(join(root, '.kimi-code', 'bin', 'kimi'), '#!/bin/sh\necho kimi 2.1.1\n');
 
   for (const item of OFFICIAL) {
     const entry = join(repoRoot, 'packages', 'proxies', item.packageDir, 'dist', 'src', 'cli', 'spawn.js');
@@ -179,21 +189,24 @@ test('official spawn.js bootstraps 2.2 without Runtime and without vendor childr
       kimi: { format: 'tar.gz', entryRelativePath: 'kimi' },
       dsh: { format: 'tar.gz', entryRelativePath: 'node_modules/@deepseek-ai/dsh/lib/bin.js' },
       grok: { format: 'raw', entryRelativePath: 'bin/grok' },
+      zcode: { format: 'tar.gz', entryRelativePath: zcodeSource.entryRelativePath },
     };
     const recipe = await client.request<RuntimeInstallPlanResult>('runtime.install.plan', {
       installerVersion: 1, runtimeId: item.runtimeId, version: item.version,
       artifactSha256: 'a'.repeat(64), platform: 'darwin-arm64',
-      distribution: item.name === 'zcode'
-        ? { kind: 'external-app', entryPath: zcode }
-        : { kind: 'managed', ...layouts[item.name] },
+      distribution: { kind: 'managed', ...layouts[item.name] },
     });
     assert.equal(recipe.runtimeId, item.runtimeId);
     assert.equal(recipe.version, item.version);
-    assert.equal(recipe.operation.kind, item.name === 'zcode' ? 'external-app' : 'managed');
+    assert.equal(recipe.operation.kind, 'managed');
     const discovered = await client.request<{
       candidates: Array<{ path: string }>;
     }>('runtime.discover', {});
-    assert.ok(discovered.candidates.length > 0, `${item.name} discovered no candidates`);
+    if (item.name === 'zcode') {
+      assert.deepEqual(discovered.candidates, [], 'ZCode must not substitute an unrelated App for its managed source pin');
+    } else {
+      assert.ok(discovered.candidates.length > 0, `${item.name} discovered no candidates`);
+    }
     const childrenDuringDiscover = await listChildren(client.processGroupId());
     assert.equal(childrenDuringDiscover.length, 0, `${item.name} started a vendor child during discover`);
     const probed = await client.request<{
@@ -202,7 +215,7 @@ test('official spawn.js bootstraps 2.2 without Runtime and without vendor childr
       path: string;
       version: string;
       readinessIssue?: { code: string };
-    }>('runtime.probe', { path: discovered.candidates[0]!.path });
+    }>('runtime.probe', { path: item.name === 'zcode' ? zcode : discovered.candidates[0]!.path });
     assert.equal(probed.runtimeId, item.runtimeId);
     assert.equal(probed.displayName, item.displayName);
     assert.equal(probed.version, item.version);
@@ -229,9 +242,10 @@ test('ZCode readiness issues do not start a Session; Kimi store state stays advi
   await writeFile(join(root, '.kimi-code', 'session_index.jsonl'), '{"id":"s1"}\n');
   const bins = join(root, '.local', 'bin');
   await mkdir(bins, { recursive: true });
-  await writeExecutable(join(bins, 'kimi'), '#!/bin/sh\necho kimi 0.38.0\n');
-  const zcode = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
+  await writeExecutable(join(bins, 'kimi'), '#!/bin/sh\necho kimi 2.1.1\n');
+  const zcode = join(root, 'runtimes', 'zcode', zcodeSource.cliVersion, 'a'.repeat(64), 'zcode', 'agent', 'zcode.cjs');
+  await writeExecutable(zcode, '#!/usr/bin/env node\nconsole.log("zcode 0.16.9");\n');
+  await writeZcodeBuiltinConfig(zcode);
 
   for (const item of [
     OFFICIAL.find((entry) => entry.name === 'kimi')!,
@@ -255,7 +269,7 @@ test('ZCode readiness issues do not start a Session; Kimi store state stays advi
     const discovered = await client.request<{ candidates: Array<{ path: string }> }>('runtime.discover', {});
     const probed = await client.request<{ readinessIssue?: { code: string; repairable: boolean } }>(
       'runtime.probe',
-      { path: discovered.candidates[0]!.path },
+      { path: item.name === 'zcode' ? zcode : discovered.candidates[0]!.path },
     );
     if (item.name === 'kimi') {
       // Since ADR-0080 Kimi session-store conditions are advisory: the probe
@@ -289,9 +303,9 @@ test('ZCode readiness produces no Host lease; Kimi store state leases normally',
   await mkdir(join(root, '.kimi-code', 'sessions'), { recursive: true });
   await writeFile(join(root, '.kimi-code', 'session_index.jsonl'), '{"id":"s1"}\n');
   const kimiBin = join(bins, 'kimi');
-  await writeExecutable(kimiBin, '#!/bin/sh\necho kimi 0.38.0\n');
-  const zcodeBin = join(root, 'Applications', 'ZCode.app', 'Contents', 'Resources', 'glm', 'zcode.cjs');
-  await writeExecutable(zcodeBin, '#!/usr/bin/env node\nconsole.log("zcode 0.16.5");\n');
+  await writeExecutable(kimiBin, '#!/bin/sh\necho kimi 2.1.1\n');
+  const zcodeBin = join(root, 'runtimes', 'zcode', zcodeSource.cliVersion, 'a'.repeat(64), 'zcode', 'agent', 'zcode.cjs');
+  await writeExecutable(zcodeBin, '#!/usr/bin/env node\nconsole.log("zcode 0.16.9");\n');
   await writeZcodeBuiltinConfig(zcodeBin);
 
   const resolver = new RuntimeResolver({
@@ -300,6 +314,7 @@ test('ZCode readiness produces no Host lease; Kimi store state leases normally',
     hostVersion: '0.1.0',
     bootstrapEnv: isolatedEnv(root, bins),
     homeDir: root,
+    managedStoreRoot: join(root, 'runtimes'),
   });
 
   const kimi = OFFICIAL.find((item) => item.name === 'kimi')!;
@@ -357,7 +372,7 @@ test('official spawn.js exact 2.2 session fixtures reach the real adapter', { ti
   const fixtures: Record<string, string> = {
     claude: join(repoRoot, 'packages', 'proxies', 'cc-proxy', 'test', 'fixtures', 'fake-claude-runtime.mjs'),
     codex: join(repoRoot, 'packages', 'proxies', 'codex-proxy', 'dist', 'test', 'fixtures', 'fake-codex-lifecycle-server.js'),
-    kimi: join(repoRoot, 'packages', 'proxies', 'kimi-proxy', 'test', 'fixtures', 'fake-kimi-cli.mjs'),
+    kimi: join(repoRoot, 'packages', 'proxies', 'kimi-proxy', 'test', 'fixtures', 'fake-kimi-server.mjs'),
     grok: join(repoRoot, 'packages', 'proxies', 'grok-proxy', 'test', 'fixtures', 'fake-grok-cli.mjs'),
     dsh: join(repoRoot, 'packages', 'proxies', 'dsh-proxy', 'test', 'fixtures', 'fake-dsh-bridge.mjs'),
     zcode: join(repoRoot, 'packages', 'proxies', 'zcode-proxy', 'test', 'fixtures', 'fake-app-server.mjs'),

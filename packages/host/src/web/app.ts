@@ -131,6 +131,13 @@ export function createApp(ctx: AppContext): AppHandle {
         resolveCurrent: pluginId => ctx.agentManager!.trustedLaunch(pluginId),
         resolveActiveGeneration: async pluginId => ctx.agentManager!.activeRuntimeGeneration(pluginId),
         resolveExact: input => ctx.agentManager!.resolveExactTrustedLaunch(input),
+        agentHasCustomRuntime: agentId => {
+          try {
+            return ctx.agentManager!.getAgent(agentId).runtime?.kind === 'custom';
+          } catch {
+            return undefined;
+          }
+        },
         ...(ctx.runtimeResolver ? { runtimeResolver: ctx.runtimeResolver } : {}),
       })
     : undefined;

@@ -6,11 +6,21 @@
  * - Durable-fact events (turn.started, activities, terminal) derive their
  *   eventId from stable native identities (prompt_id, tool_call_id), so live
  *   and replay projections of the same fact share one identity.
- * - Transient frames (deltas, notices) derive from the wire `seq`, which is
- *   unique and monotonic per session (durable + volatile share the journal
- *   counter).
- * - The seq guard drops frames at or before the last delivered durable seq,
- *   which makes cursor-based reconnect replays idempotent.
+ * - Kimi Code 2.1.1 volatile frames reuse the current durable journal seq
+ *   and are not replayed. They must not advance `lastSeq`. `assistant.delta`
+ *   and `thinking.delta` carry `offset` (length before append; reset when
+ *   `turn.step.started` begins the next step).
+ * - Assistant text and thinking each get a content id per step
+ *   (`assistant:<promptId>:<step>` / `thinking:<promptId>:<step>`). Text stays
+ *   kind `text`, so the host renders it as a message outside the Working
+ *   basket. Thinking stays kind `reasoning` and remains inside that basket.
+ * - A content.delta eventId includes the prompt, the step, the offset, and
+ *   the delta: identical text at the same position in two turns stays
+ *   distinct, frames that share a seq stay distinct, and an identical
+ *   redelivery stays idempotent.
+ * - Durable frames at or before the last delivered durable seq are dropped,
+ *   so cursor-based reconnect replays stay idempotent. A volatile frame is
+ *   dropped only when its seq is strictly older than that watermark.
  *
  * Main-agent filtering: only `agentId === "main"` frames project as turn
  * content/tools; subagent work arrives via the dedicated `subagent.*` /
@@ -27,6 +37,16 @@ export interface OuterNotification {
   params: Record<string, unknown>;
 }
 
+/** One `/api/v1/ws` session-event frame. `volatile` and `offset` are envelope
+ *  fields on Kimi Code 2.1.1, not payload fields. */
+export interface KimiProjectedFrame {
+  type: string;
+  seq: number;
+  volatile?: boolean;
+  offset?: number;
+  payload: Record<string, unknown>;
+}
+
 export interface KimiErrorLike {
   code?: string | undefined;
   message?: string | undefined;
@@ -40,6 +60,10 @@ export interface ProjectorServices {
   emit: (notification: OuterNotification) => void;
   /** Called after every terminal finalization completes. */
   onFinalized?: () => void;
+  /** Turn-start buffer overflowed: the service must fence the turn (stop the
+   *  native prompt, then fail it); a bare local failure would leave native
+   *  work running unattributed. */
+  onBindingOverflow?: (gianTurnId: string) => void;
   /** Async terminal hooks; failures skip the facet honestly (never fake). */
   finalUsage: () => Promise<Record<string, unknown> | null>;
   fileDiff: (nativeTurnId: number) => Promise<{ diff: string; truncated: boolean; files: Array<Record<string, unknown>> } | null>;
@@ -55,6 +79,12 @@ const PLAN_STATUS_MAP: Record<string, string> = {
   done: 'completed',
 };
 
+/** Hard cap on the optional terminal facets (final usage, file diff): they
+ *  may enrich the terminal, never delay it beyond this budget. */
+const FINAL_FACET_BUDGET_MS = 10_000;
+/** Frames buffered between prompt submission and turn binding. */
+const BINDING_BUFFER_LIMIT = 4_096;
+
 interface ActiveTurn {
   gianTurnId: string;
   promptId: string;
@@ -65,6 +95,15 @@ interface ActiveTurn {
 interface OpenActivity {
   name: string;
   input: unknown;
+  title?: string;
+  presentation?: { type: string; data: Record<string, unknown> };
+}
+
+interface OpenContent {
+  kind: 'text' | 'reasoning';
+  text: string;
+  /** Length of this step's text, matching the server offset cursor. */
+  stepLength: number;
 }
 
 export interface PendingInteractionState {
@@ -72,19 +111,35 @@ export interface PendingInteractionState {
   kind: 'approval' | 'question';
   nativeId: string;
   turnId: string;
+  /** Question input ids/types at projection time; respondInteraction needs
+   *  them to wrap raw UI values into the native kind-discriminated answers. */
+  inputs?: Array<{ id: string; type: string }>;
 }
 
 export class KimiSessionProjector {
   private streamId = '';
+  /** Last durable journal seq. Volatile frames reuse this value and must not move it. */
   private lastSeq = -1;
+  /** Bumps on each main-agent `turn.step.started`. Each step owns its content ids. */
+  private contentStep = 0;
+  /** Identity for text deltas that arrive without an offset. */
+  private unoffsetDelta = 0;
   private activeTurn: ActiveTurn | null = null;
-  private readonly openContent = new Map<string, { kind: 'text' | 'reasoning'; text: string }>();
+  private readonly openContent = new Map<string, OpenContent>();
   private readonly openActivities = new Map<string, OpenActivity>();
   readonly pendingInteractions = new Map<string, PendingInteractionState>();
   private lastPlanFingerprint: string | null = null;
   private lastUsageFingerprint: string | null = null;
   private lastError: KimiErrorLike | null = null;
   private terminalSent = false;
+  /** Set by failTurn while a finalization is already running: the optional
+   *  REST facets are skipped so the terminal goes out immediately. */
+  private facetsAborted = false;
+  /** Turn-start binding window: frames that beat the prompt-submission
+   *  response are buffered and flushed by bindTurn, never projected blind. */
+  private binding = false;
+  private bufferedFrames: KimiProjectedFrame[] = [];
+  private bindingOverflowed = false;
 
   constructor(private readonly services: ProjectorServices) {}
 
@@ -92,10 +147,49 @@ export class KimiSessionProjector {
     this.streamId = streamId;
   }
 
+  /** Open the turn-start window. Until bindTurn or discardBinding, incoming
+   *  frames are buffered in arrival order instead of being dropped for lack
+   *  of an active turn. */
+  beginBinding(): void {
+    this.binding = true;
+    this.bufferedFrames = [];
+    this.bindingOverflowed = false;
+  }
+
+  discardBinding(): void {
+    this.binding = false;
+    this.bufferedFrames = [];
+    this.bindingOverflowed = false;
+  }
+
   bindTurn(turn: { gianTurnId: string; promptId: string }): void {
     this.activeTurn = { gianTurnId: turn.gianTurnId, promptId: turn.promptId, nativeTurnId: null, interruptAccepted: false };
     this.terminalSent = false;
     this.lastError = null;
+    this.lastUsageFingerprint = null;
+    this.lastPlanFingerprint = null;
+    this.contentStep = 0;
+    this.unoffsetDelta = 0;
+    this.facetsAborted = false;
+    const buffered = this.bufferedFrames;
+    const overflowed = this.bindingOverflowed;
+    this.binding = false;
+    this.bufferedFrames = [];
+    this.bindingOverflowed = false;
+    for (const frame of buffered) this.handleFrame(frame);
+    if (overflowed) {
+      // Fencing belongs to the service: it stops the native prompt before
+      // failing the turn, so no native work keeps running unattributed.
+      const onOverflow = this.services.onBindingOverflow;
+      if (onOverflow !== undefined) {
+        onOverflow(turn.gianTurnId);
+      } else {
+        void this.failTurn(
+          'The Kimi event stream overflowed the turn-start buffer; the turn was fenced rather than projected incompletely.',
+          true,
+        );
+      }
+    }
   }
 
   markInterruptAccepted(): void {
@@ -114,15 +208,19 @@ export class KimiSessionProjector {
     return this.activeTurn?.gianTurnId ?? null;
   }
 
-  /** The service resolves an interaction through REST; the projector drops it
-   *  so the later wire resolved-event is not double-projected. */
-  resolveInteraction(interactionId: string): void {
-    this.pendingInteractions.delete(interactionId);
+  /** Claim resolution through REST. A native WS resolution may already
+   *  have won; only the caller that removes pending emits a terminal fact. */
+  resolveInteraction(interactionId: string): boolean {
+    return this.pendingInteractions.delete(interactionId);
   }
 
   private frameParams(source: unknown, turn: ActiveTurn | null): Record<string, unknown> {
     return {
-      eventId: `evt-${sha16([this.services.nativeSessionId, source])}`,
+      // Native activity/plan identifiers can repeat in a later turn. A live
+      // fact belongs to its native prompt, not just to the whole session.
+      eventId: `evt-${sha16(turn === null
+        ? [this.services.nativeSessionId, source]
+        : [this.services.nativeSessionId, turn.promptId, source])}`,
       sessionId: this.services.gianSessionId,
       streamId: this.streamId,
       sequence: this.services.nextSequence(),
@@ -137,11 +235,22 @@ export class KimiSessionProjector {
     this.services.emit({ method, params });
   }
 
-  /** Feed one wire frame. Returns false when the frame was dropped by the
-   *  seq guard (already delivered). */
-  handleFrame(frame: { type: string; seq: number; payload: Record<string, unknown> }): boolean {
-    if (frame.seq <= this.lastSeq) return false;
-    this.lastSeq = frame.seq;
+  /** Feed one wire frame. Returns false when the seq guard drops it. */
+  handleFrame(frame: KimiProjectedFrame): boolean {
+    if (this.binding) {
+      if (this.bufferedFrames.length >= BINDING_BUFFER_LIMIT) {
+        this.bindingOverflowed = true;
+        return true;
+      }
+      this.bufferedFrames.push(frame);
+      return true;
+    }
+    if (frame.volatile === true) {
+      if (frame.seq < this.lastSeq) return false;
+    } else {
+      if (frame.seq <= this.lastSeq) return false;
+      this.lastSeq = frame.seq;
+    }
     const payload = frame.payload;
     const agentId = typeof payload.agentId === 'string' ? payload.agentId : 'main';
     const turn = this.activeTurn;
@@ -152,16 +261,29 @@ export class KimiSessionProjector {
         if (typeof payload.turnId === 'number') turn.nativeTurnId = payload.turnId;
         return true;
       }
+      case 'turn.step.started': {
+        if (agentId !== 'main') return true;
+        this.contentStep += 1;
+        return true;
+      }
       case 'assistant.delta':
       case 'thinking.delta': {
         if (agentId !== 'main' || turn === null) return true;
-        const kind = frame.type === 'assistant.delta' ? 'text' : 'reasoning';
-        const contentId = `${kind === 'text' ? 'assistant' : 'thinking'}:${turn.promptId}`;
+        const kind = frame.type === 'assistant.delta' ? 'text' as const : 'reasoning' as const;
+        const contentId = `${kind === 'text' ? 'assistant' : 'thinking'}:${turn.promptId}:${this.contentStep}`;
         const delta = typeof payload.delta === 'string' ? payload.delta : '';
-        const open = this.openContent.get(contentId) ?? { kind, text: '' };
-        open.text += delta;
+        const open = this.openContent.get(contentId) ?? { kind, text: '', stepLength: 0 };
+        const offset = typeof frame.offset === 'number' && Number.isFinite(frame.offset) ? frame.offset : null;
+        if (offset !== null) {
+          if (offset < open.stepLength) return true;
+          if (offset > open.stepLength) open.stepLength = offset;
+        }
         this.openContent.set(contentId, open);
-        this.emitTurn('content.delta', [frame.seq, 'delta'], { contentId, kind, delta }, turn);
+        if (delta === '') return true;
+        const position = offset ?? this.unoffsetDelta++;
+        open.text += delta;
+        open.stepLength += delta.length;
+        this.emitTurn('content.delta', [frame.type, turn.promptId, this.contentStep, position, delta], { contentId, kind, delta }, turn);
         return true;
       }
       case 'tool.call.started': {
@@ -175,16 +297,19 @@ export class KimiSessionProjector {
         } else if (display?.kind === 'plan_review' && typeof display.plan === 'string') {
           this.emitPlanReview(display);
         }
-        this.openActivities.set(toolCallId, { name, input: payload.args });
+        const projected = projectToolCall(name, display, payload.args);
+        this.openActivities.set(toolCallId, {
+          name,
+          input: payload.args,
+          title: projected.title,
+          presentation: projected.presentation,
+        });
         this.emitTurn('activity.updated', [toolCallId, 'activity:running'], {
           activityId: toolCallId,
           kind: `tool:${name}`,
-          title: name,
+          title: projected.title,
           status: 'running',
-          presentation: {
-            type: 'tool',
-            data: { name, ...(payload.args !== undefined ? { input: payload.args } : {}) },
-          },
+          presentation: projected.presentation,
           ...(display !== undefined ? { details: { display } } : {}),
         }, turn);
         return true;
@@ -196,19 +321,15 @@ export class KimiSessionProjector {
         const open = this.openActivities.get(toolCallId);
         const name = open?.name ?? 'tool';
         this.openActivities.delete(toolCallId);
+        const presentation = open?.presentation ?? projectToolCall(name, undefined, open?.input).presentation;
+        const data: Record<string, unknown> = { ...presentation.data, output: payload.output ?? null };
         this.emitTurn('activity.updated', [toolCallId, 'activity:terminal'], {
           activityId: toolCallId,
           kind: `tool:${name}`,
-          title: name,
+          title: open?.title ?? name,
           status: payload.isError === true ? 'failed' : 'succeeded',
-          presentation: {
-            type: 'tool',
-            data: {
-              name,
-              ...(open?.input !== undefined ? { input: open.input } : {}),
-              output: payload.output ?? null,
-            },
-          },
+          ...(typeof payload.output === 'string' ? { summary: payload.output } : {}),
+          presentation: { type: presentation.type, data },
         }, turn);
         return true;
       }
@@ -224,7 +345,7 @@ export class KimiSessionProjector {
             const inputTokens = (numberOr(total.inputOther) ?? 0) + (numberOr(total.inputCacheRead) ?? 0) + (numberOr(total.inputCacheCreation) ?? 0);
             const outputTokens = numberOr(total.output);
             const cached = numberOr(total.inputCacheRead);
-            this.emitTurn('usage.updated', [frame.seq, 'usage'], {
+            this.emitTurn('usage.updated', ['usage', turn?.promptId ?? '', fingerprint], {
               conversation: {
                 mode: 'absolute',
                 ...(inputTokens > 0 ? { inputTokens } : {}),
@@ -316,14 +437,14 @@ export class KimiSessionProjector {
         if (this.pendingInteractions.has(interactionId)) return true;
         const questions = Array.isArray(payload.questions) ? payload.questions as Array<Record<string, unknown>> : [];
         if (questions.length === 0) return true;
-        this.pendingInteractions.set(interactionId, {
-          interactionId,
-          kind: 'question',
-          nativeId: questionId,
-          turnId: turn.gianTurnId,
-        });
         const inputs = questions.map((question, index) => {
           const options = Array.isArray(question.options) ? question.options as Array<Record<string, unknown>> : [];
+          // Interaction choices have only value/displayName in the shared
+          // protocol. Preserve native option help in the input description.
+          const descriptions = options
+            .filter((option) => typeof option.description === 'string' && option.description !== '')
+            .map((option) => `${typeof option.label === 'string' ? option.label : String(option.id)}: ${String(option.description)}`);
+          if (question.allow_other === true) descriptions.push('You may provide your own answer in the note field.');
           return {
             id: typeof question.id === 'string' ? question.id : `q_${index}`,
             type: question.multi_select === true ? 'multi_select' : 'single_select',
@@ -336,12 +457,18 @@ export class KimiSessionProjector {
                     .map((option) => ({
                       value: option.id as string,
                       displayName: typeof option.label === 'string' ? option.label : option.id as string,
-                      ...(typeof option.description === 'string' ? { description: option.description } : {}),
                     })),
                 }
               : {}),
-            ...(question.allow_other === true ? { description: 'You may provide your own answer in the note field.' } : {}),
+            ...(descriptions.length > 0 ? { description: descriptions.join('\n') } : {}),
           };
+        });
+        this.pendingInteractions.set(interactionId, {
+          interactionId,
+          kind: 'question',
+          nativeId: questionId,
+          turnId: turn.gianTurnId,
+          inputs: inputs.map((input) => ({ id: input.id, type: input.type })),
         });
         this.emitTurn('interaction.requested', [questionId, 'interaction.requested'], {
           interactionId,
@@ -510,8 +637,14 @@ export class KimiSessionProjector {
   }
 
   /** Force-fail the active turn (interrupt settle timeout, resync, runtime
-   *  loss): the terminal is emitted deterministically with the given error. */
+   *  loss): the terminal is emitted deterministically with the given error.
+   *  When a finalization is already in flight its outcome is known and
+   *  stands; this only expedites its optional facets. */
   async failTurn(message: string, retryable: boolean): Promise<void> {
+    if (this.terminalSent) {
+      this.facetsAborted = true;
+      return;
+    }
     this.lastError = { message, retryable };
     await this.finalizeTurn('failed');
   }
@@ -541,23 +674,26 @@ export class KimiSessionProjector {
     this.openContent.clear();
 
     for (const [activityId, activity] of this.openActivities) {
+      const presentation = activity.presentation ?? {
+        type: 'tool',
+        data: { name: activity.name },
+      };
       this.emitTurn('activity.updated', [activityId, 'activity:finalizer'], {
         activityId,
         kind: `tool:${activity.name}`,
-        title: activity.name,
+        title: activity.title ?? activity.name,
         status: turn.interruptAccepted ? 'cancelled' : 'failed',
-        presentation: {
-          type: 'tool',
-          data: { name: activity.name },
-        },
+        presentation,
       }, turn);
     }
     this.openActivities.clear();
 
-    try {
-      const usage = await this.services.finalUsage();
-      if (usage !== null) {
-        this.emitTurn('usage.updated', ['final-usage', usage], {
+    const facetDeadline = Date.now() + FINAL_FACET_BUDGET_MS;
+
+    if (!this.facetsAborted) {
+      const usage = await this.withFacetDeadline(this.services.finalUsage(), facetDeadline);
+      if (usage !== null && !this.facetsAborted) {
+        this.emitTurn('usage.updated', ['final-usage', turn.promptId, usage], {
           conversation: {
             mode: 'absolute',
             ...(numberOr(usage.input_tokens) !== null ? { inputTokens: numberOr(usage.input_tokens) } : {}),
@@ -566,26 +702,25 @@ export class KimiSessionProjector {
           },
         }, turn);
       }
-    } catch { /* skip facet honestly */ }
+    }
 
-    if (turn.nativeTurnId !== null) {
-      try {
-        const diff = await this.services.fileDiff(turn.nativeTurnId);
-        if (diff !== null && (diff.diff !== '' || diff.files.length > 0)) {
-          this.emitTurn('diff.updated', ['diff', turn.nativeTurnId, sha16(diff.diff).slice(0, 8)], {
-            diffId: `turn-${turn.nativeTurnId}`,
-            diff: diff.diff,
-            truncated: diff.truncated,
-            ...(diff.files.length > 0 ? { files: diff.files } : {}),
-          }, turn);
-        }
-      } catch { /* skip facet honestly */ }
+    if (!this.facetsAborted && turn.nativeTurnId !== null) {
+      const diff = await this.withFacetDeadline(this.services.fileDiff(turn.nativeTurnId), facetDeadline);
+      if (diff !== null && !this.facetsAborted && (diff.diff !== '' || diff.files.length > 0)) {
+        this.emitTurn('diff.updated', ['diff', turn.nativeTurnId, sha16(diff.diff).slice(0, 8)], {
+          diffId: `turn-${turn.nativeTurnId}`,
+          diff: diff.diff,
+          truncated: diff.truncated,
+          ...(diff.files.length > 0 ? { files: diff.files } : {}),
+        }, turn);
+      }
     }
 
     const error = this.lastError;
     if (reason === 'failed') {
       if (error?.code === 'loop.max_steps_exceeded') {
         this.emitTerminal('turn.completed', 'limit_reached', turn);
+        this.services.onFinalized?.();
         return;
       }
       const domain = mapKimiErrorCode(error?.code);
@@ -619,6 +754,21 @@ export class KimiSessionProjector {
     this.services.onFinalized?.();
   }
 
+  /** Optional terminal facets never delay the terminal itself: the shared
+   *  deadline caps the facet phase, and a hung or failed fetch resolves to a
+   *  skipped facet rather than a stuck finalization. */
+  private withFacetDeadline<T>(promise: Promise<T>, deadline: number): Promise<T | null> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return Promise.resolve(null);
+    return Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), remaining);
+        timer.unref();
+      }),
+    ]);
+  }
+
   private emitTerminal(method: 'turn.completed' | 'turn.failed', stopReason: string, turn: ActiveTurn): void {
     this.services.emit({
       method,
@@ -636,6 +786,84 @@ export class KimiSessionProjector {
       },
     });
   }
+}
+
+function argsRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function argString(args: Record<string, unknown>, key: string): string | null {
+  const value = args[key];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+interface ToolProjection {
+  title: string;
+  presentation: { type: string; data: Record<string, unknown> };
+}
+
+function genericTool(name: string, args: unknown): ToolProjection {
+  return {
+    title: name,
+    presentation: {
+      type: 'tool',
+      data: {
+        name,
+        ...(args !== undefined ? { input: args } : {}),
+      },
+    },
+  };
+}
+
+/** Map a Kimi tool display onto a basket row. Assistant prose is not a tool
+ *  and never comes through here. */
+function projectToolCall(name: string, display: KimiToolDisplay | undefined, args: unknown): ToolProjection {
+  const record = argsRecord(args);
+  if (display?.kind === 'command') {
+    const command = (typeof display.command === 'string' && display.command !== '' ? display.command : null)
+      ?? argString(record, 'command');
+    if (command !== null) {
+      return { title: command, presentation: { type: 'command', data: { command } } };
+    }
+  }
+  if (display?.kind === 'url_fetch') {
+    const query = (typeof display.url === 'string' && display.url !== '' ? display.url : null)
+      ?? argString(record, 'url');
+    if (query !== null) {
+      return { title: query, presentation: { type: 'search', data: { query } } };
+    }
+  }
+  if (display?.kind === 'file_io') {
+    const path = display.path ?? argString(record, 'path') ?? argString(record, 'file_path') ?? '';
+    const operation = display.operation ?? '';
+    if (path !== '' && (operation === 'read' || operation === 'write' || operation === 'delete' || operation === 'rename')) {
+      return { title: path, presentation: { type: 'file', data: { path, operation } } };
+    }
+    if (path !== '' && operation === 'edit') {
+      return { title: path, presentation: { type: 'file', data: { path, operation: 'write' } } };
+    }
+    if (operation === 'grep' || operation === 'glob' || operation === 'search') {
+      const pattern = argString(record, 'pattern')
+        ?? argString(record, 'glob')
+        ?? argString(record, 'query')
+        ?? (typeof display.query === 'string' && display.query !== '' ? display.query : null)
+        ?? name;
+      return {
+        title: pattern,
+        presentation: {
+          type: 'file-search',
+          data: {
+            pattern,
+            searchKind: operation === 'glob' ? 'glob' : 'grep',
+            ...(path !== '' ? { path } : {}),
+          },
+        },
+      };
+    }
+  }
+  return genericTool(name, args);
 }
 
 function numberOr(value: unknown): number | null {

@@ -406,7 +406,7 @@ test('official Catalog source verifies and compiles reproducibly without the tes
   assert.equal(plugins.some((plugin) => plugin.entry.pluginId === 'io.gian.fixture'), false);
   assert.deepEqual(
     plugins.map((plugin) => plugin.entry.pluginId).sort(),
-    ['ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'kimi'],
+    ['ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'grok', 'kimi'],
   );
   const signingKey = ephemeralCatalogSigningKey();
   const first = await compileOfficialCatalogSource({
@@ -427,7 +427,7 @@ test('official Catalog source verifies and compiles reproducibly without the tes
   }
   assert.deepEqual(
     first.index.plugins.map((plugin) => plugin.pluginId).sort(),
-    ['ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'kimi'],
+    ['ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'grok', 'kimi'],
   );
   for (const plugin of first.index.plugins) {
     assert.equal(plugin.stable.runtime?.kind, 'external');

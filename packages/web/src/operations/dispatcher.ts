@@ -166,7 +166,7 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
     // applyResult returns false when the store was already settled through an
     // external path; resources are still released, but escape hatches do not
     // fire a second time.
-    if (!store.applyResult(runId, outcome.ok, outcome.error?.message, outcome.result)) return;
+    if (!store.applyResult(runId, outcome.ok, outcome.error?.message, outcome.result, outcome.error?.code)) return;
     const definition = registry.get(run.name);
     if (outcome.ok) {
       definition.reconcile?.(outcome.result, active.context);
@@ -288,7 +288,11 @@ export function createOperationDispatcher(deps: OperationDispatcherDeps = {}): O
               type: 'result',
               ok: false,
               error: {
-                code: 'EXECUTE_FAILED',
+                // Preserve a structured executor code (e.g. AgentApiError's
+                // Host code) so views can map the failure to its cause.
+                code: thrown instanceof Error && typeof (thrown as { code?: unknown }).code === 'string'
+                  ? (thrown as unknown as { code: string }).code
+                  : 'EXECUTE_FAILED',
                 message: thrown instanceof Error ? thrown.message : String(thrown),
               },
             });

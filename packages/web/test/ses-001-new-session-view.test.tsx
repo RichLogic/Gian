@@ -1412,6 +1412,114 @@ describe('NewSessionView', () => {
     });
   });
 
+  it('sends a later model and thinking pick over catalog resolve defaults', async () => {
+    const kimi = agent('kimi', 'Kimi Code');
+    const options = [
+      {
+        id: 'workspace_mode',
+        displayName: 'Workspace',
+        binding: 'session' as const,
+        control: 'select' as const,
+        required: false,
+        defaultValue: 'default',
+        choices: [
+          { value: 'default', displayName: 'Default' },
+          { value: 'strict', displayName: 'Strict' },
+        ],
+      },
+      {
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn' as const,
+        role: 'model' as const,
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'kimi-code/kimi-for-coding',
+        choices: [
+          { value: 'kimi-code/kimi-for-coding', displayName: 'K2.8 Preview' },
+          { value: 'kimi-code/k3', displayName: 'K3' },
+        ],
+      },
+      {
+        id: 'thinking',
+        displayName: 'Thinking',
+        binding: 'turn' as const,
+        role: 'effort' as const,
+        control: 'select' as const,
+        required: true,
+        defaultValue: 'max',
+        choices: [
+          { value: 'low', displayName: 'Low' },
+          { value: 'max', displayName: 'Max' },
+        ],
+      },
+    ];
+    vi.mocked(loadAgents).mockResolvedValue([kimi]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.2',
+      catalogRevision: 'kimi-models',
+      specialCatalogs: { model: 'model', thinking: 'thinking' },
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 },
+      models: [],
+      modes: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockImplementation(async (_executor, request) => {
+      const turn = request.turnConfig ?? {};
+      return {
+        catalogRevision: 'kimi-models',
+        specialCatalogs: { model: 'model', thinking: 'thinking' },
+        input: [{ type: 'text' }],
+        configOptions: options,
+        slashCommands: [],
+        resolvedDefaults: {
+          sessionConfig: request.sessionConfig ?? {},
+          turnConfig: {
+            model: typeof turn.model === 'string' ? turn.model : 'kimi-code/kimi-for-coding',
+            thinking: typeof turn.thinking === 'string' ? turn.thinking : 'max',
+          },
+        },
+      };
+    });
+
+    const { onCreate } = renderView({ initialAgentId: kimi.id });
+    await userEvent.selectOptions(await screen.findByLabelText('Workspace'), 'strict');
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('K2.8 Preview');
+      expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Max');
+    });
+
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(
+      within(document.querySelector('.model-pop') as HTMLElement)
+        .getByText('K3', { selector: '.mp-row-title' }),
+    );
+    await waitFor(() => expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('K3'));
+    await userEvent.click(screen.getByTestId('ns-thinking-chip'));
+    await userEvent.click(
+      within(document.querySelector('.think-pop') as HTMLElement)
+        .getByText('Low', { selector: '.mp-row-title' }),
+    );
+    await waitFor(() => expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low'));
+
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'use the chips');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: kimi.id,
+      executor: 'kimi',
+      model: 'kimi-code/k3',
+      thinkingEffort: 'low',
+      sessionConfig: { workspace_mode: 'strict' },
+      turnConfig: expect.objectContaining({
+        model: 'kimi-code/k3',
+        thinking: 'low',
+      }),
+      firstMessage: 'use the chips',
+    }));
+  });
+
   it('does not carry leftover Claude effort onto a Kimi catalog that only advertises on', async () => {
     vi.mocked(loadAgents).mockResolvedValue([
       agent('claude', 'Claude Code'),

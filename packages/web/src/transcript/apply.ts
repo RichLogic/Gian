@@ -1189,11 +1189,12 @@ export function formatAnsweredWith(raw: unknown): string | null {
 export function parseDiffUpdated(env: EventEnvelope): DiffItem | null {
   const data = (env.data ?? {}) as Record<string, unknown>;
   const params = (data.params ?? data) as Record<string, unknown>;
+  const cwd = typeof data.cwd === 'string' ? data.cwd : typeof params.cwd === 'string' ? params.cwd : undefined;
   const text = String(params.diff ?? params.unified ?? data.diff ?? '');
   if (text.trim()) {
     const files = parseUnifiedDiff(text);
     if (files.length > 0) {
-      return { kind: 'diff', id: env.call_id, files, ts: env.ts, turn: env.turn };
+      return { kind: 'diff', id: env.call_id, files, ...(cwd ? { cwd } : {}), ts: env.ts, turn: env.turn };
     }
   }
   // unified file_change: data.files[] without raw diff text
@@ -1204,7 +1205,7 @@ export function parseDiffUpdated(env: EventEnvelope): DiffItem | null {
       del: Number(f.removed ?? 0),
       hunks: [],
     }));
-    return { kind: 'diff', id: env.call_id, files, ts: env.ts, turn: env.turn };
+    return { kind: 'diff', id: env.call_id, files, ...(cwd ? { cwd } : {}), ts: env.ts, turn: env.turn };
   }
   return null;
 }

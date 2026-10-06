@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { CodexProxyService } from '../src/core/service.js';
 import {
@@ -2809,6 +2812,75 @@ test('Codex reattach restores canonical Fork boundaries before advertising actio
     );
   } finally {
     await harness.cleanup();
+  }
+});
+
+test('Codex Fork replays a 64+ MiB source and cleans up a child whose history cannot be indexed', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-codex-fork-large-'));
+  const previousHome = process.env.CODEX_HOME;
+  const previousData = process.env.GIAN_PLUGIN_DATA_DIR;
+  process.env.CODEX_HOME = home;
+  process.env.GIAN_PLUGIN_DATA_DIR = join(home, 'plugin-data');
+  const harness = await createHarness();
+  const adapter = new CodexProtocolV2Adapter(harness.service, 'fixture', () => undefined);
+  try {
+    const dir = join(home, 'sessions');
+    await mkdir(dir);
+    const line = (value: unknown) => `${JSON.stringify(value)}\n`;
+    const sourcePath = join(dir, 'rollout-thread-source.jsonl');
+    const file = await open(sourcePath, 'w');
+    await file.writeFile(line({ type: 'session_meta', payload: { id: 'thread-source', cwd: '/tmp/work' } })
+      + line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'provider-turn' } })
+      + line({ type: 'event_msg', payload: { type: 'user_message', message: 'source input' } }));
+    const padding = line({ type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(4096) } }).repeat(256);
+    for (let i = 0; i < 65; i += 1) await file.writeFile(padding);
+    await file.writeFile(line({ type: 'event_msg', payload: { type: 'agent_message', message: 'source answer' } })
+      + line({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'provider-turn' } }));
+    await file.close();
+    const boundary = (await stat(sourcePath)).size;
+    harness.runtime.threads.set('thread-source', { id: 'thread-source', cwd: '/tmp/work', turns: [{ id: 'provider-turn', status: 'completed', items: [] }] });
+    const originalFork = harness.runtime.forkThread.bind(harness.runtime);
+    let failure: 'none' | 'malformed' | 'missing' = 'none';
+    harness.runtime.forkThread = async (id, options) => {
+      const result = await originalFork(id, options);
+      if (failure === 'missing') return result;
+      await writeFile(join(dir, `rollout-${result.thread.id}.jsonl`), line({ type: 'session_meta', payload: {
+        id: result.thread.id, cwd: '/tmp/work', history_base: { thread_id: 'thread-source', end_byte_offset: boundary },
+      } }) + (failure === 'malformed' ? 'not-json\n' : ''));
+      return result;
+    };
+    await adapter.handle(v2Request('init', 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.3'] } }));
+    const parent = resultSchemas['session.create'].parse(await adapter.handle(v2Request('create', 'session.create', {
+      sessionId: 'parent-large', workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] }, config: {},
+      nativeSession: { id: 'thread-source', history: 'none' },
+      forkBoundaries: [{ turnId: 'host-turn', sourceTurnId: 'provider-turn' }],
+    })));
+    const fork = resultSchemas['session.fork'].parse(await adapter.handle(v2Request('fork', 'session.fork', {
+      sourceSessionId: 'parent-large', sourceStreamId: parent.session.streamId, sessionId: 'large-child', anchor: { type: 'head' },
+    })));
+    const page = resultSchemas['session.replay'].parse(await adapter.handle(v2Request('replay', 'session.replay', {
+      sessionId: 'large-child', streamId: fork.session.streamId, cursor: null, limit: 100,
+    })));
+    assert.match(JSON.stringify(page), /source answer/);
+    assert.equal(page.events.length, 4);
+    failure = 'malformed';
+    await assert.rejects(adapter.handle(v2Request('broken', 'session.fork', {
+      sourceSessionId: 'parent-large', sourceStreamId: parent.session.streamId, sessionId: 'broken-child', anchor: { type: 'head' },
+    })), /Malformed Codex history record/);
+    assert.equal(harness.runtime.archiveCalls.length, 1);
+    assert.equal(harness.runtime.archiveCalls[0], 'thread-2');
+    await assert.rejects(adapter.handle(v2Request('broken-get', 'session.get', { sessionId: 'broken-child' })), /not found|unknown/i);
+    failure = 'missing';
+    await assert.rejects(adapter.handle(v2Request('missing', 'session.fork', {
+      sourceSessionId: 'parent-large', sourceStreamId: parent.session.streamId, sessionId: 'missing-child', anchor: { type: 'head' },
+    })), /Fork history is unavailable/);
+    assert.deepEqual(harness.runtime.archiveCalls, ['thread-2', 'thread-3']);
+    assert.equal(resultSchemas['session.get'].parse(await adapter.handle(v2Request('source-get', 'session.get', { sessionId: 'parent-large' }))).session.state, 'idle');
+  } finally {
+    await adapter.close(); await harness.cleanup();
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    if (previousData === undefined) delete process.env.GIAN_PLUGIN_DATA_DIR; else process.env.GIAN_PLUGIN_DATA_DIR = previousData;
+    await rm(home, { recursive: true, force: true });
   }
 });
 

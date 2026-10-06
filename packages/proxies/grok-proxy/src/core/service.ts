@@ -18,13 +18,14 @@ import {
 } from './catalog.js';
 import { createAppError, GrokProxyError } from './errors.js';
 import { parsePromptUsage } from './events.js';
-import { firstText, normalizeInputItems, toPromptBlocks } from './input.js';
+import { firstText, normalizeInputItems, toInterjectPayload, toPromptBlocks } from './input.js';
 import {
   admitHostStreamableHttpServices,
   McpAdmissionError,
+  mcpBoundaryProblem,
   mcpSpawnDenyRules,
+  readMcpListPayload,
   scanDiskConfiguredMcpServers,
-  unexpectedMcpServerNames,
   type AdmittedHostMcp,
 } from './mcp-isolation.js';
 import {
@@ -32,6 +33,7 @@ import {
   parseGrokPermissionMode,
   type GrokPermissionMode,
 } from './permissions.js';
+import { parseGrokSandboxProfile, type GrokSandboxProfile } from './sandbox.js';
 import { firstSlashToken, isBlockedSlashCommand } from './slash-policy.js';
 import type { GrokCustomizationRuntimeAccess } from './customization.js';
 import type {
@@ -49,11 +51,28 @@ import type {
   StartTurnParams,
 } from './types.js';
 import { nowIso, randomId } from './utils.js';
+import { GrokExtBusinessError } from '../runtime/acp-wire.js';
 import {
   GrokAcpClient,
+  GROK_ORIGIN_CLIENT_ID,
   GrokExtMethodUnsupportedError,
   isMethodNotFound,
+  type GrokNativeForkResponse,
 } from '../runtime/grok-acp-client.js';
+
+interface SpawnBoundary {
+  spawnDenyRules: readonly string[];
+  sandboxProfile: GrokSandboxProfile;
+  disallowMetaTools: boolean;
+}
+
+interface PermissionRow {
+  draft: GrokPermissionMode;
+  notified: GrokPermissionMode | null;
+  turnSnapshot: GrokPermissionMode | null;
+  /** Session `_meta.clientIdentifier`. The native permission matcher keys on this, not on sessionId. */
+  audience: string;
+}
 
 type ProxyEventSink = (method: string, params: Record<string, unknown>) => void;
 
@@ -61,12 +80,17 @@ interface ActiveTurn {
   turnId: string;
   completed: boolean;
   generation: number;
+  /** Resolves when the native prompt call returns, whether it succeeded or failed. */
+  settled: Promise<void>;
+  markSettled: () => void;
 }
 
 export interface ServiceOptions {
   binaryPath: string;
-  createRuntime?: (cwd: string, spawn: { spawnDenyRules: readonly string[] }) => GrokAcpClient;
+  createRuntime?: (cwd: string, spawn: SpawnBoundary) => GrokAcpClient;
   emitEvent?: ProxyEventSink;
+  /** How long cancel may take, and how long the prompt may take to finish, before the child is killed. */
+  turnStopDeadlineMs?: number;
 }
 
 function nonEmptyString(value: unknown, field: string): string {
@@ -81,6 +105,13 @@ function recordField(value: Record<string, unknown>, key: string): Record<string
   return raw && typeof raw === 'object' && !Array.isArray(raw)
     ? raw as Record<string, unknown>
     : {};
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
 }
 
 function isStructuredNotFound(error: unknown): boolean {
@@ -111,8 +142,18 @@ async function nativeSessionListed(runtime: GrokAcpClient, nativeSessionId: stri
   return false;
 }
 
+interface PreparedTurn {
+  session: SessionRecord;
+  turnId: string;
+  input: ReturnType<typeof normalizeInputItems>;
+  generation: number;
+}
+
 function mapRuntimeError(error: unknown, binaryPath: string): GrokProxyError {
   if (error instanceof GrokProxyError) return error;
+  if (error instanceof GrokExtBusinessError) {
+    return createAppError(502, 'RUNTIME_ERROR', error.message);
+  }
   if (error instanceof GrokExtMethodUnsupportedError) {
     return createAppError(400, 'CAPABILITY_NOT_SUPPORTED', error.message);
   }
@@ -131,14 +172,19 @@ function mapRuntimeError(error: unknown, binaryPath: string): GrokProxyError {
 }
 
 /** Feature-detect newer GrokAcpClient surface so minimal runtime doubles keep working. */
-function runtimeExtensionSupport(runtime: GrokAcpClient | null): { supports(method: string): boolean } | null {
-  const candidate = runtime as { extensions?: { supports(method: string): boolean } } | null;
+function runtimeExtensionSupport(runtime: GrokAcpClient | null): {
+  supports(method: string): boolean;
+  mayAttempt?(method: string): boolean;
+} | null {
+  const candidate = runtime as {
+    extensions?: { supports(method: string): boolean; mayAttempt?(method: string): boolean };
+  } | null;
   return candidate?.extensions ?? null;
 }
 
 export class GrokProxyService {
   private readonly binaryPath: string;
-  private readonly createRuntime: (cwd: string, spawn: { spawnDenyRules: readonly string[] }) => GrokAcpClient;
+  private readonly createRuntime: (cwd: string, spawn: SpawnBoundary) => GrokAcpClient;
   private emitEvent: ProxyEventSink;
   private runtime: GrokAcpClient | null = null;
   private runtimeCwd: string | null = null;
@@ -147,9 +193,10 @@ export class GrokProxyService {
   private readonly unclaimedUpdates = new Map<string, SessionNotification[]>();
   private readonly replayCollectors = new Map<string, SessionNotification[]>();
   private modelState: GrokModelState = {};
-  private permissionMode: GrokPermissionMode = 'default';
-  private currentModel: string | null = null;
-  private currentEffort: string | null = null;
+  private stagedPermission: GrokPermissionMode = 'default';
+  private sandboxProfile: GrokSandboxProfile = 'workspace';
+  private readonly permissionBySession = new Map<string, PermissionRow>();
+  private mcpBlockedReason: string | null = null;
   private slashCommands: AvailableCommand[] = [];
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly approvalsById = new Map<string, PendingApproval>();
@@ -165,14 +212,24 @@ export class GrokProxyService {
   private nativeForkSupported = false;
   /** Host-approved MCP servers admitted before the runtime spawns. */
   private admittedHostMcp: AdmittedHostMcp | null = null;
+  private readonly turnStopDeadlineMs: number;
+  /**
+   * Sessions whose turn is being cancelled or closed. While listed, new
+   * reverse permission/question requests settle as cancelled immediately
+   * instead of becoming pending requests nobody will answer.
+   */
+  private readonly cancellingSessions = new Set<string>();
 
   constructor(options: ServiceOptions) {
     this.binaryPath = options.binaryPath;
+    this.turnStopDeadlineMs = options.turnStopDeadlineMs ?? 1000;
     this.createRuntime = options.createRuntime
       ?? ((cwd, spawn) => new GrokAcpClient({
         binaryPath: options.binaryPath,
         cwd,
         spawnDenyRules: spawn.spawnDenyRules,
+        sandboxProfile: spawn.sandboxProfile,
+        disallowMetaTools: spawn.disallowMetaTools,
       }));
     this.emitEvent = options.emitEvent ?? (() => undefined);
   }
@@ -181,8 +238,61 @@ export class GrokProxyService {
     this.emitEvent = handler;
   }
 
+  private auxBoundary(): SpawnBoundary {
+    return {
+      spawnDenyRules: ['MCPTool(*)'],
+      sandboxProfile: 'workspace',
+      disallowMetaTools: true,
+    };
+  }
+
+  private newPermissionAudience(): string {
+    return `${GROK_ORIGIN_CLIENT_ID}:${randomId('aud')}`;
+  }
+
+  private permissionRow(sessionId: string): PermissionRow {
+    const existing = this.permissionBySession.get(sessionId);
+    if (existing) return existing;
+    const created: PermissionRow = {
+      draft: this.stagedPermission,
+      notified: null,
+      turnSnapshot: null,
+      audience: this.newPermissionAudience(),
+    };
+    this.permissionBySession.set(sessionId, created);
+    return created;
+  }
+
+  private catalogPermissionMode(): GrokPermissionMode {
+    const sessions = [...this.sessionsById.values()];
+    const only = sessions.length === 1 ? sessions[0] : undefined;
+    if (only) return this.permissionRow(only.id).draft;
+    return this.stagedPermission;
+  }
+
+  private displayedPermission(session: SessionRecord): GrokPermissionMode {
+    const row = this.permissionBySession.get(session.id);
+    if (!row) return this.stagedPermission;
+    if (session.activeTurnId && row.turnSnapshot) return row.turnSnapshot;
+    return row.draft;
+  }
+
+  /** Same-binary probe used at initialize. Aux processes stay on workspace. */
+  async probeInterjectSupport(): Promise<boolean> {
+    const aux = this.createRuntime(resolve(tmpdir()), this.auxBoundary());
+    try {
+      const probe = (aux as { probeInterjectRegistered?: () => Promise<'confirmed' | 'refuted' | 'unknown'> }).probeInterjectRegistered;
+      if (typeof probe !== 'function') return false;
+      return await probe.call(aux) === 'confirmed';
+    } catch {
+      return false;
+    } finally {
+      await aux.stop();
+    }
+  }
+
   async listCapabilities() {
-    const aux = this.createRuntime(resolve(tmpdir()), { spawnDenyRules: ['MCPTool(*)'] });
+    const aux = this.createRuntime(resolve(tmpdir()), this.auxBoundary());
     try {
       const initialized = await aux.ensureStarted();
       this.forkSupported = initialized.agentCapabilities?.sessionCapabilities?.fork != null;
@@ -191,7 +301,7 @@ export class GrokProxyService {
       const meta = (initialized as { _meta?: Record<string, unknown> })._meta ?? {};
       this.modelState = modelStateFromUnknown(meta.modelState);
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
-      const catalog = catalogFromModelState(this.modelState, this.permissionMode);
+      const catalog = catalogFromModelState(this.modelState, this.catalogPermissionMode(), this.sandboxProfile);
       return {
         ...initialized,
         ...catalog,
@@ -218,6 +328,16 @@ export class GrokProxyService {
     const extensions = runtimeExtensionSupport(this.runtime);
     if (extensions) return extensions.supports('x.ai/session/fork') === true;
     return this.nativeForkSupported;
+  }
+
+  /**
+   * True while a real fork request may double as the confirming call: the
+   * runtime is the stdio grok agent and `x.ai/session/fork` is not refuted on
+   * this attach. The Proxy never probes the method — it creates sessions on
+   * disk — so only a user-requested fork can confirm it.
+   */
+  mayAttemptNativeFork(): boolean {
+    return runtimeExtensionSupport(this.runtime)?.mayAttempt?.('x.ai/session/fork') === true;
   }
 
   /**
@@ -250,7 +370,7 @@ export class GrokProxyService {
 
   async listNativeSessions(params: ListNativeSessionsParams) {
     const cwd = params.cwd ? resolve(params.cwd) : resolve(tmpdir());
-    const aux = this.createRuntime(cwd, { spawnDenyRules: ['MCPTool(*)'] });
+    const aux = this.createRuntime(cwd, this.auxBoundary());
     try {
       await aux.ensureStarted();
       return await aux.listSessions({
@@ -272,7 +392,7 @@ export class GrokProxyService {
     if (input.mcpServers && input.mcpServers.length > 0 && !this.admittedHostMcp) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Only admitted Host Streamable HTTP MCP servers are supported.');
     }
-    const diskDiagnostics = this.runtime ? [] : (await scanDiskConfiguredMcpServers(cwd)).diagnostics;
+    if (input.sandboxProfile) this.setSandboxProfile(input.sandboxProfile);
     const runtime = await this.ensureRuntime(cwd);
     const importHistory = Boolean(input.nativeSessionId?.trim()) && input.resumeMode !== 'resume';
     const nativeId = input.nativeSessionId?.trim() || null;
@@ -284,19 +404,24 @@ export class GrokProxyService {
         this.modelState = modelStateFromUnknown(meta.modelState);
       }
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
-      const permission = grokPermissionSpec(this.permissionMode);
+      const mode = input.permissionMode ?? this.stagedPermission;
+      this.stagedPermission = mode;
+      const permission = grokPermissionSpec(mode);
+      const audience = this.newPermissionAudience();
+      const sessionMeta = {
+        mode: 'agent',
+        clientIdentifier: audience,
+        ...permission.createMeta,
+      };
       const hostMcp = this.hostMcpServers as never[];
       const response = nativeId
         ? input.resumeMode === 'resume'
-          ? await runtime.resumeSession({ sessionId: nativeId, cwd, mcpServers: hostMcp })
-          : await runtime.loadSession({ sessionId: nativeId, cwd, mcpServers: hostMcp })
+          ? await runtime.resumeSession({ sessionId: nativeId, cwd, mcpServers: hostMcp, _meta: sessionMeta })
+          : await runtime.loadSession({ sessionId: nativeId, cwd, mcpServers: hostMcp, _meta: sessionMeta })
         : await runtime.newSession({
           cwd,
           mcpServers: hostMcp,
-          _meta: {
-            mode: 'agent',
-            ...permission.createMeta,
-          },
+          _meta: sessionMeta,
         } as never);
       const sessionId = typeof (response as { sessionId?: unknown }).sessionId === 'string'
         ? (response as { sessionId: string }).sessionId
@@ -305,6 +430,8 @@ export class GrokProxyService {
       if (this.proxyIdByNativeId.has(sessionId)) {
         throw createAppError(409, 'NATIVE_SESSION_ATTACHED', `Native Grok session ${sessionId} is already attached.`);
       }
+      if (this.admittedHostMcp) await this.assertHostMcpBoundary(sessionId);
+      const isNewNativeSession = !nativeId;
       const session: SessionRecord = {
         id: randomId('sess'),
         cwd,
@@ -316,15 +443,26 @@ export class GrokProxyService {
         mcpServers: [...hostMcp] as SessionRecord['mcpServers'],
         attached: true,
         lastError: null,
+        // A brand-new native session evidences the runtime's default model.
+        // A loaded/resumed one only knows what a native update or the fork
+        // parent proved — never the process-wide initialize default.
+        model: isNewNativeSession
+          ? this.modelState.currentModelId ?? null
+          : input.initialModel ?? null,
+        effort: isNewNativeSession
+          ? this.defaultEffortForModel(this.modelState.currentModelId ?? null)
+          : input.initialEffort ?? null,
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
+      this.permissionBySession.set(session.id, {
+        draft: mode,
+        notified: mode,
+        turnSnapshot: null,
+        audience,
+      });
       this.sessionsById.set(session.id, session);
       this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
-      this.currentModel = this.modelState.currentModelId ?? this.currentModel;
-      if (this.admittedHostMcp) {
-        void this.verifyMcpBoundary(session, diskDiagnostics);
-      }
       const replayUpdates = this.replayCollectors.get(session.nativeSessionId)
         ?? this.unclaimedUpdates.get(session.nativeSessionId)
         ?? [];
@@ -358,30 +496,59 @@ export class GrokProxyService {
     }
     const runtime = this.requireRuntime();
     const runtimeExtensions = runtimeExtensionSupport(runtime);
-    const useNative = runtimeExtensions?.supports('x.ai/session/fork') === true;
-    if (!useNative && !this.supportsFork()) {
+    const nativeConfirmed = runtimeExtensions?.supports('x.ai/session/fork') === true;
+    // An exact-turn fork only runs on a confirmed native method; a silent
+    // boundary change would fork at the wrong prompt. A head fork may be the
+    // one real call that confirms the method on this attach.
+    const tryNative = nativeConfirmed
+      || (params.targetPromptIndex === undefined && this.mayAttemptNativeFork());
+    if (!tryNative && !this.supportsFork()) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', 'Grok ACP does not advertise session/fork.');
     }
 
     let forked: { sessionId: string; configOptions?: unknown };
     let parentChildIsolation = false;
-    if (useNative) {
-      const response = await runtime.nativeForkSession({
-        sourceSessionId: source.nativeSessionId,
-        sourceCwd: source.cwd,
-        newCwd: source.cwd,
-        ...(params.targetPromptIndex !== undefined
-          ? { targetPromptIndex: params.targetPromptIndex }
-          : {}),
-      });
+    let nativeResponse: GrokNativeForkResponse | null = null;
+    if (tryNative) {
+      try {
+        nativeResponse = await runtime.nativeForkSession({
+          sourceSessionId: source.nativeSessionId,
+          sourceCwd: source.cwd,
+          newCwd: source.cwd,
+          ...(params.targetPromptIndex !== undefined
+            ? { targetPromptIndex: params.targetPromptIndex }
+            : {}),
+        });
+      } catch (error) {
+        if (!(error instanceof GrokExtMethodUnsupportedError)) {
+          // A real fork failure keeps its attribution; never rewrite it into
+          // a semantically different operation.
+          throw mapRuntimeError(error, this.binaryPath);
+        }
+        // Live refutation on the confirming call. Exact-turn forks have no
+        // fallback; head forks may still use the standard ACP capability.
+        if (params.targetPromptIndex !== undefined || !this.supportsFork()) {
+          throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', error.message);
+        }
+      }
+    }
+    if (nativeResponse) {
+      const response = nativeResponse;
       // The fork exists on disk only; attach it in this runtime via resume so
-      // parent and child remain separate native sessions with stable ids.
+      // parent and child remain separate native sessions with stable ids. The
+      // child inherits the parent's model/effort at fork time — proven by
+      // newModelId when the runtime reports it, inherited otherwise.
       const attached = await this.createSession({
         cwd: source.cwd,
         nativeSessionId: response.newSessionId,
         resumeMode: 'resume',
         mcpServers: [...source.mcpServers],
         allowAdditional: true,
+        permissionMode: this.permissionRow(source.id).draft,
+        ...(response.newModelId ?? source.model
+          ? { initialModel: response.newModelId ?? source.model! }
+          : {}),
+        ...(source.effort ? { initialEffort: source.effort } : {}),
       });
       forked = {
         sessionId: attached.session.nativeSessionId,
@@ -418,6 +585,16 @@ export class GrokProxyService {
         return { session: this.serializeSession(existing) };
       }
     }
+    const sourceRow = this.permissionRow(source.id);
+    // Standard ACP fork does not take session `_meta`, so the child keeps the
+    // parent's origin. Sharing the audience makes a divergent notify refuse
+    // instead of widening both sessions.
+    this.permissionBySession.set(session.id, {
+      draft: sourceRow.draft,
+      notified: sourceRow.notified,
+      turnSnapshot: null,
+      audience: sourceRow.audience,
+    });
     this.sessionsById.set(session.id, session);
     this.proxyIdByNativeId.set(session.nativeSessionId, session.id);
     return { session: this.serializeSession(session) };
@@ -427,19 +604,47 @@ export class GrokProxyService {
     return { commands: [...this.slashCommands] };
   }
 
-  currentCatalog() {
-    const catalog = catalogFromModelState(this.modelState, this.permissionMode);
+  currentCatalog(sessionId?: string) {
+    const session = sessionId ? this.sessionsById.get(sessionId) : undefined;
+    // Without a session the catalog reports the runtime default model; with
+    // one it reports that session's own evidenced model/effort.
+    const model = session ? session.model : this.modelState.currentModelId ?? null;
+    const effort = session ? session.effort : this.defaultEffortForModel(model);
+    const catalog = catalogFromModelState(
+      this.modelState,
+      this.catalogPermissionMode(),
+      this.sandboxProfile,
+    );
+    // models[].isDefault feeds catalog.resolve when no model is requested:
+    // a session catalog must default to the session's own model/effort, not
+    // the process default its sessionOptions already moved away from.
+    const models = session?.model
+      ? catalog.models.map((entry) => {
+        if (entry.id !== session.model) return { ...entry, isDefault: false };
+        return {
+          ...entry,
+          isDefault: true,
+          efforts: session.effort
+            ? entry.efforts.map((item) => ({ ...item, isDefault: item.id === session.effort }))
+            : entry.efforts,
+        };
+      })
+      : catalog.models;
     return {
       ...catalog,
+      models,
       sessionOptions: catalog.sessionOptions.map(option => {
         if (option.id === 'model') {
-          return { ...option, currentValue: this.currentModel ?? option.currentValue };
+          return { ...option, currentValue: model ?? option.currentValue };
         }
         if (option.id === 'reasoning_effort') {
-          return { ...option, currentValue: this.currentEffort ?? option.currentValue };
+          return { ...option, currentValue: effort ?? option.currentValue };
         }
         if (option.id === 'permission_mode') {
-          return { ...option, currentValue: this.permissionMode };
+          return { ...option, currentValue: this.catalogPermissionMode() };
+        }
+        if (option.id === 'sandbox_profile') {
+          return { ...option, currentValue: this.sandboxProfile };
         }
         return option;
       }),
@@ -447,19 +652,30 @@ export class GrokProxyService {
   }
 
   async startTurn(params: StartTurnParams) {
-    const prepared = this.prepareTurn(params);
-    await this.runPreparedTurn(prepared);
+    const prepared = await this.openTurn(params);
+    const { response } = await this.dispatchPreparedTurn(prepared);
+    await this.runPreparedTurn(prepared, response);
     return { session: this.serializeSession(prepared.session), turn: { id: prepared.turnId } };
   }
 
-  async beginTurn(params: StartTurnParams) {
-    const prepared = this.prepareTurn(params);
-    void this.runPreparedTurn(prepared).catch(() => undefined);
+  async beginTurn(params: StartTurnParams, onDispatched?: () => void) {
+    const prepared = await this.openTurn(params);
+    // Await the dispatch point: a rejection here means no native prompt exists
+    // (missing image, dead runtime), so the caller never counts this turn as
+    // a dispatched native prompt. The prompt response settles in background.
+    const { response } = await this.dispatchPreparedTurn(prepared);
+    // Record the Host's native prompt position before a fast response can
+    // emit turn.completed. Failed local dispatches never invoke this hook.
+    onDispatched?.();
+    void this.runPreparedTurn(prepared, response).catch(() => undefined);
     return { turn: { id: prepared.turnId } };
   }
 
-  private prepareTurn(params: StartTurnParams) {
+  private async openTurn(params: StartTurnParams): Promise<PreparedTurn> {
     const session = this.requireSession(params.sessionId);
+    if (this.mcpBlockedReason) {
+      throw createAppError(409, 'CONFLICT', this.mcpBlockedReason);
+    }
     this.requireRuntime();
     if (session.activeTurnId) {
       throw createAppError(409, 'SESSION_BUSY', 'This session already has an active turn.');
@@ -469,38 +685,80 @@ export class GrokProxyService {
     if (command && isBlockedSlashCommand(command)) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', `Grok command ${command} is not available in Gian.`);
     }
+    await this.applyPermissionDraft(session);
     const turnId = randomId('turn');
     session.activeTurnId = turnId;
     session.status = 'running';
     const generation = ++this.promptGeneration;
-    this.activeTurns.set(session.id, { turnId, completed: false, generation });
+    let markSettled = () => {};
+    const settled = new Promise<void>((resolve) => {
+      markSettled = () => resolve();
+    });
+    this.activeTurns.set(session.id, { turnId, completed: false, generation, settled, markSettled });
+    this.permissionRow(session.id).turnSnapshot = this.permissionRow(session.id).draft;
     this.emitEvent('turn.started', this.envelope(session, { turnId, status: 'running' }, turnId));
     return { session, turnId, input, generation };
   }
 
-  private async runPreparedTurn(prepared: {
-    session: SessionRecord;
-    turnId: string;
-    input: ReturnType<typeof normalizeInputItems>;
-    generation: number;
-  }) {
-    const runtime = this.requireRuntime();
+  /**
+   * Resolve the input locally, then hand the prompt to the native runtime.
+   * Resolves at the dispatch point: a rejection means no native prompt exists
+   * yet (local input failure, dead runtime), so the turn must fail without
+   * minting a native prompt slot. A resolution means the native session owns
+   * the prompt even if the prompt response later fails.
+   */
+  private async dispatchPreparedTurn(prepared: PreparedTurn): Promise<{ response: Promise<PromptResponse> }> {
     try {
-      const response = await runtime.prompt({
+      const runtime = this.requireRuntime();
+      const prompt = await toPromptBlocks(prepared.input);
+      const request = {
         sessionId: prepared.session.nativeSessionId,
-        prompt: await toPromptBlocks(prepared.input),
+        prompt,
         _meta: { mode: 'agent' },
-      } as never);
+      } as never;
+      // Minimal runtime doubles dispatch synchronously inside prompt().
+      const dispatcher = runtime as unknown as {
+        dispatchPrompt?: (params: never) => Promise<{ response: Promise<PromptResponse> }>;
+      };
+      if (typeof dispatcher.dispatchPrompt === 'function') {
+        return dispatcher.dispatchPrompt(request);
+      }
+      return { response: runtime.prompt(request) };
+    } catch (error) {
+      this.failTurn(prepared.session, prepared.turnId, error);
+      this.markTurnSettled(prepared.session.id, prepared.generation);
+      throw mapRuntimeError(error, this.binaryPath);
+    }
+  }
+
+  private async runPreparedTurn(prepared: PreparedTurn, response: Promise<PromptResponse>) {
+    try {
+      const promptResponse = await response;
       if (this.activeTurns.get(prepared.session.id)?.generation === prepared.generation) {
-        this.emitPromptUsage(prepared.session, prepared.turnId, response);
-        this.completeTurn(prepared.session, prepared.turnId, this.promptStopReason(response));
+        if (this.mcpBlockedReason) {
+          this.failTurn(
+            prepared.session,
+            prepared.turnId,
+            createAppError(409, 'CONFLICT', this.mcpBlockedReason),
+          );
+        } else {
+          this.emitPromptUsage(prepared.session, prepared.turnId, promptResponse);
+          this.completeTurn(prepared.session, prepared.turnId, this.promptStopReason(promptResponse));
+        }
       }
     } catch (error) {
       if (this.activeTurns.get(prepared.session.id)?.generation === prepared.generation) {
         this.failTurn(prepared.session, prepared.turnId, error);
       }
       throw mapRuntimeError(error, this.binaryPath);
+    } finally {
+      this.markTurnSettled(prepared.session.id, prepared.generation);
     }
+  }
+
+  private markTurnSettled(sessionId: string, generation: number): void {
+    const active = this.activeTurns.get(sessionId);
+    if (active?.generation === generation) active.markSettled();
   }
 
   private promptStopReason(response: PromptResponse): string {
@@ -511,6 +769,9 @@ export class GrokProxyService {
 
   async steerTurn(params: { sessionId: string; input: unknown }) {
     const session = this.requireSession(params.sessionId);
+    if (this.mcpBlockedReason) {
+      throw createAppError(409, 'CONFLICT', this.mcpBlockedReason);
+    }
     const runtime = this.requireRuntime();
     if (!session.activeTurnId) {
       throw createAppError(404, 'TURN_NOT_FOUND', 'No active Grok turn to steer.');
@@ -520,20 +781,33 @@ export class GrokProxyService {
     if (command && isBlockedSlashCommand(command)) {
       throw createAppError(400, 'CAPABILITY_NOT_SUPPORTED', `Grok command ${command} is not available in Gian.`);
     }
-    await runtime.interject({
-      sessionId: session.nativeSessionId,
-      text: firstText(input),
-      interjectionId: randomId('interject'),
-    });
+    const payload = await toInterjectPayload(input);
+    let result: unknown;
+    try {
+      result = await runtime.interject({
+        sessionId: session.nativeSessionId,
+        text: payload.text,
+        interjectionId: randomId('interject'),
+        content: payload.content,
+      });
+    } catch (error) {
+      throw mapRuntimeError(error, this.binaryPath);
+    }
+    const status = result && typeof result === 'object' ? (result as { status?: unknown }).status : undefined;
+    if (status !== 'queued') {
+      throw createAppError(502, 'RUNTIME_ERROR', 'Grok did not queue the steer.');
+    }
     return { ok: true as const, turnId: session.activeTurnId };
   }
 
   async interruptTurn(params: InterruptTurnParams) {
     const session = this.requireSession(params.sessionId);
     if (!session.activeTurnId) return;
-    // Cancel pending structured questions first so the agent's blocked
-    // reverse request settles before the cancel notification arrives.
-    this.resolveQuestionsForSession(session.id);
+    // Block new pending interactions for this turn, then settle the ones
+    // already waiting so the agent's blocked reverse requests resolve before
+    // the cancel notification arrives.
+    this.cancellingSessions.add(session.id);
+    this.settlePendingInteractions(session.id);
     await this.requireRuntime().cancel(session.nativeSessionId);
   }
 
@@ -617,7 +891,6 @@ export class GrokProxyService {
     actionId: string,
     values: Record<string, unknown>,
   ): QuestionOutcome {
-    if (actionId === 'cancel') return { kind: 'cancelled' };
     if (kind === 'plan') {
       if (actionId === 'submit' || actionId === 'approve') {
         return { kind: 'plan_approved' };
@@ -628,9 +901,19 @@ export class GrokProxyService {
         ...(feedback !== undefined ? { feedback } : {}),
       };
     }
+    if (actionId === 'cancel') return { kind: 'cancelled' };
     if (kind === 'elicit') {
-      if (actionId === 'submit') return { kind: 'elicit_accept', content: values.content ?? null };
-      return { kind: 'elicit_decline' };
+      if (actionId === 'submit') {
+        // The Adapter rebuilds flat protocol values into the native content
+        // object; anything else cannot become an honest ElicitResult.
+        const content = values.content;
+        if (!content || typeof content !== 'object' || Array.isArray(content)) {
+          return { kind: 'elicit_decline' };
+        }
+        return { kind: 'elicit_accept', content };
+      }
+      if (actionId === 'decline') return { kind: 'elicit_decline' };
+      return { kind: 'cancelled' };
     }
     // ask_user_question
     if (actionId === 'submit') {
@@ -688,7 +971,9 @@ export class GrokProxyService {
     const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
     const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
     const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
-    if (!session) return { outcome: 'cancelled' };
+    if (!session || this.cancellingSessions.has(session.id) || !session.activeTurnId) {
+      return { outcome: 'cancelled' };
+    }
     const questionId = randomId('iq');
     const turnId = session.activeTurnId;
     const response = await new Promise<QuestionOutcome>((resolve) => {
@@ -735,7 +1020,9 @@ export class GrokProxyService {
     const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
     const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
     const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
-    if (!session) return { outcome: 'cancelled', feedback: undefined };
+    if (!session || this.cancellingSessions.has(session.id) || !session.activeTurnId) {
+      return { outcome: 'cancelled', feedback: undefined };
+    }
     const questionId = randomId('iq');
     const turnId = session.activeTurnId;
     const response = await new Promise<QuestionOutcome>((resolve) => {
@@ -773,7 +1060,12 @@ export class GrokProxyService {
     const nativeSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
     const proxySessionId = this.proxyIdByNativeId.get(nativeSessionId);
     const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
-    if (!session) return 'decline';
+    // The runtime parses the response as the MCP ElicitResult
+    // ({ action: 'accept' | 'decline' | 'cancel', content? }); anything else
+    // is malformed and cancels the request natively.
+    if (!session || this.cancellingSessions.has(session.id) || !session.activeTurnId) {
+      return { action: 'decline' };
+    }
     const questionId = randomId('iq');
     const turnId = session.activeTurnId;
     const response = await new Promise<QuestionOutcome>((resolve) => {
@@ -792,15 +1084,20 @@ export class GrokProxyService {
       this.emitEvent('question.requested', this.envelope(session, {
         questionId,
         toolCallId: typeof payload.serverName === 'string' ? payload.serverName : null,
+        serverName: typeof payload.serverName === 'string' ? payload.serverName : null,
+        message: typeof payload.message === 'string' ? payload.message : null,
         requestedSchema: payload.requestedSchema ?? null,
         kind: 'mcp_elicit',
       }, turnId ?? undefined));
     });
     if (this.questionsById.has(questionId)) this.questionsById.delete(questionId);
     if (response.kind === 'elicit_accept') {
-      return { accept: { content: response.content ?? {} } };
+      return { action: 'accept', content: response.content };
     }
-    return 'decline';
+    if (response.kind === 'elicit_decline') {
+      return { action: 'decline' };
+    }
+    return { action: 'cancel' };
   }
 
   /** Resolve every pending question for a session (turn end, cancel, close). */
@@ -819,6 +1116,37 @@ export class GrokProxyService {
     }
   }
 
+  /**
+   * Resolve every pending permission request for a session. Equivalent to the
+   * question path: the blocked native prompt must settle exactly once with
+   * `cancelled`, never hang until the stop deadline. The resolved event itself
+   * is emitted by the handlePermissionRequest continuation.
+   */
+  private resolveApprovalsForSession(sessionId: string): void {
+    for (const [approvalId, approval] of [...this.approvalsById]) {
+      if (approval.sessionId !== sessionId) continue;
+      this.approvalsById.delete(approvalId);
+      approval.resolve({ outcome: { outcome: 'cancelled' } });
+    }
+  }
+
+  /** One settlement path for turn end, interrupt, close, and runtime exit. */
+  private settlePendingInteractions(sessionId: string, outcome: QuestionOutcome['kind'] = 'cancelled'): void {
+    this.resolveQuestionsForSession(sessionId, outcome);
+    this.resolveApprovalsForSession(sessionId);
+  }
+
+  /** The model's own default effort, or null when the runtime did not say. */
+  private defaultEffortForModel(modelId: string | null): string | null {
+    if (!modelId) return null;
+    const model = this.modelState.availableModels?.find((item) => item.modelId === modelId);
+    const efforts = model?._meta?.reasoningEfforts ?? [];
+    return efforts.find((effort) => effort.default === true)?.value
+      ?? model?._meta?.reasoningEffort
+      ?? efforts[0]?.value
+      ?? null;
+  }
+
   async setConfigOption(params: SetConfigOptionParams) {
     const session = this.requireSession(params.sessionId);
     const runtime = this.requireRuntime();
@@ -828,12 +1156,22 @@ export class GrokProxyService {
         throw createAppError(400, 'INVALID_REQUEST', `Unknown Grok model ${modelId}.`);
       }
       await runtime.setSessionModel({ sessionId: session.nativeSessionId, modelId });
-      this.currentModel = modelId;
-      this.modelState = { ...this.modelState, currentModelId: modelId };
+      // Model state is per session: another attached session keeps its own.
+      session.model = modelId;
+      session.effort = this.defaultEffortForModel(modelId);
     } else if (params.configId === 'reasoning_effort') {
       const effort = String(params.value);
-      const modelId = this.currentModel ?? this.modelState.currentModelId;
-      if (!modelId) throw createAppError(400, 'INVALID_REQUEST', 'No Grok model is selected.');
+      // The native request is model-scoped: only this session's own evidenced
+      // model may be sent. Borrowing the process default could silently switch
+      // a resumed session to a model it never ran.
+      const modelId = session.model;
+      if (!modelId) {
+        throw createAppError(
+          400,
+          'INVALID_REQUEST',
+          'Select a Grok model for this session before adjusting thinking.',
+        );
+      }
       if (!effortIdsForModel(this.modelState, modelId).includes(effort)) {
         throw createAppError(400, 'INVALID_REQUEST', `Unknown Grok reasoning effort ${effort}.`);
       }
@@ -842,17 +1180,14 @@ export class GrokProxyService {
         modelId,
         _meta: { reasoningEffort: effort },
       });
-      this.currentEffort = effort;
+      session.effort = effort;
     } else if (params.configId === 'permission_mode') {
       const mode = parseGrokPermissionMode(String(params.value));
       if (!mode) throw createAppError(400, 'INVALID_REQUEST', 'Unknown Grok permission mode.');
-      const spec = grokPermissionSpec(mode);
-      await runtime.notifyPermissionMode({
-        sessionId: session.nativeSessionId,
-        clientIdentifier: 'gian-grok-proxy',
-        ...spec.runtime,
-      });
-      this.permissionMode = mode;
+      this.permissionRow(session.id).draft = mode;
+      this.stagedPermission = mode;
+    } else if (params.configId === 'sandbox_profile') {
+      this.setSandboxProfile(String(params.value));
     } else {
       throw createAppError(400, 'INVALID_REQUEST', `Unknown Grok config ${params.configId}.`);
     }
@@ -891,7 +1226,7 @@ export class GrokProxyService {
     // Guard 2: ownership must be provable — the session has to appear in the
     // native directory listing before a destructive call is issued.
     const scopedCwd = this.sessionsById.values().next().value?.cwd ?? null;
-    const aux = this.createRuntime(scopedCwd ?? resolve(tmpdir()), { spawnDenyRules: ['MCPTool(*)'] });
+    const aux = this.createRuntime(scopedCwd ?? resolve(tmpdir()), this.auxBoundary());
     try {
       await aux.ensureStarted();
       if (!await nativeSessionListed(aux, nativeSessionId)) {
@@ -919,19 +1254,21 @@ export class GrokProxyService {
 
   async closeSession(params: CloseSessionParams) {
     const session = this.requireSession(params.sessionId);
+    // Settle blocked reverse requests first so the native prompt can unwind;
+    // local cleanup must finish even when native cancel/close fails.
+    this.cancellingSessions.add(session.id);
+    this.settlePendingInteractions(session.id);
     try {
       if (this.runtime) {
         await this.runtime.cancel(session.nativeSessionId).catch(() => undefined);
         await this.runtime.closeSession({ sessionId: session.nativeSessionId }).catch(() => undefined);
       }
     } finally {
-      this.resolveQuestionsForSession(session.id);
       this.sessionsById.delete(session.id);
       this.proxyIdByNativeId.delete(session.nativeSessionId);
       this.activeTurns.delete(session.id);
-      for (const [approvalId, approval] of this.approvalsById) {
-        if (approval.sessionId === session.id) this.approvalsById.delete(approvalId);
-      }
+      this.permissionBySession.delete(session.id);
+      this.cancellingSessions.delete(session.id);
       if (this.sessionsById.size === 0) await this.stopRuntime();
     }
   }
@@ -944,13 +1281,13 @@ export class GrokProxyService {
   }
 
   setPermissionMode(mode: GrokPermissionMode) {
-    this.permissionMode = mode;
+    this.stagedPermission = mode;
   }
 
   /** Runtime access for the read-only customization inspector. */
   customizationAccess(): GrokCustomizationRuntimeAccess {
     return {
-      createAuxRuntime: (cwd: string) => this.createRuntime(cwd, { spawnDenyRules: ['MCPTool(*)'] }),
+      createAuxRuntime: (cwd: string) => this.createRuntime(cwd, this.auxBoundary()),
       attachedRuntime: () => {
         const session = this.sessionsById.values().next().value;
         if (!session || !this.runtime || this.runtimeCwd !== session.cwd) return null;
@@ -970,16 +1307,24 @@ export class GrokProxyService {
       }
       return this.runtime;
     }
-    // The MCP isolation boundary is fixed here: disk-configured server names
-    // are enumerated once and denied per name when Host MCP is injected.
+    // Disk names only choose spawn-time denies. They are not the effective
+    // MCP set. With Host MCP, search_tool/use_tool stay closed until
+    // x.ai/mcp/list proves the admitted HTTP servers.
     const diskScan = await scanDiskConfiguredMcpServers(cwd);
     const denyRules = mcpSpawnDenyRules(this.admittedHostMcp, diskScan.names);
-    const runtime = this.createRuntime(cwd, { spawnDenyRules: denyRules });
+    const runtime = this.createRuntime(cwd, {
+      spawnDenyRules: denyRules,
+      sandboxProfile: this.sandboxProfile,
+      disallowMetaTools: this.admittedHostMcp == null,
+    });
     runtime.setPermissionHandler(request => this.handlePermissionRequest(request));
     if (typeof (runtime as { setExtMethodHandler?: unknown }).setExtMethodHandler === 'function') {
       runtime.setExtMethodHandler((method, params) => this.handleRuntimeExtMethod(method, params));
     }
     runtime.on('extensionNotification', (method, params) => {
+      if (method === 'x.ai/mcp/servers_updated' || method === 'x.ai/mcp/tools_changed') {
+        void this.onMcpCatalogChanged().catch(() => undefined);
+      }
       const nativeSessionId = params && typeof params === 'object'
         ? String((params as Record<string, unknown>).sessionId ?? '')
         : '';
@@ -993,7 +1338,7 @@ export class GrokProxyService {
     runtime.on('runtimeStopped', (event) => {
       if (event.expected) return;
       for (const session of this.sessionsById.values()) {
-        this.resolveQuestionsForSession(session.id);
+        this.settlePendingInteractions(session.id);
         session.status = 'stale';
         session.lastError = 'Grok runtime stopped.';
         this.emitEvent('session.updated', this.envelope(session, { status: 'stale' }));
@@ -1015,37 +1360,197 @@ export class GrokProxyService {
     const runtime = this.runtime;
     this.runtime = null;
     this.runtimeCwd = null;
+    this.mcpBlockedReason = null;
+    this.permissionBySession.clear();
     if (runtime) await runtime.stop();
   }
 
-  /**
-   * Runtime MCP isolation verification: compare the effective server catalog
-   * (`x.ai/mcp/list`, a pure read that contacts nothing) against the approved
-   * Host set. Unexpected servers are reported honestly; they were already
-   * denied at spawn when their names came from disk config, so this catches
-   * the residual (e.g. plugin-contributed) sources.
-   */
-  private async verifyMcpBoundary(session: SessionRecord, diskDiagnostics: readonly string[]): Promise<void> {
-    try {
-      const catalog = await this.runtime?.mcpList();
-      const entries = catalog && typeof catalog === 'object'
-        ? (catalog as { servers?: unknown }).servers
-        : undefined;
-      const effective = (Array.isArray(entries) ? entries : []).flatMap((raw) => {
-        const entry = raw && typeof raw === 'object' ? (raw as { name?: unknown }) : {};
-        return typeof entry.name === 'string' && entry.name ? [entry.name] : [];
-      });
-      const unexpected = unexpectedMcpServerNames(effective, this.admittedHostMcp?.names ?? []);
-      if (unexpected.length === 0 && diskDiagnostics.length === 0) return;
-      this.emitEvent('mcp.boundary', this.envelope(session, {
-        approved: this.admittedHostMcp?.names ?? [],
-        unexpected,
-        ...(diskDiagnostics.length > 0 ? { diagnostics: diskDiagnostics } : {}),
-      }));
-    } catch {
-      // Verification is best-effort; the spawn-time deny rules remain the
-      // hard boundary. Absence of x.ai/mcp/list is reported via capabilities.
+  /** Retry while the catalog is unresolved. A miss fails the session. */
+  private async readVerifiedMcpList(nativeSessionId?: string) {
+    const runtime = this.requireRuntime();
+    let last = 'Host MCP catalog could not be verified.';
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const reading = readMcpListPayload(
+          nativeSessionId ? await runtime.mcpList(nativeSessionId) : await runtime.mcpList(),
+        );
+        if (reading.resolved === false || reading.initializing) {
+          last = 'Host MCP catalog is still initializing.';
+          if (attempt < 2) await delay(20);
+          continue;
+        }
+        return reading;
+      } catch (error) {
+        if (error instanceof GrokProxyError) throw error;
+        last = error instanceof Error ? error.message : String(error);
+        if (attempt < 2) await delay(20);
+      }
     }
+    throw createAppError(409, 'CONFLICT', last);
+  }
+
+  /**
+   * Prove the executable catalog matches the admitted Host HTTP set before
+   * the session is inserted. Failure leaves no session and stops the child.
+   */
+  private async assertHostMcpBoundary(nativeSessionId: string): Promise<void> {
+    const admitted = this.admittedHostMcp;
+    if (!admitted) return;
+    const reading = await this.readVerifiedMcpList(nativeSessionId);
+    const problem = mcpBoundaryProblem(reading.servers, admitted);
+    if (problem) throw createAppError(409, 'CONFLICT', problem);
+  }
+
+  /**
+   * `x.ai/mcp/servers_updated` is the process-local and plugin catalog. It has
+   * no session id and does not include Host MCP injected into a session, so
+   * the body is not the session's executable set. Re-read `x.ai/mcp/list` for
+   * every attached session. `x.ai/mcp/tools_changed` is only a refetch trigger.
+   */
+  private async onMcpCatalogChanged(): Promise<void> {
+    if (!this.admittedHostMcp || !this.runtime || this.mcpBlockedReason) return;
+    const sessions = [...this.sessionsById.values()];
+    if (sessions.length === 0) return;
+    try {
+      for (const session of sessions) {
+        if (this.mcpBlockedReason) return;
+        const reading = await this.readVerifiedMcpList(session.nativeSessionId);
+        const problem = mcpBoundaryProblem(reading.servers, this.admittedHostMcp);
+        if (problem) {
+          await this.blockMcp(problem);
+          return;
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : 'Host MCP catalog changed and could not be verified.';
+      await this.blockMcp(message);
+    }
+  }
+
+  /**
+   * Mark the boundary, then confirm the native prompt has stopped. A local
+   * `turn.failed` is sent only after that confirmation. Cancel that fails or
+   * does not finish kills the child. `stopRuntime()` is not used here because
+   * it would clear the block and allow another turn.
+   */
+  private async blockMcp(reason: string): Promise<void> {
+    if (this.mcpBlockedReason) return;
+    this.mcpBlockedReason = reason;
+    const runtime = this.runtime;
+    const active = [...this.sessionsById.values()].filter((session) => session.activeTurnId);
+    // Settle blocked reverse requests up front: a prompt parked in
+    // requestPermission can only finish once its promise resolves, and must
+    // not hold this path until the stop deadline.
+    for (const session of active) {
+      this.cancellingSessions.add(session.id);
+      this.settlePendingInteractions(session.id);
+    }
+    let detail = reason;
+    if (runtime) {
+      const stopError = await this.stopTurnForMcpBoundary(runtime, active);
+      if (stopError) {
+        detail = `${reason} The Grok process could not be stopped (${stopError}).`;
+        this.mcpBlockedReason = detail;
+      }
+    }
+    for (const session of active) {
+      const turnId = session.activeTurnId;
+      if (!turnId) continue;
+      this.failTurn(session, turnId, createAppError(409, 'CONFLICT', detail));
+    }
+  }
+
+  private async stopTurnForMcpBoundary(
+    runtime: GrokAcpClient,
+    sessions: SessionRecord[],
+  ): Promise<string | null> {
+    const pending = sessions.map((session) => this.activeTurns.get(session.id)?.settled ?? Promise.resolve());
+    const cancelOk = await Promise.race([
+      Promise.all(sessions.map((session) => runtime.cancel(session.nativeSessionId))).then(() => true, () => false),
+      delay(this.turnStopDeadlineMs).then(() => false),
+    ]);
+    if (cancelOk) {
+      const settled = await Promise.race([
+        Promise.all(pending).then(() => true, () => true),
+        delay(this.turnStopDeadlineMs).then(() => false),
+      ]);
+      if (settled) return null;
+    }
+    let stopError: string | null = null;
+    try {
+      await runtime.stop();
+    } catch (error) {
+      stopError = error instanceof Error ? error.message : String(error);
+    }
+    if (this.runtime === runtime) {
+      this.runtime = null;
+      this.runtimeCwd = null;
+    }
+    return stopError;
+  }
+
+  private setSandboxProfile(value: string): void {
+    const profile = parseGrokSandboxProfile(value);
+    if (!profile) {
+      throw createAppError(400, 'INVALID_REQUEST', `Unknown Grok sandbox profile ${value}.`);
+    }
+    if (this.runtime) {
+      if (profile === this.sandboxProfile) return;
+      throw createAppError(
+        409,
+        'CONFLICT',
+        'The sandbox profile is fixed when the Grok process starts. Start a new session to change it.',
+      );
+    }
+    this.sandboxProfile = profile;
+  }
+
+  /** Mode the runtime was last told, or the mode pinned to the active turn. */
+  private effectivePermission(row: PermissionRow): GrokPermissionMode {
+    return row.turnSnapshot ?? row.notified ?? row.draft;
+  }
+
+  /**
+   * The native matcher updates every resident session with this origin. A
+   * second session that still has the same origin must not be given a
+   * different mode. Native fork and resume use a distinct origin instead.
+   */
+  private assertPermissionAudienceIsolated(session: SessionRecord, row: PermissionRow): void {
+    for (const other of this.sessionsById.values()) {
+      if (other.id === session.id) continue;
+      const otherRow = this.permissionBySession.get(other.id);
+      if (!otherRow || otherRow.audience !== row.audience) continue;
+      if (this.effectivePermission(otherRow) !== row.draft) {
+        throw createAppError(
+          409,
+          'CONFLICT',
+          'Sessions that share one Grok origin cannot use different permission modes in the same process.',
+        );
+      }
+    }
+  }
+
+  /** Re-apply this session's draft before its prompt. A send is not confirmation. */
+  private async applyPermissionDraft(session: SessionRecord): Promise<void> {
+    const runtime = this.requireRuntime();
+    const row = this.permissionRow(session.id);
+    this.assertPermissionAudienceIsolated(session, row);
+    const spec = grokPermissionSpec(row.draft);
+    await runtime.notifyPermissionMode({
+      sessionId: session.nativeSessionId,
+      clientIdentifier: row.audience,
+      permission_mode: spec.runtime.permission_mode,
+      yolo_mode: spec.runtime.yolo_mode,
+      auto_mode: spec.runtime.auto_mode,
+    });
+    row.notified = row.draft;
+  }
+
+  private releaseTurnSnapshot(session: SessionRecord): void {
+    const row = this.permissionBySession.get(session.id);
+    if (row) row.turnSnapshot = null;
   }
 
   private requireSession(sessionId: string): SessionRecord {
@@ -1062,9 +1567,10 @@ export class GrokProxyService {
   private serializeSession(session: SessionRecord) {
     return {
       ...session,
-      model: this.currentModel,
-      mode: this.permissionMode,
-      effort: this.currentEffort,
+      model: session.model,
+      mode: this.displayedPermission(session),
+      sandboxProfile: this.sandboxProfile,
+      effort: session.effort,
     };
   }
 
@@ -1082,8 +1588,10 @@ export class GrokProxyService {
     if (!active || active.turnId !== turnId || active.completed) return;
     active.completed = true;
     session.activeTurnId = null;
+    this.releaseTurnSnapshot(session);
     session.status = 'idle';
-    this.resolveQuestionsForSession(session.id);
+    this.cancellingSessions.delete(session.id);
+    this.settlePendingInteractions(session.id);
     this.emitEvent('turn.completed', this.envelope(session, { stopReason }, turnId));
   }
 
@@ -1092,9 +1600,11 @@ export class GrokProxyService {
     if (!active || active.turnId !== turnId || active.completed) return;
     active.completed = true;
     session.activeTurnId = null;
+    this.releaseTurnSnapshot(session);
     session.status = 'error';
     session.lastError = error instanceof Error ? error.message : String(error);
-    this.resolveQuestionsForSession(session.id);
+    this.cancellingSessions.delete(session.id);
+    this.settlePendingInteractions(session.id);
     this.emitEvent('turn.failed', this.envelope(session, {
       code: /auth|login/i.test(session.lastError) ? 'RUNTIME_AUTH_REQUIRED' : 'RUNTIME_ERROR',
       message: session.lastError,
@@ -1143,16 +1653,10 @@ export class GrokProxyService {
       session.slashCommands = this.slashCommands;
       this.emitEvent('slash.updated', this.envelope(session, { commands: this.slashCommands }));
     }
-    if (
-      update.sessionUpdate === 'current_mode_update'
-      && parseGrokPermissionMode(String(update.currentModeId ?? ''))
-    ) {
-      this.permissionMode = parseGrokPermissionMode(String(update.currentModeId))!;
-      this.emitEvent('session.updated', this.envelope(session, { mode: this.permissionMode }));
-    }
     if (update.sessionUpdate === 'current_model_update' && typeof update.currentModelId === 'string') {
-      this.currentModel = update.currentModelId;
-      this.modelState = { ...this.modelState, currentModelId: update.currentModelId };
+      // A model update belongs to the session that emitted it; other attached
+      // sessions and the process default keep their own values.
+      session.model = update.currentModelId;
       this.emitEvent('session.updated', this.envelope(session, { model: update.currentModelId }));
     }
     if (update.sessionUpdate === 'usage_update') {
@@ -1171,7 +1675,12 @@ export class GrokProxyService {
   ): Promise<RequestPermissionResponse> {
     const proxySessionId = this.proxyIdByNativeId.get(request.sessionId);
     const session = proxySessionId ? this.sessionsById.get(proxySessionId) : undefined;
-    if (!session) return { outcome: { outcome: 'cancelled' } };
+    // A late permission request racing a cancel/close — or one arriving with
+    // no active turn at all — settles immediately instead of parking a
+    // promise nobody will resolve.
+    if (!session || this.cancellingSessions.has(session.id) || !session.activeTurnId) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
     const approvalId = randomId('appr');
     const turnId = session.activeTurnId;
     const response = await new Promise<RequestPermissionResponse>((resolve) => {

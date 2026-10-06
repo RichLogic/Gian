@@ -6,18 +6,24 @@ import { LocaleProvider } from '../src/i18n/index.js';
 import { SessionMain } from '../src/views/SessionMain.js';
 import type { QueueEntry, TranscriptItem } from '../src/types.js';
 import { sessionContractFixture } from './fixtures/ws-contract.js';
+import { clearComposerCapabilityCaches, fetchSteerCached } from '../src/components/composer/capabilities.js';
 
 vi.mock('../src/api.js', () => {
   const never = () => new Promise<never>(() => {});
   return {
     loadChanged: never,
     loadProxyModels: never,
-    loadProxyCapabilities: never,
+    loadProxyCapabilities: vi.fn(async () => ({ capabilities: { 'turn.steer': 1 } })),
     loadSlashCommands: never,
     loadSessionSlashCommands: never,
     loadNativeConfig: never,
     loadAgents: async () => [],
   };
+});
+
+beforeEach(async () => {
+  clearComposerCapabilityCaches();
+  await fetchSteerCached('codex');
 });
 
 const workspace: Workspace = {

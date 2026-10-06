@@ -36,6 +36,7 @@ import type {
   AgentProxyStatus,
   AgentProxyUpdateCheck,
   AgentHomeBinding,
+  AgentRuntimeBinding,
   ConfigValue,
   Executor,
   ProductExecutor,
@@ -495,6 +496,7 @@ function persistableAgent(agent: UserAgent): UserAgent {
     proxy: agent.proxy,
     ...(agent.enabled !== undefined ? { enabled: agent.enabled } : {}),
     home: agent.home ? { ...agent.home } : null,
+    ...(agent.runtime ? { runtime: { ...agent.runtime } } : {}),
     cliPath: agent.cliPath,
     defaults: copyProxyDefaults(agent.defaults),
   };
@@ -520,6 +522,14 @@ function normalizeUserAgent(value: unknown): UserAgent | null {
     && isAbsolute(rawHome['path'])
     ? { kind: rawHome['kind'], path: rawHome['path'] } as AgentHomeBinding
     : null;
+  const rawRuntime = objectRecord(record['runtime']);
+  const runtime: AgentRuntimeBinding | null = rawRuntime?.['kind'] === 'managed'
+    ? { kind: 'managed' }
+    : rawRuntime?.['kind'] === 'custom'
+      && typeof rawRuntime['path'] === 'string'
+      && isAbsolute(rawRuntime['path'])
+      ? { kind: 'custom', path: rawRuntime['path'] }
+      : null;
   return persistableAgent({
     id,
     name,
@@ -527,6 +537,7 @@ function normalizeUserAgent(value: unknown): UserAgent | null {
     proxy: productExecutorForPluginId(pluginId),
     ...(typeof record['enabled'] === 'boolean' ? { enabled: record['enabled'] } : {}),
     home,
+    runtime,
     cliPath,
     defaults: normalizeProxyDefaults(record['defaults']),
   });
@@ -1456,9 +1467,10 @@ export class AgentManager {
     return { ...this.getAgent(id).defaults };
   }
 
-  /** Resolved runtime CLI path for one saved Agent. Production reads only the
-   * globally active certified generation; GianDev retains the legacy path
-   * seam for isolated fixtures and migration verification. */
+  /** Resolved runtime CLI path for one saved Agent. A custom Runtime binding
+   *  (ADR-0094) wins everywhere; otherwise production reads only the globally
+   *  active certified generation, and GianDev retains the legacy path seam
+   *  for isolated fixtures and migration verification. */
   agentRuntimePath(id: string): {
     pluginId: string;
     proxy: ProductExecutor | null;
@@ -1468,10 +1480,12 @@ export class AgentManager {
     return {
       pluginId: agent.pluginId,
       proxy: agent.proxy,
-      cliPath: this.options.managedProxies
-        ? this.options.generationStore?.activeCached(agent.pluginId)?.runtime?.entryPath ?? null
-        : agent.cliPath
-          ?? (agent.proxy ? this.options.environmentCliPaths?.[agent.proxy] ?? null : null),
+      cliPath: agent.runtime?.kind === 'custom'
+        ? agent.runtime.path
+        : this.options.managedProxies
+          ? this.options.generationStore?.activeCached(agent.pluginId)?.runtime?.entryPath ?? null
+          : agent.cliPath
+            ?? (agent.proxy ? this.options.environmentCliPaths?.[agent.proxy] ?? null : null),
     };
   }
 
@@ -1679,6 +1693,10 @@ export class AgentManager {
     proxy?: ProductExecutor;
     cliPath?: string | null;
     home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+    /** Per-Agent Runtime binding (ADR-0094). Absent/'managed' uses the
+     *  certified generation; 'custom' pins a user-provided Runtime path that
+     *  is probed before the Agent is persisted. */
+    runtime?: { kind: 'managed' } | { kind: 'custom'; path: string } | null;
     defaults?: Partial<AgentProxyDefaults>;
   }): Promise<UserAgent> {
     const fromPlugin = input.pluginId !== undefined ? resolvePluginIdInput(input.pluginId) : null;
@@ -1710,9 +1728,22 @@ export class AgentManager {
       // explicit development environment path or another saved Agent's path.
       cliPath = await this.scannedCliPath(proxy);
     }
+    const runtime: AgentRuntimeBinding | null = input.runtime?.kind === 'custom'
+      ? { kind: 'custom', path: input.runtime.path.trim() }
+      : null;
+    if (runtime?.kind === 'custom' && !isAbsolute(runtime.path)) {
+      throw new AgentCreateError(
+        'RUNTIME_INVALID',
+        'Custom Runtime path must be an absolute path.',
+        400,
+      );
+    }
     const agentId = randomUUID();
     const launch = await this.trustedLaunch(pluginId);
     if (!launch) {
+      if (runtime?.kind === 'custom') {
+        throw new AgentCreateError('PLUGIN_NOT_FOUND', 'A Custom Runtime requires an installed trusted Proxy.', 404);
+      }
       const catalogItem = await this.options.catalogService?.get(pluginId) ?? null;
       const mayInstall = this.options.managedProxies
         && catalogItem?.compatibility.state === 'compatible'
@@ -1740,7 +1771,9 @@ export class AgentManager {
     }
     if (this.options.catalogService) {
       const item = await this.options.catalogService.get(pluginId);
-      const mayCreate = item?.availableActions.includes('create_agent')
+      const mayCreateCustom = runtime?.kind === 'custom' && generic && launch?.runtime.kind === 'external'
+        && item?.compatibility.state === 'compatible' && item.installation.state === 'installed';
+      const mayCreate = mayCreateCustom || item?.availableActions.includes('create_agent')
         || (!this.options.managedProxies && launch !== null && item === null)
         || (this.options.managedProxies && item?.availableActions.some(action => (
           action === 'install_runtime' || action === 'install_proxy' || action === 'update_proxy'
@@ -1760,7 +1793,15 @@ export class AgentManager {
         400,
       );
     }
-    if (!this.options.managedProxies && generic && launch?.runtime.kind === 'external' && cliPath === null) {
+    if (launch?.runtime.kind === 'none' && runtime?.kind === 'custom') {
+      throw new AgentCreateError(
+        'RUNTIME_NONE_HAS_PATH',
+        'A none Runtime cannot carry a custom Runtime path.',
+        400,
+      );
+    }
+    if (!this.options.managedProxies && generic && launch?.runtime.kind === 'external' && cliPath === null
+      && runtime?.kind !== 'custom') {
       throw new AgentCreateError(
         'RUNTIME_PATH_REQUIRED',
         'An external Runtime requires a selected path.',
@@ -1769,7 +1810,7 @@ export class AgentManager {
     }
     // The per-kind claim excludes updater/path writers while the candidate
     // path is being probed; a path-less create only needs the config claim.
-    const kinds = cliPath !== null && proxy ? [proxy] : [];
+    const kinds = (cliPath !== null || runtime?.kind === 'custom') && proxy ? [proxy] : [];
     const agent = await this.withAgentConfigLock(kinds, 'Agent create', async (current) => {
       assertAgentNameAvailable(current.agents, name);
       let home: AgentHomeBinding | null;
@@ -1808,6 +1849,19 @@ export class AgentManager {
       }
       if (generic && launch?.runtime.kind === 'none') {
         await this.publishNoneRuntime(pluginId, launch, agentId);
+      } else if (runtime?.kind === 'custom') {
+        // Custom Runtime (ADR-0094): probe the user-provided path before the
+        // Agent is persisted. A failed probe aborts the create — there is no
+        // fallback to the managed generation.
+        try {
+          await this.probeAgentRuntimePath(pluginId, runtime.path);
+        } catch (error) {
+          throw new AgentCreateError(
+            'RUNTIME_INVALID',
+            error instanceof Error ? error.message : String(error),
+            400,
+          );
+        }
       } else if (cliPath !== null) {
         await this.probeAgentRuntimePath(pluginId, cliPath);
       }
@@ -1817,6 +1871,7 @@ export class AgentManager {
         pluginId,
         proxy,
         home,
+        ...(runtime ? { runtime } : {}),
         cliPath,
         defaults: normalizeProxyDefaults(input.defaults),
       };
@@ -1825,7 +1880,12 @@ export class AgentManager {
         [agent.id],
         officialKinds(proxy),
       );
-      if (launch) this.rewritePublishedAgentId(pluginId, launch.pluginVersion, cliPath, agent.id);
+      if (launch) this.rewritePublishedAgentId(
+        pluginId,
+        launch.pluginVersion,
+        runtime?.kind === 'custom' ? runtime.path : cliPath,
+        agent.id,
+      );
       return agent;
     });
     if (agent.proxy === 'codex') await this.reconcileManagedSkills();
@@ -1840,8 +1900,17 @@ export class AgentManager {
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
     enabled?: boolean;
+    /** ADR-0094 phase 1: the Runtime binding is create-only. */
+    runtime?: unknown;
   }): Promise<UserAgent> {
     const existing = this.getAgent(id);
+    if (patch.runtime !== undefined) {
+      throw new AgentCreateError(
+        'RUNTIME_EDIT_UNSUPPORTED',
+        'The Runtime binding is set at Agent creation; delete and recreate the Agent to change it.',
+        400,
+      );
+    }
     if (patch.pluginId !== undefined) {
       const nextPluginId = resolvePluginIdInput(patch.pluginId);
       if (nextPluginId !== existing.pluginId) throw new PluginIdImmutableError();
@@ -1964,7 +2033,9 @@ export class AgentManager {
     const pending = this.agentStatusProbes.get(id);
     if (!refresh && pending?.generation === generation) return pending.promise;
     if (this.options.managedProxies) {
-      const value = await this.managedGenerationAgentStatus(agent);
+      const value = agent.runtime?.kind === 'custom'
+        ? await this.customRuntimeAgentStatus(agent)
+        : await this.managedGenerationAgentStatus(agent);
       this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
       return value;
     }
@@ -2045,6 +2116,94 @@ export class AgentManager {
     });
     this.agentStatusProbes.set(id, { generation, promise: probe });
     return probe;
+  }
+
+  /** ADR-0094: a custom-Runtime Agent never reports the managed generation's
+   *  certified version. Its Runtime status comes from the user-provided path
+   *  plus the latest probe of exactly that path; without a successful probe
+   *  the Runtime is unverified, and a missing path is an explicit error. */
+  private async customRuntimeAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
+    const path = agent.runtime?.kind === 'custom' ? agent.runtime.path : '';
+    const trusted = await this.trustedLaunch(agent.pluginId);
+    const pathReady = path.length > 0 && await existsReadable(path);
+    let probeFailure: { code: string; message: string; repairable: boolean } | null = null;
+    if (pathReady && trusted && this.options.runtimeResolver
+      && !this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path)) {
+      // No probe record for this path (e.g. after a Host restart): probe now
+      // so the status view and session launch share one verification result.
+      try {
+        await this.probeAgentRuntimePath(agent.pluginId, path);
+      } catch (error) {
+        probeFailure = {
+          code: 'RUNTIME_INVALID',
+          message: error instanceof Error ? error.message : String(error),
+          repairable: false,
+        };
+      }
+    }
+    const probe = trusted && path
+      ? this.options.readinessCache?.get(agent.pluginId, trusted.pluginVersion, path) ?? null
+      : null;
+    const profile = (path
+      ? this.lastOpenRuntimeProfiles.get(`${agent.pluginId}\0${path}`) ?? null
+      : null) ?? probe?.profile ?? null;
+    const plugin: Omit<AgentProxyStatus, 'defaults'> = trusted
+      ? {
+        state: 'ready',
+        path: trusted.entryPath,
+        version: trusted.pluginVersion,
+        verifiedCliVersions: [...(trusted.runtime.verifiedVersions ?? [])],
+        source: trusted.source === 'official-development' ? 'development' : 'github-release',
+      }
+      : agent.proxy ? await this.proxyStatus(agent.proxy) : {
+        state: 'missing',
+        path: null,
+        version: null,
+        source: null,
+      };
+    const cli: AgentCliStatus = !pathReady
+      ? {
+        state: 'invalid',
+        path: path || null,
+        version: null,
+        source: 'override',
+        error: 'The custom Runtime path no longer exists or is not readable.',
+        readinessIssue: {
+          code: 'RUNTIME_PATH_MISSING',
+          message: 'The custom Runtime path no longer exists or is not readable.',
+          repairable: false,
+        },
+      }
+      : probeFailure || probe?.state === 'invalid'
+        ? {
+          state: 'invalid',
+          path,
+          version: profile?.version ?? null,
+          source: 'override',
+          readinessIssue: probeFailure ?? probe?.readinessIssue,
+        }
+        : {
+          state: 'ready',
+          path,
+          version: profile?.version ?? null,
+          verifiedVersions: [...(trusted?.runtime.verifiedVersions ?? [])],
+          contentFingerprint: profile?.contentFingerprint ?? null,
+          source: 'override',
+        };
+    return {
+      ...agent,
+      cliPath: null,
+      proxyName: agent.proxy ? AGENTS[agent.proxy].name : agent.pluginId,
+      // A custom Runtime is launchable when its path probes clean; a version
+      // outside the Manifest's verified list stays launchable ('unverified'),
+      // only 'incompatible' or an unreadable path blocks.
+      ready: plugin.state === 'ready' && cli.state === 'ready',
+      cli,
+      plugin: { ...plugin, defaults: copyProxyDefaults(agent.defaults) },
+      runtimeProfile: profile ? { ...profile, agentId: agent.id } : null,
+      skill: null,
+      officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
+    };
   }
 
   private async managedGenerationAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {

@@ -16,10 +16,29 @@ The entry point requires an absolute managed binary path:
 node dist/src/cli/spawn.js --kimi-bin /absolute/path/to/kimi
 ```
 
+Current development candidate: **0.4.5**. Successful question dismissal
+accepts the native 40909 response only for the dismiss endpoint with its
+verified success payload; REST and WebSocket resolution share one terminal
+fact, including when the native event arrives before the response.
+Native message and session list requests use their verified maximum of
+100 entries. They follow newest-first pages with `before_id` to fetch older
+records; message history is reversed into chronological replay order before
+Gian's independent event pagination.
+Cold native sessions are resumed by a bounded message-list read before WS
+subscription. Attach waits for an accepted subscription ACK, so a cold child
+cannot silently run prompts without an event stream. Every subsequent send
+rechecks this barrier on the current connection; a failed check leaves the
+binding stale and submits no prompt. Cached Side Chat resumes report live
+state and reattach stale bindings to the same native child after a restart.
+Turn-scoped live facts include the native prompt in their identity; replay
+tool facts also distinguish reused tool-call ids across turns. Replay snapshot
+identity is v2 for this change; terminal identities are unchanged. Existing
+stored transcripts are not rewritten.
+
 ## Runtime baseline
 
-- Kimi Code CLI `2.1.x` (verified against the installed `2.1.1`; the manifest
-  records `2.1.0` pending a real-acceptance bump). Evidence baseline: the
+- Kimi Code CLI `2.1.1` (the Manifest and certified Runtime candidate select
+  the same exact official archive). Evidence baseline: the
   server's own OpenAPI 3.0.3 (`/openapi.json`) and AsyncAPI 3.1.0
   (`/asyncapi.json`) documents, plus `packages/kap-server` sources embedded in
   the official binary (`protocol/error-codes.ts`, `transport/ws/*`,
@@ -69,23 +88,23 @@ dependency.
 | `input.localFile` | Content part `{type:"file", path, name?, media_type?}` (same union). |
 | `input.skill` | Prompt-level `skills: [{name, args?}]` — the native per-turn activation (REST analogue of the `/<skill>` slash command). |
 | `turn.start` | `POST prompts` with a client-derived deterministic `prompt_id`; `PROMPT_ID_CONFLICT` (40927) makes retries idempotent. Turn config (model/thinking/permission_mode) rides the prompt as server-native turn-scoped overrides. A `queued` status means the server already had an active prompt → `SESSION_BUSY` instead of a silently queued turn. |
-| Turn events | `turn.started/ended` (native numeric turnId), `assistant.delta`/`thinking.delta` (volatile), `tool.call.started` (args + structured display), `tool.result`, `agent.status.updated` usage. Terminal is finalized deterministically by the projector: open content completes, pending interactions resolve `turn_ended`, final session usage (bounded REST) attaches, then exactly one `turn.completed`/`turn.failed`. |
-| `turn.interrupt` | `POST prompts/{prompt_id}:abort` → `{aborted, at_seq}`; accepted aborts map `turn.ended(cancelled)` → `stopReason:"interrupted"`. A settle watchdog (15 s) fails the turn if the server never ends it. |
+| Turn events | `turn.started/ended` (native numeric turnId), `assistant.delta`/`thinking.delta` (volatile; Kimi 2.1.1 reuses the current durable seq and stamps `offset`, reset by `turn.step.started`), `tool.call.started` (args + structured display), `tool.result`, `agent.status.updated` usage. Terminal is finalized deterministically by the projector: open content completes, pending interactions resolve `turn_ended`, final session usage (bounded REST) attaches, then exactly one `turn.completed`/`turn.failed`. |
+| `turn.interrupt` | `POST prompts/{prompt_id}:abort` → `{aborted, at_seq}`; accepted aborts map `turn.ended(cancelled)` → `stopReason:"interrupted"`. A settle watchdog (15 s) is armed on every interrupt answer — `aborted:false` only means the terminal is in flight; if none lands, the watchdog re-aborts best-effort and fences the turn. |
 | `turn.steer` | Queue a prompt (`prompt_id` deterministic; 40927 ⇒ identical replay) then `POST prompts:steer {prompt_ids}`. Without a running turn the proxy fails with `TURN_NOT_FOUND` before submitting (upstream would silently queue). `prompt.steered` surfaces as a notice activity; the steered turn keeps its identity and terminal. |
 | `interaction` (permissions) | `event.approval.requested` → `interaction.requested` (`Allow`/`Deny`), `POST /approvals/{id} {decision, feedback?}`; expiry/foreign resolution → honest `interaction.resolved(cancelled)`; 40902/41001 → `INTERACTION_NOT_FOUND`. |
-| `interaction` (structured questions) | `event.question.requested` keeps every question/header/options/multi_select/allow_other as gian `inputs`; accept posts the native `answers` map (+`note`), decline posts `:dismiss`. responseId ledger replays duplicates and CONFLICTs on reuse with different content. |
+| `interaction` (structured questions) | `event.question.requested` keeps every question/header/options/multi_select/allow_other as gian `inputs`; accept wraps each value into the native kind-discriminated answer record (`single`/`multi`/`other`, top-level `note` passes through), decline posts `:dismiss`. responseId ledger replays duplicates and CONFLICTs on reuse with different content. |
 | `session.rename` | `POST /sessions/{id}/profile {title}` — native rename. |
 | `session.fork` (head) | `POST /sessions/{id}/children` (the upstream head fork); child adopted (resume + subscribe), origin anchored on the last completed native turn. |
 | `session.fork.atTurn` | **Unsupported**: the engine `forkSessionOptionsSchema` has `turnIndex`, but the REST surface exposes no turn boundary (only head children). Refused with `FORK_BOUNDARY_UNAVAILABLE` naming the evidence. |
 | `sidechat.*` | Create = head child of the parent with an opaque encrypted resume ref (`OpaqueSidechatResumeStore`, GIAN_PLUGIN_DATA_DIR key); resume reattaches the child; close detaches + tombstones the ref, `providerDataDeleted:false` (child `:delete` permanence unverified). |
 | `session.native.list` | `GET /sessions` (cursor pagination mapped to the outer cursor; busy sessions excluded — they are not adoptable; owned sessions filtered). |
 | `session.native.delete` | `POST /sessions/{id}:delete` (`{deleted:true}`). Attached sessions refuse with `SESSION_BUSY`. |
-| `session.replay` + adoption | `GET /messages` (cursor-paged) → replay events keyed by native `prompt_id`; terminal eventIds shared with the live projector, so attach-replay and `session.replay` name identical facts. `nativeSession.history:"replay"` projects the transcript onto the fresh stream in the create response barrier. |
+| `session.replay` + adoption | `GET /messages` (cursor-paged) → replay events keyed by native `prompt_id`; terminal eventIds shared with the live projector, so replayed and live facts share one identity. Attach history is pull-only: `nativeSession.history:"replay"` leads the Host to page `session.replay` after create; create itself emits no replay-shaped notifications. |
 | `event.plan` | Native `tool.call.started display.kind:"todo_list"` items → `plan.updated` (status map done→completed); `plan_review` displays carry the plan text. Fingerprint-deduped. |
-| `event.diff` | Per-turn `GET /file-history/changes?turn_id` (path/status/additions/deletions) + before/after `file-history/content` checkpoints rendered as a bounded LCS unified diff. All facets bounded (3 s) — a wedged REST call skips the facet instead of stalling the terminal. |
+| `event.diff` | Per-turn `GET /file-history/changes?turn_id` (path/status/additions/deletions) + before/after `file-history/content` checkpoints rendered as a bounded LCS unified diff. All terminal facets are bounded (shared 10 s deadline; per-request timeouts; the REST deadline covers the response body) — a wedged call skips the facet instead of stalling the terminal. |
 | Subagent/task activity | `subagent.spawned/started/completed/failed/cancelled` and `task.*`/`background.task.*` → `activity.updated` with `presentation.type:"agent"`, stable identity = `subagentId`/`taskId`, `parentToolCallId` preserved. Subagent streams (non-main agentId) do not pollute the main transcript. |
 | `event.usage` | `agent.status.updated.usage.total` (by-model tokens) live; final session usage attached at the terminal. |
-| `catalog.list/resolve` | `GET /models` (provider aliases, `support_efforts`, `default_effort`, `max_context_size`) + `GET /config` default model. Model/thinking/approval options; switching models drops stale thinking values. |
+| `catalog.list/resolve` | `GET /models` (provider aliases, `support_efforts`, `default_effort`, `max_context_size`) + `GET /config` default model. Model/thinking/approval options follow the selected model: declared efforts, or on/off when `thinking` is supported without efforts; `always_thinking` cannot offer off. The native default is the declared effort (otherwise the middle effort), or on for boolean models. Switching model-specific Catalog revisions drops stale thinking values in either direction; turn submission rejects unadvertised thinking before REST. |
 | `customization.list/detail` (2.3) | Read-only filesystem inventory (skills/mcp/hooks/rules), unchanged from the ACP generation. Hooks stay scan-only: the server API has no hook enumeration either. |
 
 ### Unsupported (with upstream evidence)

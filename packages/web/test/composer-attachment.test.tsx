@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Session } from '@gian/shared';
-import { KEY_BACKSPACE_COMMAND, UNDO_COMMAND, type LexicalEditor } from 'lexical';
+import { $getRoot, KEY_BACKSPACE_COMMAND, UNDO_COMMAND, type LexicalEditor } from 'lexical';
 
 import {
   Composer,
@@ -425,16 +425,25 @@ describe('Composer file attachments', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add context' }));
     await user.click(screen.getByRole('button', { name: 'Files and folders' }));
+    await screen.findByText('example-folder');
     const textbox = screen.getByRole('textbox');
     const editor = (textbox as HTMLElement & { __lexicalEditor?: LexicalEditor }).__lexicalEditor;
+    expect(editor).toBeTruthy();
+    act(() => {
+      (textbox as HTMLElement).focus();
+      editor!.update(() => $getRoot().selectEnd(), { discrete: true });
+    });
     // Two-step delete: the first Backspace splices the trailing space and
     // selects the chip, the second deletes it.
-    for (let i = 0; i < 2; i += 1) {
-      act(() => editor?.dispatchCommand(
-        KEY_BACKSPACE_COMMAND,
-        new KeyboardEvent('keydown', { key: 'Backspace' }),
-      ));
-    }
+    act(() => editor!.dispatchCommand(
+      KEY_BACKSPACE_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Backspace' }),
+    ));
+    await waitFor(() => expect(textbox.querySelector('[data-reference-id]')).toHaveClass('is-selected'));
+    act(() => editor!.dispatchCommand(
+      KEY_BACKSPACE_COMMAND,
+      new KeyboardEvent('keydown', { key: 'Backspace' }),
+    ));
     await waitFor(() => expect(screen.queryByText('example-folder')).toBeNull());
     act(() => editor?.dispatchCommand(UNDO_COMMAND, undefined));
     // Hover previews the folder chip (a plain click is a no-op, 2026-09-10).

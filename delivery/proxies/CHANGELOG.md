@@ -1,5 +1,71 @@
 # Gian Proxies Changelog
 
+## Kimi Proxy 0.4.5 - Unreleased
+
+- Materialize native cold Side Chat children before subscribing and reject
+  failed subscription acknowledgements. Keep child events and terminal state
+  bound to the actual child turn.
+- Forward Stop to the native Runtime and settle interrupted turns without
+  requiring Host fencing; preserve follow-up turns and interaction cancellation.
+- Keep the Kimi Code 2.1.1 Runtime pin and gian.proxy wire versions unchanged.
+
+## Catalog 1.19.0 - 2026-09-30
+
+- Select the published Kimi Proxy 0.4.4 release and its unchanged Kimi Code 2.1.1 Runtime.
+- Retain every other signed Proxy coordinate from Catalog 1.18.0, including Codex Proxy 0.3.3 / Codex CLI 0.159.2. No App release.
+
+## Catalog 1.18.0 - 2026-09-30
+
+- Select the published Codex Proxy 0.3.3 and its Codex CLI 0.159.2 Runtime.
+- Retain every other signed Proxy coordinate from Catalog 1.17.0. No App release.
+
+## Codex Proxy 0.3.3 - 2026-09-30
+
+- Target the managed Codex CLI 0.159.2 Runtime with the existing app-server adapter.
+- Retain the gian.proxy wire contract and the previously published Codex Proxy and Runtime for rollback.
+
+## Kimi Proxy 0.4.4 - 2026-09-30
+
+- Show assistant prose as its own text stream on each step. Thinking stays reasoning, also split per step, and tool results keep command, file, and search presentation.
+- Enable fork and side chat after a completed turn while the session is idle. Forking from a specific turn stays unavailable.
+- Accept volatile frames that reuse the current sequence, and include the turn prompt id on usage events.
+- This release does not change the Proxy wire protocol or the Kimi Code 2.1.1 Runtime pin.
+
+## Grok Proxy 0.3.7 - Unreleased
+
+- Bind model and reasoning effort to the turn. Permission mode stays session-bound.
+- Require `workspace.roots` to include the session directory. The Host may also list the session attachment directory; that path is not added to the sandbox.
+- Hold turn events that arrive before `turn.started`, and drop usage deltas after the turn ends.
+- Normalize native interaction IDs across tool metadata and interaction events;
+  retain first-turn ordering and configuration validation during model changes.
+- Refresh the Grok Build logos and show the default permission mode as Default.
+- This release does not change the Proxy wire protocol or the Grok CLI 1.0.41 Runtime pin.
+
+## Catalog 1.17.0 - 2026-09-28
+
+- Select the published Kimi Proxy 0.4.3 release and its Kimi Code 2.1.1 Runtime.
+- Retain every other signed Proxy coordinate from Catalog 1.16.0. No App release.
+
+## Kimi Proxy 0.4.3 - 2026-09-28
+
+- Keep previously returned Catalog revisions valid while the underlying Kimi
+  model catalog is unchanged, so switching models can refresh the available
+  reasoning efforts without an erroneous revision rejection.
+- Require a new `catalog.list` when the underlying model catalog changes.
+  This release does not change the Proxy wire protocol or the Kimi 2.1.1 Runtime pin.
+
+## Published Catalog history restored - 2026-09-28
+
+- Restore the Catalog source that shipped without being merged to main. Grok
+  0.3.6 is an official Catalog plugin, and the authored histories match Catalog
+  1.16: Claude 0.3.2, Codex 0.3.2, Kimi 0.4.2, DeepSeek 0.3.3, ZCode 0.4.2, and
+  Grok 0.3.6.
+- DeepSeek Proxy 0.3.4 and ZCode Proxy 0.4.3 on main already match those
+  published local builds. Source may stay ahead of the last signed snapshot.
+- ZCode qualification uses a short macOS temporary directory so the Runtime
+  socket fits `sun_path`, and keeps a redacted stderr tail when the catalog
+  probe exits early.
+
 ## Catalog 1.10.0 - 2026-09-24
 
 - Select the certified Claude 0.3.2, Codex 0.3.2, Kimi 0.3.3 and DeepSeek 0.3.2

@@ -39,10 +39,14 @@ it('enables the remote-session toggle and prepares translated sends through the 
     onSteer={noop} onSetMode={noop} onSetModel={noop} onSetEffort={noop} onSetServiceTier={noop}
     onSetNativeConfig={noop} onShowLastTurnChanges={noop}
   /></LocaleProvider>);
-  await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled());
-  expect(screen.getByRole('switch')).toBeChecked();
-  const underbar = screen.getByRole('switch').closest('.main-underbar')!;
-  expect(underbar.textContent?.indexOf('Auto translate')).toBeLessThan(underbar.textContent!.indexOf('Navigation fixture'));
+  // The auto-translate toggle is a chip button (aria-pressed), not a switch.
+  const chip = await screen.findByRole('button', { name: 'Auto translate' });
+  await waitFor(() => expect(chip).not.toBeDisabled());
+  expect(chip).toHaveAttribute('aria-pressed', 'true');
+  const underbar = chip.closest('.main-underbar')!;
+  expect(underbar).not.toBeNull();
+  const nav = screen.getByRole('button', { name: 'Navigation fixture' });
+  expect(chip.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Submit fixture' }));
   await waitFor(() => expect(onSend).toHaveBeenCalledWith('中文问题', { translationId: 'local-translation-receipt' }));
   expect(translateText).toHaveBeenCalledWith('local-conversation', expect.objectContaining({ text: '中文问题', purpose: 'send' }),

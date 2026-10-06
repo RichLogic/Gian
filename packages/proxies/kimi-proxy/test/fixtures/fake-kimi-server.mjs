@@ -81,6 +81,7 @@ const state = {
   models: scenario.models ?? [],
   defaultModel: scenario.default_model ?? null,
   wsClients: new Set(),
+  wsConnections: 0,
 };
 
 if (statePath && fs.existsSync(statePath)) {
@@ -89,7 +90,7 @@ if (statePath && fs.existsSync(statePath)) {
     for (const [root, workspace] of saved.workspaces ?? []) state.workspaces.set(root, workspace);
     for (const [id, session] of saved.sessions ?? []) {
       state.sessions.set(id, {
-        info: session.info, messages: session.messages ?? [], busy: false, activePrompt: null,
+        info: session.info, messages: session.messages ?? [], live: false, busy: false, activePrompt: null,
         turnCounter: session.turnCounter ?? 0, childOf: session.childOf ?? null, turnIdByPrompt: new Map(),
       });
     }
@@ -121,6 +122,7 @@ for (const seed of scenario.sessions ?? []) {
   state.sessions.set(info.id, {
     info,
     messages: seed.messages ?? [],
+    live: false,
     busy: false,
     activePrompt: null,
     turnCounter: 0,
@@ -131,23 +133,32 @@ for (const seed of scenario.sessions ?? []) {
 
 const getTurnScript = (sessionId) => {
   const perSession = scenario.turns?.[sessionId];
-  return perSession ?? scenario.turn ?? null;
+  if (perSession !== undefined) return perSession;
+  if (Array.isArray(scenario.turnSequence)) {
+    return scenario.turnSequence[Math.min(state.sessions.get(sessionId)?.turnCounter ?? 0, scenario.turnSequence.length - 1)];
+  }
+  return scenario.turn ?? null;
 };
 
 // ---- turn scripts (WS event scheduling) ----
 
 const timers = new Set();
+const promptTimers = new Map();
 
-function emitFrame(sessionId, type, payload) {
+function emitFrame(sessionId, type, payload, options = {}) {
   const session = state.sessions.get(sessionId);
   if (!session) return;
-  session.info.last_seq += 1;
+  // Kimi 2.1.1 volatile frames reuse the current durable seq instead of
+  // calling nextSeq(). reuseSeq models that; the default still increments.
+  if (options.reuseSeq !== true) session.info.last_seq += 1;
   const frame = {
     type,
     seq: session.info.last_seq,
     epoch: `ep_${sessionId.slice(-8)}`,
     session_id: sessionId,
     timestamp: new Date().toISOString(),
+    ...(options.volatile === true ? { volatile: true } : {}),
+    ...(Number.isInteger(options.offset) ? { offset: options.offset } : {}),
     payload: { type, ...payload },
   };
   for (const client of state.wsClients) {
@@ -161,6 +172,8 @@ function scheduleScript(sessionId, script, promptId) {
   const turnId = ++session.turnCounter;
   session.turnIdByPrompt.set(promptId, turnId);
   let elapsed = script.delayBefore ?? 15;
+  const ownedTimers = new Set();
+  promptTimers.set(`${sessionId}\0${promptId}`, ownedTimers);
   for (const step of script.events ?? []) {
     if (step.op === 'wait') {
       elapsed += step.ms ?? 20;
@@ -170,6 +183,8 @@ function scheduleScript(sessionId, script, promptId) {
     const at = elapsed;
     const timer = setTimeout(() => {
       timers.delete(timer);
+      ownedTimers.delete(timer);
+      if (ownedTimers.size === 0) promptTimers.delete(`${sessionId}\0${promptId}`);
       if (step.type === 'turn.ended') {
         session.busy = false;
         session.activePrompt = null;
@@ -190,11 +205,16 @@ function scheduleScript(sessionId, script, promptId) {
           note: null,
         });
       }
-      emitFrame(sessionId, step.type, { promptId, turnId, ...(step.payload ?? {}) });
+      emitFrame(sessionId, step.type, { promptId, turnId, ...(step.payload ?? {}) }, {
+        volatile: step.volatile === true,
+        reuseSeq: step.reuseSeq === true,
+        offset: step.offset,
+      });
       log({ kind: 'ws-frame', sessionId, type: step.type, turnId });
     }, at);
     timer.unref();
     timers.add(timer);
+    ownedTimers.add(timer);
     void snapshot;
   }
 }
@@ -203,6 +223,11 @@ function abortScript(sessionId, promptId) {
   const session = state.sessions.get(sessionId);
   if (!session) return false;
   const turnId = session.turnIdByPrompt.get(promptId);
+  for (const timer of promptTimers.get(`${sessionId}\0${promptId}`) ?? []) {
+    clearTimeout(timer);
+    timers.delete(timer);
+  }
+  promptTimers.delete(`${sessionId}\0${promptId}`);
   session.busy = false;
   session.activePrompt = null;
   session.info.main_turn_active = false;
@@ -248,6 +273,16 @@ function attachWs(req, socket) {
     sendJson: (value) => wsSendText(socket, JSON.stringify(value)),
   };
   state.wsClients.add(client);
+  state.wsConnections += 1;
+  if (state.wsConnections === 1 && scenario.behavior?.disconnectSocketOnceMs) {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      log({ kind: 'ws-disconnected' });
+      socket.destroy();
+    }, scenario.behavior.disconnectSocketOnceMs);
+    timer.unref();
+    timers.add(timer);
+  }
   client.sendJson({
     type: 'server_hello',
     timestamp: new Date().toISOString(),
@@ -309,15 +344,30 @@ function attachWs(req, socket) {
         const cursors = {};
         for (const sid of requested) {
           const session = state.sessions.get(sid);
-          if (!session) { notFound.push(sid); continue; }
+          if (!session || !session.live || scenario.behavior?.rejectSubscriptions
+            || (scenario.behavior?.rejectReconnectedSubscriptions && state.wsConnections > 1)) {
+            notFound.push(sid);
+            continue;
+          }
           accepted.push(sid);
           cursors[sid] = { seq: session.info.last_seq, epoch: `ep_${sid.slice(-8)}` };
           client.subscriptions.add(sid);
         }
-        client.sendJson({
-          type: 'ack', id: frame.id ?? '', code: 0, msg: 'success',
-          payload: { accepted, not_found: notFound, resync_required: [], cursors },
-        });
+        const sendAck = () => {
+          log({ kind: 'subscription-ack', accepted, notFound });
+          client.sendJson({
+            type: 'ack', id: frame.id ?? '', code: 0, msg: 'success',
+            payload: { accepted, not_found: notFound, resync_required: [], cursors },
+          });
+        };
+        const ackDelay = scenario.behavior?.subscribeAckDelayMs ?? 0;
+        if (scenario.behavior?.dropSubscriptionAck) {
+          log({ kind: 'subscription-ack-dropped', accepted, notFound });
+        } else if (ackDelay > 0) {
+          const timer = setTimeout(() => { timers.delete(timer); sendAck(); }, ackDelay);
+          timer.unref();
+          timers.add(timer);
+        } else sendAck();
         // A ping right after subscription exercises the pong path.
         client.sendJson({ type: 'ping', timestamp: new Date().toISOString(), payload: { nonce: ulid() } });
       }
@@ -394,19 +444,24 @@ const server = http.createServer(async (req, res) => {
       const info = makeSessionInfo(body.metadata?.cwd ?? '/tmp/fake-ws');
       info.workspace_id = body.workspace_id ?? '';
       if (body.agent_config) info.agent_config = body.agent_config;
-      state.sessions.set(info.id, { info, messages: [], busy: false, activePrompt: null, turnCounter: 0, childOf: null, turnIdByPrompt: new Map() });
+      state.sessions.set(info.id, { info, messages: [], live: true, busy: false, activePrompt: null, turnCounter: 0, childOf: null, turnIdByPrompt: new Map() });
       persistState();
       return ok(res, info);
     }
     if (req.method === 'GET' && path === '/api/v1/sessions') {
-      const pageSize = Number(url.searchParams.get('page_size') ?? 50);
+      const pageSize = Number(url.searchParams.get('page_size') ?? 20);
+      const beforeId = url.searchParams.get('before_id');
       const afterId = url.searchParams.get('after_id');
+      if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) return fail(res, 40001, 'page_size must be an integer from 1 to 100');
+      if (beforeId && afterId) return fail(res, 40001, 'before_id and after_id are mutually exclusive');
       const busyOnly = url.searchParams.get('busy');
-      let items = [...state.sessions.values()].map(sessionView);
+      let items = [...state.sessions.values()].map(sessionView)
+        .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)) || b.id.localeCompare(a.id));
       if (busyOnly === 'false') items = items.filter((info) => info.busy === false);
-      if (afterId) {
-        const index = items.findIndex((info) => info.id === afterId);
-        if (index >= 0) items = items.slice(index + 1);
+      const pivot = beforeId ?? afterId;
+      if (pivot) {
+        const index = items.findIndex((info) => info.id === pivot);
+        if (index >= 0) items = beforeId ? items.slice(index + 1) : items.slice(0, index);
       }
       const hasMore = items.length > pageSize;
       return ok(res, { items: items.slice(0, pageSize), has_more: hasMore });
@@ -425,9 +480,11 @@ const server = http.createServer(async (req, res) => {
       const childInfo = makeSessionInfo(session.info.metadata?.cwd ?? '/tmp/fake-ws');
       childInfo.title = body.title ?? `Fork of ${session.info.title}`;
       state.sessions.set(childInfo.id, {
-        info: childInfo, messages: [], busy: false, activePrompt: null, turnCounter: 0,
+        info: childInfo, messages: session.messages.map((message) => ({ ...message, session_id: childInfo.id })),
+        live: false, busy: false, activePrompt: null, turnCounter: 0,
         childOf: sid, turnIdByPrompt: new Map(),
       });
+      persistState();
       return ok(res, childInfo);
     }
     if (sid !== null && !session) return fail(res, 40401, 'session not found');
@@ -438,12 +495,20 @@ const server = http.createServer(async (req, res) => {
       return ok(res, sessionView(session));
     }
     if (req.method === 'GET' && path === `/api/v1/sessions/${sid}/messages`) {
-      const pageSize = Number(url.searchParams.get('page_size') ?? 200);
+      const pageSize = Number(url.searchParams.get('page_size') ?? 50);
+      const beforeId = url.searchParams.get('before_id');
       const afterId = url.searchParams.get('after_id');
-      let items = session.messages;
-      if (afterId) {
-        const index = items.findIndex((message) => message.id === afterId);
-        if (index >= 0) items = items.slice(index + 1);
+      if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) return fail(res, 40001, 'page_size must be an integer from 1 to 100');
+      if (beforeId && afterId) return fail(res, 40001, 'before_id and after_id are mutually exclusive');
+      if (!session.live) log({ kind: 'materialized', sessionId: sid });
+      session.live = true; // Native listMessages resumes a cold session.
+      // Official messageHistory.listMessages reverses durable history, then
+      // before_id selects older messages and after_id selects newer ones.
+      let items = [...session.messages].reverse();
+      const pivot = beforeId ?? afterId;
+      if (pivot) {
+        const index = items.findIndex((message) => message.id === pivot);
+        if (index >= 0) items = beforeId ? items.slice(index + 1) : items.slice(0, index);
       }
       const hasMore = items.length > pageSize;
       return ok(res, { items: items.slice(0, pageSize), has_more: hasMore });
@@ -458,6 +523,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && path === `/api/v1/sessions/${sid}/prompts`) {
       if (scenario.behavior?.rejectPrompts) return fail(res, 40113, 'model not resolved');
+      session.live = true; // Native prompt submission also materializes cold sessions.
       const promptId = typeof body.prompt_id === 'string' && body.prompt_id !== ''
         ? body.prompt_id
         : `msg_${ulid()}`;
@@ -519,8 +585,34 @@ const server = http.createServer(async (req, res) => {
       const entry = state.questions.get(segments[5].replace(/:dismiss$/, ''));
       if (!entry) return fail(res, 40405, 'question not found');
       if (segments[5].endsWith(':dismiss')) {
+        if (entry.answers !== null) return fail(res, 40909, 'question already dismissed');
+        const data = scenario.behavior?.questionDismissData ?? {
+          dismissed: true, dismissed_at: new Date().toISOString(),
+        };
         entry.answers = {};
-        return ok(res, { answered: true });
+        const emitDismissed = () => emitFrame(sid, 'event.question.dismissed', {
+          question_id: entry.record.question_id, agentId: 'main',
+        });
+        if (scenario.behavior?.questionDismissEventOrder === 'before') {
+          emitDismissed();
+          // Let the WS fact arrive before the separate HTTP response.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        } else if (scenario.behavior?.questionDismissEventOrder !== 'none') {
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            emitDismissed();
+          }, 50);
+          timer.unref();
+          timers.add(timer);
+        }
+        // The official server deliberately uses QUESTION_DISMISSED even
+        // after successfully resolving the native interaction.
+        return envelope(res, 200, 40909, 'question dismissed', data);
+      }
+      if (scenario.behavior?.questionAnswerReturnsDismissed) {
+        return envelope(res, 200, 40909, 'question already dismissed', {
+          dismissed: true, dismissed_at: new Date().toISOString(),
+        });
       }
       if (entry.answers !== null) return fail(res, 40909, 'question dismissed or answered');
       entry.answers = body.answers ?? null;
@@ -574,6 +666,7 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
+  log({ kind: 'listening', port: PORT });
   process.stdout.write(`Kimi server: http://127.0.0.1:${PORT}/#token=${TOKEN}\n`);
   if (scenario.behavior?.selfDestructMs) {
     const timer = setTimeout(() => process.exit(9), scenario.behavior.selfDestructMs);
@@ -584,4 +677,5 @@ server.listen(PORT, '127.0.0.1', () => {
 // Drain stdin so the supervisor's spawn does not block on a full pipe.
 createInterface({ input: process.stdin }).on('line', () => undefined);
 
+process.on('exit', persistState);
 process.on('SIGTERM', () => process.exit(0));

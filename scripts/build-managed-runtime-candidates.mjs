@@ -38,20 +38,20 @@ export const upstreamRuntimeCandidates = Object.freeze({
     size: 217254576,
   }),
   codex: Object.freeze({
-    version: '0.156.1',
+    version: '0.159.2',
     format: 'tar.gz',
     entryRelativePath: 'bin/codex',
-    url: 'https://github.com/openai/codex/releases/download/rust-v0.156.1/codex-package-aarch64-apple-darwin.tar.gz',
-    sha256: 'fea42f9625091f011e38f059da974d52e57ba31831648bb1c7f0b1a385fde547',
-    size: 127394863,
+    url: 'https://github.com/openai/codex/releases/download/rust-v0.159.2/codex-package-aarch64-apple-darwin.tar.gz',
+    sha256: '38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101',
+    size: 129522674,
   }),
   kimi: Object.freeze({
-    version: '2.1.0',
+    version: '2.1.1',
     format: 'tar.gz',
     entryRelativePath: 'kimi',
-    url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.1.0/kimi-code-darwin-arm64.tar.gz',
-    sha256: 'b5e9a77313855e6a763608bda12ff0e26855d311a4faeed770ae915c7ee7c39a',
-    size: 62298935,
+    url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.1.1/kimi-code-darwin-arm64.tar.gz',
+    sha256: '8c3bad99571b16abd113ab5d511a98a36b852c0d5493991842a67b8c2bc4ecd0',
+    size: 62296524,
   }),
 });
 

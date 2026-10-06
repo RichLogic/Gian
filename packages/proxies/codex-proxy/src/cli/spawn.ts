@@ -162,6 +162,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     try {
       await queue.drain();
+      await adapter.close();
       await service.close();
     } catch (error) {
       // Fail closed: an unverified terminal cleanup must turn the shutdown

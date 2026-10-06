@@ -242,6 +242,8 @@ export interface DiffItem {
   kind: 'diff';
   id: string;
   files: DiffFile[];
+  /** Runtime launch root used to identify absolute/relative file aliases. */
+  cwd?: string;
   ts: number;
   turn: number;
 }

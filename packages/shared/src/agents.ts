@@ -1,7 +1,7 @@
 import type { ConfigValue, Executor, ProductExecutor } from './model.js';
 import type { ProxyPluginId } from './plugin-id.js';
 import type { OpenRuntimeProfile } from './session-proxy-binding.js';
-import type { AgentHomeBinding } from './managed-runtime.js';
+import type { AgentHomeBinding, AgentRuntimeBinding } from './managed-runtime.js';
 
 export interface AgentProxyDefaults {
   /** Empty means the Proxy/CLI default. */
@@ -37,6 +37,9 @@ export interface UserAgent {
   /** Provider state/configuration root. For ZCode the path ends in .zcode;
    *  the CLI receives its parent as process HOME. */
   home?: AgentHomeBinding | null;
+  /** Per-Agent Runtime binding. Absent/null means the managed generation;
+   *  `custom` pins a user-provided Runtime path (ADR-0094). */
+  runtime?: AgentRuntimeBinding | null;
   /** @deprecated Migration/development compatibility only. Production APIs
    *  reject this input and managed execution never resolves from it. */
   cliPath: string | null;

@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "codex",
-  "currentVersion": "0.3.2",
+  "currentVersion": "0.3.3",
   "entries": [
+    {
+      "version": "0.3.3",
+      "firstPublishedAt": "2026-09-30T07:54:56Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-codex-v0.3.3",
+          "publishedAt": "2026-09-30T07:54:56Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.3",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.3/gian-proxy-codex-0.3.3-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "16f9c9a6ac60dd78c3de2a09c8044acf97c4872dd7b2603ca4f2ebbb58000a31",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.3/gian-proxy-codex-0.3.3-darwin-arm64.tar.gz",
+            "sha256": "3ecdcef0af8145a284576b79d0d77bc99f3897472cfdaef220b3e59d5efdc870",
+            "size": 193328
+          },
+          "runtimeDeclaration": {
+            "id": "codex",
+            "versions": [
+              "0.159.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Codex CLI 更新至 0.159.2；Proxy 的 app-server 桥接和 gian.proxy 线协议不变。本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.3",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.3/packages/proxies/codex-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.2",
       "firstPublishedAt": "2026-09-24T09:39:25Z",

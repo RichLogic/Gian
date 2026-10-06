@@ -15,7 +15,8 @@ import {
   translateSessionUpdate,
 } from '../core/events.js';
 import { normalizeInputItems } from '../core/input.js';
-import { parseGrokPermissionMode } from '../core/permissions.js';
+import { parseGrokPermissionMode, type GrokPermissionMode } from '../core/permissions.js';
+import { parseGrokSandboxProfile, type GrokSandboxProfile } from '../core/sandbox.js';
 import { filterAdvertisedCommands } from '../core/slash-policy.js';
 import { GrokProxyService } from '../core/service.js';
 import { NativeTurnIdentityStore } from './replay-identity.js';
@@ -141,6 +142,17 @@ interface InteractionRef extends HostTurnRef {
   questionKind?: 'question' | 'plan' | 'elicit';
   actionIds: string[];
   responses: Map<string, { actionId: string; values: Record<string, unknown> }>;
+  /** Declared elicitation fields used to rebuild the native ElicitResult content. */
+  elicitFields?: Map<string, ElicitField>;
+}
+
+interface ElicitField {
+  kind: 'string' | 'boolean';
+  required: boolean;
+  /** Closed enum values for string fields; absent for free text. */
+  options?: string[];
+  minimumLength?: number;
+  maximumLength?: number;
 }
 
 interface InteractionInput {
@@ -148,7 +160,11 @@ interface InteractionInput {
   type: 'text' | 'single_select' | 'multi_select';
   label: string;
   required: boolean;
-  choices?: Array<{ value: string; displayName: string; description?: string }>;
+  description?: string;
+  minimumLength?: number;
+  maximumLength?: number;
+  // The strict Host schema allows only value/displayName per choice.
+  choices?: Array<{ value: string; displayName: string }>;
 }
 
 interface ReplayEvent {
@@ -220,16 +236,21 @@ const CAPABILITIES = {
   'event.plan': 1,
   'event.diff': 1,
   'event.usage': 1,
-  // NOT declared (honest by default): 'session.rename', 'session.fork',
-  // 'sidechat', 'turn.steer', and 'session.native.delete' all ride on native
-  // x.ai/* stdio extension methods. The published 1.0.41 stdio agent answers
-  // -32601 "Method not found" for every one of them (live-verified before and
-  // after session/new), and initialize metadata carries no per-method
-  // surface, so the Proxy declares nothing and dispatch answers with an
-  // explicit CAPABILITY_NOT_SUPPORTED instead of a runtime failure.
+  // Fork and Side Chat are implemented and gated honestly at request time;
+  // the catalog actions carry the dynamic support state. Declaring them here
+  // lets the first user-requested head fork double as the confirming call for
+  // native x.ai/session/fork — a capability the Adapter never probes because
+  // probing would create sessions on disk.
+  'sidechat': 1,
+  'session.fork': 1,
+  'session.fork.atTurn': 1,
+  // NOT declared here: 'session.rename' and 'session.native.delete'.
+  // turn.steer is added only after a live _x.ai/interject probe confirms the
+  // method. grokShell and agentVersion do not confirm it. A prefixed-wire
+  // -32601 refutes it.
 } as const;
 
-const CONFIG_APPLY_ORDER = ['permission_mode', 'model', 'reasoning_effort'] as const;
+const CONFIG_APPLY_ORDER = ['sandbox_profile', 'permission_mode', 'model', 'reasoning_effort'] as const;
 
 const CUSTOMIZATION_KINDS = new Set(['skill', 'mcp', 'hook', 'rule']);
 
@@ -256,11 +277,106 @@ function stableId(prefix: string, value: unknown): string {
   return `${prefix}-${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 20)}`;
 }
 
+/** JSON with sorted object keys so equal payloads fingerprint identically. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value as Record<string, unknown>).sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 function isConfigValue(value: unknown): value is ConfigValue {
   return value === null
     || typeof value === 'string'
     || typeof value === 'boolean'
     || (typeof value === 'number' && Number.isFinite(value));
+}
+
+/**
+ * Translate an MCP elicitation requestedSchema (object with flat properties)
+ * into protocol inputs. Covers string, string enum, and boolean fields plus
+ * the required constraint; anything else (numbers, arrays, nested objects)
+ * cannot be expressed honestly here and returns null so the caller declines
+ * the request instead of fabricating an empty accept.
+ */
+function elicitInputsFromSchema(
+  schema: unknown,
+): { inputs: InteractionInput[]; fields: Map<string, ElicitField> } | null {
+  const root = record(schema);
+  if (root.type !== 'object' || !Object.prototype.hasOwnProperty.call(root, 'properties')) {
+    return null;
+  }
+  const properties = record(root.properties);
+  const requiredList = Array.isArray(root.required) ? root.required : [];
+  const requiredNames = new Set(requiredList.filter((name): name is string => typeof name === 'string'));
+  const inputs: InteractionInput[] = [];
+  const fields = new Map<string, ElicitField>();
+  for (const [name, rawProperty] of Object.entries(properties)) {
+    if (!name) return null;
+    const property = record(rawProperty);
+    const label = nonEmptyString(property.title) ?? name;
+    const description = nonEmptyString(property.description) ?? undefined;
+    const required = requiredNames.has(name);
+    if (property.type === 'boolean') {
+      inputs.push({
+        id: name,
+        type: 'single_select',
+        label,
+        required,
+        ...(description ? { description } : {}),
+        choices: [
+          { value: 'true', displayName: 'True' },
+          { value: 'false', displayName: 'False' },
+        ],
+      });
+      fields.set(name, { kind: 'boolean', required });
+      continue;
+    }
+    if (property.type === 'string') {
+      if (property.enum !== undefined) {
+        if (!Array.isArray(property.enum) || property.enum.length === 0) return null;
+        const values = property.enum.filter((item): item is string => typeof item === 'string');
+        if (values.length !== property.enum.length) return null;
+        const names = Array.isArray(property.enumNames) ? property.enumNames : [];
+        inputs.push({
+          id: name,
+          type: 'single_select',
+          label,
+          required,
+          ...(description ? { description } : {}),
+          choices: values.map((value, index) => ({
+            value,
+            displayName: nonEmptyString(names[index]) ?? value,
+          })),
+        });
+        fields.set(name, { kind: 'string', required, options: values });
+        continue;
+      }
+      const input: InteractionInput = { id: name, type: 'text', label, required };
+      if (description) input.description = description;
+      if (Number.isSafeInteger(property.minLength) && (property.minLength as number) >= 0) {
+        input.minimumLength = property.minLength as number;
+      }
+      if (Number.isSafeInteger(property.maxLength) && (property.maxLength as number) >= 0) {
+        input.maximumLength = property.maxLength as number;
+      }
+      inputs.push(input);
+      // Length limits are shown to the user AND enforced on submission — the
+      // native side must never accept a value its own schema rejects.
+      fields.set(name, {
+        kind: 'string',
+        required,
+        ...(input.minimumLength !== undefined ? { minimumLength: input.minimumLength } : {}),
+        ...(input.maximumLength !== undefined ? { maximumLength: input.maximumLength } : {}),
+      });
+      continue;
+    }
+    return null;
+  }
+  return { inputs, fields };
 }
 
 export function standardError(error: unknown): GrokProtocolError | GrokJsonRpcError {
@@ -349,6 +465,19 @@ function sanitizeUsage(data: Record<string, unknown>): Record<string, unknown> |
   return next;
 }
 
+// A conversation delta without a turn is rejected by the Host. When the turn
+// has already ended, keep a context snapshot and drop only the delta.
+function usageDeliverable(
+  usage: Record<string, unknown>,
+  turnId: string | undefined,
+): Record<string, unknown> | null {
+  if (turnId || record(usage.conversation).mode !== 'delta') return usage;
+  if (usage.context === undefined) return null;
+  const next = { ...usage };
+  delete next.conversation;
+  return next;
+}
+
 export class GrokProtocolV2Adapter {
   private readonly sessions = new Map<string, AttachedSession>();
   private readonly sessionByServiceId = new Map<string, AttachedSession>();
@@ -359,9 +488,17 @@ export class GrokProtocolV2Adapter {
   /** Maps turn ids minted by GrokProxyService to the Host turn.start id. */
   private readonly hostTurnByServiceTurn = new Map<string, string>();
   private readonly startedTurns = new Set<string>();
+  // Held until turn.started is queued. Config applied inside turn.start can
+  // emit model, effort, and MCP notices before the Host has a live turn.
+  private readonly pendingTurnEvents = new Map<string, Array<{
+    method: string;
+    data: Record<string, unknown>;
+    identity?: string;
+  }>>();
   private readonly interruptedTurns = new Set<string>();
   private readonly interactions = new Map<string, InteractionRef>();
   private readonly openActivitiesByTurn = new Map<string, Set<string>>();
+  private readonly activityStateByTurn = new Map<string, Map<string, Record<string, unknown>>>();
   private readonly openContentByTurn = new Map<string, Map<string, {
     kind: 'text' | 'reasoning' | 'status';
     deltaCount: number;
@@ -372,7 +509,16 @@ export class GrokProtocolV2Adapter {
   private readonly replayBySession = new Map<string, ReplayState>();
   private readonly replayPager = new ReplayPager();
   private readonly ledger = new TurnLedger();
+  /**
+   * Bounded record of settled interaction responses, keyed by
+   * sessionId/streamId/responseId. Lets the Host retry an identical response
+   * after the turn or interaction ended without re-executing the native
+   * approval; a reused responseId with any other payload conflicts.
+   */
+  private readonly settledResponses = new Map<string, string>();
   private initialized = false;
+  /** True only when this process's interject probe returned confirmed. */
+  private steerAdvertised = false;
   private protocolVersion:
     | typeof PROTOCOL_V2
     | typeof PROTOCOL_V22
@@ -380,7 +526,27 @@ export class GrokProtocolV2Adapter {
   private catalogRevision = 'grok-empty';
   private readonly resumeStore = new OpaqueSidechatResumeStore();
   private readonly sidechats = new Map<string, SidechatRecord>();
-  private readonly terminalOrderBySession = new Map<string, Array<{ turnId: string; sourceTurnId: string }>>();
+  private readonly terminalOrderBySession = new Map<string, Array<{
+    turnId: string;
+    sourceTurnId: string;
+    /** Proven absolute native prompt ordinal (0-based); absent when this
+     *  attach could not prove the position (unverified history, native
+     *  history changed, or a `history:none` resume). */
+    absoluteIndex?: number;
+  }>>();
+  /**
+   * Proven count of native prompts that existed before this attach's first
+   * live turn (0 for a fresh session, replay-group count for a verified load,
+   * fork boundary + 1 for a forked child). Null means unproven: exact-turn
+   * forks must refuse rather than guess an index.
+   */
+  private readonly promptBaseBySession = new Map<string, number | null>();
+  /** Turn ids whose native prompt was actually dispatched, in order. */
+  private readonly dispatchedTurnsBySession = new Map<string, string[]>();
+  /** Last proven absolute prompt count by native session id. Survives a
+   *  detach inside this process so a Side Chat resume can reseed its base;
+   *  never persisted, so a stale process never guesses. */
+  private readonly promptBaseByNativeId = new Map<string, number>();
   private readonly forkResults = new Map<string, { fingerprint: string; result: unknown }>();
   private holdCount = 0;
   private readonly heldNotifications: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -425,7 +591,14 @@ export class GrokProtocolV2Adapter {
       case 'session.fork': return this.forkSession(request.params);
       case 'turn.start': return this.startTurn(request.params);
       case 'turn.interrupt': return this.interruptTurn(request.params);
-      case 'turn.steer': return this.steer(request.params);
+      case 'turn.steer':
+        if (!this.steerAdvertised) {
+          throw new GrokProtocolError(
+            'CAPABILITY_NOT_SUPPORTED',
+            'turn.steer is not available on this Grok runtime.',
+          );
+        }
+        return this.steer(request.params);
       case 'interaction.respond': return this.respondInteraction(request.params);
       case 'session.close': return this.closeSession(request.params);
       case 'session.rename': return this.rename(request.params);
@@ -467,7 +640,7 @@ export class GrokProtocolV2Adapter {
     }
   }
 
-  private initialize(params: Record<string, unknown>) {
+  private async initialize(params: Record<string, unknown>) {
     if (this.initialized) {
       throw new GrokProtocolError('ALREADY_INITIALIZED', 'initialize can only be called once.');
     }
@@ -485,20 +658,22 @@ export class GrokProtocolV2Adapter {
     }
     this.initialized = true;
     this.protocolVersion = selected;
+    this.steerAdvertised = await this.service.probeInterjectSupport();
+    const base = selected === PROTOCOL_V23
+      ? {
+          ...CAPABILITIES,
+          'runtime.discover': 1,
+          'runtime.probe': 1,
+          'customization.list': 1,
+        }
+      : selected === PROTOCOL_V22
+        ? { ...CAPABILITIES, 'runtime.discover': 1, 'runtime.probe': 1 }
+        : CAPABILITIES;
     return {
       protocol: { name: PROTOCOL_NAME, version: selected },
       plugin: { id: 'grok', name: 'Grok Build', version: this.pluginVersion },
       process: { scope: 'session' as const },
-      capabilities: selected === PROTOCOL_V23
-        ? {
-            ...CAPABILITIES,
-            'runtime.discover': 1,
-            'runtime.probe': 1,
-            'customization.list': 1,
-          }
-        : selected === PROTOCOL_V22
-          ? { ...CAPABILITIES, 'runtime.discover': 1, 'runtime.probe': 1 }
-          : CAPABILITIES,
+      capabilities: this.steerAdvertised ? { ...base, 'turn.steer': 1 } : base,
     };
   }
 
@@ -547,25 +722,32 @@ export class GrokProtocolV2Adapter {
           ? { approvalMode: 'permission_mode' }
           : {}),
       },
-      actions: [
-        {
-          id: 'sidechat.create',
-          supported: this.service.supportsFork(),
-          ...(this.service.supportsFork() ? {} : { reason: 'Current Grok ACP runtime does not support session/fork.' }),
-        },
-        {
-          id: 'session.fork',
-          supported: this.service.supportsFork(),
-          ...(this.service.supportsFork() ? {} : { reason: 'Current Grok ACP runtime does not support session/fork.' }),
-        },
-        {
-          id: 'session.fork.atTurn',
-          supported: this.service.supportsAtTurnFork(),
-          ...(this.service.supportsAtTurnFork()
-            ? {}
-            : { reason: 'Exact-turn forks need native x.ai/session/fork support in this Grok runtime.' }),
-        },
-      ],
+      actions: (() => {
+        // supported means "the Proxy will serve the request": native fork is
+        // confirmed, or a user-requested head fork may still double as the
+        // confirming call. The dynamic state lives here, never in the static
+        // initialize capabilities.
+        const forkServable = this.service.supportsFork() || this.service.mayAttemptNativeFork();
+        return [
+          {
+            id: 'sidechat.create',
+            supported: forkServable,
+            ...(forkServable ? {} : { reason: this.forkUnsupportedReason() }),
+          },
+          {
+            id: 'session.fork',
+            supported: forkServable,
+            ...(forkServable ? {} : { reason: this.forkUnsupportedReason() }),
+          },
+          {
+            id: 'session.fork.atTurn',
+            supported: this.service.supportsAtTurnFork(),
+            ...(this.service.supportsAtTurnFork()
+              ? {}
+              : { reason: 'Exact-turn forks need native x.ai/session/fork support in this Grok runtime.' }),
+          },
+        ];
+      })(),
       slashCommands,
     };
     payload.catalogRevision = stableId('catalog', {
@@ -753,6 +935,7 @@ export class GrokProtocolV2Adapter {
   private sessionConfigFromRequested(requested: Record<string, unknown>): Record<string, ConfigValue> {
     const next: Record<string, ConfigValue> = {};
     for (const option of toV2ConfigOptions(this.service.currentCatalog().sessionOptions)) {
+      if (option.binding !== 'session') continue;
       const value = requested[option.id] !== undefined
         ? requested[option.id]
         : option.defaultValue;
@@ -783,10 +966,12 @@ export class GrokProtocolV2Adapter {
       ? workspace.roots.filter((item): item is string => typeof item === 'string').map((root) => resolve(root))
       : [];
     const uniqueRoots = [...new Set(roots)];
-    if (uniqueRoots.length !== 1 || uniqueRoots[0] !== cwd) {
+    // The sandbox granted to Grok is the session cwd. The Host also lists the
+    // session attachment directory here; that path is not added to the sandbox.
+    if (!uniqueRoots.includes(cwd)) {
       throw new GrokProtocolError(
         'CONFIG_VALUE_INVALID',
-        'Grok workspace sandbox requires workspace.roots to be exactly the session cwd.',
+        'Grok workspace sandbox requires workspace.roots to include the session cwd.',
       );
     }
     if (params.hostServices !== undefined) {
@@ -799,27 +984,43 @@ export class GrokProtocolV2Adapter {
         throw new GrokProtocolError('INVALID_PARAMS', message);
       }
     }
-    const config = record(params.config);
+    const config = { ...record(params.config) };
     if (Object.keys(config).length > 0 && !this.advertisedOptionIds().has('model')) {
       await this.service.listCapabilities().catch(() => undefined);
     }
+    const liftedPermission = config.permission_mode;
+    delete config.permission_mode;
     this.validateConfig(config, 'session');
-    const native = record(params.nativeSession);
-    const nativeSessionId = nonEmptyString(native.id);
-    const history = nonEmptyString(native.history);
-    if (typeof config.permission_mode === 'string') {
-      const permission = parseGrokPermissionMode(config.permission_mode);
+    let permissionMode: GrokPermissionMode | undefined;
+    if (liftedPermission !== undefined) {
+      this.validateConfig({ permission_mode: liftedPermission }, 'turn');
+      const permission = typeof liftedPermission === 'string'
+        ? parseGrokPermissionMode(liftedPermission)
+        : null;
       if (!permission) {
         throw new GrokProtocolError('CONFIG_VALUE_INVALID', 'Unknown Grok permission mode.');
       }
-      this.service.setPermissionMode(permission);
+      permissionMode = permission;
     }
+    let sandboxProfile: GrokSandboxProfile | undefined;
+    if (typeof config.sandbox_profile === 'string') {
+      const sandbox = parseGrokSandboxProfile(config.sandbox_profile);
+      if (!sandbox) {
+        throw new GrokProtocolError('CONFIG_VALUE_INVALID', 'Unknown Grok sandbox profile.');
+      }
+      sandboxProfile = sandbox;
+    }
+    const native = record(params.nativeSession);
+    const nativeSessionId = nonEmptyString(native.id);
+    const history = nonEmptyString(native.history);
     const result = await this.service.createSession({
       cwd,
       ...(nativeSessionId ? { nativeSessionId } : {}),
       ...(nativeSessionId
         ? { resumeMode: history === 'none' ? 'resume' as const : 'load' as const }
         : {}),
+      ...(permissionMode ? { permissionMode } : {}),
+      ...(sandboxProfile ? { sandboxProfile } : {}),
       mcpServers: [],
     });
     try {
@@ -859,6 +1060,14 @@ export class GrokProtocolV2Adapter {
     });
     if (history !== 'none') {
       this.ingestNativeReplay(session, result.replayUpdates as SessionNotification[]);
+    } else {
+      // A `history:none` resume cannot prove where its next prompt lands in
+      // the native history — unless this process already proved a base for
+      // the same native session (e.g. a Side Chat it detached earlier).
+      this.promptBaseBySession.set(
+        session.id,
+        this.promptBaseByNativeId.get(session.nativeSessionId) ?? null,
+      );
     }
     void this.publishCatalogIfCommandsArrive();
     return { session: this.serialize(session) };
@@ -885,18 +1094,23 @@ export class GrokProtocolV2Adapter {
       throw new GrokProtocolError('CONFLICT', 'sidechatId already belongs to an ordinary Session.');
     }
     const anchor = this.sidechatAnchor(parent);
-    const boundaryTurnId = anchor.type === 'turn' ? anchor.turnId : null;
+    // Side Chat forks at the current head. When the anchor turn's absolute
+    // native prompt ordinal is proven and exact-turn forks are confirmed,
+    // make the boundary explicit; otherwise head semantics already mean the
+    // same thing, so no unproven targetPromptIndex is ever sent.
+    const anchorIndex = anchor.type === 'turn'
+      ? (this.terminalOrderBySession.get(parent.id) ?? [])
+        .find((entry) => entry.turnId === anchor.turnId)?.absoluteIndex
+      : undefined;
+    const targetPromptIndex = anchorIndex !== undefined && this.service.supportsAtTurnFork()
+      ? anchorIndex
+      : undefined;
     const forked = await this.service.forkSession({
       sessionId: parent.serviceSessionId,
-      ...(boundaryTurnId !== null && this.service.supportsAtTurnFork()
-        ? (() => {
-          const terminalOrder = this.terminalOrderBySession.get(parent.id) ?? [];
-          const index = terminalOrder.findIndex((entry) => entry.turnId === boundaryTurnId);
-          return index >= 0 ? { targetPromptIndex: index } : {};
-        })()
-        : {}),
+      ...(targetPromptIndex !== undefined ? { targetPromptIndex } : {}),
     });
     const session = this.attachForkedSession(sidechatId, parent, forked.session as ServiceSessionShape);
+    this.rememberPromptBase(session, this.forkChildPromptBase(parent, targetPromptIndex));
     const createdAt = new Date().toISOString();
     const resumeRef = this.resumeStore.seal({
       sidechatId,
@@ -950,6 +1164,14 @@ export class GrokProtocolV2Adapter {
       resumeMode: 'resume',
       mcpServers: [],
       allowAdditional: true,
+      // The Side Chat native session was forked from the parent, so it
+      // inherited the parent's model/effort at fork time.
+      ...(typeof payload.sessionConfig.model === 'string'
+        ? { initialModel: payload.sessionConfig.model }
+        : {}),
+      ...(typeof payload.sessionConfig.reasoning_effort === 'string'
+        ? { initialEffort: payload.sessionConfig.reasoning_effort }
+        : {}),
     });
     const session = this.attachForkedSession(
       sidechatId,
@@ -957,6 +1179,9 @@ export class GrokProtocolV2Adapter {
       resumed.session as ServiceSessionShape,
       payload.sessionConfig,
     );
+    // Reseed the prompt base proven when this native session was attached or
+    // detached in this process; without it, exact-turn forks refuse honestly.
+    this.rememberPromptBase(session, this.promptBaseByNativeId.get(session.nativeSessionId) ?? null);
     const sidechat: SidechatRecord = {
       parentSessionId,
       resumeRefId,
@@ -1039,6 +1264,17 @@ export class GrokProtocolV2Adapter {
     const boundary = this.forkBoundary(source, anchorType === 'turn'
       ? nonEmptyString(anchor.turnId) ?? ''
       : null);
+    if (anchorType === 'turn') {
+      // cloneReplay must truncate exactly where the native fork truncates.
+      // A boundary the replay cannot express rejects before any native call.
+      const replayEvents = this.replayBySession.get(source.id)?.events ?? [];
+      if (!replayEvents.some((event) => event.sourceTurnId === boundary.turnId)) {
+        throw new GrokProtocolError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          'The anchor turn has no replay events in this attach generation, so the forked replay could not match the native truncation.',
+        );
+      }
+    }
     const forked = await this.service.forkSession({
       sessionId: source.serviceSessionId,
       ...(boundary.targetPromptIndex !== undefined
@@ -1046,6 +1282,7 @@ export class GrokProtocolV2Adapter {
         : {}),
     });
     const child = this.attachForkedSession(sessionId, source, forked.session as ServiceSessionShape);
+    this.rememberPromptBase(child, this.forkChildPromptBase(source, boundary.targetPromptIndex));
     this.replayBySession.set(child.id, this.cloneReplay(source, child, boundary.turnId));
     const result = {
       session: this.serialize(child),
@@ -1061,17 +1298,24 @@ export class GrokProtocolV2Adapter {
   }
 
   private assertForkSupported(): void {
-    if (!this.service.supportsFork()) {
+    // A head fork request may double as the confirming call on a runtime
+    // whose native fork is not yet proven; the Adapter never probes it
+    // speculatively.
+    if (!this.service.supportsFork() && !this.service.mayAttemptNativeFork()) {
       throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', 'Current Grok ACP runtime does not support session/fork.');
     }
   }
 
+  private forkUnsupportedReason(): string {
+    return 'Current Grok ACP runtime does not support session/fork.';
+  }
+
   /**
-   * Resolve the fork boundary. `anchorTurnId` selects a specific terminal turn
-   * recorded live in this attach generation; the native fork keeps prompts
-   * 0..targetPromptIndex inclusive, so the anchor turn's ordinal in the
-   * session's terminal order is its inclusive prompt index. Anchors from
-   * imported history cannot be mapped to a native prompt index and are
+   * Resolve the fork boundary. `anchorTurnId` selects a terminal turn recorded
+   * live in this attach generation; the native fork keeps prompts
+   * 0..targetPromptIndex inclusive, so the anchor's proven absolute native
+   * prompt ordinal is that index. The attach-local terminal order is NOT the
+   * native index when history was inherited, and an unproven position is
    * rejected honestly rather than guessed.
    */
   private forkBoundary(
@@ -1083,17 +1327,23 @@ export class GrokProtocolV2Adapter {
     }
     const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
     if (anchorTurnId !== null) {
-      const index = terminalOrder.findIndex((entry) => entry.turnId === anchorTurnId);
-      if (index < 0) {
+      const entry = terminalOrder.find((item) => item.turnId === anchorTurnId);
+      if (!entry) {
         throw new GrokProtocolError(
           'FORK_BOUNDARY_UNAVAILABLE',
           'The anchor turn was not recorded in this attach generation; native prompt indexes for imported history cannot be mapped safely.',
         );
       }
+      if (entry.absoluteIndex === undefined) {
+        throw new GrokProtocolError(
+          'FORK_BOUNDARY_UNAVAILABLE',
+          'The anchor turn has no proven native prompt position (history was resumed without a verified replay, or the native history changed).',
+        );
+      }
       return {
         turnId: anchorTurnId,
         sourceTurnId: anchorTurnId,
-        targetPromptIndex: index,
+        targetPromptIndex: entry.absoluteIndex,
       };
     }
     const boundary = terminalOrder.at(-1);
@@ -1101,6 +1351,23 @@ export class GrokProtocolV2Adapter {
       throw new GrokProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'Fork requires a terminal Turn.');
     }
     return { turnId: boundary.turnId, sourceTurnId: boundary.sourceTurnId };
+  }
+
+  /** Proven native prompt count a forked child starts with; null if unknown. */
+  private forkChildPromptBase(
+    source: AttachedSession,
+    targetPromptIndex: number | undefined,
+  ): number | null {
+    if (targetPromptIndex !== undefined) return targetPromptIndex + 1;
+    const sourceBase = this.promptBaseBySession.get(source.id);
+    if (sourceBase == null) return null;
+    return sourceBase + (this.dispatchedTurnsBySession.get(source.id) ?? []).length;
+  }
+
+  /** Record a session's prompt base and remember it by native id. */
+  private rememberPromptBase(session: AttachedSession, base: number | null): void {
+    this.promptBaseBySession.set(session.id, base);
+    if (base !== null) this.promptBaseByNativeId.set(session.nativeSessionId, base);
   }
 
   private attachForkedSession(
@@ -1166,7 +1433,7 @@ export class GrokProtocolV2Adapter {
       throw new GrokProtocolError('SESSION_BUSY', 'Side Chat requires an idle parent Session.');
     }
     const boundary = this.latestTerminalBoundary(session.id);
-    if (boundary) return { type: 'turn', ...boundary };
+    if (boundary) return { type: 'turn', turnId: boundary.turnId, sourceTurnId: boundary.sourceTurnId };
     if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
     throw new GrokProtocolError('FORK_BOUNDARY_UNAVAILABLE', 'No stable terminal Turn is available in this attach generation.');
   }
@@ -1254,14 +1521,30 @@ export class GrokProtocolV2Adapter {
     this.turnsByRequest.set(turnId, { sessionId: session.id, turnId });
     this.requestByTurn.set(this.turnKey(session.id, turnId), turnId);
     this.openActivitiesByTurn.set(this.turnKey(session.id, turnId), new Set());
+    this.activityStateByTurn.set(this.turnKey(session.id, turnId), new Map());
     this.openContentByTurn.set(this.turnKey(session.id, turnId), new Map());
     try {
       this.validateConfig(config, 'turn', session.sessionConfig);
+      if (Object.keys(config).length > 0) {
+        await this.applyConfigMap(session.serviceSessionId, config);
+      }
       const normalized = normalizeInputItems(input, session.cwd);
-      this.identityStore.recordLive(session.nativeSessionId, turnId, normalized);
       await this.service.beginTurn({
         sessionId: session.serviceSessionId,
         input: normalized,
+      }, () => {
+        // Runs after successful native dispatch but before response handling,
+        // including responses already settled at the dispatch boundary.
+        const dispatched = this.dispatchedTurnsBySession.get(session.id) ?? [];
+        dispatched.push(turnId);
+        this.dispatchedTurnsBySession.set(session.id, dispatched);
+        const base = this.promptBaseBySession.get(session.id);
+        this.identityStore.recordLive(
+          session.nativeSessionId,
+          turnId,
+          normalized,
+          base != null ? base + dispatched.length - 1 : undefined,
+        );
       });
       return { accepted: true as const, turnId };
     } catch (error) {
@@ -1295,16 +1578,92 @@ export class GrokProtocolV2Adapter {
     return { accepted: true as const, turnId };
   }
 
+  private settledResponseKey(sessionId: string, streamId: string, responseId: string): string {
+    return `${sessionId}\u0000${streamId}\u0000${responseId}`;
+  }
+
+  private rememberSettledResponse(key: string, fingerprint: string): void {
+    if (this.settledResponses.size >= 512) {
+      const oldest = this.settledResponses.keys().next().value;
+      if (oldest !== undefined) this.settledResponses.delete(oldest);
+    }
+    this.settledResponses.set(key, fingerprint);
+  }
+
+  /** Rebuild the native elicitation content object from flat protocol values. */
+  private elicitContentFromValues(
+    interaction: InteractionRef,
+    values: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const fields = interaction.elicitFields ?? new Map<string, ElicitField>();
+    const content: Record<string, unknown> = {};
+    for (const [id, field] of fields) {
+      const raw = values[id];
+      if (raw === undefined) {
+        if (field.required) {
+          throw new GrokJsonRpcError(-32602, `Elicitation field "${id}" is required.`);
+        }
+        continue;
+      }
+      if (field.kind === 'boolean') {
+        if (raw === true || raw === 'true') content[id] = true;
+        else if (raw === false || raw === 'false') content[id] = false;
+        else throw new GrokJsonRpcError(-32602, `Elicitation field "${id}" must be a boolean choice.`);
+        continue;
+      }
+      if (typeof raw !== 'string') {
+        throw new GrokJsonRpcError(-32602, `Elicitation field "${id}" must be a string.`);
+      }
+      if (field.required && raw.length === 0) {
+        throw new GrokJsonRpcError(-32602, `Elicitation field "${id}" is required.`);
+      }
+      if (field.options && !field.options.includes(raw)) {
+        throw new GrokJsonRpcError(-32602, `Elicitation field "${id}" is not one of the offered values.`);
+      }
+      // An empty optional field carries no value to constrain.
+      if (raw.length > 0) {
+        if (field.minimumLength !== undefined && raw.length < field.minimumLength) {
+          throw new GrokJsonRpcError(
+            -32602,
+            `Elicitation field "${id}" must be at least ${field.minimumLength} characters.`,
+          );
+        }
+        if (field.maximumLength !== undefined && raw.length > field.maximumLength) {
+          throw new GrokJsonRpcError(
+            -32602,
+            `Elicitation field "${id}" must be at most ${field.maximumLength} characters.`,
+          );
+        }
+      }
+      content[id] = raw;
+    }
+    return content;
+  }
+
   private async respondInteraction(params: Record<string, unknown>) {
     const session = this.requireAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
     const turnId = String(params.turnId ?? '');
-    this.requireActiveTurn(session.id, turnId);
     const interactionId = nonEmptyString(params.interactionId);
     const responseId = nonEmptyString(params.responseId);
     const actionId = nonEmptyString(params.actionId);
     if (!interactionId || !responseId || !actionId) {
       throw new GrokJsonRpcError(-32602, 'interactionId, responseId, and actionId are required.');
     }
+    const values = record(params.values);
+    const fingerprint = stableJson({ turnId, interactionId, actionId, values });
+    // After stream validation, settled responses replay first: an identical
+    // retry of an already-settled response is accepted without touching the
+    // native runtime, and any reuse with a different payload conflicts —
+    // including a responseId first settled on another interaction.
+    const settledKey = this.settledResponseKey(session.id, session.streamId, responseId);
+    const settled = this.settledResponses.get(settledKey);
+    if (settled !== undefined) {
+      if (settled !== fingerprint) {
+        throw new GrokProtocolError('CONFLICT', 'responseId was reused with a different payload.');
+      }
+      return { accepted: true as const, interactionId, responseId };
+    }
+    this.requireActiveTurn(session.id, turnId);
     const interaction = this.interactions.get(interactionId);
     if (!interaction || interaction.sessionId !== session.id || interaction.turnId !== turnId) {
       throw new GrokProtocolError('INTERACTION_NOT_FOUND', 'Interaction not found.');
@@ -1312,14 +1671,15 @@ export class GrokProtocolV2Adapter {
     if (!interaction.actionIds.includes(actionId)) {
       throw new GrokProtocolError('INTERACTION_ACTION_NOT_FOUND', 'Interaction action is not available.');
     }
-    const values = record(params.values);
     const previous = interaction.responses.get(responseId);
     if (previous) {
-      if (previous.actionId !== actionId || JSON.stringify(previous.values) !== JSON.stringify(values)) {
+      if (previous.actionId !== actionId || stableJson(previous.values) !== stableJson(values)) {
         throw new GrokProtocolError('CONFLICT', 'responseId was reused with a different payload.');
       }
       return { accepted: true as const, interactionId, responseId };
     }
+    // Registered synchronously before the native call so concurrent identical
+    // responses share this single settlement instead of racing a second one.
     interaction.responses.set(responseId, { actionId, values });
     try {
       if (interaction.questionKind === undefined) {
@@ -1329,17 +1689,21 @@ export class GrokProtocolV2Adapter {
           nativeOptionId: actionId,
         });
       } else {
+        const outbound = interaction.questionKind === 'elicit' && actionId === 'submit'
+          ? { content: this.elicitContentFromValues(interaction, values) }
+          : values;
         await this.service.respondQuestion({
           questionId: interaction.serviceApprovalId,
           responseId,
           actionId,
-          values,
+          values: outbound,
         });
       }
     } catch (error) {
       interaction.responses.delete(responseId);
       throw standardError(error);
     }
+    this.rememberSettledResponse(settledKey, fingerprint);
     return { accepted: true as const, interactionId, responseId };
   }
 
@@ -1371,6 +1735,20 @@ export class GrokProtocolV2Adapter {
     await this.service.closeSession({ sessionId: session.serviceSessionId });
     this.ledger.close(session.id);
     this.replayPager.close(session.id);
+    for (const key of [...this.settledResponses.keys()]) {
+      if (key.startsWith(`${session.id}\u0000`)) this.settledResponses.delete(key);
+    }
+    // Remember the proven prompt count by native id for in-process reattach;
+    // the per-session maps themselves go away with the attachment.
+    const detachedBase = this.promptBaseBySession.get(session.id);
+    if (detachedBase != null) {
+      this.promptBaseByNativeId.set(
+        session.nativeSessionId,
+        detachedBase + (this.dispatchedTurnsBySession.get(session.id) ?? []).length,
+      );
+    }
+    this.promptBaseBySession.delete(session.id);
+    this.dispatchedTurnsBySession.delete(session.id);
     this.sessions.delete(session.id);
     this.sessionByServiceId.delete(session.serviceSessionId);
     this.creationFingerprints.delete(session.id);
@@ -1443,10 +1821,10 @@ export class GrokProtocolV2Adapter {
   }
 
   /**
-   * catalog.resolve: resolve the session-scoped config surface for a
-   * requested model from runtime model metadata — thinking (reasoning
-   * effort) choices, input kinds, and defaults. No model is called and no
-   * live session is mutated.
+   * catalog.resolve: project the requested model's thinking choices and
+   * defaults. Model, thinking, and permission mode are turn-bound; the
+   * sandbox profile stays session-bound. Both resolved default maps are always present. No model
+   * is called and no live session is mutated.
    */
   private async resolveCatalog(params: Record<string, unknown>) {
     const catalogRevision = nonEmptyString(params.catalogRevision);
@@ -1456,18 +1834,12 @@ export class GrokProtocolV2Adapter {
     if ((sessionId === null) !== (streamId === null)) {
       throw new GrokJsonRpcError(-32602, 'sessionId and streamId must be sent together.');
     }
-    if (sessionId && streamId) this.requireOrdinaryAttached(sessionId, streamId);
-    const sessionConfig = record(params.sessionConfig);
-    const turnConfig = record(params.turnConfig);
-    if (Object.keys(turnConfig).length > 0) {
-      throw new GrokProtocolError(
-        'CONFIG_BINDING_INVALID',
-        'Grok config options are session-bound; send them in sessionConfig, not turnConfig.',
-      );
-    }
-    const raw = this.sessions.size > 0
-      ? this.service.currentCatalog()
-      : await this.service.listCapabilities();
+    const attached = sessionId && streamId ? this.requireOrdinaryAttached(sessionId, streamId) : null;
+    const raw = attached
+      ? this.service.currentCatalog(attached.serviceSessionId)
+      : this.sessions.size > 0
+        ? this.service.currentCatalog()
+        : await this.service.listCapabilities();
     const models = raw.models as Array<{
       id: string;
       displayName: string;
@@ -1479,66 +1851,99 @@ export class GrokProtocolV2Adapter {
     if (models.length === 0) {
       throw new GrokProtocolError('CAPABILITY_NOT_SUPPORTED', 'Grok model metadata is not available.');
     }
-    const requestedModelId = typeof sessionConfig.model === 'string' ? sessionConfig.model : null;
-    const model = requestedModelId
-      ? models.find(item => item.id === requestedModelId)
-      : models.find(item => item.isDefault) ?? models[0]!;
-    if (!model) {
+    const sessionConfig = record(params.sessionConfig);
+    const turnConfig = record(params.turnConfig);
+    const turnDraft: Record<string, unknown> = { ...turnConfig };
+    // A page still holding the older session-bound catalog sends model and
+    // reasoning_effort inside sessionConfig. Lift them so that resolve can
+    // return the turn-bound catalog. An explicit turnConfig value wins.
+    for (const key of ['model', 'reasoning_effort', 'permission_mode']) {
+      if (!Object.prototype.hasOwnProperty.call(sessionConfig, key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(turnDraft, key)) {
+        turnDraft[key] = sessionConfig[key];
+      }
+      delete sessionConfig[key];
+    }
+    this.validateConfig(sessionConfig, 'session');
+    const requestedModelId = typeof turnDraft.model === 'string' ? turnDraft.model : null;
+    const requestedModel = requestedModelId
+      ? models.find((item) => item.id === requestedModelId)
+      : undefined;
+    const resolvedModel = requestedModel
+      ?? (requestedModelId ? undefined : models.find((item) => item.isDefault) ?? models[0]);
+    if (resolvedModel && typeof turnDraft.reasoning_effort === 'string') {
+      const allowed = new Set(resolvedModel.efforts.map((effort) => effort.id));
+      if (!allowed.has(turnDraft.reasoning_effort)) {
+        const advertised = this.advertisedOptions().find((option) => option.id === 'reasoning_effort');
+        const known = advertised?.choices?.some((choice) => (
+          Object.is(choice.value, turnDraft.reasoning_effort)
+        )) === true;
+        // A thinking value left over from another model is dropped. The
+        // selected model's own default takes its place.
+        if (known) delete turnDraft.reasoning_effort;
+      }
+    }
+    const conditionValues: Record<string, ConfigValue> = resolvedModel && turnDraft.model === undefined
+      ? { model: resolvedModel.id }
+      : {};
+    this.validateConfig(turnDraft, 'turn', conditionValues);
+    if (!resolvedModel) {
       throw new GrokProtocolError(
         'CONFIG_VALUE_INVALID',
         `Unknown Grok model ${String(requestedModelId)}.`,
       );
     }
-    const permissionChoices = raw.modes.map((mode: { id: string; displayName: string }) => ({
-      value: mode.id,
-      displayName: mode.displayName,
-    }));
-    const configOptions = toV2ConfigOptions([
-      {
-        id: 'model',
-        displayName: 'Model',
-        category: 'model',
-        type: 'select' as const,
-        scope: 'session' as const,
-        currentValue: model.id,
-        choices: [{ value: model.id, displayName: model.displayName }],
-      },
-      ...(model.efforts.length > 0 ? [{
-        id: 'reasoning_effort',
-        displayName: 'Thinking',
-        category: 'reasoning_effort',
-        type: 'select' as const,
-        scope: 'session' as const,
-        currentValue: model.efforts.find(effort => effort.isDefault)?.id ?? model.efforts[0]!.id,
-        choices: model.efforts.map(effort => ({
+    const effortDefault = resolvedModel.efforts.find((effort) => effort.isDefault)?.id
+      ?? resolvedModel.efforts[0]?.id
+      ?? null;
+    const configOptions = toV2ConfigOptions(raw.sessionOptions).flatMap((option) => {
+      if (option.id === 'model') return [{ ...option, defaultValue: resolvedModel.id }];
+      if (option.id !== 'reasoning_effort') return [option];
+      if (resolvedModel.efforts.length === 0 || effortDefault === null) return [];
+      return [{
+        ...option,
+        defaultValue: effortDefault,
+        choices: resolvedModel.efforts.map((effort) => ({
           value: effort.id,
           displayName: effort.displayName,
         })),
-        enabledWhen: [{ optionId: 'model', oneOf: [model.id] as ConfigValue[] }],
-      }] : []),
-      {
-        id: 'permission_mode',
-        displayName: 'Mode',
-        category: 'mode',
-        type: 'select' as const,
-        scope: 'session' as const,
-        currentValue: (this.service.currentCatalog().sessionOptions.find(option => option.id === 'permission_mode')?.currentValue ?? 'default') as string,
-        choices: permissionChoices,
-      },
-    ]);
-    const resolvedDefaults: { sessionConfig: Record<string, ConfigValue> } = { sessionConfig: {} };
-    for (const option of configOptions) {
-      if (sessionConfig[option.id] !== undefined) continue;
-      if (!isConfigValue(option.defaultValue) || option.defaultValue === null) continue;
-      if (option.id === 'model' && option.defaultValue !== model.id) continue;
-      resolvedDefaults.sessionConfig[option.id] = option.defaultValue;
+        enabledWhen: [{ optionId: 'model', oneOf: [resolvedModel.id] }],
+      }];
+    });
+    const resolvedDefaults: {
+      sessionConfig: Record<string, ConfigValue>;
+      turnConfig: Record<string, ConfigValue>;
+    } = {
+      sessionConfig: {},
+      turnConfig: { model: resolvedModel.id },
+    };
+    if (
+      effortDefault !== null
+      && turnDraft.reasoning_effort === undefined
+    ) {
+      resolvedDefaults.turnConfig.reasoning_effort = effortDefault;
     }
-    if (resolvedDefaults.sessionConfig.model === undefined) {
-      resolvedDefaults.sessionConfig.model = model.id;
+    const permission = configOptions.find((option) => option.id === 'permission_mode');
+    if (permission) {
+      const chosen = turnDraft.permission_mode === undefined
+        ? permission.defaultValue
+        : turnDraft.permission_mode;
+      if (isConfigValue(chosen) && chosen !== null) {
+        resolvedDefaults.turnConfig.permission_mode = chosen;
+      }
+    }
+    const sandbox = configOptions.find((option) => option.id === 'sandbox_profile');
+    if (
+      sandbox
+      && sessionConfig.sandbox_profile === undefined
+      && isConfigValue(sandbox.defaultValue)
+      && sandbox.defaultValue !== null
+    ) {
+      resolvedDefaults.sessionConfig.sandbox_profile = sandbox.defaultValue;
     }
     const payload = {
       catalogRevision: stableId('catalog-resolve', {
-        model: model.id,
+        model: resolvedModel.id,
         options: configOptions,
       }),
       input: [
@@ -1548,9 +1953,13 @@ export class GrokProtocolV2Adapter {
       ],
       configOptions,
       specialCatalogs: {
-        model: 'model',
-        ...(model.efforts.length > 0 ? { thinking: 'reasoning_effort' } : {}),
-        approvalMode: 'permission_mode',
+        ...(configOptions.some((option) => option.id === 'model') ? { model: 'model' } : {}),
+        ...(configOptions.some((option) => option.id === 'reasoning_effort')
+          ? { thinking: 'reasoning_effort' }
+          : {}),
+        ...(configOptions.some((option) => option.id === 'permission_mode')
+          ? { approvalMode: 'permission_mode' }
+          : {}),
       },
       slashCommands: [] as Array<{ name: string; description: string; source: 'builtin'; argHints: Array<{ kind: 'free'; placeholder: string }> }>,
       resolvedDefaults,
@@ -1570,10 +1979,8 @@ export class GrokProtocolV2Adapter {
       ?? this.activeTurnBySession.get(session.id);
 
     if (method === 'turn.started') {
-      if (!turnId || this.startedTurns.has(this.turnKey(session.id, turnId))) return;
-      this.startedTurns.add(this.turnKey(session.id, turnId));
-      this.updateSession(session, { state: 'running', lastError: null });
-      this.emitTurnEvent('turn.started', session, turnId, {});
+      if (!turnId) return;
+      this.ensureTurnStarted(session, turnId);
       return;
     }
     if (method === 'turn.completed') {
@@ -1585,7 +1992,8 @@ export class GrokProtocolV2Adapter {
       return;
     }
     if (method === 'usage.updated') {
-      const usage = sanitizeUsage(data);
+      const sanitized = sanitizeUsage(data);
+      const usage = sanitized ? usageDeliverable(sanitized, turnId) : null;
       if (!usage) return;
       if (turnId) this.emitTurnEvent('usage.updated', session, turnId, usage);
       else this.emitSessionEvent('usage.updated', session, usage);
@@ -1651,6 +2059,7 @@ export class GrokProtocolV2Adapter {
         ? 'plan' as const
         : data.kind === 'mcp_elicit' ? 'elicit' as const : 'question' as const;
       const inputs: InteractionInput[] = [];
+      let elicitFields: Map<string, ElicitField> | undefined;
       const actions: Array<{ id: string; label: string; style: 'primary' | 'secondary' | 'danger' }> = [];
       if (questionKind === 'question') {
         const questions = Array.isArray(data.questions) ? data.questions : [];
@@ -1661,18 +2070,19 @@ export class GrokProtocolV2Adapter {
             : '';
           if (!label) continue;
           const options = Array.isArray(question.options) ? question.options : [];
+          const described: string[] = [];
           const choices = options.flatMap((rawOption) => {
             const option = record(rawOption);
             const value = typeof option.label === 'string' && option.label ? option.label : '';
             if (!value) return [];
-            return [{
-              value,
-              displayName: value,
-              ...(typeof option.description === 'string' && option.description
-                ? { description: option.description }
-                : {}),
-            }];
+            // The strict Host choice schema has no description field; option
+            // notes survive on the input's own description instead.
+            if (typeof option.description === 'string' && option.description) {
+              described.push(`${value} — ${option.description}`);
+            }
+            return [{ value, displayName: value }];
           });
+          const description = described.length > 0 ? described.join('\n') : undefined;
           const multi = question.multiSelect === true || question.multi_select === true;
           inputs.push(choices.length > 0
             ? {
@@ -1680,9 +2090,16 @@ export class GrokProtocolV2Adapter {
               type: multi ? 'multi_select' : 'single_select',
               label,
               required: false,
+              ...(description ? { description } : {}),
               choices,
             }
-            : { id: label, type: 'text', label, required: false });
+            : {
+              id: label,
+              type: 'text',
+              label,
+              required: false,
+              ...(description ? { description } : {}),
+            });
         }
         actions.push({ id: 'submit', label: 'Submit', style: 'primary' });
         actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
@@ -1691,17 +2108,44 @@ export class GrokProtocolV2Adapter {
           actions.push({ id: 'skip_interview', label: 'Skip interview', style: 'secondary' });
         }
       } else if (questionKind === 'plan') {
+        inputs.push({
+          id: 'feedback',
+          type: 'text',
+          label: 'Feedback when returning the plan (optional)',
+          required: false,
+        });
         actions.push({ id: 'approve', label: 'Approve plan', style: 'primary' });
         actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
       } else {
+        const parsed = elicitInputsFromSchema(data.requestedSchema);
+        if (parsed === null) {
+          // The schema needs types this protocol cannot express honestly.
+          // Decline the native request immediately instead of showing a form
+          // whose submission could never be reconstructed.
+          void this.service.respondQuestion({
+            questionId: interactionId,
+            responseId: `auto-decline-${interactionId}`,
+            actionId: 'decline',
+          }).catch(() => undefined);
+          return;
+        }
+        inputs.push(...parsed.inputs);
+        elicitFields = parsed.fields;
         actions.push({ id: 'submit', label: 'Submit', style: 'primary' });
         actions.push({ id: 'decline', label: 'Decline', style: 'danger' });
         actions.push({ id: 'cancel', label: 'Cancel', style: 'danger' });
       }
-      // Interactions are turn-scoped on the wire; a question arriving outside
-      // an active turn stays pending in the service and settles as cancelled
-      // when the turn ends, so the agent's reverse request never hangs.
-      if (!turnId) return;
+      // Interactions are turn-scoped on the wire. A reverse request arriving
+      // without an active turn is settled honestly right away instead of
+      // becoming an invisible pending interaction nobody can answer.
+      if (!turnId) {
+        void this.service.respondQuestion({
+          questionId: interactionId,
+          responseId: `auto-cancel-${interactionId}`,
+          actionId: 'cancel',
+        }).catch(() => undefined);
+        return;
+      }
       this.interactions.set(interactionId, {
         sessionId: session.id,
         turnId,
@@ -1709,6 +2153,7 @@ export class GrokProtocolV2Adapter {
         questionKind: questionKind === 'plan' || questionKind === 'elicit' ? questionKind : 'question',
         actionIds: actions.map((action) => action.id),
         responses: new Map(),
+        ...(elicitFields ? { elicitFields } : {}),
       });
       this.updateSession(session, { state: 'waiting_interaction' });
       this.emitTurnEvent('interaction.requested', session, turnId, {
@@ -1728,6 +2173,10 @@ export class GrokProtocolV2Adapter {
         ...(data.plan !== undefined || data.questions !== undefined || data.requestedSchema !== undefined
           ? {
             context: {
+              // The Host projects context.subject onto the interaction card;
+              // the plan body keeps its newlines there. context.plan stays as
+              // the raw trace copy.
+              ...(typeof data.plan === 'string' && data.plan ? { subject: data.plan } : {}),
               ...(data.plan !== undefined && data.plan !== null ? { plan: String(data.plan) } : {}),
               ...(data.requestedSchema !== undefined && data.requestedSchema !== null
                 ? { requestedSchema: jsonValue(data.requestedSchema) }
@@ -1750,7 +2199,7 @@ export class GrokProtocolV2Adapter {
         item.sessionId === session.id && item.turnId === interactionRef.turnId
       ));
       this.updateSession(session, { state: waiting ? 'waiting_interaction' : 'running' });
-      this.emitTurnEvent('interaction.resolved', session, interactionRef.turnId, submitted && last
+      this.emitTurnEvent('interaction.resolved', session, interactionRef.turnId, submitted && last && last.actionId !== 'cancel'
         ? {
           interactionId,
           outcome: 'submitted',
@@ -1776,7 +2225,6 @@ export class GrokProtocolV2Adapter {
     }
     if (method === 'session.updated') {
       if (typeof data.model === 'string') session.sessionConfig.model = data.model;
-      if (typeof data.mode === 'string') session.sessionConfig.permission_mode = data.mode;
       if (data.status === 'stale') {
         this.updateSession(session, {
           state: 'stale',
@@ -1805,13 +2253,15 @@ export class GrokProtocolV2Adapter {
     if (method === 'extension.notification') {
       const name = extensionName(String(params.method ?? data.method ?? 'unknown'));
       if (isExcludedExtension(name)) return;
-      for (const event of translateExtension(name, params.params ?? data.params ?? {})) {
+      const activities = turnId ? this.activityStateByTurn.get(this.turnKey(session.id, turnId)) : undefined;
+      for (const event of translateExtension(name, params.params ?? data.params ?? {}, activities)) {
         this.emitTranslated(session, turnId, event);
       }
       return;
     }
     if (method === 'session.update') {
-      for (const event of translateSessionUpdate(data.update)) {
+      const activities = turnId ? this.activityStateByTurn.get(this.turnKey(session.id, turnId)) : undefined;
+      for (const event of translateSessionUpdate(data.update, activities)) {
         this.emitTranslated(session, turnId, event);
       }
     }
@@ -1871,7 +2321,8 @@ export class GrokProtocolV2Adapter {
       return;
     }
     if (event.method === 'usage.updated') {
-      const usage = sanitizeUsage(event.data);
+      const sanitized = sanitizeUsage(event.data);
+      const usage = sanitized ? usageDeliverable(sanitized, turnId) : null;
       if (!usage) return;
       if (turnId) this.emitTurnEvent('usage.updated', session, turnId, usage);
       else this.emitSessionEvent('usage.updated', session, usage);
@@ -1893,6 +2344,7 @@ export class GrokProtocolV2Adapter {
         if (count > 1) activityId = `${activityId}:${count}`;
         event.data = { ...event.data, activityId };
       }
+      this.activityStateByTurn.get(this.turnKey(session.id, turnId))?.set(activityId, { ...event.data, activityId });
       const open = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
       const status = String(event.data.status ?? 'running');
       if (open && status === 'running') open.add(activityId);
@@ -1922,9 +2374,20 @@ export class GrokProtocolV2Adapter {
     data: Record<string, unknown>,
   ): void {
     if (!this.activeTurnBySession.has(session.id)) return;
+    this.ensureTurnStarted(session, turnId);
     const terminalOrder = this.terminalOrderBySession.get(session.id) ?? [];
-    if (!terminalOrder.some((entry) => entry.turnId === turnId)) {
-      terminalOrder.push({ turnId, sourceTurnId: turnId });
+    const dispatched = this.dispatchedTurnsBySession.get(session.id) ?? [];
+    const dispatchIndex = dispatched.indexOf(turnId);
+    // A turn that failed before dispatch consumed no native prompt: it is
+    // neither a fork boundary nor part of the absolute ordinal sequence.
+    if (dispatchIndex >= 0 && !terminalOrder.some((entry) => entry.turnId === turnId)) {
+      const base = this.promptBaseBySession.get(session.id);
+      const absoluteIndex = base != null ? base + dispatchIndex : undefined;
+      terminalOrder.push({
+        turnId,
+        sourceTurnId: turnId,
+        ...(absoluteIndex !== undefined ? { absoluteIndex } : {}),
+      });
     }
     this.terminalOrderBySession.set(session.id, terminalOrder);
     this.resolveInteractionsForTurn(session, turnId, failed ? 'runtime_ended' : 'turn_ended');
@@ -1982,12 +2445,15 @@ export class GrokProtocolV2Adapter {
     const activities = this.openActivitiesByTurn.get(this.turnKey(session.id, turnId));
     if (activities) {
       for (const activityId of activities) {
+        const previous = this.activityStateByTurn.get(this.turnKey(session.id, turnId))?.get(activityId);
         this.emitTurnEvent('activity.updated', session, turnId, {
-          activityId,
-          kind: 'tool',
-          title: 'Tool',
+          ...(previous ?? {
+            activityId,
+            kind: 'tool',
+            title: 'Tool',
+            presentation: { type: 'tool', data: { name: 'tool' } },
+          }),
           status,
-          presentation: { type: 'tool', data: { name: 'tool' } },
         });
       }
       activities.clear();
@@ -2022,10 +2488,13 @@ export class GrokProtocolV2Adapter {
       nativeReason === 'limit_reached'
       || nativeReason === 'max_tokens'
       || nativeReason === 'max_tokens_reached'
+      || nativeReason === 'max_turn_requests'
     ) {
       return 'limit_reached';
     }
-    if (nativeReason === 'refused' || nativeReason === 'rejected') return 'refused';
+    if (nativeReason === 'refused' || nativeReason === 'refusal' || nativeReason === 'rejected') {
+      return 'refused';
+    }
     return 'other';
   }
 
@@ -2046,17 +2515,26 @@ export class GrokProtocolV2Adapter {
     });
     if (meaningful.length === 0) {
       this.replayBySession.set(session.id, { streamId, events: [], sequence: 0 });
+      // Fresh or empty native history: the next prompt is provably ordinal 0.
+      this.rememberPromptBase(session, 0);
       return;
     }
     const turns: Array<{ userText: string; updates: SessionNotification[] }> = [];
     let current: { userText: string; updates: SessionNotification[] } | null = null;
     let lastWasUser = false;
+    // A user chunk run merged into the previous group means the replay lost a
+    // prompt boundary (e.g. a cancelled turn with no assistant output directly
+    // followed by the next prompt): the group count may undercount native
+    // prompts and cannot seed ordinals on its own.
+    let mergedUserRun = false;
     for (const notification of meaningful) {
       const kind = String(record(notification.update).sessionUpdate ?? '');
       if (kind === 'user_message_chunk') {
         if (!current || !lastWasUser) {
           current = { userText: '', updates: [] };
           turns.push(current);
+        } else {
+          mergedUserRun = true;
         }
         current.userText += sessionUpdateText(notification.update);
         lastWasUser = true;
@@ -2093,18 +2571,27 @@ export class GrokProtocolV2Adapter {
         data,
       });
     };
+    let ordinalsConsistent = true;
+    let allOrdinalsVerified = true;
     for (const [turnIndex, turn] of turns.entries()) {
       const fallback = stableId('replay-turn', {
         nativeSessionId: session.nativeSessionId,
         turnIndex,
         inputHash: createHash('sha256').update(turn.userText).digest('hex').slice(0, 32),
       });
-      const sourceTurnId = this.identityStore.resolveReplay(
+      // Identity is positional (nativeSessionId + absolute prompt ordinal);
+      // the input hash only verifies that binding. A mismatch means native
+      // history moved (compact/rewind/external edit) and this attach's
+      // ordinals are unproven — exact-turn forks must refuse.
+      const resolution = this.identityStore.resolveReplay(
         session.nativeSessionId,
         turnIndex,
         [{ type: 'text', text: turn.userText }],
         fallback,
       );
+      if (resolution.consistent === false) ordinalsConsistent = false;
+      if (resolution.consistent !== true) allOrdinalsVerified = false;
+      const sourceTurnId = resolution.sourceTurnId;
       append(sourceTurnId, 'turn.started', {}, 'lifecycle');
       if (turn.userText) {
         append(sourceTurnId, 'input.recorded', {
@@ -2173,6 +2660,13 @@ export class GrokProtocolV2Adapter {
       append(sourceTurnId, 'turn.completed', { stopReason: 'completed' }, 'lifecycle');
     }
     this.replayBySession.set(session.id, { streamId, events, sequence: events.length });
+    // The replayed turn groups are this attach's proven prompt base — unless
+    // an identity/hash mismatch proved the native history moved. A replay that
+    // merged consecutive user chunks has no reliable boundary evidence: then
+    // only identity-verified groups (a merge shifts hashes and fails them)
+    // keep the base; otherwise exact-turn forks must refuse.
+    const proven = ordinalsConsistent && (!mergedUserRun || allOrdinalsVerified);
+    this.rememberPromptBase(session, proven ? turns.length : null);
   }
 
   private emitSessionEvent(
@@ -2182,7 +2676,9 @@ export class GrokProtocolV2Adapter {
   ): void {
     session.sequence += 1;
     this.emitEvent(method, {
-      eventId: stableId('session-event', { method, sessionId: session.id, data }),
+      eventId: stableId('session-event', {
+        method, sessionId: session.id, streamId: session.streamId, sequence: session.sequence, data,
+      }),
       streamId: session.streamId,
       sequence: session.sequence,
       sessionId: session.id,
@@ -2226,6 +2722,25 @@ export class GrokProtocolV2Adapter {
       : entityIdentity ?? `occurrence:${occurrence}`;
   }
 
+  private ensureTurnStarted(session: AttachedSession, turnId: string): void {
+    const key = this.turnKey(session.id, turnId);
+    if (this.startedTurns.has(key)) return;
+    this.startedTurns.add(key);
+    this.updateSession(session, { state: 'running', lastError: null });
+    this.emitTurnEvent('turn.started', session, turnId, {});
+    this.flushTurnPrelude(session, turnId);
+  }
+
+  private flushTurnPrelude(session: AttachedSession, turnId: string): void {
+    const key = this.turnKey(session.id, turnId);
+    const pending = this.pendingTurnEvents.get(key);
+    if (!pending || pending.length === 0) return;
+    this.pendingTurnEvents.delete(key);
+    for (const event of pending) {
+      this.emitTurnEvent(event.method, session, turnId, event.data, event.identity);
+    }
+  }
+
   private emitTurnEvent(
     method: string,
     session: AttachedSession,
@@ -2234,6 +2749,16 @@ export class GrokProtocolV2Adapter {
     identity?: string,
   ): void {
     const turnKey = this.turnKey(session.id, turnId);
+    if (method !== 'turn.started' && !this.startedTurns.has(turnKey)) {
+      const pending = this.pendingTurnEvents.get(turnKey) ?? [];
+      pending.push({
+        method,
+        data,
+        ...(identity !== undefined ? { identity } : {}),
+      });
+      this.pendingTurnEvents.set(turnKey, pending);
+      return;
+    }
     const occurrenceKey = `${turnKey}\u0000${method}`;
     const occurrence = (this.eventOccurrences.get(occurrenceKey) ?? 0) + 1;
     this.eventOccurrences.set(occurrenceKey, occurrence);
@@ -2291,8 +2816,10 @@ export class GrokProtocolV2Adapter {
     const key = this.turnKey(sessionId, turnId);
     this.activeTurnBySession.delete(sessionId);
     this.startedTurns.delete(key);
+    this.pendingTurnEvents.delete(key);
     this.interruptedTurns.delete(key);
     this.openActivitiesByTurn.delete(key);
+    this.activityStateByTurn.delete(key);
     this.openContentByTurn.delete(key);
     this.emittedFactsByTurn.delete(key);
     for (const occurrenceKey of this.eventOccurrences.keys()) {

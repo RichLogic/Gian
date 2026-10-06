@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -89,12 +90,24 @@ function fakeRuntime(overrides: Record<string, unknown> = {}) {
     async notifyPermissionMode() { runtime.calls.push('x.ai/yolo_mode_changed'); },
     async renameSession() { runtime.calls.push('x.ai/session/rename'); },
     async deleteSession() { runtime.calls.push('x.ai/session/delete'); },
-    async interject() { runtime.calls.push('x.ai/interject'); },
+    async interject(params: unknown) {
+      runtime.calls.push('x.ai/interject');
+      runtime.prompts.push(params);
+      return { status: 'queued' };
+    },
     async closeSession() { runtime.calls.push('session/close'); },
     async stop() { runtime.calls.push('stop'); },
     ...overrides,
   });
   return runtime;
+}
+
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test('catalog comes from initialize metadata and never creates a session', async () => {
@@ -183,7 +196,9 @@ test('rename surfaces method-not-found honestly instead of faking success', asyn
   const runtime = fakeRuntime({
     async renameSession() {
       runtime.calls.push('x.ai/session/rename');
-      throw new Error('Method not found: x.ai/session/rename');
+      const error = new Error('Method not found: x.ai/session/rename');
+      (error as { code?: number }).code = -32601;
+      throw error;
     },
   });
   const service = new GrokProxyService({
@@ -201,8 +216,20 @@ test('rename surfaces method-not-found honestly instead of faking success', asyn
   await service.closeSession({ sessionId: created.session.id });
 });
 
-test('permission runtime updates use yolo_mode_changed and never set_mode', async () => {
-  const runtime = fakeRuntime();
+test('permission draft changes on the next turn and does not notify immediately', async () => {
+  const notices: Array<Record<string, unknown>> = [];
+  let audience = '';
+  const runtime = fakeRuntime({
+    async newSession(params: { _meta?: { clientIdentifier?: string } }) {
+      runtime.calls.push('session/new');
+      audience = params._meta?.clientIdentifier ?? '';
+      return { sessionId: 'native-1' };
+    },
+    async notifyPermissionMode(params: Record<string, unknown>) {
+      runtime.calls.push('x.ai/yolo_mode_changed');
+      notices.push(params);
+    },
+  });
   const service = new GrokProxyService({
     binaryPath: '/managed/grok',
     createRuntime: () => runtime,
@@ -213,9 +240,183 @@ test('permission runtime updates use yolo_mode_changed and never set_mode', asyn
     configId: 'permission_mode',
     value: 'always_approve',
   });
-  assert.ok(runtime.calls.includes('x.ai/yolo_mode_changed'));
+  assert.ok(!runtime.calls.includes('x.ai/yolo_mode_changed'));
   assert.ok(!runtime.calls.includes('session/set_mode'));
+  await service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'hello' }],
+  });
+  assert.match(audience, /^gian-grok-proxy:aud_/);
+  assert.deepEqual(notices, [{
+    sessionId: 'native-1',
+    clientIdentifier: audience,
+    permission_mode: 'always-approve',
+    yolo_mode: true,
+    auto_mode: false,
+  }]);
+  const notifyAt = runtime.calls.indexOf('x.ai/yolo_mode_changed');
+  const promptAt = runtime.calls.indexOf('session/prompt');
+  assert.ok(notifyAt >= 0 && notifyAt < promptAt);
   await service.closeSession({ sessionId: created.session.id });
+});
+
+/**
+ * grok-build `apply_yolo_mode_to_matching_sessions`: an omitted sender matches
+ * every resident session, and a sender matches only `origin_client.product`.
+ * `sessionId` is not part of that match. Session `_meta.clientIdentifier` is
+ * the product.
+ */
+function nativeYoloMatches(sender: string | undefined, origin: string): boolean {
+  return sender == null || origin === sender;
+}
+
+test('native fork permission changes do not match the other session origin', async () => {
+  const notices: Array<Record<string, unknown>> = [];
+  const releases: Array<() => void> = [];
+  const origins: { parent: string | undefined; child: string | undefined } = {
+    parent: undefined,
+    child: undefined,
+  };
+  const runtime = fakeRuntime({
+    extensions: {
+      supports: (method: string) => method === 'x.ai/session/fork',
+    },
+    async newSession(params: { _meta?: { clientIdentifier?: string } }) {
+      runtime.calls.push('session/new');
+      origins.parent = params._meta?.clientIdentifier;
+      return { sessionId: 'native-parent' };
+    },
+    async resumeSession(params: { sessionId: string; _meta?: { clientIdentifier?: string } }) {
+      runtime.calls.push('session/resume');
+      origins.child = params._meta?.clientIdentifier;
+      return { sessionId: params.sessionId };
+    },
+    async nativeForkSession() {
+      runtime.calls.push('x.ai/session/fork');
+      return { newSessionId: 'native-child' };
+    },
+    async notifyPermissionMode(params: Record<string, unknown>) {
+      runtime.calls.push('x.ai/yolo_mode_changed');
+      notices.push(params);
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+      });
+      return { stopReason: 'end_turn' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const parent = await service.createSession({ cwd: '/workspace' });
+  const child = await service.forkSession({ sessionId: parent.session.id });
+  await service.setConfigOption({
+    sessionId: child.session.id,
+    configId: 'permission_mode',
+    value: 'always_approve',
+  });
+  const parentTurn = service.startTurn({
+    sessionId: parent.session.id,
+    input: [{ type: 'text', text: 'parent' }],
+  });
+  const childTurn = service.startTurn({
+    sessionId: child.session.id,
+    input: [{ type: 'text', text: 'child' }],
+  });
+  await waitFor(() => notices.length === 2 && releases.length === 2, 'both permission notices');
+  assert.match(origins.parent ?? '', /^gian-grok-proxy:aud_/);
+  assert.match(origins.child ?? '', /^gian-grok-proxy:aud_/);
+  assert.notEqual(origins.parent, origins.child);
+  const parentNotice = notices.find((notice) => notice.clientIdentifier === origins.parent);
+  const childNotice = notices.find((notice) => notice.clientIdentifier === origins.child);
+  assert.equal(parentNotice?.permission_mode, 'default');
+  assert.equal(parentNotice?.yolo_mode, false);
+  assert.equal(parentNotice?.sessionId, 'native-parent');
+  assert.equal(childNotice?.permission_mode, 'always-approve');
+  assert.equal(childNotice?.yolo_mode, true);
+  assert.equal(childNotice?.sessionId, 'native-child');
+  assert.equal(nativeYoloMatches(undefined, origins.parent ?? ''), true);
+  assert.equal(nativeYoloMatches(childNotice?.clientIdentifier as string, origins.parent ?? ''), false);
+  assert.equal(nativeYoloMatches(parentNotice?.clientIdentifier as string, origins.child ?? ''), false);
+  assert.equal(service.getSession({ sessionId: parent.session.id }).session.mode, 'default');
+  assert.equal(service.getSession({ sessionId: child.session.id }).session.mode, 'always_approve');
+  for (const release of releases) release();
+  await parentTurn;
+  await childTurn;
+  await service.close();
+});
+
+test('a standard ACP fork refuses a permission mode the shared origin would broadcast', async () => {
+  const notices: Array<Record<string, unknown>> = [];
+  let audience = '';
+  const baseMeta = initializeMeta();
+  const forkMeta = {
+    ...baseMeta,
+    agentCapabilities: {
+      ...baseMeta.agentCapabilities,
+      sessionCapabilities: {
+        ...baseMeta.agentCapabilities.sessionCapabilities,
+        fork: {},
+      },
+    },
+  };
+  const runtime = fakeRuntime({
+    negotiated: forkMeta,
+    async ensureStarted() {
+      runtime.calls.push('initialize');
+      return forkMeta;
+    },
+    async newSession(params: { _meta?: { clientIdentifier?: string } }) {
+      runtime.calls.push('session/new');
+      audience = params._meta?.clientIdentifier ?? '';
+      return { sessionId: 'native-parent' };
+    },
+    async forkSession() {
+      runtime.calls.push('session/fork');
+      return { sessionId: 'native-child', configOptions: [] };
+    },
+    async notifyPermissionMode(params: Record<string, unknown>) {
+      runtime.calls.push('x.ai/yolo_mode_changed');
+      notices.push(params);
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const parent = await service.createSession({ cwd: '/workspace' });
+  const child = await service.forkSession({ sessionId: parent.session.id });
+  await service.setConfigOption({
+    sessionId: child.session.id,
+    configId: 'permission_mode',
+    value: 'always_approve',
+  });
+  await assert.rejects(
+    service.startTurn({
+      sessionId: child.session.id,
+      input: [{ type: 'text', text: 'child' }],
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  assert.equal(notices.length, 0);
+  assert.equal(runtime.calls.filter((call) => call === 'session/prompt').length, 0);
+  assert.equal(service.getSession({ sessionId: parent.session.id }).session.mode, 'default');
+  assert.equal(service.getSession({ sessionId: child.session.id }).session.status, 'idle');
+  await service.startTurn({
+    sessionId: parent.session.id,
+    input: [{ type: 'text', text: 'parent' }],
+  });
+  assert.deepEqual(notices, [{
+    sessionId: 'native-parent',
+    clientIdentifier: audience,
+    permission_mode: 'default',
+    yolo_mode: false,
+    auto_mode: false,
+  }]);
+  await service.close();
 });
 
 test('edit tool_call_update diffs emit schema-valid consecutive notifications', async () => {
@@ -359,9 +560,28 @@ test('Grok gian.proxy/2 rejects a second attached session and hostServices', asy
   );
   await service.close();
 
+  const admittedRuntime = fakeRuntime({
+    async mcpList() {
+      admittedRuntime.calls.push('x.ai/mcp/list');
+      return {
+        sessionMcpResolved: true,
+        servers: [{
+          name: 'gian-tools',
+          type: 'http',
+          url: 'http://127.0.0.1:9',
+          sourceLabel: 'client',
+          session: { enabled: true, status: 'ready' },
+        }],
+      };
+    },
+  });
+  const boundaries: Array<{ disallowMetaTools: boolean; spawnDenyRules: readonly string[] }> = [];
   const fresh = new GrokProtocolV2Adapter(new GrokProxyService({
     binaryPath: '/managed/grok',
-    createRuntime: () => fakeRuntime(),
+    createRuntime: (_cwd, boundary) => {
+      boundaries.push(boundary);
+      return admittedRuntime;
+    },
   }), '0.3.0', () => undefined);
   await fresh.handle(v2Request('1', 'initialize', {
     protocol: { name: 'gian.proxy', versions: ['2.1'] },
@@ -391,6 +611,9 @@ test('Grok gian.proxy/2 rejects a second attached session and hostServices', asy
     }],
   }));
   assert.ok(admitted);
+  assert.equal(boundaries.at(-1)?.disallowMetaTools, false);
+  assert.ok(!boundaries.at(-1)?.spawnDenyRules.includes('MCPTool(*)'));
+  assert.ok(admittedRuntime.calls.includes('x.ai/mcp/list'));
 });
 
 test('Grok gian.proxy/2 returns an empty Replay Event page before native history exists', async () => {
@@ -421,7 +644,7 @@ test('Grok gian.proxy/2 returns an empty Replay Event page before native history
   await service.close();
 });
 
-test('Grok gian.proxy/2 rejects session-bound config on turn.start', async () => {
+test('Grok gian.proxy/2 applies turn-bound model and thinking on turn.start', async () => {
   const runtime = fakeRuntime();
   const service = new GrokProxyService({
     binaryPath: '/managed/grok',
@@ -435,7 +658,7 @@ test('Grok gian.proxy/2 rejects session-bound config on turn.start', async () =>
   const created = await adapter.handle(v2Request('2', 'session.create', {
     sessionId: 'host-bind',
     workspace: { cwd: '/workspace', roots: ['/workspace'] },
-    config: { model: 'grok-4.6' },
+    config: {},
   })) as { session: { streamId: string } };
   await assert.rejects(
     adapter.handle(v2Request('3', 'turn.start', {
@@ -443,13 +666,44 @@ test('Grok gian.proxy/2 rejects session-bound config on turn.start', async () =>
       streamId: created.session.streamId,
       turnId: 'host-turn-bind',
       input: [{ type: 'text', text: 'hello' }],
-      config: { model: 'grok-4.6' },
+      config: { sandbox_profile: 'workspace' },
     })),
     (error: unknown) => error instanceof Error
       && 'domainCode' in error
       && (error as { domainCode: string }).domainCode === 'CONFIG_BINDING_INVALID',
   );
-  assert.equal(runtime.calls.filter(call => call === 'session/set_model').length, 1);
+  assert.equal(runtime.calls.filter(call => call === 'session/set_model').length, 0);
+  assert.ok(!runtime.calls.includes('x.ai/yolo_mode_changed'));
+  await assert.rejects(
+    adapter.handle(v2Request('4', 'turn.start', {
+      sessionId: 'host-bind',
+      streamId: created.session.streamId,
+      turnId: 'host-turn-invalid-model',
+      input: [{ type: 'text', text: 'hello' }],
+      config: { model: 'not-a-model' },
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CONFIG_VALUE_INVALID',
+  );
+  assert.equal(runtime.calls.filter(call => call === 'session/set_model').length, 0);
+  const started = await adapter.handle(v2Request('5', 'turn.start', {
+    sessionId: 'host-bind',
+    streamId: created.session.streamId,
+    turnId: 'host-turn-model',
+    input: [{ type: 'text', text: 'hello' }],
+    config: { model: 'grok-4.6', reasoning_effort: 'low' },
+  })) as { accepted?: boolean };
+  assert.equal(started.accepted, true);
+  assert.deepEqual(
+    runtime.prompts.filter((item) => (
+      Boolean(item) && typeof item === 'object' && 'modelId' in (item as object)
+    )),
+    [
+      { sessionId: 'native-1', modelId: 'grok-4.6' },
+      { sessionId: 'native-1', modelId: 'grok-4.6', _meta: { reasoningEffort: 'low' } },
+    ],
+  );
   await service.close();
 });
 
@@ -467,15 +721,179 @@ test('Grok gian.proxy/2 validates session config before creating a native sessio
   await adapter.handle(v2Request('2', 'catalog.list', {}));
   await assert.rejects(
     adapter.handle(v2Request('3', 'session.create', {
+      sessionId: 'host-turn-model',
+      workspace: { cwd: '/workspace', roots: ['/workspace'] },
+      config: { model: 'grok-4.6' },
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CONFIG_BINDING_INVALID',
+  );
+  await assert.rejects(
+    adapter.handle(v2Request('4', 'session.create', {
       sessionId: 'host-invalid',
       workspace: { cwd: '/workspace', roots: ['/workspace'] },
-      config: { model: 'not-a-model' },
+      config: { permission_mode: 'not-a-mode' },
     })),
     (error: unknown) => error instanceof Error
       && 'domainCode' in error
       && (error as { domainCode: string }).domainCode === 'CONFIG_VALUE_INVALID',
   );
   assert.ok(!runtime.calls.includes('session/new'));
+  await service.close();
+});
+
+test('session.create accepts the Host attachment directory beside the session cwd', async () => {
+  const runtime = fakeRuntime();
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  await assert.rejects(
+    adapter.handle(v2Request('2', 'session.create', {
+      sessionId: 'host-missing-cwd',
+      workspace: { cwd: '/workspace', roots: ['/elsewhere'] },
+      config: {},
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CONFIG_VALUE_INVALID',
+  );
+  const created = await adapter.handle(v2Request('3', 'session.create', {
+    sessionId: 'host-attachment-root',
+    workspace: {
+      cwd: '/workspace',
+      roots: ['/workspace', '/tmp/gian-attachments/host-attachment-root'],
+    },
+    config: { permission_mode: 'default' },
+  })) as { session: { state: string; sessionConfig: Record<string, unknown> } };
+  assert.equal(created.session.state, 'idle');
+  assert.equal(created.session.sessionConfig.permission_mode, undefined);
+  assert.equal(created.session.sessionConfig.sandbox_profile, 'workspace');
+  assert.equal(created.session.sessionConfig.model, undefined);
+  assert.ok(runtime.calls.includes('session/new'));
+  await service.close();
+});
+
+test('catalog.resolve keeps the full model list and returns both default maps', async () => {
+  const meta = initializeMeta();
+  const models = meta._meta.modelState.availableModels as Array<{
+    modelId: string;
+    name?: string;
+  }>;
+  models.push({ modelId: 'grok-fast', name: 'Grok Fast' });
+  const runtime = fakeRuntime({
+    negotiated: meta,
+    async ensureStarted() {
+      runtime.calls.push('initialize');
+      return meta;
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', () => undefined);
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  const resolved = resultSchemas['catalog.resolve'].parse(await adapter.handle(v2Request('2', 'catalog.resolve', {
+    catalogRevision: 'rev-1',
+    sessionConfig: {},
+    turnConfig: { model: 'grok-4.6' },
+  })));
+  const model = resolved.configOptions.find((option) => option.id === 'model');
+  assert.equal(model?.binding, 'turn');
+  assert.deepEqual(model?.choices?.map((choice) => choice.value), ['grok-4.6', 'grok-fast']);
+  assert.equal(model?.defaultValue, 'grok-4.6');
+  const effort = resolved.configOptions.find((option) => option.id === 'reasoning_effort');
+  assert.equal(effort?.binding, 'turn');
+  assert.deepEqual(effort?.choices?.map((choice) => choice.value), ['high', 'low']);
+  assert.equal(resolved.resolvedDefaults.turnConfig.model, 'grok-4.6');
+  assert.equal(resolved.resolvedDefaults.turnConfig.reasoning_effort, 'high');
+  assert.equal(resolved.resolvedDefaults.turnConfig.permission_mode, 'default');
+  assert.equal(resolved.resolvedDefaults.sessionConfig.permission_mode, undefined);
+  assert.equal(resolved.resolvedDefaults.sessionConfig.sandbox_profile, 'workspace');
+  assert.equal(resolved.resolvedDefaults.sessionConfig.model, undefined);
+  const dropped = resultSchemas['catalog.resolve'].parse(await adapter.handle(v2Request('3', 'catalog.resolve', {
+    catalogRevision: 'rev-1',
+    sessionConfig: {},
+    turnConfig: { model: 'grok-fast', reasoning_effort: 'high' },
+  })));
+  assert.equal(dropped.configOptions.some((option) => option.id === 'reasoning_effort'), false);
+  assert.equal(dropped.specialCatalogs?.thinking, undefined);
+  assert.equal(dropped.resolvedDefaults.turnConfig.model, 'grok-fast');
+  assert.equal(dropped.resolvedDefaults.turnConfig.reasoning_effort, undefined);
+  const lifted = resultSchemas['catalog.resolve'].parse(await adapter.handle(v2Request('4', 'catalog.resolve', {
+    catalogRevision: 'rev-1',
+    sessionConfig: { model: 'grok-4.6' },
+    turnConfig: {},
+  })));
+  assert.equal(lifted.configOptions.find((option) => option.id === 'model')?.binding, 'turn');
+  assert.equal(lifted.resolvedDefaults.turnConfig.model, 'grok-4.6');
+  assert.equal(lifted.resolvedDefaults.turnConfig.reasoning_effort, 'high');
+  assert.equal(lifted.resolvedDefaults.sessionConfig.model, undefined);
+  assert.equal(lifted.resolvedDefaults.sessionConfig.reasoning_effort, undefined);
+  assert.equal(lifted.resolvedDefaults.turnConfig.permission_mode, 'default');
+  assert.equal(lifted.resolvedDefaults.sessionConfig.permission_mode, undefined);
+  const stalePage = resultSchemas['catalog.resolve'].parse(await adapter.handle(v2Request('4b', 'catalog.resolve', {
+    catalogRevision: 'rev-1',
+    sessionConfig: {
+      model: 'grok-4.6',
+      reasoning_effort: 'low',
+      permission_mode: 'default',
+    },
+    turnConfig: {},
+  })));
+  assert.equal(stalePage.resolvedDefaults.turnConfig.model, 'grok-4.6');
+  assert.equal(stalePage.resolvedDefaults.sessionConfig.model, undefined);
+  assert.equal(stalePage.resolvedDefaults.sessionConfig.reasoning_effort, undefined);
+  assert.equal(stalePage.resolvedDefaults.sessionConfig.permission_mode, undefined);
+  assert.equal(stalePage.resolvedDefaults.turnConfig.permission_mode, 'default');
+  assert.deepEqual(
+    stalePage.configOptions.find((option) => option.id === 'reasoning_effort')?.choices?.map((choice) => choice.value),
+    ['high', 'low'],
+  );
+  const turnWins = resultSchemas['catalog.resolve'].parse(await adapter.handle(v2Request('7', 'catalog.resolve', {
+    catalogRevision: 'rev-1',
+    sessionConfig: { model: 'grok-fast', reasoning_effort: 'low' },
+    turnConfig: { model: 'grok-4.6', reasoning_effort: 'high' },
+  })));
+  assert.equal(turnWins.resolvedDefaults.turnConfig.model, 'grok-4.6');
+  assert.equal(turnWins.resolvedDefaults.sessionConfig.model, undefined);
+  assert.equal(turnWins.resolvedDefaults.sessionConfig.reasoning_effort, undefined);
+  assert.deepEqual(
+    turnWins.configOptions.find((option) => option.id === 'reasoning_effort')?.choices?.map((choice) => choice.value),
+    ['high', 'low'],
+  );
+  await assert.rejects(
+    adapter.handle(v2Request('5', 'catalog.resolve', {
+      catalogRevision: 'rev-1',
+      sessionConfig: {},
+      turnConfig: { sandbox_profile: 'workspace' },
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CONFIG_BINDING_INVALID',
+  );
+  await assert.rejects(
+    adapter.handle(v2Request('6', 'catalog.resolve', {
+      catalogRevision: 'rev-1',
+      sessionConfig: {},
+      turnConfig: { model: 'not-a-model' },
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CONFIG_VALUE_INVALID',
+  );
+  assert.ok(!runtime.calls.includes('session/new'));
+  assert.ok(!runtime.calls.includes('session/prompt'));
   await service.close();
 });
 
@@ -715,6 +1133,130 @@ test('unknown ACP session updates become diagnostic activities and late events a
     },
   });
   assert.equal(notifications.length, before);
+  await service.close();
+});
+
+test('turn config notices stay behind turn.started and usage deltas keep a turn', async () => {
+  const runtime = fakeRuntime({
+    async setSessionModel(params: unknown) {
+      runtime.calls.push('session/set_model');
+      runtime.prompts.push(params);
+      runtime.emit('extensionNotification', 'x.ai/model_changed', {
+        sessionId: 'native-1',
+        modelId: 'grok-4.6',
+      });
+      return {};
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      return {
+        stopReason: 'end_turn',
+        _meta: { inputTokens: 3, outputTokens: 2, totalTokens: 10 },
+      };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', (method, params) => {
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-model-turn',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  adapter.beginRequest();
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-model-turn',
+    streamId: created.session.streamId,
+    turnId: 'host-turn-model',
+    input: [{ type: 'text', text: 'hi' }],
+    config: { model: 'grok-4.6', reasoning_effort: 'low' },
+  }));
+  adapter.flushNotifications();
+  for (let attempt = 0; attempt < 50 && !notifications.some(notification => notification.method === 'turn.completed'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  const turnNotes = notifications.filter(notification => notification.params.turnId === 'host-turn-model');
+  assert.equal(turnNotes[0]?.method, 'turn.started');
+  assert.ok(turnNotes.some(notification => (
+    notification.method === 'activity.updated'
+    && (notification.params.data as { title?: string }).title === 'Grok model changed'
+  )));
+  const usage = notifications.find(notification => (
+    notification.method === 'usage.updated'
+    && (notification.params.data as { conversation?: { mode?: string } }).conversation?.mode === 'delta'
+  ));
+  assert.equal(usage?.params.turnId, 'host-turn-model');
+  assert.equal(usage?.params.sourceTurnId, 'host-turn-model');
+  for (const notification of notifications) {
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method: notification.method, params: notification.params });
+  }
+  const sequenced = notifications.filter(notification => typeof notification.params.sequence === 'number');
+  assert.deepEqual(
+    sequenced.map(notification => notification.params.sequence),
+    sequenced.map((_notification, index) => index + 1),
+  );
+  await service.close();
+});
+
+test('conversation usage after the turn ends is not a session-scoped delta', async () => {
+  const runtime = fakeRuntime({
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      runtime.emit('extensionNotification', 'x.ai/turn_completed', {
+        sessionId: 'native-1',
+        stopReason: 'completed',
+      });
+      return {
+        stopReason: 'end_turn',
+        _meta: { inputTokens: 4, outputTokens: 1, totalTokens: 8 },
+      };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', (method, params) => {
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-usage-after',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  await adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-usage-after',
+    streamId: created.session.streamId,
+    turnId: 'host-turn-usage',
+    input: [{ type: 'text', text: 'hi' }],
+    config: {},
+  }));
+  for (let attempt = 0; attempt < 50 && !notifications.some(notification => notification.method === 'turn.completed'); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.ok(notifications.some(notification => notification.method === 'turn.completed'));
+  for (const notification of notifications) {
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method: notification.method, params: notification.params });
+    const conversation = (notification.params.data as { conversation?: { mode?: string } } | undefined)?.conversation;
+    if (notification.method === 'usage.updated' && conversation?.mode === 'delta') {
+      assert.equal(notification.params.turnId, 'host-turn-usage');
+      assert.equal(notification.params.sourceTurnId, 'host-turn-usage');
+    }
+  }
   await service.close();
 });
 
@@ -974,13 +1516,13 @@ test('native turn identity persistence is bounded by least-recently-used cleanup
     maxEntries: 2,
     now: () => now,
   });
-  store.recordLive('native-prune', 'host-old', [{ type: 'text', text: 'Old secret prompt' }]);
+  store.recordLive('native-prune', 'host-old', [{ type: 'text', text: 'Old secret prompt' }], 0);
   now += 1;
-  store.recordLive('native-prune', 'host-recent', [{ type: 'text', text: 'Recent secret prompt' }]);
+  store.recordLive('native-prune', 'host-recent', [{ type: 'text', text: 'Recent secret prompt' }], 1);
   now += 1;
-  store.recordLive('native-prune', 'host-old', [{ type: 'text', text: 'Old secret prompt' }]);
+  store.recordLive('native-prune', 'host-old', [{ type: 'text', text: 'Old secret prompt' }], 0);
   now += 1;
-  store.recordLive('native-prune', 'host-new', [{ type: 'text', text: 'New secret prompt' }]);
+  store.recordLive('native-prune', 'host-new', [{ type: 'text', text: 'New secret prompt' }], 2);
 
   const persisted = await readFile(join(dataDir, 'grok-native-turn-identities.json'), 'utf8');
   const identities = JSON.parse(persisted) as Array<{ sourceTurnId: string }>;
@@ -989,12 +1531,84 @@ test('native turn identity persistence is bounded by least-recently-used cleanup
 
   const restarted = new NativeTurnIdentityStore(dataDir, { maxEntries: 2, now: () => now });
   assert.equal(
-    restarted.resolveReplay('native-prune', 0, [{ type: 'text', text: 'Old secret prompt' }], 'fallback-old'),
+    restarted.resolveReplay('native-prune', 0, [{ type: 'text', text: 'Old secret prompt' }], 'fallback-old').sourceTurnId,
     'host-old',
   );
   assert.equal(
-    restarted.resolveReplay('native-prune', 1, [{ type: 'text', text: 'Recent secret prompt' }], 'fallback-evicted'),
+    restarted.resolveReplay('native-prune', 1, [{ type: 'text', text: 'Recent secret prompt' }], 'fallback-evicted').sourceTurnId,
     'fallback-evicted',
+  );
+});
+
+test('replay identity is positional: repeated text never steals another turn', () => {
+  const store = new NativeTurnIdentityStore(undefined);
+  const sameText = [{ type: 'text', text: '继续' }];
+  store.recordLive('native-dup', 'host-turn-first', sameText, 0);
+  store.recordLive('native-dup', 'host-turn-second', sameText, 1);
+
+  // Each ordinal binds its own live id; identical text cannot cross them.
+  assert.deepEqual(
+    store.resolveReplay('native-dup', 0, sameText, 'fallback-0'),
+    { sourceTurnId: 'host-turn-first', consistent: true },
+  );
+  assert.deepEqual(
+    store.resolveReplay('native-dup', 1, sameText, 'fallback-1'),
+    { sourceTurnId: 'host-turn-second', consistent: true },
+  );
+
+  // A live turn without a proven ordinal never binds a replay position.
+  store.recordLive('native-dup', 'host-turn-unproven', sameText);
+  assert.deepEqual(
+    store.resolveReplay('native-dup', 2, sameText, 'fallback-2'),
+    { sourceTurnId: 'fallback-2', consistent: null },
+  );
+
+  // A bound ordinal whose native text moved (compact/rewind) reports the
+  // divergence instead of binding the stale id.
+  assert.deepEqual(
+    store.resolveReplay('native-dup', 1, [{ type: 'text', text: 'changed elsewhere' }], 'fallback-x'),
+    { sourceTurnId: 'fallback-x', consistent: false },
+  );
+
+  // Multi-block and attachment-only inputs hash by text blocks only, so they
+  // can verify a positional binding but never create one.
+  assert.deepEqual(
+    store.resolveReplay('native-dup', 0, [
+      { type: 'text', text: '继续' },
+      { type: 'localFile', path: '/tmp/a.png' },
+    ], 'fallback-multi'),
+    { sourceTurnId: 'host-turn-first', consistent: true },
+  );
+});
+
+test('legacy hash-guessed identity records lose their ordinal binding on load', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'gian-grok-identity-legacy-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const filePath = join(dataDir, 'grok-native-turn-identities.json');
+  // Pre-marker format: replayIndex was guessed from the text hash, so a
+  // repeated prompt could have bound the wrong position.
+  await writeFile(filePath, `${JSON.stringify([{
+    nativeSessionId: 'native-legacy',
+    sourceTurnId: 'host-turn-legacy',
+    inputHash: createHash('sha256').update(JSON.stringify(['same text'])).digest('hex').slice(0, 32),
+    replayIndex: 0,
+    lastUsedAt: 1,
+  }])}\n`, { mode: 0o600 });
+
+  const loaded = new NativeTurnIdentityStore(dataDir);
+  // The binding is gone: the entry survives for cross-reference but no longer
+  // claims ordinal 0.
+  assert.deepEqual(
+    loaded.resolveReplay('native-legacy', 0, [{ type: 'text', text: 'same text' }], 'fallback-legacy'),
+    { sourceTurnId: 'fallback-legacy', consistent: null },
+  );
+
+  // A fresh proven record round-trips with its binding intact.
+  loaded.recordLive('native-legacy', 'host-turn-proven', [{ type: 'text', text: 'same text' }], 0);
+  const reloaded = new NativeTurnIdentityStore(dataDir);
+  assert.deepEqual(
+    reloaded.resolveReplay('native-legacy', 0, [{ type: 'text', text: 'same text' }], 'fallback-new'),
+    { sourceTurnId: 'host-turn-proven', consistent: true },
   );
 });
 
@@ -1037,12 +1651,13 @@ test('Grok gian.proxy/2 maps ACP session/fork to durable Side Chat and head Fork
     protocol: { name: 'gian.proxy', versions: ['2.1'] },
     host: { name: 'Gian', version: '0.0.0' },
   })));
-  // x.ai/*-independent capabilities are never claimed at initialize: the
-  // runtime does not exist yet and 1.0.41 registers none of the methods.
-  // ACP-fork fallback runtimes surface through catalog actions + dispatch.
-  assert.equal(initialized.capabilities.sidechat, undefined);
-  assert.equal(initialized.capabilities['session.fork'], undefined);
-  assert.equal(initialized.capabilities['session.fork.atTurn'], undefined);
+  // This double has no interject probe, so steer stays undeclared.
+  // Static Fork capabilities permit routing; catalog actions carry the
+  // live support guard. Exact-turn support below remains unavailable.
+  assert.equal(initialized.capabilities['turn.steer'], undefined);
+  assert.equal(initialized.capabilities.sidechat, 1);
+  assert.equal(initialized.capabilities['session.fork'], 1);
+  assert.equal(initialized.capabilities['session.fork.atTurn'], 1);
   const catalog = resultSchemas['catalog.list'].parse(await adapter.handle(v2Request('2', 'catalog.list', {})));
   assert.equal(catalog.actions?.find((action) => action.id === 'sidechat.create')?.supported, true);
   assert.equal(catalog.actions?.find((action) => action.id === 'session.fork.atTurn')?.supported, false);
@@ -1115,4 +1730,1250 @@ test('auth failures map to AUTH_REQUIRED', async () => {
     }),
   });
   await assert.rejects(service.listCapabilities(), /Workbench Terminal/);
+});
+
+test('a failed permission notification does not start the turn', async () => {
+  const runtime = fakeRuntime({
+    async notifyPermissionMode() {
+      throw new Error('notify failed');
+    },
+  });
+  const events: string[] = [];
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+    emitEvent: (method) => { events.push(method); },
+  });
+  const created = await service.createSession({ cwd: '/workspace' });
+  await assert.rejects(
+    service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'hello' }],
+    }),
+    /notify failed/,
+  );
+  assert.ok(!events.includes('turn.started'));
+  assert.equal(service.getSession({ sessionId: created.session.id }).session.activeTurnId, null);
+  assert.ok(!runtime.calls.includes('session/prompt'));
+  await service.closeSession({ sessionId: created.session.id });
+});
+
+test('steer keeps every text block and does not accept a file or a non-queued result', async () => {
+  let releasePrompt: (() => void) | undefined;
+  const runtime = fakeRuntime({
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const created = await service.createSession({ cwd: '/workspace' });
+  const pending = service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(
+    service.steerTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'localFile', path: 'notes.txt' }],
+    }),
+    /File attachments are rejected/,
+  );
+  assert.equal(runtime.calls.filter((call) => call === 'x.ai/interject').length, 0);
+  const steered = await service.steerTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }],
+  });
+  assert.equal(steered.ok, true);
+  const payload = runtime.prompts.find((item) => (
+    Boolean(item) && typeof item === 'object' && 'interjectionId' in (item as object)
+  )) as { text?: string; content?: Array<{ text?: string }> };
+  assert.equal(payload.text, 'one\ntwo');
+  assert.deepEqual(payload.content?.map((block) => block.text), ['one', 'two']);
+  releasePrompt?.();
+  await pending;
+  await service.close();
+});
+
+test('steer does not report accepted when Grok does not queue it', async () => {
+  let releasePrompt: (() => void) | undefined;
+  const runtime = fakeRuntime({
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    },
+    async interject() {
+      runtime.calls.push('x.ai/interject');
+      return { status: 'dropped' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const created = await service.createSession({ cwd: '/workspace' });
+  const pending = service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(
+    service.steerTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'more' }],
+    }),
+    /did not queue/,
+  );
+  releasePrompt?.();
+  await pending;
+  await service.close();
+});
+
+test('sandbox profile is chosen before the child starts and cannot be widened later', async () => {
+  const boundaries: Array<{ sandboxProfile: string; disallowMetaTools: boolean }> = [];
+  const runtime = fakeRuntime();
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: (_cwd, boundary) => {
+      boundaries.push(boundary);
+      return runtime;
+    },
+  });
+  const created = await service.createSession({ cwd: '/workspace', sandboxProfile: 'read-only' });
+  assert.equal(boundaries.at(-1)?.sandboxProfile, 'read-only');
+  assert.equal(boundaries.at(-1)?.disallowMetaTools, true);
+  assert.equal(created.session.sandboxProfile, 'read-only');
+  await assert.rejects(
+    service.setConfigOption({
+      sessionId: created.session.id,
+      configId: 'sandbox_profile',
+      value: 'off',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  const same = await service.setConfigOption({
+    sessionId: created.session.id,
+    configId: 'sandbox_profile',
+    value: 'read-only',
+  });
+  assert.equal(same.session.sandboxProfile, 'read-only');
+  await service.closeSession({ sessionId: created.session.id });
+});
+
+test('Host MCP that is not the admitted HTTP set fails closed before the session exists', async () => {
+  const runtime = fakeRuntime({
+    async mcpList() {
+      runtime.calls.push('x.ai/mcp/list');
+      return {
+        sessionMcpResolved: true,
+        servers: [{
+          name: 'plugin-tool',
+          type: 'stdio',
+          sourceLabel: 'plugin:extra',
+          session: { enabled: true, status: 'ready' },
+        }],
+      };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  service.setHostMcpServices([{
+    id: 'gian-tools',
+    protocol: 'mcp',
+    transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+  }]);
+  await assert.rejects(
+    service.createSession({ cwd: '/workspace' }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  assert.ok(runtime.calls.includes('stop'));
+});
+
+test('Host MCP catalog retries while initializing and then admits the matching server', async () => {
+  let attempts = 0;
+  const runtime = fakeRuntime({
+    async mcpList() {
+      attempts += 1;
+      runtime.calls.push('x.ai/mcp/list');
+      if (attempts < 3) return { sessionMcpResolved: false, servers: [] };
+      return {
+        sessionMcpResolved: true,
+        servers: [{
+          name: 'gian-tools',
+          type: 'http',
+          url: 'http://127.0.0.1:9',
+          sourceLabel: 'client',
+          session: { enabled: true, status: 'ready' },
+        }],
+      };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  service.setHostMcpServices([{
+    id: 'gian-tools',
+    protocol: 'mcp',
+    transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+  }]);
+  const created = await service.createSession({ cwd: '/workspace' });
+  assert.equal(attempts, 3);
+  assert.equal(created.session.status, 'idle');
+  await service.closeSession({ sessionId: created.session.id });
+});
+
+test('a process-local MCP catalog notification is re-listed and does not block a matching session', async () => {
+  let releasePrompt: (() => void) | undefined;
+  let stops = 0;
+  const admitted = {
+    name: 'gian-tools',
+    type: 'http',
+    url: 'http://127.0.0.1:9',
+    sourceLabel: 'client',
+    session: { enabled: true, status: 'ready' },
+  };
+  const disabledExtra = {
+    name: 'plugin-off',
+    type: 'stdio',
+    sourceLabel: 'plugin:extra',
+    session: { enabled: false, status: 'disabled' },
+  };
+  let servers: Array<Record<string, unknown>> = [admitted, disabledExtra];
+  let listCalls = 0;
+  const runtime = fakeRuntime({
+    async mcpList() {
+      listCalls += 1;
+      runtime.calls.push('x.ai/mcp/list');
+      return { sessionMcpResolved: true, servers };
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    },
+    async cancel() {
+      runtime.calls.push('session/cancel');
+      releasePrompt?.();
+    },
+    async stop() {
+      stops += 1;
+      runtime.calls.push('stop');
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  service.setHostMcpServices([{
+    id: 'gian-tools',
+    protocol: 'mcp',
+    transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+  }]);
+  const created = await service.createSession({ cwd: '/workspace' });
+  const listedAtCreate = listCalls;
+  const pending = service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await waitFor(() => releasePrompt != null, 'prompt to start');
+  runtime.emit('extensionNotification', 'x.ai/mcp/servers_updated', { mcpServers: [] });
+  await waitFor(() => listCalls > listedAtCreate, 'session mcp/list after servers_updated');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(service.getSession({ sessionId: created.session.id }).session.status, 'running');
+  assert.equal(stops, 0);
+
+  servers = [{
+    name: 'other',
+    type: 'http',
+    url: 'http://127.0.0.1:1',
+    sourceLabel: 'user',
+    session: { enabled: true, status: 'ready' },
+  }];
+  runtime.emit('extensionNotification', 'x.ai/mcp/tools_changed', {
+    sessionId: 'native-1',
+    serverName: 'gian-tools',
+    tools: [],
+  });
+  await waitFor(
+    () => service.getSession({ sessionId: created.session.id }).session.status === 'error',
+    'turn to fail after the real catalog mismatch',
+  );
+  assert.equal(stops, 0);
+  await pending;
+  await assert.rejects(
+    service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'again' }],
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  await service.close();
+});
+
+test('MCP boundary cancel failure kills the child before the turn is failed', async () => {
+  let releasePrompt: (() => void) | undefined;
+  let stops = 0;
+  let statusAtStop = '';
+  let failedBeforeStop = false;
+  const events: string[] = [];
+  const admitted = {
+    name: 'gian-tools',
+    type: 'http',
+    url: 'http://127.0.0.1:9',
+    sourceLabel: 'client',
+    session: { enabled: true, status: 'ready' },
+  };
+  let servers = [admitted];
+  let service!: GrokProxyService;
+  let created!: { session: { id: string } };
+  const runtime = fakeRuntime({
+    async mcpList() {
+      runtime.calls.push('x.ai/mcp/list');
+      return { sessionMcpResolved: true, servers };
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    },
+    async cancel() {
+      runtime.calls.push('session/cancel');
+      throw new Error('cancel failed');
+    },
+    async stop() {
+      stops += 1;
+      statusAtStop = service.getSession({ sessionId: created.session.id }).session.status;
+      failedBeforeStop = events.includes('turn.failed');
+      setTimeout(() => releasePrompt?.(), 0);
+      runtime.calls.push('stop');
+    },
+  });
+  service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+    emitEvent: (method) => { events.push(method); },
+    turnStopDeadlineMs: 20,
+  });
+  service.setHostMcpServices([{
+    id: 'gian-tools',
+    protocol: 'mcp',
+    transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+  }]);
+  created = await service.createSession({ cwd: '/workspace' });
+  const pending = service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await waitFor(() => releasePrompt != null, 'prompt to start');
+  servers = [{
+    name: 'other',
+    type: 'http',
+    url: 'http://127.0.0.1:1',
+    sourceLabel: 'user',
+    session: { enabled: true, status: 'ready' },
+  }];
+  runtime.emit('extensionNotification', 'x.ai/mcp/servers_updated', { mcpServers: [] });
+  await waitFor(() => stops === 1, 'child stop after cancel failure');
+  assert.equal(statusAtStop, 'running');
+  assert.equal(failedBeforeStop, false);
+  await waitFor(() => events.includes('turn.failed'), 'turn.failed after the child stops');
+  await pending;
+  await assert.rejects(
+    service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'again' }],
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+  );
+  await service.close();
+});
+
+test('a hung MCP boundary cancel kills the child and reports a failed stop', async () => {
+  let releasePrompt: (() => void) | undefined;
+  let stops = 0;
+  let statusAtStop = '';
+  let failedBeforeStop = false;
+  const events: Array<{ method: string; message?: string }> = [];
+  const admitted = {
+    name: 'gian-tools',
+    type: 'http',
+    url: 'http://127.0.0.1:9',
+    sourceLabel: 'client',
+    session: { enabled: true, status: 'ready' },
+  };
+  const unexpected = {
+    name: 'other',
+    type: 'http',
+    url: 'http://127.0.0.1:1',
+    sourceLabel: 'user',
+    session: { enabled: true, status: 'ready' },
+  };
+  let servers = [admitted];
+  let service!: GrokProxyService;
+  let created!: { session: { id: string } };
+  const runtime = fakeRuntime({
+    async mcpList() {
+      runtime.calls.push('x.ai/mcp/list');
+      return { sessionMcpResolved: true, servers };
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      return { stopReason: 'end_turn' };
+    },
+    async cancel() {
+      runtime.calls.push('session/cancel');
+      await new Promise(() => undefined);
+    },
+    async stop() {
+      stops += 1;
+      statusAtStop = service.getSession({ sessionId: created.session.id }).session.status;
+      failedBeforeStop = events.some((event) => event.method === 'turn.failed');
+      setTimeout(() => releasePrompt?.(), 0);
+      runtime.calls.push('stop');
+      throw new Error('stop failed');
+    },
+  });
+  service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+    emitEvent: (method, params) => {
+      const data = params.data;
+      const message = data && typeof data === 'object' && 'message' in data
+        ? String((data as { message?: unknown }).message ?? '')
+        : undefined;
+      events.push({ method, ...(message ? { message } : {}) });
+    },
+    turnStopDeadlineMs: 20,
+  });
+  service.setHostMcpServices([{
+    id: 'gian-tools',
+    protocol: 'mcp',
+    transport: { type: 'streamable-http', url: 'http://127.0.0.1:9' },
+  }]);
+  created = await service.createSession({ cwd: '/workspace' });
+  const pending = service.startTurn({
+    sessionId: created.session.id,
+    input: [{ type: 'text', text: 'go' }],
+  });
+  await waitFor(() => releasePrompt != null, 'prompt to start');
+  servers = [unexpected];
+  runtime.emit('extensionNotification', 'x.ai/mcp/servers_updated', { mcpServers: [] });
+  await waitFor(() => stops === 1, 'child stop after cancel hang');
+  assert.equal(statusAtStop, 'running');
+  assert.equal(failedBeforeStop, false);
+  await waitFor(
+    () => events.some((event) => event.method === 'turn.failed' && event.message?.includes('could not be stopped')),
+    'turn.failed after the stop failure',
+  );
+  await pending;
+  await assert.rejects(
+    service.startTurn({
+      sessionId: created.session.id,
+      input: [{ type: 'text', text: 'again' }],
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'CONFLICT'
+      && (error as { message?: string }).message?.includes('could not be stopped') === true,
+  );
+  await service.close();
+});
+
+test('turn.steer is advertised only when the interject probe confirms', async () => {
+  const silent = fakeRuntime();
+  const silentAdapter = new GrokProtocolV2Adapter(new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => silent,
+  }), '0.3.0', () => undefined);
+  const silentInit = resultSchemas.initialize.parse(await silentAdapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  })));
+  assert.equal(silentInit.capabilities['turn.steer'], undefined);
+  await assert.rejects(
+    silentAdapter.handle(v2Request('2', 'turn.steer', {
+      sessionId: 'missing',
+      streamId: 'missing',
+      turnId: 'missing',
+      input: [{ type: 'text', text: 'later' }],
+    })),
+    (error: unknown) => error instanceof Error
+      && 'domainCode' in error
+      && (error as { domainCode: string }).domainCode === 'CAPABILITY_NOT_SUPPORTED',
+  );
+
+  const live = fakeRuntime({
+    async probeInterjectRegistered() {
+      return 'confirmed';
+    },
+  });
+  const liveAdapter = new GrokProtocolV2Adapter(new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => live,
+  }), '0.3.0', () => undefined);
+  const liveInit = resultSchemas.initialize.parse(await liveAdapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  })));
+  assert.equal(liveInit.capabilities['turn.steer'], 1);
+});
+
+interface InteractionHarness {
+  adapter: GrokProtocolV2Adapter;
+  service: GrokProxyService;
+  runtime: ReturnType<typeof fakeRuntime>;
+  notifications: Array<{ method: string; params: Record<string, unknown> }>;
+  reverse: Array<{ method: string; response: unknown }>;
+  askExt(method: string, params: unknown): Promise<unknown>;
+  askPermission(request: unknown): Promise<unknown>;
+}
+
+/** Adapter+service pair whose fake agent parks its prompt in a reverse call. */
+async function interactionHarness(
+  reverseCall: (
+    askExt: (method: string, params: unknown) => Promise<unknown>,
+    askPermission: (request: unknown) => Promise<unknown>,
+  ) => Promise<void>,
+): Promise<InteractionHarness> {
+  let extHandler: ((method: string, params: unknown) => Promise<unknown>) | null = null;
+  let permissionHandler: ((request: unknown) => Promise<unknown>) | null = null;
+  const reverse: Array<{ method: string; response: unknown }> = [];
+  const runtime = fakeRuntime({
+    setExtMethodHandler(handler: (method: string, params: unknown) => Promise<unknown>) {
+      extHandler = handler;
+    },
+    setPermissionHandler(handler: (request: unknown) => Promise<unknown>) {
+      permissionHandler = handler;
+    },
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      await reverseCall(
+        async (method, params) => {
+          const response = await extHandler?.(method, params);
+          reverse.push({ method, response });
+          return response;
+        },
+        async (request) => {
+          const response = await permissionHandler?.(request);
+          reverse.push({ method: 'session/request_permission', response });
+          return response;
+        },
+      );
+      return { stopReason: 'end_turn' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', (method, params) => {
+    // Every notification must survive the strict Host validator.
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  return {
+    adapter,
+    service,
+    runtime,
+    notifications,
+    reverse,
+    askExt: (method, params) => {
+      if (!extHandler) throw new Error('ext handler not registered');
+      return extHandler(method, params);
+    },
+    askPermission: (request) => {
+      if (!permissionHandler) throw new Error('permission handler not registered');
+      return permissionHandler(request);
+    },
+  };
+}
+
+async function attachInteractionSession(harness: InteractionHarness, sessionId = 'host-ix') {
+  const created = await harness.adapter.handle(v2Request('2', 'session.create', {
+    sessionId,
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  })) as { session: { streamId: string } };
+  return { streamId: created.session.streamId };
+}
+
+function notificationData(
+  notifications: Array<{ method: string; params: Record<string, unknown> }>,
+  method: string,
+): Record<string, unknown>[] {
+  return notifications
+    .filter((notification) => notification.method === method)
+    .map((notification) => notification.params.data as Record<string, unknown>);
+}
+
+test('question choices satisfy the strict Host schema and settled responses replay idempotently', async () => {
+  const harness = await interactionHarness(async (askExt) => {
+    await askExt('x.ai/ask_user_question', {
+      sessionId: 'native-1',
+      toolCallId: 'tc-q1',
+      questions: [{
+        question: 'Which database?',
+        options: [
+          { label: 'Redis', description: 'in-memory' },
+          { label: 'Postgres', description: 'relational' },
+        ],
+      }],
+    });
+    await askExt('x.ai/ask_user_question', {
+      sessionId: 'native-1',
+      toolCallId: 'tc-q2',
+      questions: [{ question: 'Again?' }],
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-q',
+    input: [{ type: 'text', text: 'ask' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 1,
+    'first question card',
+  );
+  const requested = notificationData(harness.notifications, 'interaction.requested')[0]!;
+  const inputs = requested.inputs as Array<Record<string, unknown>>;
+  assert.equal(inputs.length, 1);
+  const choices = inputs[0]!.choices as Array<Record<string, unknown>>;
+  // R1: choices carry only value/displayName; option notes moved to the
+  // input description, which the strict schema allows.
+  for (const choice of choices) {
+    assert.equal('description' in choice, false);
+  }
+  assert.match(String(inputs[0]!.description ?? ''), /Redis — in-memory/);
+  assert.match(String(inputs[0]!.description ?? ''), /Postgres — relational/);
+
+  const interactionId = String(requested.interactionId);
+  const respond = (responseId: string, values: Record<string, unknown>, id = '10') => harness.adapter.handle(v2Request(id, 'interaction.respond', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-q',
+    interactionId,
+    responseId,
+    actionId: 'submit',
+    values,
+  }));
+  const accepted = await respond('r1', { 'Which database?': 'Redis' }) as { accepted?: boolean };
+  assert.equal(accepted.accepted, true);
+  // Identical retry while the interaction is still pending: accepted once.
+  assert.equal((await respond('r1', { 'Which database?': 'Redis' }, '11') as { accepted?: boolean }).accepted, true);
+  await assert.rejects(
+    respond('r1', { 'Which database?': 'Postgres' }, '12'),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CONFLICT',
+  );
+
+  // Second question in the same turn: a settled responseId must not move.
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 2,
+    'second question card',
+  );
+  const second = notificationData(harness.notifications, 'interaction.requested')[1]!;
+  await assert.rejects(
+    harness.adapter.handle(v2Request('13', 'interaction.respond', {
+      sessionId: 'host-ix',
+      streamId,
+      turnId: 'turn-q',
+      interactionId: String(second.interactionId),
+      responseId: 'r1',
+      actionId: 'submit',
+      values: { 'Again?': 'yes' },
+    })),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CONFLICT',
+  );
+  await harness.adapter.handle(v2Request('14', 'interaction.respond', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-q',
+    interactionId: String(second.interactionId),
+    responseId: 'r2',
+    actionId: 'submit',
+    values: { 'Again?': 'yes' },
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  assert.equal(harness.reverse.length, 2);
+  assert.deepEqual(harness.reverse[0]!.response, {
+    outcome: 'accepted',
+    answers: { 'Which database?': ['Redis'] },
+  });
+
+  // After the turn ended, the identical settled response still replays as
+  // accepted without re-executing anything natively; a different payload
+  // conflicts; a fresh responseId cannot re-answer the finished interaction.
+  assert.equal((await respond('r1', { 'Which database?': 'Redis' }, '15') as { accepted?: boolean }).accepted, true);
+  await assert.rejects(
+    respond('r1', { 'Which database?': 'Postgres' }, '16'),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CONFLICT',
+  );
+  await assert.rejects(
+    respond('r3', { 'Which database?': 'Redis' }, '17'),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'TURN_NOT_FOUND',
+  );
+  assert.equal(harness.reverse.length, 2);
+  assert.equal(harness.runtime.calls.filter((call) => call === 'session/prompt').length, 1);
+  await harness.service.close();
+});
+
+test('plan approval carries the plan body as context.subject with newlines intact', async () => {
+  const plan = '# Plan\n\n- step one\n- step two';
+  const harness = await interactionHarness(async (askExt) => {
+    await askExt('x.ai/exit_plan_mode', {
+      sessionId: 'native-1',
+      toolCallId: 'tc-plan',
+      planContent: plan,
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-plan',
+    input: [{ type: 'text', text: 'plan' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 1,
+    'plan card',
+  );
+  const requested = notificationData(harness.notifications, 'interaction.requested')[0]!;
+  const context = requested.context as Record<string, unknown>;
+  // R9: the plan body renders through the subject channel the Host projects.
+  assert.equal(context.subject, plan);
+  assert.equal(context.plan, plan);
+  const actions = requested.actions as Array<{ id: string }>;
+  assert.deepEqual(actions.map((action) => action.id), ['approve', 'cancel']);
+  await harness.adapter.handle(v2Request('10', 'interaction.respond', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-plan',
+    interactionId: String(requested.interactionId),
+    responseId: 'r1',
+    actionId: 'approve',
+    values: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  assert.deepEqual(harness.reverse[0]!.response, { outcome: 'approved' });
+  await harness.service.close();
+});
+
+test('elicitation requestedSchema becomes protocol inputs and submit rebuilds native content', async () => {
+  const harness = await interactionHarness(async (askExt) => {
+    await askExt('x.ai/mcp/elicit', {
+      sessionId: 'native-1',
+      serverName: 'files',
+      requestedSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', title: 'Path', minLength: 1, maxLength: 200 },
+          level: { type: 'string', enum: ['ro', 'rw'], enumNames: ['Read only', 'Read write'] },
+          recursive: { type: 'boolean', description: 'Recurse into subdirectories' },
+        },
+        required: ['path', 'level'],
+      },
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-elicit',
+    input: [{ type: 'text', text: 'elicit' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 1,
+    'elicit card',
+  );
+  const requested = notificationData(harness.notifications, 'interaction.requested')[0]!;
+  const inputs = requested.inputs as Array<Record<string, unknown>>;
+  assert.deepEqual(inputs.map((input) => [input.id, input.type, input.required]), [
+    ['path', 'text', true],
+    ['level', 'single_select', true],
+    ['recursive', 'single_select', false],
+  ]);
+  assert.equal(inputs[0]!.minimumLength, 1);
+  assert.equal(inputs[0]!.maximumLength, 200);
+  assert.deepEqual(inputs[1]!.choices, [
+    { value: 'ro', displayName: 'Read only' },
+    { value: 'rw', displayName: 'Read write' },
+  ]);
+  assert.deepEqual(inputs[2]!.choices, [
+    { value: 'true', displayName: 'True' },
+    { value: 'false', displayName: 'False' },
+  ]);
+  const respond = (values: Record<string, unknown>, id: string) => harness.adapter.handle(v2Request(id, 'interaction.respond', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-elicit',
+    interactionId: String(requested.interactionId),
+    responseId: 'r1',
+    actionId: 'submit',
+    values,
+  }));
+  // A missing required field rejects without settling the interaction.
+  await assert.rejects(
+    respond({ level: 'rw' }, '10'),
+    (error: unknown) => (error as { code?: number }).code === -32602,
+  );
+  await assert.rejects(
+    respond({ path: '/tmp', level: 'admin' }, '11'),
+    (error: unknown) => (error as { code?: number }).code === -32602,
+  );
+  const accepted = await respond({ path: '/tmp', level: 'rw', recursive: 'true' }, '12') as { accepted?: boolean };
+  assert.equal(accepted.accepted, true);
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  // R8: the native ElicitResult carries typed content, not a flat string map.
+  assert.deepEqual(harness.reverse[0]!.response, {
+    action: 'accept',
+    content: { path: '/tmp', level: 'rw', recursive: true },
+  });
+  await harness.service.close();
+});
+
+test('an inexpressible elicitation schema declines natively without a ghost card', async () => {
+  const harness = await interactionHarness(async (askExt) => {
+    await askExt('x.ai/mcp/elicit', {
+      sessionId: 'native-1',
+      serverName: 'files',
+      requestedSchema: {
+        type: 'object',
+        properties: { retries: { type: 'number' } },
+      },
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-elicit-x',
+    input: [{ type: 'text', text: 'elicit' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  assert.equal(notificationData(harness.notifications, 'interaction.requested').length, 0);
+  assert.deepEqual(harness.reverse[0]!.response, { action: 'decline' });
+  await harness.service.close();
+});
+
+test('a reverse question with no active turn settles cancelled immediately', async () => {
+  const harness = await interactionHarness(async () => undefined);
+  await attachInteractionSession(harness);
+  const response = await harness.askExt('x.ai/ask_user_question', {
+    sessionId: 'native-1',
+    toolCallId: 'tc-idle',
+    questions: [{ question: 'Nobody is listening?' }],
+  });
+  assert.deepEqual(response, { outcome: 'cancelled' });
+  assert.equal(notificationData(harness.notifications, 'interaction.requested').length, 0);
+  await harness.service.close();
+});
+
+test('interrupt settles a parked permission exactly once on the Host stream', async () => {
+  const harness = await interactionHarness(async (_askExt, askPermission) => {
+    await askPermission({
+      sessionId: 'native-1',
+      toolCall: { toolCallId: 'tc-perm', title: 'Run tests', kind: 'execute' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-perm',
+    input: [{ type: 'text', text: 'perm' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 1,
+    'permission card',
+  );
+  await harness.adapter.handle(v2Request('4', 'turn.interrupt', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-perm',
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  // R2: the native reverse request settled cancelled, and the Host saw one
+  // interaction.resolved plus one terminal turn event.
+  assert.deepEqual(harness.reverse[0]!.response, { outcome: { outcome: 'cancelled' } });
+  const resolved = notificationData(harness.notifications, 'interaction.resolved');
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0]!.outcome, 'cancelled');
+  const completed = notificationData(harness.notifications, 'turn.completed');
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0]!.stopReason, 'interrupted');
+  // A late permission request after the interrupt settles cancelled without a card.
+  const late = await harness.askPermission({
+    sessionId: 'native-1',
+    toolCall: { toolCallId: 'tc-late', title: 'Late', kind: 'execute' },
+    options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+  });
+  assert.deepEqual(late, { outcome: { outcome: 'cancelled' } });
+  assert.equal(notificationData(harness.notifications, 'interaction.requested').length, 1);
+  await harness.service.close();
+});
+
+test('an answered permission replays after settlement without re-executing natively', async () => {
+  const harness = await interactionHarness(async (_askExt, askPermission) => {
+    await askPermission({
+      sessionId: 'native-1',
+      toolCall: { toolCallId: 'tc-perm', title: 'Run tests', kind: 'execute' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+  });
+  const { streamId } = await attachInteractionSession(harness);
+  await harness.adapter.handle(v2Request('3', 'turn.start', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-perm',
+    input: [{ type: 'text', text: 'perm' }],
+    config: {},
+  }));
+  await waitFor(
+    () => notificationData(harness.notifications, 'interaction.requested').length === 1,
+    'permission card',
+  );
+  const interactionId = String(notificationData(harness.notifications, 'interaction.requested')[0]!.interactionId);
+  const respond = (responseId: string, actionId: string, id: string) => harness.adapter.handle(v2Request(id, 'interaction.respond', {
+    sessionId: 'host-ix',
+    streamId,
+    turnId: 'turn-perm',
+    interactionId,
+    responseId,
+    actionId,
+    values: {},
+  }));
+  assert.equal((await respond('r1', 'allow', '10') as { accepted?: boolean }).accepted, true);
+  await waitFor(
+    () => notificationData(harness.notifications, 'turn.completed').length === 1,
+    'turn completion',
+  );
+  assert.deepEqual(harness.reverse[0]!.response, {
+    outcome: { outcome: 'selected', optionId: 'allow' },
+  });
+  // Same payload replays accepted; a different action on the settled
+  // responseId conflicts; the approval operation never ran twice.
+  assert.equal((await respond('r1', 'allow', '11') as { accepted?: boolean }).accepted, true);
+  await assert.rejects(
+    respond('r1', 'deny', '12'),
+    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CONFLICT',
+  );
+  assert.equal(harness.reverse.length, 1);
+  await harness.service.close();
+});
+
+test('model and effort are per-session: a sibling never leaks into native requests', async () => {
+  const modelCalls: Array<Record<string, unknown>> = [];
+  const twoModelMeta = {
+    protocolVersion: 1,
+    agentCapabilities: {
+      loadSession: true,
+      sessionCapabilities: { list: {}, resume: {}, close: {} },
+    },
+    _meta: {
+      modelState: {
+        currentModelId: 'grok-a',
+        availableModels: [
+          {
+            modelId: 'grok-a',
+            name: 'Grok A',
+            _meta: {
+              reasoningEfforts: [
+                { id: 'lo', value: 'lo', label: 'Lo', default: true },
+                { id: 'hi', value: 'hi', label: 'Hi' },
+              ],
+            },
+          },
+          {
+            modelId: 'grok-b',
+            name: 'Grok B',
+            _meta: {
+              reasoningEfforts: [{ id: 'max', value: 'max', label: 'Max', default: true }],
+            },
+          },
+        ],
+      },
+      availableCommands: [],
+    },
+  };
+  const runtime = fakeRuntime({
+    negotiated: twoModelMeta,
+    async ensureStarted() {
+      runtime.calls.push('initialize');
+      return twoModelMeta;
+    },
+    async resumeSession(params: { sessionId: string }) {
+      runtime.calls.push('session/resume');
+      return { sessionId: params.sessionId };
+    },
+    async setSessionModel(params: Record<string, unknown>) {
+      runtime.calls.push('session/set_model');
+      modelCalls.push(params);
+      return {};
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const parent = await service.createSession({ cwd: '/workspace' });
+  const child = await service.createSession({
+    cwd: '/workspace',
+    nativeSessionId: 'native-b',
+    resumeMode: 'resume',
+    allowAdditional: true,
+  });
+
+  // Fresh session evidences the runtime default; the resumed one reports
+  // unknown instead of borrowing the process default.
+  assert.equal(parent.session.model, 'grok-a');
+  assert.equal(child.session.model, null);
+
+  await service.setConfigOption({
+    sessionId: parent.session.id,
+    configId: 'model',
+    value: 'grok-b',
+  });
+  assert.deepEqual(modelCalls, [{ sessionId: 'native-1', modelId: 'grok-b' }]);
+
+  // The child's model is unknown: adjusting thinking must refuse instead of
+  // sending the process default model to the native session.
+  await assert.rejects(
+    service.setConfigOption({
+      sessionId: child.session.id,
+      configId: 'reasoning_effort',
+      value: 'lo',
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'INVALID_REQUEST'
+      && /Select a Grok model/.test((error as Error).message),
+  );
+  assert.equal(modelCalls.filter((call) => call.sessionId === 'native-b').length, 0);
+
+  // The parent's effort change must not emit a set_model for the child.
+  await service.setConfigOption({
+    sessionId: parent.session.id,
+    configId: 'reasoning_effort',
+    value: 'max',
+  });
+  assert.deepEqual(modelCalls[1], {
+    sessionId: 'native-1',
+    modelId: 'grok-b',
+    _meta: { reasoningEffort: 'max' },
+  });
+  assert.equal(modelCalls.filter((call) => call.sessionId === 'native-b').length, 0);
+
+  // Once a native update evidences the child's model, thinking applies to it.
+  runtime.emit('sessionUpdate', {
+    sessionId: 'native-b',
+    update: { sessionUpdate: 'current_model_update', currentModelId: 'grok-b' },
+  });
+  await service.setConfigOption({
+    sessionId: child.session.id,
+    configId: 'reasoning_effort',
+    value: 'max',
+  });
+  assert.deepEqual(modelCalls[2], {
+    sessionId: 'native-b',
+    modelId: 'grok-b',
+    _meta: { reasoningEffort: 'max' },
+  });
+
+  // Native model updates only move the session that emitted them.
+  assert.equal(service.getSession({ sessionId: child.session.id }).session.model, 'grok-b');
+  assert.equal(service.getSession({ sessionId: parent.session.id }).session.model, 'grok-b');
+  runtime.emit('sessionUpdate', {
+    sessionId: 'native-b',
+    update: { sessionUpdate: 'current_model_update', currentModelId: 'grok-a' },
+  });
+  assert.equal(service.getSession({ sessionId: child.session.id }).session.model, 'grok-a');
+  assert.equal(service.getSession({ sessionId: parent.session.id }).session.model, 'grok-b');
+  await service.setConfigOption({
+    sessionId: child.session.id,
+    configId: 'reasoning_effort',
+    value: 'lo',
+  });
+
+  // Session-scoped catalogs never cross values; the sessionless catalog keeps
+  // the runtime default rather than whichever child changed last.
+  const parentCatalog = service.currentCatalog(parent.session.id);
+  const childCatalog = service.currentCatalog(child.session.id);
+  const defaultCatalog = service.currentCatalog();
+  const currentOf = (catalog: ReturnType<GrokProxyService['currentCatalog']>, id: string) => (
+    catalog.sessionOptions.find((option) => option.id === id)?.currentValue
+  );
+  assert.equal(currentOf(parentCatalog, 'model'), 'grok-b');
+  assert.equal(currentOf(parentCatalog, 'reasoning_effort'), 'max');
+  assert.equal(currentOf(childCatalog, 'model'), 'grok-a');
+  assert.equal(currentOf(childCatalog, 'reasoning_effort'), 'lo');
+  assert.equal(currentOf(defaultCatalog, 'model'), 'grok-a');
+  // models[].isDefault agrees with the session options, so a session-scoped
+  // catalog.resolve without an explicit model resolves the session's own
+  // model and effort instead of the process default.
+  assert.equal(parentCatalog.models.find((entry) => entry.isDefault)?.id, 'grok-b');
+  assert.equal(
+    parentCatalog.models.find((entry) => entry.id === 'grok-b')?.efforts.find((effort) => effort.isDefault)?.id,
+    'max',
+  );
+  assert.equal(childCatalog.models.find((entry) => entry.isDefault)?.id, 'grok-a');
+  assert.equal(
+    childCatalog.models.find((entry) => entry.id === 'grok-a')?.efforts.find((effort) => effort.isDefault)?.id,
+    'lo',
+  );
+  assert.equal(defaultCatalog.models.find((entry) => entry.isDefault)?.id, 'grok-a');
+  await service.close();
+});
+
+test('a fork child inherits the parent model and effort at fork time', async () => {
+  const modelCalls: Array<Record<string, unknown>> = [];
+  const forkMeta = {
+    ...initializeMeta(),
+    agentCapabilities: {
+      ...initializeMeta().agentCapabilities,
+      sessionCapabilities: { list: {}, resume: {}, close: {}, fork: {} },
+    },
+  };
+  const runtime = fakeRuntime({
+    negotiated: forkMeta,
+    async ensureStarted() {
+      runtime.calls.push('initialize');
+      return forkMeta;
+    },
+    async forkSession() {
+      runtime.calls.push('session/fork');
+      return { sessionId: 'native-child', configOptions: [] };
+    },
+    async setSessionModel(params: Record<string, unknown>) {
+      runtime.calls.push('session/set_model');
+      modelCalls.push(params);
+      return {};
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const parent = await service.createSession({ cwd: '/workspace' });
+  await service.setConfigOption({
+    sessionId: parent.session.id,
+    configId: 'reasoning_effort',
+    value: 'low',
+  });
+  const forked = await service.forkSession({ sessionId: parent.session.id });
+  const childId = forked.session.id;
+  assert.equal(service.getSession({ sessionId: childId }).session.model, 'grok-4.6');
+  assert.equal(service.getSession({ sessionId: childId }).session.effort, 'low');
+  // The child diverges independently afterwards.
+  await service.setConfigOption({
+    sessionId: childId,
+    configId: 'reasoning_effort',
+    value: 'high',
+  });
+  assert.equal(service.getSession({ sessionId: parent.session.id }).session.effort, 'low');
+  assert.equal(service.getSession({ sessionId: childId }).session.effort, 'high');
+  assert.equal(modelCalls.at(-1)?.sessionId, forked.session.nativeSessionId);
+  await service.close();
+});
+
+test('native stop reasons map to the protocol stop table', async () => {
+  const stopReasons = ['refusal', 'max_turn_requests', 'max_tokens', 'end_turn', 'future-reason'];
+  const runtime = fakeRuntime({
+    async prompt() {
+      runtime.calls.push('session/prompt');
+      return { stopReason: stopReasons.shift() ?? 'end_turn' };
+    },
+  });
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => runtime,
+  });
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.0', (method, params) => {
+    proxyNotificationSchema.parse({ jsonrpc: '2.0', method, params });
+    notifications.push({ method, params });
+  });
+  await adapter.handle(v2Request('1', 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  }));
+  const created = await adapter.handle(v2Request('2', 'session.create', {
+    sessionId: 'host-stops',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  })) as { session: { streamId: string } };
+
+  const expected = ['refused', 'limit_reached', 'limit_reached', 'completed', 'other'];
+  for (const [index, stopReason] of expected.entries()) {
+    const turnId = `turn-stop-${index}`;
+    await adapter.handle(v2Request(`t${index}`, 'turn.start', {
+      sessionId: 'host-stops',
+      streamId: created.session.streamId,
+      turnId,
+      input: [{ type: 'text', text: `q${index}` }],
+      config: {},
+    }));
+    await waitFor(
+      () => notifications.some((notification) => (
+        notification.method === 'turn.completed' && notification.params.turnId === turnId
+      )),
+      `turn.completed for ${turnId}`,
+    );
+    const completed = notifications.find((notification) => (
+      notification.method === 'turn.completed' && notification.params.turnId === turnId
+    ));
+    assert.equal(
+      (completed!.params.data as { stopReason?: string }).stopReason,
+      stopReason,
+    );
+  }
+  await service.close();
 });

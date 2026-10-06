@@ -855,6 +855,41 @@
       "optionalPatterns": [
         "docs/operations/remote-settings.md"
       ]
+    },
+    {
+      "id": "agent-custom-runtime",
+      "patterns": [
+        "packages/shared/src/agents.ts",
+        "packages/shared/src/managed-runtime.ts",
+        "packages/host/src/agents/**",
+        "packages/host/src/session/binding-planner.ts",
+        "packages/host/src/web/routes/agents.ts",
+        "packages/host/test/agent-custom-runtime.test.ts",
+        "packages/host/test/agents-routes.test.ts",
+        "packages/web/src/views/agent-dialog.tsx",
+        "packages/web/src/views/AgentsView.tsx",
+        "packages/web/src/agents/AgentDetailPanel.tsx",
+        "packages/web/src/operations/**",
+        "packages/web/test/agents-view.test.tsx",
+        "docs/adr/0094-custom-agent-runtime-binding.md"
+      ],
+      "optionalPatterns": [
+        "docs/adr/0094-custom-agent-runtime-binding.md"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "web"
+      ],
+      "scopes": [
+        "integration",
+        "system"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog"
+      ],
+      "reason": "Custom Agent Runtime binding (ADR-0094) spans the Agent model, Host probing and session binding, REST routes, and the Agents dialog."
     }
   ]
 }

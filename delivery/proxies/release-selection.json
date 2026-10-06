@@ -1,5 +1,8 @@
 {
   "schema": 1,
-  "providers": ["dsh", "zcode"],
-  "baseCatalogTag": "catalog-v1.16.0"
+  "providers": [
+    "kimi",
+    "grok"
+  ],
+  "baseCatalogTag": "catalog-v1.19.0"
 }

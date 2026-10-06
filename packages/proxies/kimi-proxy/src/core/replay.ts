@@ -7,9 +7,16 @@
  * - Terminal eventIds come from terminalEventIdFor(nativeSessionId,
  *   sourceTurnId, method) — the same function the live projector uses for
  *   turn.completed / turn.failed.
- * - Content ids use `assistant:<prompt_id>` / `thinking:<prompt_id>`, matching
- *   the live delta contentIds.
- * - Activities are keyed by tool_call_id, matching live tool frames.
+ * - Content ids use `assistant:<prompt_id>` / `thinking:<prompt_id>` for a
+ *   turn's first assistant message and append `:m<ordinal>` for later ones:
+ *   a multi-message turn keeps one card per message instead of overwriting a
+ *   shared card. Live deltas append `:<contentStep>`; a persisted message has
+ *   no step split. First-message ids stay byte-stable, and any message whose
+ *   payload changes also changes its eventId — hosts enforce payload
+ *   immutability per persisted eventId.
+ * - Activity rows retain tool_call_id, matching live tool frames; event
+ *   identity also includes sourceTurnId so native ids reused in another
+ *   prompt cannot overwrite an earlier tool fact.
  *
  * Replay has NO usage events: Kimi's message store carries no per-message
  * token facts (session usage lives in the session snapshot only).
@@ -164,6 +171,7 @@ export function buildReplayEvents(context: {
       turn.anchorTime,
     );
 
+    let assistantOrdinal = 0;
     for (const message of all) {
       if (message.role === 'user') {
         const items = inputItemsOf(message);
@@ -179,13 +187,24 @@ export function buildReplayEvents(context: {
         continue;
       }
       // Assistant / tool / system messages: content, reasoning, tool calls.
+      const ordinal = assistantOrdinal;
+      assistantOrdinal += 1;
       const text = textOfParts(message.content, 'text');
       if (text !== '') {
         push(
           turn,
           'content.completed',
-          `evt-${sha16([context.nativeSessionId, message.id, 'content.text'])}`,
-          { contentId: `assistant:${turn.sourceTurnId}`, kind: 'text', format: 'markdown', content: text },
+          `evt-${sha16(ordinal === 0
+            ? [context.nativeSessionId, message.id, 'content.text']
+            : [context.nativeSessionId, message.id, 'content.text', ordinal])}`,
+          {
+            contentId: ordinal === 0
+              ? `assistant:${turn.sourceTurnId}`
+              : `assistant:${turn.sourceTurnId}:m${ordinal}`,
+            kind: 'text',
+            format: 'markdown',
+            content: text,
+          },
           message.created_at,
         );
       }
@@ -194,8 +213,16 @@ export function buildReplayEvents(context: {
         push(
           turn,
           'content.completed',
-          `evt-${sha16([context.nativeSessionId, message.id, 'content.thinking'])}`,
-          { contentId: `thinking:${turn.sourceTurnId}`, kind: 'reasoning', content: thinking },
+          `evt-${sha16(ordinal === 0
+            ? [context.nativeSessionId, message.id, 'content.thinking']
+            : [context.nativeSessionId, message.id, 'content.thinking', ordinal])}`,
+          {
+            contentId: ordinal === 0
+              ? `thinking:${turn.sourceTurnId}`
+              : `thinking:${turn.sourceTurnId}:m${ordinal}`,
+            kind: 'reasoning',
+            content: thinking,
+          },
           message.created_at,
         );
       }
@@ -208,7 +235,7 @@ export function buildReplayEvents(context: {
         push(
           turn,
           'activity.updated',
-          `evt-${sha16([context.nativeSessionId, part.tool_call_id, 'activity:terminal'])}`,
+          `evt-${sha16([context.nativeSessionId, turn.sourceTurnId, part.tool_call_id, 'activity:terminal'])}`,
           {
             activityId: part.tool_call_id,
             kind: `tool:${part.tool_name}`,

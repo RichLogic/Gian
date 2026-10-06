@@ -56,6 +56,11 @@ export interface SessionBindingPlannerOptions {
     expectedManifestSha256: string;
   }) => Promise<TrustedLaunch>;
   runtimeResolver?: RuntimeResolver;
+  /** ADR-0094: whether the Agent owning a Runtime profile binds a custom
+   *  Runtime path. Custom paths always re-probe the session's stored path on
+   *  resume — they never adopt the active managed generation. `undefined`
+   *  means the owning Agent was deleted; preserve its stored path. */
+  agentHasCustomRuntime?: (agentId: string) => boolean | undefined;
 }
 
 function pinnedProtocol(launch: TrustedLaunch): string {
@@ -219,7 +224,16 @@ export class SessionBindingPlanner {
    * the last successful launch; they do not pin future turns to old bytes. */
   async prepareResume(binding: SessionProxyBinding): Promise<PreparedSessionLaunch> {
     const pluginId = parseProxyPluginId(binding.pluginId);
-    const active = await this.options.resolveActiveGeneration?.(pluginId) ?? null;
+    const profile = binding.runtimeProfile;
+    const hasOwnerLookup = profile?.agentId !== undefined && this.options.agentHasCustomRuntime !== undefined;
+    const ownerIsCustom = hasOwnerLookup
+      ? this.options.agentHasCustomRuntime!(profile!.agentId)
+      : false;
+    // A deleted owning Agent cannot prove that the saved Runtime was managed.
+    // Preserve that exact path (including after identity repair) rather than
+    // silently substituting the globally managed Runtime or its older Proxy.
+    const customRuntime = hasOwnerLookup && ownerIsCustom !== false;
+    const active = customRuntime ? null : await this.options.resolveActiveGeneration?.(pluginId) ?? null;
     const launch = active
       ? await this.options.resolveExact({
         pluginId,
@@ -250,10 +264,14 @@ export class SessionBindingPlanner {
         'Unknown plugins require a Manifest v4 package.',
       );
     }
-    const profile = binding.runtimeProfile;
-    const selectedPath = active
-      ? active.runtime?.entryPath ?? null
-      : sessionRuntimeCliPath(profile);
+    // ADR-0094: a custom-Runtime session re-probes its stored path and fails
+    // loudly; adopting the active managed generation would be a silent
+    // fallback away from the user-provided Runtime.
+    const selectedPath = customRuntime
+      ? sessionRuntimeCliPath(profile)
+      : active
+        ? active.runtime?.entryPath ?? null
+        : sessionRuntimeCliPath(profile);
     const agentId = profile?.agentId ?? 'session';
     const configHome = profile?.configHome ?? null;
     let prepared: PreparedSessionLaunch;
@@ -262,7 +280,7 @@ export class SessionBindingPlanner {
         launch, agentId, selectedPath, profile, undefined, configHome,
       );
     } catch (error) {
-      if (!active && selectedPath !== null && launch.schemaVersion >= 4
+      if (!customRuntime && !active && selectedPath !== null && launch.schemaVersion >= 4
         && launch.runtime.kind === 'external' && this.options.runtimeResolver
         && isMissingRuntimeRootError(error)) {
         prepared = await this.prepareFromLaunch(

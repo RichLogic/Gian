@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES } from '@gian/shared';
 import type { GianBrowserPageSnapshotCapture, PastedTextContextItem } from '@gian/shared';
+import type { OperationRun } from '../src/operations/types.js';
 import {
   assembleBrowserPageSnapshotText,
   assembleBrowserTabReferenceText,
@@ -186,6 +187,29 @@ describe('attachBrowserPageScreenshot', () => {
     });
     expect(text).toBe('png-bytes');
     expect(inject).toHaveBeenCalledWith(SESSION_ID, expect.objectContaining({ path: '/uploads/abc.png' }));
+  });
+
+  it('routes the default screenshot upload through the operation dispatcher', async () => {
+    const uploaded = { path: '/uploads/op.png', name: 'op.png', mime: 'image/png', size: 9 };
+    const dispatch = vi.fn((_name: string, input: unknown): OperationRun => {
+      (input as { onUploaded: (value: typeof uploaded) => void }).onUploaded(uploaded);
+      return { id: 'upload-operation', name: 'message.uploadAttachment',
+        entityKey: 'pending:upload-operation', phase: 'confirmed', startedAt: 0 };
+    });
+    const inject = vi.fn();
+    const result = await attachBrowserPageScreenshot(
+      { capturePageScreenshot: vi.fn().mockResolvedValue(capture) },
+      TAB_ID,
+      SESSION_ID,
+      { dispatch, inject },
+    );
+    expect(result).toBe('attached');
+    expect(dispatch).toHaveBeenCalledWith('message.uploadAttachment', expect.objectContaining({
+      sessionId: SESSION_ID,
+      blob: expect.any(Blob),
+      filename: expect.stringMatching(/^browser-screenshot-.*\.png$/),
+    }));
+    expect(inject).toHaveBeenCalledWith(SESSION_ID, uploaded);
   });
 
   it('fails closed when the main-side capture is unavailable', async () => {

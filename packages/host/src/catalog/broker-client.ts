@@ -102,6 +102,7 @@ function brokerRequest(input: {
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let responseStarted = false;
     let receivedBytes = 0;
     const finish = (action: () => void): void => {
@@ -129,9 +130,26 @@ function brokerRequest(input: {
       },
     }, response => {
       responseStarted = true;
+      const status = response.statusCode ?? 0;
+      if (status === 304) {
+        const etag = typeof response.headers.etag === 'string' ? response.headers.etag : undefined;
+        finish(() => resolve({ status, body: Buffer.alloc(0), etag }));
+        response.resume();
+        return;
+      }
+      // Error bodies are not Catalog assets. Do not disguise a 404/502 body
+      // larger than a small asset as an oversized signed Catalog payload.
+      if (status !== 200) {
+        finish(() => resolve({ status, body: Buffer.alloc(0) }));
+        response.destroy();
+        return;
+      }
+      const requestBody = input.body as { operation?: string; asset?: string };
+      const context = requestBody.asset ?? requestBody.operation ?? 'metadata';
+      const tooLarge = () => new Error(`Catalog broker response is too large (${context}; limit ${input.maxBytes} bytes).`);
       const declared = Number(response.headers['content-length'] ?? 0);
       if (Number.isFinite(declared) && declared > input.maxBytes) {
-        fail(new Error('Catalog broker response is too large.'));
+        fail(tooLarge());
         response.destroy();
         return;
       }
@@ -141,7 +159,7 @@ function brokerRequest(input: {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         received += bytes.length;
         if (received > input.maxBytes) {
-          fail(new Error('Catalog broker response is too large.'));
+          fail(tooLarge());
           response.destroy();
         } else {
           chunks.push(bytes);
@@ -179,7 +197,7 @@ function brokerRequest(input: {
       }
       input.signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       if (!responseStarted && receivedBytes === 0) {
         fail(new CatalogBrokerUnavailableError('Catalog broker request timed out.'));
       } else {

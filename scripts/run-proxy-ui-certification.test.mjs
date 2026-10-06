@@ -23,11 +23,8 @@ test('Proxy UI certification defaults to every shipping Proxy', () => {
   }
 });
 
-test('Proxy UI certification rejects hidden or unknown Proxies', () => {
-  assert.throws(
-    () => parseProxyUiOptions(['--provider', 'grok']),
-    /only accepts shipping Proxies: grok/,
-  );
+test('Proxy UI certification accepts shipping Grok and rejects unknown Proxies', () => {
+  assert.deepEqual(parseProxyUiOptions(['--provider', 'grok']).providers, ['grok']);
   assert.throws(
     () => parseProxyUiOptions(['--provider', 'new-proxy']),
     /only accepts shipping Proxies: new-proxy/,

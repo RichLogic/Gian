@@ -1,22 +1,62 @@
 {
   "claude": {
-    "en": { "displayName": "Claude Code", "tagline": "Anthropic Claude Code sessions in Gian." },
-    "zh-CN": { "displayName": "Claude Code", "tagline": "在 Gian 中使用 Anthropic Claude Code 开展编码会话。" }
+    "en": {
+      "displayName": "Claude Code",
+      "tagline": "Anthropic Claude Code sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "Claude Code",
+      "tagline": "在 Gian 中使用 Anthropic Claude Code 开展编码会话。"
+    }
   },
   "codex": {
-    "en": { "displayName": "Codex", "tagline": "OpenAI Codex sessions in Gian." },
-    "zh-CN": { "displayName": "Codex", "tagline": "在 Gian 中使用 OpenAI Codex 开展编码会话。" }
+    "en": {
+      "displayName": "Codex",
+      "tagline": "OpenAI Codex sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "Codex",
+      "tagline": "在 Gian 中使用 OpenAI Codex 开展编码会话。"
+    }
   },
   "kimi": {
-    "en": { "displayName": "Kimi Code", "tagline": "Moonshot Kimi Code sessions in Gian." },
-    "zh-CN": { "displayName": "Kimi Code", "tagline": "在 Gian 中使用月之暗面 Kimi Code 开展编码会话。" }
+    "en": {
+      "displayName": "Kimi Code",
+      "tagline": "Moonshot Kimi Code sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "Kimi Code",
+      "tagline": "在 Gian 中使用月之暗面 Kimi Code 开展编码会话。"
+    }
   },
   "ai.deepseek.harness": {
-    "en": { "displayName": "DeepSeek Harness", "tagline": "DeepSeek Harness sessions in Gian." },
-    "zh-CN": { "displayName": "DeepSeek Harness", "tagline": "在 Gian 中使用 DeepSeek Harness 开展编码会话。" }
+    "en": {
+      "displayName": "DeepSeek Harness",
+      "tagline": "DeepSeek Harness sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "DeepSeek Harness",
+      "tagline": "在 Gian 中使用 DeepSeek Harness 开展编码会话。"
+    }
   },
   "com.zhipu.zcode": {
-    "en": { "displayName": "ZCode", "tagline": "Zhipu ZCode sessions in Gian." },
-    "zh-CN": { "displayName": "ZCode", "tagline": "在 Gian 中使用智谱 ZCode 开展编码会话。" }
+    "en": {
+      "displayName": "ZCode",
+      "tagline": "Zhipu ZCode sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "ZCode",
+      "tagline": "在 Gian 中使用智谱 ZCode 开展编码会话。"
+    }
+  },
+  "grok": {
+    "en": {
+      "displayName": "Grok Build",
+      "tagline": "xAI Grok Build sessions in Gian."
+    },
+    "zh-CN": {
+      "displayName": "Grok Build",
+      "tagline": "在 Gian 中使用 xAI Grok Build 开展编码会话。"
+    }
   }
 }

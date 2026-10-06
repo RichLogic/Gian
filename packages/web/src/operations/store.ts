@@ -72,7 +72,7 @@ export interface OperationStore {
    *  (REST executor value) is recorded on the run on success so views can
    *  consume it. Returns true when this call actually settled the run (false
    *  for already-settled runs, e.g. a late result after timeout). */
-  applyResult(runId: string, ok: boolean, error?: string, result?: unknown): boolean;
+  applyResult(runId: string, ok: boolean, error?: string, result?: unknown, errorCode?: string): boolean;
   /** Timeout/disconnect path: phase `timed-out`, overlays marked
    *  `unresolved`, NEVER rolled back. No-op for settled runs. */
   markTimedOut(runId: string): void;
@@ -230,12 +230,12 @@ export function createOperationStore(now: () => number = () => Date.now()): Oper
       notify();
     },
 
-    applyResult(runId, ok, error, result) {
+    applyResult(runId, ok, error, result, errorCode) {
       const entry = runs.get(runId);
       if (!entry || !isInFlight(entry.run)) return false;
       setRun(entry, ok
         ? { ...entry.run, phase: 'confirmed', ...(result !== undefined ? { result } : {}) }
-        : { ...entry.run, phase: 'failed', error });
+        : { ...entry.run, phase: 'failed', error, ...(errorCode !== undefined ? { errorCode } : {}) });
       // Ownership check on every key: a newer run's overlay on the same
       // field is never removed or rolled back by this run's result.
       for (const key of entry.overlayKeys) removeOverlayIfOwned(key, runId);

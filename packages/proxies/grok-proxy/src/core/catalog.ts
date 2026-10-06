@@ -1,4 +1,5 @@
 import { GROK_PERMISSION_SPECS, type GrokPermissionMode } from './permissions.js';
+import { GROK_SANDBOX_SPECS, type GrokSandboxProfile } from './sandbox.js';
 
 export interface GrokReasoningEffort {
   id: string;
@@ -70,6 +71,7 @@ export function commandsFromUnknown(value: unknown): GrokAdvertisedCommand[] {
 export function catalogFromModelState(
   state: GrokModelState,
   permissionMode: GrokPermissionMode = 'default',
+  sandboxProfile: GrokSandboxProfile = 'workspace',
 ) {
   const current = state.currentModelId ?? state.availableModels?.[0]?.modelId ?? '';
   const models = (state.availableModels ?? []).map(model => {
@@ -137,27 +139,68 @@ export function catalogFromModelState(
       {
         id: 'permission_mode',
         displayName: 'Mode',
+        description: 'Applies on the next turn. It does not change the turn that is already running.',
         category: 'mode',
         type: 'select' as const,
-        scope: 'session' as const,
+        scope: 'turn' as const,
         currentValue: permissionMode,
         choices: GROK_PERMISSION_SPECS.map(spec => ({
           value: spec.id,
           displayName: spec.displayName,
         })),
       },
+      {
+        id: 'sandbox_profile',
+        displayName: 'Sandbox',
+        description: 'Chosen when the Grok process starts and fixed for that process. Gian reports this requested profile, not an effective sandbox it has not confirmed.',
+        category: 'sandbox',
+        type: 'select' as const,
+        scope: 'session' as const,
+        currentValue: sandboxProfile,
+        choices: GROK_SANDBOX_SPECS.map(spec => ({
+          value: spec.id,
+          displayName: spec.displayName,
+          description: spec.description,
+        })),
+      },
     ].filter(option => !option.choices || option.choices.length > 0),
   };
 }
 
+const TURN_BOUND_OPTION_IDS = new Set(['model', 'reasoning_effort', 'permission_mode']);
+
+/** Catalog rows after a live current-value overlay. Literal choice ids are
+ *  not preserved: `currentCatalog` replaces them with the session's strings. */
+export interface GrokCatalogSessionOption {
+  id: string;
+  displayName: string;
+  description?: string;
+  currentValue?: string | null;
+  choices?: ReadonlyArray<{
+    value: string;
+    displayName: string;
+    description?: string;
+  }>;
+  enabledWhen?: ReadonlyArray<{ optionId: string; oneOf: ReadonlyArray<string | boolean | number | null> }>;
+  visibleWhen?: ReadonlyArray<{ optionId: string; oneOf: ReadonlyArray<string | boolean | number | null> }>;
+  constraints?: {
+    minimum?: number;
+    maximum?: number;
+    step?: number;
+    minimumLength?: number;
+    maximumLength?: number;
+  };
+}
+
 export function toV2ConfigOptions(
-  sessionOptions: ReturnType<typeof catalogFromModelState>['sessionOptions'],
+  sessionOptions: readonly GrokCatalogSessionOption[],
 ) {
   return sessionOptions.map((option) => {
     return {
       id: option.id,
       displayName: option.displayName,
-      binding: 'session' as const,
+      ...('description' in option && option.description ? { description: option.description } : {}),
+      binding: TURN_BOUND_OPTION_IDS.has(option.id) ? 'turn' as const : 'session' as const,
       control: 'select' as const,
       required: false,
       defaultValue: option.currentValue ?? null,

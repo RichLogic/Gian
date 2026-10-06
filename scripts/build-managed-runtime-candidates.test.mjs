@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,6 +60,23 @@ test('ZCode source lock binds CLI, immutable Git revision, toolchain and depende
   }
   assert.throws(() => assertZcodeSourceBinding({ ...candidate, source: undefined }), /pinned Git source/);
   assert.throws(() => assertZcodeSourceBinding({ ...candidate, format: 'raw' }), /pinned Git source/);
+});
+
+test('macOS Runtime qualification keeps the ZCode socket path inside sun_path', () => {
+  const source = readFileSync(new URL('./verify-managed-runtime-candidates.mjs', import.meta.url), 'utf8');
+  assert.match(source, /process\.platform === 'darwin' \? '\/tmp' : tmpdir\(\)/);
+  assert.match(source, /'grv-'/);
+});
+
+test('ZCode qualification reports a redacted stderr tail when the probe exits early', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'zcode-protocol-exit-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = join(root, 'zcode.cjs');
+  await writeFile(entry, "console.error('startup failed token=super-secret');\nprocess.exit(7);\n");
+  await assert.rejects(
+    verifyZcodeRuntimeProtocol(entry, root, root),
+    /code 7, signal none; stderr: startup failed \[redacted\]/,
+  );
 });
 
 test('ZCode qualification rejects an upstream catalog method removal despite a valid version', async (t) => {

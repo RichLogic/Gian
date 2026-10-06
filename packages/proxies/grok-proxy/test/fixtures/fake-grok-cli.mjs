@@ -27,6 +27,11 @@ if (process.env.GROK_TEST_SPAWN_RECORD) {
 }
 
 const FORKED_SESSION_ID = 'native-forked-child';
+const knownSessions = new Set(['native-new', 'native-existing', FORKED_SESSION_ID]);
+
+function rememberSession(sessionId) {
+  if (typeof sessionId === 'string' && sessionId) knownSessions.add(sessionId);
+}
 
 const stream = ndJsonStream(
   Writable.toWeb(process.stdout),
@@ -70,30 +75,39 @@ new AgentSideConnection((agentConn) => ({
     };
   },
   async newSession() {
+    rememberSession('native-new');
     return { sessionId: 'native-new' };
   },
   async listSessions() {
     return { sessions: [{ sessionId: 'native-existing', cwd: process.cwd(), title: 'Existing' }] };
   },
   async loadSession({ sessionId }) {
+    rememberSession(sessionId);
     return { sessionId };
   },
   async resumeSession({ sessionId }) {
+    rememberSession(sessionId);
     return { sessionId };
   },
   async closeSession() {
     return {};
   },
   extMethod: async (method, params) => {
+    // Bare x.ai/* is not the wire form. The Proxy must send _x.ai/*.
+    if (typeof method !== 'string' || !method.startsWith('_x.ai/')) {
+      throw RequestError.methodNotFound(String(method));
+    }
+    const logical = method.slice(1);
     const record = params && typeof params === 'object' ? params : {};
-    return extDispatch(method, () => {
-      if (method === 'x.ai/session/delete') {
+    return extDispatch(logical, () => {
+      if (logical === 'x.ai/session/delete') {
         return { success: true };
       }
-      if (method === 'x.ai/session/rename') {
+      if (logical === 'x.ai/session/rename') {
         return { success: true, title: record.title ?? '' };
       }
-      if (method === 'x.ai/session/fork') {
+      if (logical === 'x.ai/session/fork') {
+        rememberSession(FORKED_SESSION_ID);
         return {
           newSessionId: FORKED_SESSION_ID,
           chatMessagesCopied: 3,
@@ -103,26 +117,35 @@ new AgentSideConnection((agentConn) => ({
           parentSessionId: record.sourceSessionId ?? 'native-new',
         };
       }
-      if (method === 'x.ai/interject') {
-        return { status: 'queued' };
+      if (logical === 'x.ai/interject') {
+        const sessionId = typeof record.sessionId === 'string' ? record.sessionId : '';
+        if (!knownSessions.has(sessionId)) {
+          throw RequestError.invalidParams(`session not found: ${sessionId}`);
+        }
+        return { result: { status: 'queued' } };
       }
-      if (method === 'x.ai/mcp/list') {
-        return { servers: [] };
+      if (logical === 'x.ai/mcp/list') {
+        return { servers: [], sessionMcpResolved: true };
       }
-      if (method === 'x.ai/skills/list') {
+      if (logical === 'x.ai/skills/list') {
         return { skills: [] };
       }
-      if (method === 'x.ai/hooks/list') {
+      if (logical === 'x.ai/hooks/list') {
         return { hooks: [] };
       }
-      if (method === 'x.ai/session/usage') {
+      if (logical === 'x.ai/session/usage') {
         return { usage: {} };
       }
-      if (method === 'x.ai/session/update_mcp_servers') {
+      if (logical === 'x.ai/session/update_mcp_servers') {
         return { ok: true };
       }
       throw RequestError.methodNotFound(method);
     });
+  },
+  extNotification: async (method) => {
+    if (typeof method !== 'string' || !method.startsWith('_x.ai/')) {
+      throw RequestError.methodNotFound(String(method));
+    }
   },
   async prompt() {
     await agentConn.sessionUpdate({

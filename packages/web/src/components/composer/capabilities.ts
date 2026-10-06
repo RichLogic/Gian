@@ -109,6 +109,17 @@ export function steerAdvertised(capabilities: unknown): boolean | undefined {
   return advertised['turn.steer'] !== undefined;
 }
 
+/** Queue "Send now" injects only after the Proxy advertises turn.steer. */
+export function queueSendNowEnabled(input: {
+  executor: Executor;
+  steerAdvertised: boolean | undefined;
+  completed: boolean;
+  remoteUnavailable?: boolean;
+}): boolean {
+  if (input.completed || input.remoteUnavailable) return false;
+  return input.steerAdvertised === true;
+}
+
 const steerCache = new Map<string, boolean | undefined>();
 const steerPromises = new Map<string, Promise<boolean | undefined>>();
 
@@ -527,6 +538,16 @@ export function fetchCatalogCached(
     });
   catalogPromises.set(key, request);
   return request;
+}
+
+/** Cached advertisement, or `undefined` when this Proxy has not been read yet. */
+export function peekSteerCached(
+  executor: Executor,
+  agentId?: string | null,
+): boolean | undefined {
+  const key = scopeKey(executor, agentId);
+  if (!steerCache.has(key)) return undefined;
+  return steerCache.get(key);
 }
 
 export function fetchSteerCached(

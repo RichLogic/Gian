@@ -1122,6 +1122,11 @@ export class HostProtocolValidator {
       resumeRef: request.resumeRef.id,
     });
     const existing = this.sessions.get(request.sidechatId);
+    if (existing?.kind === 'sidechat' && (existing.parentSessionId !== snapshot.parentSessionId
+      || existing.resumeRefId !== request.resumeRef.id || snapshot.resumeRef.id !== request.resumeRef.id
+      || canonicalJson(existing.sessionConfig) !== canonicalJson(snapshot.sessionConfig))) {
+      throw protocolViolation('A Side Chat resume changed its immutable identity or config.');
+    }
     if (existing?.kind === 'sidechat' && existing.resumeFingerprint === fingerprint) {
       if (existing.streamId !== snapshot.streamId) {
         throw protocolViolation('Idempotent sidechat.resume changed streamId.');
@@ -1130,6 +1135,13 @@ export class HostProtocolValidator {
     }
     if (existing?.kind === 'sidechat' && existing.resumeFingerprint && existing.resumeFingerprint !== fingerprint) {
       throw requestViolation('CONFLICT', 'sidechat.resume reused an id with different parent or resumeRef.');
+    }
+    if (existing?.kind === 'sidechat' && existing.streamId === snapshot.streamId) {
+      // The first resume after create may simply return the already-live
+      // route. Keep its sequence and active turns, not an empty generation.
+      existing.resumeFingerprint = fingerprint;
+      existing.configOptions = this.mergeCatalogWithTurnOptions(snapshot.turnConfigOptions);
+      return;
     }
     this.rememberResumeRef(request.sidechatId, snapshot.resumeRef.id);
     this.sessions.set(request.sidechatId, {
@@ -1289,8 +1301,12 @@ export class HostProtocolValidator {
         );
       }
     }
+    // Required answers constrain submission, not an advertised cancellation.
+    // Supplied values remain validated; this exact action was checked above.
+    const cancellation = params.actionId.startsWith('reject')
+      || ['decline', 'cancel', 'cancelled', 'dismiss'].includes(params.actionId);
     for (const input of interaction.inputs) {
-      if (input.required && params.values[input.id] === undefined) {
+      if (!cancellation && input.required && params.values[input.id] === undefined) {
         throw jsonRpcRequestViolation(
           'INVALID_PARAMS',
           `Interaction input ${input.id} is required.`,
@@ -1419,6 +1435,11 @@ export class HostProtocolValidator {
     this.validateLifecycle(notification, session);
     session.sequence = params.sequence;
     session.liveEvents.set(params.eventId, fingerprint);
+    if (notification.method === 'runtime.error' && session.kind === 'sidechat') {
+      // A subsequent explicit resume may reattach a failed Runtime and return
+      // a new stream. Ordinary identical retries still retain their stream.
+      session.resumeFingerprint = undefined;
+    }
     if (notification.method === 'session.updated') {
       if (notification.params.data.turnConfigOptions !== undefined) {
         session.configOptions = this.mergeCatalogWithTurnOptions(

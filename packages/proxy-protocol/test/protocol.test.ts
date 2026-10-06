@@ -1175,6 +1175,27 @@ test('interaction IDs round-trip and responseId is idempotent', () => {
   }, 't_1'));
 });
 
+test('advertised question cancellation accepts no answers while submission remains required', () => {
+  const validator = new HostProtocolValidator({ pluginId: 'codex', processScope: 'shared' });
+  initialize(validator, { interaction: 1 });
+  attach(validator);
+  startTurn(validator);
+  validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
+  validator.acceptLine(notification('interaction.requested', 2, {
+    interactionId: 'question-empty', presentation: { kind: 'questions' },
+    inputs: [{ id: 'choice', type: 'single_select', label: 'Choice', required: true,
+      choices: [{ value: 'a', displayName: 'A' }] }],
+    actions: [{ id: 'accept', label: 'Submit', style: 'primary' },
+      { id: 'decline', label: 'Dismiss', style: 'danger' }],
+  }, 't_1'));
+  const params = { sessionId: 's_1', streamId: 'stream-1', turnId: 't_1',
+    interactionId: 'question-empty', responseId: 'response-empty', values: {} };
+  assert.throws(() => validator.registerRequest(rpc({ id: 'bad-submit', method: 'interaction.respond',
+    params: { ...params, actionId: 'accept' } })), /required/);
+  assert.doesNotThrow(() => validator.registerRequest(rpc({ id: 'dismiss', method: 'interaction.respond',
+    params: { ...params, actionId: 'decline' } })));
+});
+
 test('conversation delta usage is accepted at most once per turn', () => {
   const validator = new HostProtocolValidator({
     pluginId: 'codex',

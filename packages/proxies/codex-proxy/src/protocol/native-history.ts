@@ -25,20 +25,16 @@ export interface ReplayEvent {
   data: Record<string, unknown>;
 }
 
-export interface NativeReplay {
-  streamId: string;
-  events: ReplayEvent[];
-}
-
 export class CodexNativeHistoryWatcher {
   private timer: NodeJS.Timeout | null = null;
   private paused = false;
   private signature: string | null = null;
   private filePath: string | null = null;
+  private refreshing = false;
 
   constructor(
     private nativeSessionId: string,
-    private readonly onChange: () => void,
+    private readonly onChange: () => void | Promise<void>,
     private readonly intervalMs = 1_000,
     private readonly homeDir?: string,
   ) {}
@@ -71,11 +67,14 @@ export class CodexNativeHistoryWatcher {
   }
 
   private poll(): void {
-    if (this.paused) return;
+    if (this.paused || this.refreshing) return;
     const next = this.readSignature();
     if (next === this.signature) return;
     this.signature = next;
-    this.onChange();
+    this.refreshing = true;
+    Promise.resolve().then(() => this.onChange()).catch(error => {
+      console.warn(`[codex-history] refresh failed: ${String(error)}`);
+    }).finally(() => { this.refreshing = false; });
   }
 
   private readSignature(): string | null {
@@ -93,7 +92,7 @@ export class CodexNativeHistoryWatcher {
   }
 }
 
-interface CodexFile {
+export interface CodexFile {
   path: string;
   id: string;
   cwd: string;
@@ -285,8 +284,15 @@ function preview(text: string): string {
 }
 
 function describe(path: string): CodexFile | null {
+  let fd: number | undefined;
   try {
-    const lines = readFileSync(path, 'utf8').split('\n');
+    // Discovery needs metadata and an optional preview, never the whole log.
+    fd = openSync(path, 'r');
+    const buffer = Buffer.alloc(64 * 1024);
+    const count = readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.subarray(0, count).toString('utf8');
+    const lines = text.split('\n');
+    if (count === buffer.length) lines.pop();
     const first = lines[0];
     if (!first) return null;
     const metadata = JSON.parse(first) as Record<string, unknown>;
@@ -316,7 +322,7 @@ function describe(path: string): CodexFile | null {
     };
   } catch {
     return null;
-  }
+  } finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export function listCodexNativeSessions(
@@ -337,326 +343,13 @@ export function listCodexNativeSessions(
     }));
 }
 
-function findSession(nativeSessionId: string, homeDir?: string): CodexFile | null {
-  const matches = collectRollouts(homeDir, true).flatMap(path => {
-    if (!path.endsWith(`-${nativeSessionId}.jsonl`)) return [];
+export function findSession(nativeSessionId: string, homeDir?: string): CodexFile | null {
+  const candidates = collectRollouts(homeDir, true).filter(path => path.endsWith(`-${nativeSessionId}.jsonl`));
+  const matches = candidates.flatMap(path => {
     const file = describe(path);
     return file?.id === nativeSessionId ? [file] : [];
   });
+  if (candidates.length && !matches.length) throw new Error('Codex native history metadata is unavailable or invalid.');
   matches.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   return matches[0] ?? null;
-}
-
-export function replayCodexNativeSession(
-  hostSessionId: string,
-  nativeSessionId: string,
-  homeDir?: string,
-  identityStore?: NativeTurnIdentityStore,
-): NativeReplay {
-  const file = findSession(nativeSessionId, homeDir);
-  if (!file) return { streamId: stableId('replay', { nativeSessionId, empty: true }), events: [] };
-  const content = readRolloutHistory(file, homeDir);
-  const fallback = new Date(0).toISOString();
-  const turns: Array<{
-    id: string;
-    timestamp: string;
-    input: string;
-    nativeTurnId?: string;
-    completed?: boolean;
-    messages: Array<{ id: string; timestamp: string; text: string }>;
-  }> = [];
-  let turn: (typeof turns)[number] | null = null;
-  for (const [lineIndex, line] of content.split('\n').entries()) {
-    if (!line) continue;
-    let record: Record<string, unknown>;
-    try { record = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-    const payload = record.payload as Record<string, unknown> | undefined;
-    const timestamp = typeof record.timestamp === 'string' && !Number.isNaN(Date.parse(record.timestamp))
-      ? new Date(Date.parse(record.timestamp)).toISOString()
-      : fallback;
-    const lineId = stableId('codex-line', { nativeSessionId, lineIndex, line });
-    if (record.type === 'event_msg' && payload?.type === 'task_started' && typeof payload.turn_id === 'string') {
-      turn = { id: lineId, nativeTurnId: payload.turn_id, timestamp, input: '', messages: [], completed: false };
-      turns.push(turn);
-      continue;
-    }
-    if (record.type === 'event_msg' && payload?.type === 'task_complete' && turn?.nativeTurnId) {
-      if (payload.turn_id === turn.nativeTurnId) turn.completed = true;
-      continue;
-    }
-    if (record.type === 'response_item' && payload?.type === 'message' && turn?.nativeTurnId) {
-      const metadata = payload.internal_chat_message_metadata_passthrough as Record<string, unknown> | undefined;
-      if (typeof metadata?.turn_id === 'string' && metadata.turn_id !== turn.nativeTurnId) continue;
-      const kinds = metadata?.content_item_kinds;
-      // The runtime records environment/instruction messages as role=user too.
-      // Use its provenance field, never text matching, to exclude those facts.
-      if (payload.role === 'user' && Array.isArray(kinds) && kinds.length > 0
-        && !kinds.some(kind => typeof kind === 'string' && kind.startsWith('user.'))) continue;
-      const text = Array.isArray(payload.content) ? payload.content.flatMap(item => {
-        if (!item || typeof item !== 'object') return [];
-        const block = item as Record<string, unknown>;
-        return typeof block.text === 'string' ? [block.text] : [];
-      }).join('') : '';
-      if (payload.role === 'user') turn.input += text;
-      else if (payload.role === 'assistant' && text) turn.messages.push({ id: lineId, timestamp, text });
-      continue;
-    }
-    if (record.type !== 'event_msg') continue;
-    if (payload?.type === 'user_message' && typeof payload.message === 'string') {
-      if (turn?.nativeTurnId) {
-        // Older versions record both response_item and event_msg views of
-        // the same task. The explicit user_message is the canonical input.
-        turn.input = payload.message;
-        continue;
-      }
-      turn = { id: lineId, timestamp, input: payload.message, messages: [] };
-      turns.push(turn);
-    } else if (
-      payload?.type === 'agent_message'
-      && typeof payload.message === 'string'
-      && turn
-    ) {
-      if (turn.nativeTurnId && turn.messages.length > 0) continue;
-      turn.messages.push({ id: lineId, timestamp, text: payload.message });
-    }
-  }
-
-  const streamId = stableId('replay', { nativeSessionId });
-  let sequence = 0;
-  const events: ReplayEvent[] = [];
-  const append = (
-    sourceTurnId: string,
-    emittedAt: string,
-    eventId: string,
-    method: string,
-    data: Record<string, unknown>,
-  ) => {
-    sequence += 1;
-    events.push({
-      method,
-      eventId,
-      sessionId: hostSessionId,
-      replayStreamId: streamId,
-      sequence,
-      sourceTurnId,
-      emittedAt,
-      data,
-    });
-  };
-  for (const [index, item] of turns.entries()) {
-    const fallbackSourceTurnId = stableId('replay-turn', { nativeSessionId, inputId: item.id, index });
-    const sourceTurnId = item.nativeTurnId ?? identityStore?.resolveReplay(
-      nativeSessionId,
-      item.id,
-      [{ type: 'text', text: item.input }],
-      fallbackSourceTurnId,
-    ) ?? fallbackSourceTurnId;
-    append(
-      sourceTurnId,
-      item.timestamp,
-      stableId('provider-event', {
-        nativeSessionId,
-        sourceTurnId,
-        method: 'turn.started',
-        identity: 'lifecycle',
-      }),
-      'turn.started',
-      {},
-    );
-    append(sourceTurnId, item.timestamp, stableId('input', item.id), 'input.recorded', {
-      input: [{ type: 'text', text: item.input }],
-    });
-    for (const [messageIndex, message] of item.messages.entries()) {
-      const contentId = `text:${messageIndex + 1}`;
-      append(
-        sourceTurnId,
-        message.timestamp,
-        stableId('provider-event', {
-          nativeSessionId,
-          sourceTurnId,
-          method: 'content.completed',
-          identity: contentId,
-        }),
-        'content.completed',
-        {
-          contentId,
-          kind: 'text',
-          content: message.text,
-        },
-      );
-    }
-    if (item.completed === false) continue;
-    const completedAt = item.messages.at(-1)?.timestamp ?? item.timestamp;
-    append(
-      sourceTurnId,
-      completedAt,
-      stableId('provider-event', {
-        nativeSessionId,
-        sourceTurnId,
-        method: 'turn.completed',
-        identity: 'lifecycle',
-      }),
-      'turn.completed',
-      { stopReason: 'completed' },
-    );
-  }
-  return { streamId, events };
-}
-
-/** New Codex rollouts store Fork ancestry as a pinned prefix, not copied
- * records. Read only the native byte boundary, within the selected Home. */
-function readRolloutHistory(
-  file: CodexFile,
-  homeDir?: string,
-  endByteOffset?: number,
-  seen = new Set<string>(),
-  budget = { remaining: 64 * 1024 * 1024 },
-): string {
-  if (seen.has(file.id) || seen.size >= 32) throw new Error('Cyclic or excessively deep Codex history ancestry.');
-  seen.add(file.id);
-  const size = statSync(file.path).size;
-  const length = endByteOffset ?? size;
-  if (!Number.isSafeInteger(length) || length < 0 || length > size || length > budget.remaining) {
-    throw new Error('Codex history prefix is unavailable or exceeds its read limit.');
-  }
-  budget.remaining -= length;
-  if (length === 0) return '';
-  const bytes = Buffer.alloc(length);
-  const fd = openSync(file.path, 'r');
-  try {
-    let offset = 0;
-    while (offset < length) {
-      const count = readSync(fd, bytes, offset, length - offset, offset);
-      if (!count) throw new Error('Codex history changed while reading its prefix.');
-      offset += count;
-    }
-  } finally { closeSync(fd); }
-  if (endByteOffset !== undefined && bytes[length - 1] !== 10) {
-    throw new Error('Codex history prefix does not end at a record boundary.');
-  }
-  const content = bytes.toString('utf8');
-  const header = JSON.parse(content.split('\n', 1)[0]!) as { payload?: { history_base?: { thread_id?: unknown; end_byte_offset?: unknown } } };
-  const base = header.payload?.history_base;
-  if (!base) return content;
-  if (typeof base.thread_id !== 'string' || !Number.isSafeInteger(base.end_byte_offset)) {
-    throw new Error('Codex history ancestry is missing its exact prefix identity.');
-  }
-  const parent = findSession(base.thread_id, homeDir);
-  if (!parent) throw new Error('Codex inherited history is unavailable in the selected Home.');
-  return readRolloutHistory(parent, homeDir, base.end_byte_offset as number, seen, budget) + content;
-}
-
-function turnGroups(snapshot: NativeReplay): Map<string, ReplayEvent[]> {
-  const groups = new Map<string, ReplayEvent[]>();
-  for (const event of snapshot.events) {
-    const events = groups.get(event.sourceTurnId) ?? [];
-    events.push(event);
-    groups.set(event.sourceTurnId, events);
-  }
-  return groups;
-}
-
-function groupFingerprint(events: ReplayEvent[]): string {
-  return JSON.stringify(events.map((event) => ({
-    method: event.method,
-    sourceTurnId: event.sourceTurnId,
-    data: event.data,
-  })));
-}
-
-function revisionStreamId(
-  snapshot: NativeReplay,
-  fingerprints: Map<string, string>,
-): string {
-  const digest = createHash('sha256')
-    .update(JSON.stringify([...fingerprints]))
-    .digest('hex')
-    .slice(0, 24);
-  return `${snapshot.streamId}-revision-${digest}`;
-}
-
-/** Tracks complete replay turns instead of raw file bytes. A changed turn is
- * replayed as one lifecycle-complete unit, while turns already observed from
- * Gian's own runtime writes stay out of external-history refreshes. */
-export class IncrementalReplayTracker {
-  private observed = new Map<string, string>();
-  private includedTurns = new Set<string>();
-  private latest: NativeReplay = { streamId: 'replay-empty', events: [] };
-  private replayStreamId = 'replay-empty';
-
-  attach(snapshot: NativeReplay, includeHistory: boolean): void {
-    this.latest = snapshot;
-    const groups = turnGroups(snapshot);
-    this.observed = new Map(
-      [...groups].map(([turnId, events]) => [turnId, groupFingerprint(events)]),
-    );
-    this.includedTurns = includeHistory ? new Set(groups.keys()) : new Set();
-    this.replayStreamId = snapshot.streamId;
-  }
-
-  observe(snapshot: NativeReplay): boolean {
-    const groups = turnGroups(snapshot);
-    const nextFingerprints = new Map(
-      [...groups].map(([turnId, events]) => [turnId, groupFingerprint(events)]),
-    );
-    const currentOrder = [...groups.keys()];
-    const previousIncluded = [...this.includedTurns];
-    const lastPreviousIndex = previousIncluded.reduce(
-      (last, turnId) => Math.max(last, currentOrder.indexOf(turnId)),
-      -1,
-    );
-    let changed = false;
-    let rewritten = snapshot.streamId !== this.latest.streamId;
-
-    for (const [turnId, events] of groups) {
-      const fingerprint = groupFingerprint(events);
-      const previous = this.observed.get(turnId);
-      if (previous === fingerprint) continue;
-      changed = true;
-      if (previous !== undefined || currentOrder.indexOf(turnId) < lastPreviousIndex) {
-        rewritten = true;
-      }
-      this.includedTurns.add(turnId);
-    }
-    for (const turnId of previousIncluded) {
-      if (groups.has(turnId)) continue;
-      this.includedTurns.delete(turnId);
-      changed = true;
-      rewritten = true;
-    }
-    this.observed = nextFingerprints;
-    this.latest = snapshot;
-    if (rewritten) this.replayStreamId = revisionStreamId(snapshot, nextFingerprints);
-    return changed;
-  }
-
-  rebase(snapshot: NativeReplay): void {
-    const included = new Set(this.includedTurns);
-    this.latest = snapshot;
-    const groups = turnGroups(snapshot);
-    this.observed = new Map(
-      [...groups].map(([turnId, events]) => [turnId, groupFingerprint(events)]),
-    );
-    this.includedTurns = new Set([...included].filter((turnId) => groups.has(turnId)));
-  }
-
-  replay(): NativeReplay {
-    const selected = this.latest.events.filter((event) => (
-      this.includedTurns.has(event.sourceTurnId)
-    ));
-    return {
-      streamId: this.replayStreamId,
-      events: selected.map((event, index) => ({
-        ...event,
-        replayStreamId: this.replayStreamId,
-        sequence: index + 1,
-      })),
-    };
-  }
-
-  acknowledge(): void {
-    // Acknowledgement ends the current paging pass. Published turns stay in
-    // the replay snapshot so later append-only refreshes preserve their
-    // sequence numbers and Host can deduplicate them by stable eventId.
-  }
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { strict as assert } from 'node:assert';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,7 @@ import { defaultRemoteDeviceGrants } from '../../src/remote/grants.js';
 export const HARNESS_AGENT: UserAgent = {
   id: 'agent-claude-review',
   name: 'Claude Review',
+  pluginId: 'claude',
   proxy: 'claude',
   cliPath: null,
   defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
@@ -52,7 +54,17 @@ class FakeProxyClient implements ProxyClient {
     return {
       catalogRevision: 'remote-test',
       input: [{ type: 'text' as const }],
-      configOptions: [],
+      configOptions: [
+        { id: 'model', displayName: 'Model', binding: 'turn' as const, role: 'model' as const,
+          control: 'select' as const, required: false, defaultValue: 'sonnet',
+          choices: [{ value: 'sonnet', displayName: 'Sonnet' }] },
+        { id: 'thinking', displayName: 'Thinking', binding: 'turn' as const, role: 'effort' as const,
+          control: 'select' as const, required: false, defaultValue: 'high',
+          choices: ['medium', 'high'].map(value => ({ value, displayName: value })) },
+        { id: 'approval_mode', displayName: 'Approval', binding: 'turn' as const, role: 'approval_mode' as const,
+          control: 'select' as const, required: false, defaultValue: 'ask',
+          choices: ['ask', 'plan', 'auto'].map(value => ({ value, displayName: value })) },
+      ],
       slashCommands: [],
     };
   }
@@ -102,6 +114,11 @@ class FakeProxyClient implements ProxyClient {
 
 class FakeProxyManager {
   readonly client = new FakeProxyClient();
+  async acquireInspectionHost(pluginId: string, options: { agentId?: string }) {
+    assert.equal(pluginId, HARNESS_AGENT.pluginId);
+    assert.equal(options.agentId, HARNESS_AGENT.id);
+    return { host: this.client, release: async () => {} };
+  }
   async getOrCreate(): Promise<ProxyClient> { return this.client; }
   get(): ProxyClient { return this.client; }
   async dispose() {}

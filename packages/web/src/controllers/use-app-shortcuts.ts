@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import type { KeymapCommand, Session } from '@gian/shared';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
+import { peekSteerCached, queueSendNowEnabled } from '../components/composer/capabilities.js';
 import { comboMatches, useKeymap } from '../shortcut-prefs.js';
 
 interface UseAppShortcutsInput {
@@ -60,8 +61,12 @@ export function useAppShortcuts({
           : undefined;
         if (
           activeSessionId
-          && session?.executor === 'codex'
-          && session.completed_at == null
+          && session
+          && queueSendNowEnabled({
+            executor: session.executor,
+            steerAdvertised: peekSteerCached(session.executor, session.agent_id),
+            completed: session.completed_at != null,
+          })
         ) {
           event.preventDefault();
           // Pending policy: the dispatcher's duplicate guard blocks repeat

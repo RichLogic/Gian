@@ -41,7 +41,7 @@ import {
   type IntegrationInstallTerminalState,
 } from '../agents/IntegrationInstallTerminal.js';
 import { ProxyDetailPanel } from '../agents/ProxyDetailPanel.js';
-import { AgentDialog, type CreateAgentDialogInput } from './agent-dialog.js';
+import { AgentDialog, type AgentDialogFieldErrors, type CreateAgentDialogInput } from './agent-dialog.js';
 
 type Selection =
   | { kind: 'agent'; id: string }
@@ -111,6 +111,7 @@ export function AgentsView({ ws, terminalPreferences }: {
   const [addDialogPluginId, setAddDialogPluginId] = useState<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
+  const [addFieldErrors, setAddFieldErrors] = useState<AgentDialogFieldErrors>({});
   const [loginTerminal, setLoginTerminal] = useState<{ agentId: string; termId: string } | null>(null);
   const [integrationTerminals, setIntegrationTerminals] = useState<
     Record<string, IntegrationInstallTerminalState>
@@ -343,24 +344,39 @@ export function AgentsView({ ws, terminalPreferences }: {
     catalogInstallationStatus(item) === 'installed'
     && item.availableActions.includes('create_agent')
   ));
+  const customIntegrationItems = integrationItems.filter(item => (
+    item.compatibility.state === 'compatible'
+    && item.installation.state === 'installed'
+    && item.installation.installedVersion !== null
+    && item.runtime.state !== 'not_required'
+  ));
 
   function openAddAgent(pluginId?: string) {
     setAddDialogPluginId(pluginId ?? '');
     setAddError('');
+    setAddFieldErrors({});
     if (catalogItems.length === 0 && !catalogSyncing) void syncCatalog();
   }
 
   async function createAgentFromDialog(input: CreateAgentDialogInput) {
     setAddError('');
+    setAddFieldErrors({});
     setAddSaving(true);
     try {
       const settled = await waitForRunSettle(store, dispatch('agent.create', {
         name: input.name,
         pluginId: input.pluginId,
         ...(input.home ? { home: input.home } : {}),
+        ...(input.runtime ? { runtime: input.runtime } : {}),
       }).id);
       if (settled.phase !== 'confirmed') {
-        setAddError(settled.error ?? 'Agent creation failed');
+        // Map Host failure codes to the field that caused them (ADR-0094);
+        // anything else stays a dialog-level error.
+        const code = settled.errorCode ?? '';
+        const message = settled.error ?? 'Agent creation failed';
+        if (code.startsWith('RUNTIME_')) setAddFieldErrors({ runtime: message });
+        else if (code.startsWith('AGENT_HOME_')) setAddFieldErrors({ home: message });
+        else setAddError(message);
         return;
       }
       const result = settled.result as CreateAgentOperationResult;
@@ -379,6 +395,13 @@ export function AgentsView({ ws, terminalPreferences }: {
     if (settled.phase === 'confirmed') return settled.result as string | null;
     if (agentId) setError(settled.error ?? 'HOME picker failed');
     else setAddError(settled.error ?? 'HOME picker failed');
+    return null;
+  }
+
+  async function pickRuntime(): Promise<string | null> {
+    const settled = await waitForRunSettle(store, dispatch('agent.pickRuntime', {}).id);
+    if (settled.phase === 'confirmed') return settled.result as string | null;
+    setAddError(settled.error ?? 'Runtime picker failed');
     return null;
   }
 
@@ -613,11 +636,14 @@ export function AgentsView({ ws, terminalPreferences }: {
       {addDialogPluginId !== null && (
         <AgentDialog
           integrations={installedIntegrationItems}
+          customIntegrations={customIntegrationItems}
           agents={agents}
           initialPluginId={addDialogPluginId}
           busy={addSaving}
           error={addError}
+          fieldErrors={addFieldErrors}
           onPickHome={() => pickHome()}
+          onPickRuntime={() => pickRuntime()}
           onSubmit={input => { void createAgentFromDialog(input); }}
           onClose={() => { if (!addSaving) setAddDialogPluginId(null); }}
         />

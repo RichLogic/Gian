@@ -27,6 +27,17 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 
+import { buildSpawnArgs } from '../core/mcp-isolation.js';
+import { agentHome, grokChildHomeEnv } from '../core/home.js';
+import type { GrokSandboxProfile } from '../core/sandbox.js';
+import {
+  fromWireExtensionMethod,
+  GrokExtBusinessError,
+  isInterjectSessionMissing,
+  isWireMethodNotFound,
+  toWireExtensionMethod,
+  unwrapExtMethodResult,
+} from './acp-wire.js';
 import {
   extensionSupportFromInitialize,
   type GrokExtMethod,
@@ -34,19 +45,22 @@ import {
   NO_EXTENSION_SUPPORT,
 } from './grok-extensions.js';
 
+export { GrokExtBusinessError, isWireMethodNotFound };
+
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_MS = 3_000;
 
 export const GROK_DEFAULT_DENY_RULES = ['MCPTool(*)'] as const;
 
-/** Legacy alias: spawn prefix with the default MCP isolation boundary. */
-export const GROK_SPAWN_PREFIX = [
-  '--deny',
-  GROK_DEFAULT_DENY_RULES[0],
-  '--disallowed-tools',
-  'search_tool,use_tool',
-] as const;
+/** Spawn prefix with the default MCP isolation boundary (no Host MCP). */
+export const GROK_SPAWN_PREFIX = buildSpawnArgs(GROK_DEFAULT_DENY_RULES);
+
+/** Origin product written into initialize and session meta. The yolo
+ *  notification does not send this: a sender id the runtime cannot match
+ *  applies to nobody, and an omitted sender applies to every resident
+ *  session in this process. */
+export const GROK_ORIGIN_CLIENT_ID = 'gian-grok-proxy';
 
 export class GrokExtMethodUnsupportedError extends Error {
   constructor(readonly method: string, reason: string) {
@@ -94,21 +108,9 @@ export interface GrokAcpTransport {
 
 export type GrokAcpTransportFactory = (client: Client) => Promise<GrokAcpTransport>;
 
-/** The Agent HOME this Proxy serves: the Host-provided constrained
- *  GIAN_AGENT_HOME wins; an inherited GROK_HOME is only a compatibility
- *  fallback for the pre-gate Host generation. */
-export function agentHome(env: NodeJS.ProcessEnv): string | undefined {
-  if (env.GIAN_AGENT_HOME !== undefined && env.GIAN_AGENT_HOME !== '') return env.GIAN_AGENT_HOME;
-  return env.GROK_HOME;
-}
-
-/** Provider-specific child env: translates the Host's constrained
- *  GIAN_AGENT_HOME into GROK_HOME so the CLI reads its state from the served
- *  Agent's HOME and never from a stale machine-wide value. */
-export function grokChildHomeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  const home = agentHome(env);
-  return home !== undefined ? { GROK_HOME: home } : {};
-}
+/** The Agent HOME this Proxy serves: re-exported from core/home.js, which
+ *  owns the single resolution rule shared with the MCP disk scan. */
+export { agentHome, grokChildHomeEnv };
 
 export interface GrokAcpClientOptions {
   binaryPath: string;
@@ -120,6 +122,12 @@ export interface GrokAcpClientOptions {
   transportFactory?: GrokAcpTransportFactory;
   /** MCP permission deny rules for the spawn boundary; defaults to MCPTool(*). */
   spawnDenyRules?: readonly string[];
+  /** Requested GROK_SANDBOX value. Defaults to workspace. This does not
+   *  read or confirm an effective sandbox. */
+  sandboxProfile?: GrokSandboxProfile;
+  /** When false, search_tool and use_tool stay available so a later
+   *  fail-closed catalog check can allow Host MCP. Defaults to disallowed. */
+  disallowMetaTools?: boolean;
 }
 
 export interface GrokAcpRuntimeStoppedEvent extends GrokAcpExit {
@@ -163,10 +171,7 @@ function validateAbsolutePath(value: string, field: string): void {
 }
 
 export function isMethodNotFound(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  if (code === -32601) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /method not found/i.test(message);
+  return isWireMethodNotFound(error);
 }
 
 function processExit(child: ChildProcessWithoutNullStreams): Promise<GrokAcpExit> {
@@ -190,34 +195,37 @@ function innerConnection(connection: ClientSideConnection): ExtCapable {
   return candidate.connection;
 }
 
+export function grokChildProcessEnv(
+  env: NodeJS.ProcessEnv,
+  sandboxProfile: GrokSandboxProfile,
+): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    ...grokChildHomeEnv(env),
+    GROK_DISABLE_AUTOUPDATER: '1',
+    GROK_SANDBOX: sandboxProfile,
+  };
+}
+
 function processTransportFactory(
-  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'cwd' | 'env' | 'gracefulStopMs' | 'spawnDenyRules'>,
+  options: Pick<GrokAcpClientOptions, 'binaryPath' | 'cwd' | 'env' | 'gracefulStopMs' | 'spawnDenyRules' | 'sandboxProfile' | 'disallowMetaTools'>,
   emitDebug: (message: string) => void,
 ): GrokAcpTransportFactory {
   return async (client) => {
-    const args: string[] = [];
-    for (const rule of options.spawnDenyRules ?? GROK_DEFAULT_DENY_RULES) {
-      args.push('--deny', rule);
-    }
-    args.push('--disallowed-tools', 'search_tool,use_tool');
-    const child = spawn(options.binaryPath, [
-      ...args,
+    const args = [
+      ...buildSpawnArgs(options.spawnDenyRules ?? GROK_DEFAULT_DENY_RULES, {
+        disallowMetaTools: options.disallowMetaTools !== false,
+      }),
       'agent',
       '--no-leader',
       'stdio',
-    ], {
+    ];
+    const child = spawn(options.binaryPath, args, {
       cwd: options.cwd,
-      env: {
-        ...process.env,
-        ...options.env,
-        // Home mapping lives in the owning Proxy (Host provides the
-        // constrained universal GIAN_AGENT_HOME). The explicit translation
-        // wins over any inherited GROK_HOME so a stale outer value can never
-        // point the CLI at another Agent's state.
-        ...grokChildHomeEnv(options.env ?? process.env),
-        GROK_DISABLE_AUTOUPDATER: '1',
-        GROK_SANDBOX: 'workspace',
-      },
+      env: grokChildProcessEnv(
+        { ...process.env, ...options.env },
+        options.sandboxProfile ?? 'workspace',
+      ),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const exit = processExit(child);
@@ -281,15 +289,16 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
         this.emit('sessionUpdate', notification);
       },
       extNotification: async (method, params) => {
-        this.emit('extensionNotification', method, params);
+        this.emit('extensionNotification', fromWireExtensionMethod(method), params);
       },
       extMethod: async (method: string, params: unknown) => {
+        const logical = fromWireExtensionMethod(method);
         // Reverse requests from the agent must be answered honestly: the old
         // blanket `{}` return silently mis-answered structured questions.
         if (!this.extMethodHandler) {
-          throw new Error(`Method not found: ${method}`);
+          throw new Error(`Method not found: ${logical}`);
         }
-        const result = await this.extMethodHandler(method, params);
+        const result = await this.extMethodHandler(logical, params);
         return result as Record<string, unknown>;
       },
     };
@@ -344,11 +353,12 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
     const initialize = transport.connection.initialize({
       protocolVersion: ACP_PROTOCOL_VERSION,
-      clientInfo: { name: 'gian-grok-proxy', version: '0.2.0' },
+      clientInfo: { name: GROK_ORIGIN_CLIENT_ID, version: '0.2.0' },
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
+      _meta: { clientIdentifier: GROK_ORIGIN_CLIENT_ID },
     });
 
     let response: InitializeResponse;
@@ -411,25 +421,64 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     return (await this.connection()).unstable_forkSession(params);
   }
 
-  /** One live extension-request round trip with honest per-attach learning.
-   *  Unknown methods are allowed a first real attempt: a -32601 "Method not
-   *  found" refutes the method for the rest of this attach (later calls fail
-   *  fast instead of repeating the live misreport), any other outcome
-   *  confirms it. Refuted methods never touch the runtime again. */
+  /** One live extension-request round trip. A prefixed-wire -32601 refutes
+   *  the method. A business error does not. Other failures leave it unknown. */
   private async extRequest(method: GrokExtMethod, params: unknown): Promise<unknown> {
     if (!this.extSupport.mayAttempt(method)) {
       throw new GrokExtMethodUnsupportedError(method, this.extSupport.unsupportedReason(method));
     }
     try {
-      const result = await (await this.ext()).sendRequest(method, params);
+      const raw = await (await this.ext()).sendRequest(toWireExtensionMethod(method), params);
+      const result = unwrapExtMethodResult(method, raw);
+      if (method === 'x.ai/interject') {
+        const status = result && typeof result === 'object'
+          ? (result as { status?: unknown }).status
+          : undefined;
+        if (status !== 'queued') {
+          throw new GrokExtBusinessError(method, 'interject did not return status queued');
+        }
+      }
       this.extSupport.confirm(method);
       return result;
     } catch (error) {
-      if (isMethodNotFound(error)) {
+      if (error instanceof GrokExtBusinessError) throw error;
+      if (isWireMethodNotFound(error)) {
         this.extSupport.refute(method);
         throw new GrokExtMethodUnsupportedError(method, this.extSupport.unsupportedReason(method));
       }
       throw error;
+    }
+  }
+
+  /**
+   * Side-effect-free interject probe. Confirms only on -32602 "session not
+   * found" for a session that does not exist. A queued result is not proof.
+   * -32601 on the prefixed wire refutes. Anything else stays unknown.
+   */
+  async probeInterjectRegistered(): Promise<'confirmed' | 'refuted' | 'unknown'> {
+    await this.ensureStarted();
+    const method = 'x.ai/interject' as const;
+    // A prefixed-wire -32601 is a confirmed negative. Later probes must keep
+    // that answer; `mayAttempt` would otherwise hide it as `unknown`.
+    if (this.extSupport.state(method) === 'refuted') return 'refuted';
+    if (!this.extSupport.mayAttempt(method)) return 'unknown';
+    try {
+      await (await this.ext()).sendRequest(toWireExtensionMethod(method), {
+        sessionId: 'gian-probe-missing-session',
+        text: 'probe',
+        interjectionId: 'gian-probe',
+      });
+      return 'unknown';
+    } catch (error) {
+      if (isWireMethodNotFound(error)) {
+        this.extSupport.refute(method);
+        return 'refuted';
+      }
+      if (isInterjectSessionMissing(error)) {
+        this.extSupport.confirm(method);
+        return 'confirmed';
+      }
+      return 'unknown';
     }
   }
 
@@ -463,6 +512,16 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     return (await this.connection()).prompt(params);
+  }
+
+  /**
+   * Send `session/prompt` and resolve once the request has been registered
+   * with the transport — the dispatch point after which the native session
+   * owns the prompt. The prompt's own response settles separately, so the
+   * caller can count a dispatched prompt without awaiting the whole turn.
+   */
+  async dispatchPrompt(params: PromptRequest): Promise<{ response: Promise<PromptResponse> }> {
+    return { response: (await this.connection()).prompt(params) };
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -510,8 +569,10 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
   }
 
   /** Read-only effective MCP server catalog (no server is contacted). */
-  async mcpList(): Promise<unknown> {
-    return this.extRequest('x.ai/mcp/list', {});
+  async mcpList(sessionId?: string): Promise<unknown> {
+    return this.extRequest('x.ai/mcp/list', {
+      ...(sessionId ? { sessionId } : {}),
+    });
   }
 
   /** Read-only skill listing reloaded from disk (no hooks run, no MCP dialed). */
@@ -532,10 +593,26 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     sessionId: string;
     text: string;
     interjectionId: string;
+    content?: ReadonlyArray<Record<string, unknown>>;
   }): Promise<unknown> {
-    return this.extRequest('x.ai/interject', params);
+    return this.extRequest('x.ai/interject', {
+      sessionId: params.sessionId,
+      text: params.text,
+      interjectionId: params.interjectionId,
+      ...(params.content ? { content: [...params.content] } : {}),
+    });
   }
 
+  /**
+   * Asks the runtime to use this mode on the next prompt. A resolved send is
+   * not proof the mode was applied.
+   *
+   * `x.ai/yolo_mode_changed` does not filter on `sessionId`. An omitted
+   * `clientIdentifier` updates every resident session. A present one updates
+   * only sessions whose `origin_client.product` equals it, and that product
+   * is the session `_meta.clientIdentifier` (initialize is only the fallback).
+   * The value here must be the identifier this session was created with.
+   */
   async notifyPermissionMode(params: {
     sessionId: string;
     clientIdentifier: string;
@@ -543,7 +620,13 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     yolo_mode: boolean;
     auto_mode: boolean;
   }): Promise<void> {
-    await (await this.ext()).sendNotification('x.ai/yolo_mode_changed', params);
+    await (await this.ext()).sendNotification(toWireExtensionMethod('x.ai/yolo_mode_changed'), {
+      sessionId: params.sessionId,
+      clientIdentifier: params.clientIdentifier,
+      permission_mode: params.permission_mode,
+      yolo_mode: params.yolo_mode,
+      auto_mode: params.auto_mode,
+    });
   }
 
   async closeSession(params: CloseSessionRequest): Promise<void> {

@@ -8,7 +8,7 @@ import {
 import type { EventEnvelope } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import type { SessionManager } from '../session/manager.js';
-import { RemoteProjector, projectRemoteInteraction, remoteStableUuid } from './projection.js';
+import { RemoteProjector, projectRemoteInteraction, remoteInteractionId, remoteStableUuid } from './projection.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import { RemoteExecutionBindings, type RemoteExecutionBinding } from './execution-bindings.js';
 
@@ -122,7 +122,7 @@ export class RemoteExecutionJournal {
       if (!item && !resolution && !interaction) throw new RemoteProtocolError('INVALID_FRAME', 'execution event cannot be projected');
       const entry = parseClosed(executionHistoryEntrySchema, interaction
         ? { sequence: row.sequence, interaction, turn: event.turn } : resolution
-        ? { sequence: row.sequence, resolution: { interaction_id: resolution.approvalId,
+        ? { sequence: row.sequence, resolution: { interaction_id: remoteInteractionId(resolution.approvalId),
           decision: resolution.decision, auto: resolution.auto, turn: event.turn, ts: event.ts,
           ...(resolution.answers ? { answers: resolution.answers } : {}) } }
         : { sequence: row.sequence, item });

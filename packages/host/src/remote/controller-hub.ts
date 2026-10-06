@@ -1,5 +1,5 @@
 import {
-  RemoteProtocolError, canonicalJson, catalogReadResultSchema, executionSessionSchema,
+  RemoteProtocolError, canonicalIdSchema, canonicalJson, catalogReadResultSchema, executionSessionSchema,
   executionSyncResultSchema, generateCanonicalId, generateUuidV7, parseClosed,
   type AccountLoginStarted, type ExecutionSession, type CommandStatusResult,
   type RemoteInteraction, type RemoteMethod, type RemoteTranscriptItem,
@@ -113,7 +113,11 @@ export class RemoteControllerHub {
     this.clients.clear(); this.pendingLogin.clear();
   }
 
-  owns(sessionId: string): boolean { return this.bindings.get(sessionId) !== null; }
+  owns(sessionId: string): boolean {
+    // Local resources (including sc_<uuid> Side Chats) are not Remote IDs.
+    // Binding reads still validate stored targets and must not hide corruption.
+    return canonicalIdSchema.safeParse(sessionId).success && this.bindings.get(sessionId) !== null;
+  }
 
   status(sessionId: string) {
     const session = this.repository.get(sessionId);

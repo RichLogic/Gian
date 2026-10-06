@@ -73,11 +73,13 @@ describe('performance-sensitive API clients', () => {
   it('forces a working-tree rescan and rejects failures instead of returning an empty list', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response('[]', { status: 200 }))
+      .mockResolvedValueOnce(new Response('[]', { status: 200 }))
       .mockResolvedValueOnce(new Response('unavailable', { status: 503 }));
     const api = await import('../src/api.js');
 
     await expect(api.loadWorkingTrees({ refresh: true })).resolves.toEqual([]);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/working_trees?refresh=1');
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/remote/working-trees');
     await expect(api.loadWorkingTrees({ refresh: true })).rejects.toThrow(
       'working trees request failed (503)',
     );

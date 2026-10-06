@@ -6,13 +6,29 @@ interface NativeTurnIdentity {
   nativeSessionId: string;
   sourceTurnId: string;
   inputHash: string;
+  /** Absolute prompt ordinal in the native session, recorded only when the
+   *  attach could prove it (fresh session, verified replay, or fork seed). */
   replayIndex?: number;
   lastUsedAt: number;
 }
 
+/** Disk marker distinguishing proven ordinals from legacy hash-guessed ones.
+ *  Records written before positional identity was enforced carry a
+ *  `replayIndex` derived from text-hash matching; repeated text made those
+ *  guesses unreliable, so they are loaded WITHOUT a positional binding. */
+const ORDINAL_PROVEN_FIELD = 'ordinalProven';
+
 export interface NativeTurnIdentityStoreOptions {
   maxEntries?: number;
   now?: () => number;
+}
+
+export interface ReplayIdentityResolution {
+  sourceTurnId: string;
+  /** true: ordinal binding and input hash agree. false: the native history at
+   *  this ordinal diverges from the recorded identity — the binding must not
+   *  be used. null: no ordinal binding exists; the fallback is in use. */
+  consistent: boolean | null;
 }
 
 const DEFAULT_MAX_NATIVE_TURN_IDENTITIES = 4_096;
@@ -31,7 +47,16 @@ function inputIdentityHash(input: unknown): string {
   return createHash('sha256').update(JSON.stringify(texts)).digest('hex').slice(0, 32);
 }
 
-/** Persists Host sourceTurnId for Grok native sessions. Only input hashes are stored. */
+/**
+ * Persists Host sourceTurnId for Grok native sessions. Only input hashes are
+ * stored, never prompt plaintext.
+ *
+ * Identity is positional: `nativeSessionId + absolute prompt ordinal`. The
+ * input hash only *verifies* a positional binding — it never creates one, so
+ * repeated identical prompts can never steal each other's identity. Replay
+ * turns without a positional binding get a deterministic fallback that is NOT
+ * persisted: it cannot collide, and it never claims to be an old live id.
+ */
 export class NativeTurnIdentityStore {
   private readonly identities: NativeTurnIdentity[] = [];
   private readonly filePath: string | null;
@@ -60,6 +85,13 @@ export class NativeTurnIdentityStore {
           || typeof entry.sourceTurnId !== 'string'
           || typeof entry.inputHash !== 'string'
         ) continue;
+        // Legacy records guessed replayIndex from the text hash; only entries
+        // written with the proven marker keep a positional binding.
+        const provenOrdinal = entry[ORDINAL_PROVEN_FIELD] === true
+          && typeof entry.replayIndex === 'number'
+          && Number.isSafeInteger(entry.replayIndex)
+          ? entry.replayIndex
+          : undefined;
         this.identities.push({
           nativeSessionId: entry.nativeSessionId,
           sourceTurnId: entry.sourceTurnId,
@@ -67,9 +99,7 @@ export class NativeTurnIdentityStore {
           lastUsedAt: typeof entry.lastUsedAt === 'number' && Number.isFinite(entry.lastUsedAt)
             ? entry.lastUsedAt
             : loadedAt,
-          ...(typeof entry.replayIndex === 'number' && Number.isSafeInteger(entry.replayIndex)
-            ? { replayIndex: entry.replayIndex }
-            : {}),
+          ...(provenOrdinal !== undefined ? { replayIndex: provenOrdinal } : {}),
         });
       }
       if (this.prune()) this.persist();
@@ -78,19 +108,30 @@ export class NativeTurnIdentityStore {
     }
   }
 
-  recordLive(nativeSessionId: string, sourceTurnId: string, input: unknown): string {
+  /**
+   * Record a live Host turn. Called only after the native prompt was actually
+   * dispatched — local input failures and phantom turns never create entries.
+   * `ordinal` is the proven absolute native prompt ordinal; without it the
+   * entry exists for cross-reference but can never bind a replay position.
+   */
+  recordLive(nativeSessionId: string, sourceTurnId: string, input: unknown, ordinal?: number): string {
+    const inputHash = inputIdentityHash(input);
     const existing = this.identities.find((entry) => (
       entry.nativeSessionId === nativeSessionId && entry.sourceTurnId === sourceTurnId
     ));
     if (existing) {
       existing.lastUsedAt = this.now();
+      if (ordinal !== undefined) existing.replayIndex = ordinal;
+      existing.inputHash = inputHash;
+      this.persist();
       return existing.sourceTurnId;
     }
     this.identities.push({
       nativeSessionId,
       sourceTurnId,
-      inputHash: inputIdentityHash(input),
+      inputHash,
       lastUsedAt: this.now(),
+      ...(ordinal !== undefined ? { replayIndex: ordinal } : {}),
     });
     this.persist();
     return sourceTurnId;
@@ -101,25 +142,18 @@ export class NativeTurnIdentityStore {
     replayIndex: number,
     input: unknown,
     fallback: string,
-  ): string {
+  ): ReplayIdentityResolution {
     const bound = this.identities.find((entry) => (
       entry.nativeSessionId === nativeSessionId && entry.replayIndex === replayIndex
     ));
-    if (bound) {
-      bound.lastUsedAt = this.now();
-      return bound.sourceTurnId;
+    if (!bound) return { sourceTurnId: fallback, consistent: null };
+    bound.lastUsedAt = this.now();
+    // A hash mismatch means the native history at this ordinal no longer is
+    // the prompt we recorded (compact/rewind/external edit). Never bind.
+    if (bound.inputHash !== inputIdentityHash(input)) {
+      return { sourceTurnId: fallback, consistent: false };
     }
-    const inputHash = inputIdentityHash(input);
-    const match = this.identities.find((entry) => (
-      entry.nativeSessionId === nativeSessionId
-      && entry.inputHash === inputHash
-      && entry.replayIndex === undefined
-    ));
-    if (!match) return fallback;
-    match.replayIndex = replayIndex;
-    match.lastUsedAt = this.now();
-    this.persist();
-    return match.sourceTurnId;
+    return { sourceTurnId: bound.sourceTurnId, consistent: true };
   }
 
   private prune(): boolean {
@@ -142,7 +176,12 @@ export class NativeTurnIdentityStore {
       this.prune();
       mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
       const temporary = `${this.filePath}.${process.pid}.tmp`;
-      writeFileSync(temporary, `${JSON.stringify(this.identities)}\n`, { mode: 0o600 });
+      // In-memory replayIndex is only ever set from proven positions; mark
+      // that on disk so future loads can tell it apart from legacy guesses.
+      const serialized = this.identities.map((entry) => (
+        entry.replayIndex !== undefined ? { ...entry, [ORDINAL_PROVEN_FIELD]: true } : entry
+      ));
+      writeFileSync(temporary, `${JSON.stringify(serialized)}\n`, { mode: 0o600 });
       renameSync(temporary, this.filePath);
     } catch {
       /* Deterministic fallback identities remain available. */

@@ -11,6 +11,7 @@ export function verifyZcodeRuntimeProtocol(entryPath, home, workspace) {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let buffer = '';
+    let stderrTail = '';
     let outcome;
     let received = 0;
     const pending = new Map([
@@ -25,7 +26,12 @@ export function verifyZcodeRuntimeProtocol(entryPath, home, workspace) {
     const timer = setTimeout(() => stop(new Error('ZCode app-server catalog probe timed out.')), 20_000);
     child.on('error', error => { clearTimeout(timer); reject(error); });
     child.stdin.on('error', error => stop(error));
-    child.stderr.on('data', () => { /* Drain without exposing runtime diagnostics/credentials. */ });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => {
+      // This process has a throwaway HOME and no inherited credentials. Keep
+      // only a bounded, redacted tail for a startup failure diagnosis.
+      stderrTail = (stderrTail + chunk).slice(-2048);
+    });
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => {
       received += Buffer.byteLength(chunk);
@@ -58,9 +64,16 @@ export function verifyZcodeRuntimeProtocol(entryPath, home, workspace) {
         if (pending.size === 0) return stop(null);
       }
     });
-    child.on('close', () => {
+    child.on('close', (code, signal) => {
       clearTimeout(timer);
-      if (!outcome) reject(new Error('ZCode app-server exited before answering its catalog probe.'));
+      if (!outcome) {
+        const diagnostic = stderrTail
+          .replace(/\x1b\[[0-9;]*m/g, '')
+          .replace(/[^\S\r\n]*(?:[A-Za-z_]*(?:token|api[_-]?key|secret|password|authorization)[A-Za-z_]*)\s*[:=]\s*\S+/gi, ' [redacted]')
+          .replace(/[\r\n]+/g, ' | ')
+          .slice(-900);
+        reject(new Error(`ZCode app-server exited before its catalog probe (code ${code ?? 'none'}, signal ${signal ?? 'none'}${diagnostic ? `; stderr: ${diagnostic}` : ''}).`));
+      }
       else if (outcome.error) reject(outcome.error);
       else resolve();
     });

@@ -353,7 +353,11 @@ function projectNotification(notification: unknown): {
             retryable: error.retryable === true,
             code: String(error.domainCode ?? error.code ?? 'INTERNAL'),
           },
-        }],
+        }, ...(method === 'turn.failed' && turnId ? [{
+          callId: `sidechat-terminal:${turnId}`,
+          type: 'state.turn-completed',
+          data: { turnId, status: 'failed' },
+        }] : [])],
       };
     }
     // step.updated / request.updated are trace-only execution evidence;
@@ -512,16 +516,36 @@ export function projectSideChatSnapshot(
 export function mergeSideChatEchoes(
   projected: TranscriptItem[],
   previous: TranscriptItem[],
+  snapshot?: SideChatInfo,
 ): TranscriptItem[] {
   const echoes = previous.filter(item => item.kind === 'user' && item.id.startsWith('optimistic:'));
   if (echoes.length === 0) return projected;
-  const projectedUserTexts = new Set(
-    projected.filter(item => item.kind === 'user').map(item => (item as { text: string }).text),
-  );
+  const canonicalUsers = projected.filter(item => item.kind === 'user');
+  const terminalTimes = (snapshot?.events ?? []).flatMap(raw => {
+    const notification = asRecord(raw);
+    const params = asRecord(notification.params);
+    return (notification.method === 'turn.failed' || notification.method === 'turn.completed')
+      && typeof params.turnId === 'string' ? [timestamp(params.emittedAt)] : [];
+  });
+  const latestTerminal = Math.max(0, ...terminalTimes);
   const surviving = echoes.filter(item => {
     if (item.kind !== 'user') return false;
     if (item.failed === true) return true;
-    return !projectedUserTexts.has(item.text);
+    // Match one accepted input, not every previous turn with the same text.
+    const match = canonicalUsers.findIndex(user => user.kind === 'user'
+      && user.text === item.text && user.ts >= item.ts);
+    if (match < 0) return true;
+    canonicalUsers.splice(match, 1);
+    return false;
+  }).map(item => {
+    if (item.kind !== 'user' || !item.pending || !snapshot
+      || snapshot.state === 'running' || snapshot.state === 'waiting_interaction'
+      || latestTerminal <= item.ts) return item;
+    // A matching canonical echo or a correlated operation result may be lost.
+    // An observed terminal newer than this send still proves it is no longer
+    // running. Preserve the message/retry affordance, but never let an older
+    // terminal clear a newer optimistic send.
+    return { ...item, pending: false, failed: true };
   });
   return surviving.length === 0 ? projected : [...projected, ...surviving];
 }

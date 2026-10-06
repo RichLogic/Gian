@@ -2,6 +2,9 @@ import { promises as fsp } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 
+import { agentHome } from './home.js';
+import { unwrapExtMethodResult } from '../runtime/acp-wire.js';
+
 /**
  * Isolation boundary for session-level Host Streamable HTTP MCP injection.
  *
@@ -20,10 +23,10 @@ import { isAbsolute, join } from 'node:path';
  *     disk-sourced MCP servers cannot execute tools even in always-approve
  *     mode. When no Host MCP is injected the original blanket
  *     `--deny MCPTool(*)` stays in force.
- *  3. Runtime verification — after the session attaches, the effective server
- *     set from `x.ai/mcp/list` is compared against the approved set; anything
- *     unexpected (e.g. a plugin-contributed server the disk scan cannot see)
- *     is reported honestly instead of being silently trusted.
+ *  3. Runtime verification — when Host MCP is admitted, `x.ai/mcp/list` must
+ *     prove the executable set before any prompt. A miss, an unresolved
+ *     catalog, or an executable server outside the admitted HTTP set fails
+ *     the session. Logging the mismatch is not the boundary.
  *
  * Scanning here only reads configuration files; it never connects to an MCP
  * server and never executes a hook.
@@ -143,8 +146,12 @@ export function admitHostStreamableHttpServices(hostServices: unknown): Admitted
 }
 
 export function grokHome(): string {
-  return process.env.GROK_HOME && isAbsolute(process.env.GROK_HOME)
-    ? process.env.GROK_HOME
+  // The same Provider Home rule as the child spawn env: GIAN_AGENT_HOME
+  // first, legacy GROK_HOME next, the machine default last. Scanning anywhere
+  // else would build a spawn boundary from a directory the CLI never reads.
+  const home = agentHome(process.env);
+  return home && isAbsolute(home)
+    ? home
     : join(homedir(), '.grok');
 }
 
@@ -187,6 +194,9 @@ export interface DiskMcpScan {
   readonly names: readonly string[];
   /** Non-fatal notes when a source exists but could not be parsed. */
   readonly diagnostics: readonly string[];
+  /** True when a source existed but could not be read. A disk scan is not
+   *  the effective MCP set. */
+  readonly unreadable: boolean;
 }
 
 /**
@@ -200,6 +210,7 @@ export async function scanDiskConfiguredMcpServers(
   overrides: { userHome?: string } = {},
 ): Promise<DiskMcpScan> {
   const diagnostics: string[] = [];
+  let unreadable = false;
   const names = new Set<string>();
   const userHome = overrides.userHome ?? homedir();
   const sources: Array<{ path: string | null; parse: (content: string) => string[]; label: string }> = [
@@ -227,6 +238,7 @@ export async function scanDiskConfiguredMcpServers(
       // A present-but-unreadable source is an honest partial fact: the
       // boundary cannot enumerate it, so say so instead of staying silent.
       if (exists || await fsp.lstat(source.path).then(() => true, () => false)) {
+        unreadable = true;
         diagnostics.push(`${source.label} exists but could not be read for MCP name enumeration.`);
       }
       continue;
@@ -235,7 +247,7 @@ export async function scanDiskConfiguredMcpServers(
       for (const name of source.parse(content)) names.add(name);
     }
   }
-  return { names: [...names], diagnostics };
+  return { names: [...names], diagnostics, unreadable };
 }
 
 /**
@@ -257,13 +269,112 @@ export function mcpSpawnDenyRules(admitted: AdmittedHostMcp | null, diskNames: r
   return rules;
 }
 
-export function buildSpawnArgs(denyRules: readonly string[]): string[] {
+export function buildSpawnArgs(
+  denyRules: readonly string[],
+  options: { disallowMetaTools?: boolean } = {},
+): string[] {
   const args: string[] = [];
   for (const rule of denyRules) {
     args.push('--deny', rule);
   }
-  args.push('--disallowed-tools', 'search_tool,use_tool');
+  if (options.disallowMetaTools !== false) {
+    args.push('--disallowed-tools', 'search_tool,use_tool');
+  }
   return args;
+}
+
+export interface ListedMcpServer {
+  name: string;
+  type: string | null;
+  url: string | null;
+  sourceLabel: string | null;
+  executable: boolean;
+  initializing: boolean;
+}
+
+export interface McpListReading {
+  resolved: boolean | null;
+  initializing: boolean;
+  servers: ListedMcpServer[];
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** Parse `x.ai/mcp/list`. Accepts the business object or an ExtMethodResult envelope. */
+export function readMcpListPayload(raw: unknown): McpListReading {
+  const body = objectRecord(unwrapExtMethodResult('x.ai/mcp/list', raw));
+  if (!body || !Array.isArray(body.servers)) {
+    throw new Error('x.ai/mcp/list did not return a server catalog.');
+  }
+  const resolvedValue = body.sessionMcpResolved ?? body.session_mcp_resolved;
+  const resolved = typeof resolvedValue === 'boolean' ? resolvedValue : null;
+  const servers = body.servers.map((entry): ListedMcpServer => {
+    const server = objectRecord(entry) ?? {};
+    const session = objectRecord(server.session);
+    const enabled = session && Object.prototype.hasOwnProperty.call(session, 'enabled')
+      ? session.enabled !== false
+      : true;
+    const status = session && (typeof session.status === 'string' ? session.status : '');
+    const sourceLabel = typeof server.sourceLabel === 'string'
+      ? server.sourceLabel
+      : typeof server.source_label === 'string'
+        ? server.source_label
+        : null;
+    return {
+      name: typeof server.name === 'string' ? server.name : '',
+      type: typeof server.type === 'string' ? server.type : null,
+      url: typeof server.url === 'string' ? server.url : null,
+      sourceLabel,
+      executable: enabled && typeof server.name === 'string' && server.name.length > 0,
+      initializing: status === 'initializing',
+    };
+  });
+  return {
+    resolved,
+    initializing: servers.some((server) => server.initializing),
+    servers,
+  };
+}
+
+/**
+ * Fail-closed comparison of the executable catalog to the admitted Host HTTP
+ * set. Disabled entries are ignored. Messages do not include header values.
+ */
+export function mcpBoundaryProblem(
+  servers: readonly ListedMcpServer[],
+  admitted: AdmittedHostMcp,
+): string | null {
+  const approved = new Map<string, string>();
+  for (const server of admitted.servers) {
+    const name = typeof server.name === 'string' ? server.name : '';
+    const url = typeof server.url === 'string' ? server.url : '';
+    if (name) approved.set(name, url);
+  }
+  for (const server of servers) {
+    if (!server.executable || server.initializing) continue;
+    const expected = approved.get(server.name);
+    if (!expected) {
+      return `MCP server "${server.name}" is executable and was not admitted by the Host.`;
+    }
+    if (server.sourceLabel?.startsWith('plugin:')) {
+      return `MCP server "${server.name}" is provided by a plugin, not the admitted Host server.`;
+    }
+    if (server.type === 'stdio' || server.type === 'managedGateway') {
+      return `MCP server "${server.name}" uses ${server.type}, which Host admission does not allow.`;
+    }
+    if (server.type !== 'http' || server.url !== expected) {
+      return `MCP server "${server.name}" does not match the admitted Host HTTP server.`;
+    }
+  }
+  for (const name of admitted.names) {
+    const live = servers.find((server) => server.name === name && server.executable && !server.initializing);
+    if (!live) return `Admitted Host MCP server "${name}" is not executable in the Grok catalog.`;
+  }
+  return null;
 }
 
 /** Names present in the effective set but not approved by the Host. */

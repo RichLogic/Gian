@@ -25,6 +25,7 @@ import {
   installAgentProxy,
   pickAgentCliPath,
   pickAgentHome,
+  pickAgentRuntime,
   updateAgent,
   type CreateAgentInput,
   type UpdateAgentInput,
@@ -99,6 +100,13 @@ const agentPickHome: OperationDefinition<{ agentId?: string }, string | null> = 
   timeoutMs: PICK_TIMEOUT_MS,
 };
 
+const agentPickRuntime: OperationDefinition<Record<string, never>, string | null> = {
+  policy: 'pending',
+  entityKey: () => 'pending:agent.pick-runtime',
+  execute: () => pickAgentRuntime(),
+  timeoutMs: PICK_TIMEOUT_MS,
+};
+
 interface AgentIdInput {
   agentId: string;
 }
@@ -120,6 +128,7 @@ const agentCreate: OperationDefinition<CreateAgentOperationInput, CreateAgentOpe
       ...(input.pluginId !== undefined ? { pluginId: input.pluginId } : {}),
       ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
       ...(input.home !== undefined ? { home: input.home } : {}),
+      ...(input.runtime !== undefined ? { runtime: input.runtime } : {}),
       ...(input.cliPath !== undefined ? { cliPath: input.cliPath } : {}),
       ...(input.defaults !== undefined ? { defaults: input.defaults } : {}),
     });
@@ -214,6 +223,7 @@ registry.register('agent.installProxy', agentInstallProxy);
 registry.register('agent.checkProxyUpdate', agentCheckProxyUpdate);
 registry.register('agent.pickCliPath', agentPickCliPath);
 registry.register('agent.pickHome', agentPickHome);
+registry.register('agent.pickRuntime', agentPickRuntime);
 registry.register('agent.create', agentCreate);
 registry.register('agent.delete', agentDelete);
 registry.register('agent.patch', agentPatch);

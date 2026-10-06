@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "grok",
+  "currentVersion": "0.3.6",
+  "entries": [
+    {
+      "version": "0.3.6",
+      "firstPublishedAt": "2026-09-25T11:45:02Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-grok-v0.3.6",
+          "publishedAt": "2026-09-25T11:45:02Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.6/gian-proxy-grok-0.3.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5d5c44bd06be7e905454e6e175354d42a520a307217b4c95577c2b06f42da422",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.6/gian-proxy-grok-0.3.6-darwin-arm64.tar.gz",
+            "sha256": "5ca12d259980b023aeabcaf9be8a762e2b8a34f4127bb9d985acf5693615e74b",
+            "size": 156867
+          },
+          "runtimeDeclaration": {
+            "id": "grok",
+            "versions": [
+              "1.0.41"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "fixed",
+          "text": "将受管 Grok Runtime 与 Proxy 发布到同一受信任的 GitHub Release，使已发布 Gian 能通过 Catalog 下载和验证。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.6"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.5",
+      "firstPublishedAt": "2026-09-25T11:27:45Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-grok-v0.3.5",
+          "publishedAt": "2026-09-25T11:27:45Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.5/gian-proxy-grok-0.3.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "91fcff2528bcdb4dcfa7d11144234c9047e5852ce15ed9436184d92485d6f946",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.5/gian-proxy-grok-0.3.5-darwin-arm64.tar.gz",
+            "sha256": "90eeeec3c00c3ddfa4760075b69e81cb95495253b608ce9d84a9346a1b153d11",
+            "size": 156867
+          },
+          "runtimeDeclaration": {
+            "id": "grok",
+            "versions": [
+              "1.0.41"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "added",
+          "text": "Grok 4.7 真实会话支持本地文件、工具审批、历史回放和结构化事件。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.5"
+          ]
+        },
+        {
+          "category": "changed",
+          "text": "对 Grok CLI 1.0.41 的 x.ai 扩展按真实方法能力收窄；未注册的 Steer、Rename、Fork、Side Chat 和原生删除不会在 Catalog 中宣告。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/commit/c458424b5030bb93dd7d127fa5d091ec127e6bbd"
+          ]
+        },
+        {
+          "category": "fixed",
+          "text": "交互响应可在活动 Turn 期间并发处理，避免工具审批阻塞请求循环。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/commit/10d4d7c0b60632c5cd53c8da6661020052f5a177"
+          ]
+        }
+      ],
+      "unknowns": []
+    }
+  ],
+  "withdrawnVersions": []
+}

@@ -7,11 +7,8 @@ import {
 } from '../src/runtime/grok-extensions.js';
 
 test('no x.ai method is claimed from initialize metadata alone', () => {
-  // Live verification of the published 1.0.41 stdio binary showed it answers
-  // -32601 "Method not found" for every x.ai/* request method even though
-  // _meta advertises grokShell and a modern agentVersion. Version floors are
-  // therefore proof of nothing: nothing may be claimed before a live
-  // confirmation.
+  // grokShell and agentVersion do not confirm a method. Only a live call
+  // does, and only a prefixed-wire -32601 refutes one.
   const support = extensionSupportFromInitialize({ _meta: { grokShell: true, agentVersion: '1.0.41' } });
   assert.equal(support.grokShell, true);
   assert.equal(support.agentVersion, '1.0.41');

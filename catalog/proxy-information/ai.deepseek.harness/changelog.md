@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.2**，Runtime **0.1.5-rc.3**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.3**，Runtime **0.1.5-rc.3**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.3
+
+首次公开发布：2026-09-26T12:20:54Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.3)：2026-09-26T12:20:54Z。
+- 对应 CLI：0.1.5-rc.3（Manifest 兼容声明，不是本机状态）。 Bridge：0.1.5（当前归档对应的源码包）。
+
+### 变更
+
+- 适配 DeepSeek Harness 0.1.5-rc.3 的完整能力面，支持文件与图片输入、Steer、Fork、结构化问题以及计划和 Diff 事件；随包内置 Bridge 0.1.5。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.3) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-dsh-v0.3.3/packages/proxies/dsh-proxy/README.md)
 
 ## 0.3.2
 
@@ -139,4 +150,4 @@
 
 ## 已撤回版本
 
-0.4.0 已于 2026-09-20 撤回，不进入可用版本列表。仓库拆分不构成统一升级所有 Proxy 版本的理由。
+- 0.4.0：2026-09-20 已撤回，不可安装。[依据](https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md)

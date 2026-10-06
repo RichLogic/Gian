@@ -160,6 +160,7 @@ test('protocol v2 activity presentation types cover every Gian card fallback', (
     ['file', { path: 'README.md', operation: 'read' }, 'activity.file-read'],
     ['file', { path: 'output.txt', operation: 'write' }, 'activity.file-change'],
     ['search', { query: 'gian proxy' }, 'activity.web-search'],
+    ['file-search', { pattern: 'TODO', searchKind: 'grep' }, 'activity.file-search'],
     ['agent', { agentId: 'worker-1', state: 'completed' }, 'agent'],
     ['notice', { message: 'careful' }, 'activity.notice'],
     ['tool', { name: 'mock_tool' }, 'activity.tool'],
@@ -175,6 +176,24 @@ test('protocol v2 activity presentation types cover every Gian card fallback', (
     }), 'session-1', 1);
     assert.equal(event?.display?.type, expected, type);
   }
+});
+
+test('protocol v2 file-search keeps the pattern and grep or glob kind', () => {
+  const project = (searchKind: string) => {
+    const [event] = projectNotification('kimi', v2Notification('activity.updated', {
+      activityId: `search-${searchKind}`,
+      kind: 'file-search',
+      title: 'mergeAdjacentLists',
+      status: 'succeeded',
+      presentation: {
+        type: 'file-search',
+        data: { pattern: 'mergeAdjacentLists', searchKind, path: 'packages/web' },
+      },
+    }), 'session-1', 1);
+    return event?.display?.data as { pattern?: string; kind?: string };
+  };
+  assert.deepEqual(project('grep'), { pattern: 'mergeAdjacentLists', kind: 'grep' });
+  assert.deepEqual(project('glob'), { pattern: 'mergeAdjacentLists', kind: 'glob' });
 });
 
 test('protocol v2 file activities preserve adapter-supplied line counts', () => {
@@ -574,4 +593,70 @@ test('resolved decisions fall back to ACP-kind actionIds when the registry misse
     actionId: 'allow_once',
   }), registry);
   assert.equal((allowed?.display?.data as Record<string, unknown>).decision, 'allow_once');
+});
+
+test('grok plan approval projects the plan body from a string subject', () => {
+  const plan = '# Ship plan\n\n- step one\n- step two';
+  const [event] = projectNotification('grok', v2Notification('interaction.requested', {
+    interactionId: 'ix-plan',
+    title: 'Grok requests plan approval',
+    description: '',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [],
+    actions: [
+      { id: 'approve', label: 'Approve plan', style: 'primary' },
+      { id: 'cancel', label: 'Cancel', style: 'danger' },
+    ],
+    context: { subject: plan, plan },
+  }), 'session-1', 1);
+  const data = event?.display?.data as Record<string, unknown>;
+  assert.equal(data.subject, plan, 'the plan body keeps its newlines through projection');
+  assert.deepEqual(
+    (data.actions as Array<{ id: string }>).map((action) => action.id),
+    ['approve', 'cancel'],
+  );
+});
+
+test('grok elicitation projects schema-derived form inputs', () => {
+  const [event] = projectNotification('grok', v2Notification('interaction.requested', {
+    interactionId: 'ix-elicit',
+    title: 'Grok MCP server requests input',
+    description: '',
+    presentation: { kind: 'permission', tone: 'warning' },
+    inputs: [
+      { id: 'path', type: 'text', label: 'Path', required: true, minimumLength: 1 },
+      {
+        id: 'level',
+        type: 'single_select',
+        label: 'level',
+        required: true,
+        choices: [
+          { value: 'ro', displayName: 'Read only' },
+          { value: 'rw', displayName: 'Read write' },
+        ],
+      },
+      {
+        id: 'recursive',
+        type: 'single_select',
+        label: 'recursive',
+        required: false,
+        choices: [
+          { value: 'true', displayName: 'True' },
+          { value: 'false', displayName: 'False' },
+        ],
+      },
+    ],
+    actions: [
+      { id: 'submit', label: 'Submit', style: 'primary' },
+      { id: 'decline', label: 'Decline', style: 'danger' },
+      { id: 'cancel', label: 'Cancel', style: 'danger' },
+    ],
+  }), 'session-1', 1);
+  const data = event?.display?.data as Record<string, unknown>;
+  const inputs = data.inputs as Array<{ id: string; type: string; required: boolean }>;
+  assert.deepEqual(inputs.map((input) => [input.id, input.type, input.required]), [
+    ['path', 'text', true],
+    ['level', 'single_select', true],
+    ['recursive', 'single_select', false],
+  ]);
 });

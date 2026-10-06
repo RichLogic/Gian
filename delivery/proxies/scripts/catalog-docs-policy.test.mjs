@@ -45,3 +45,11 @@ test('documentation refresh preserves exact executable and proof identities', ()
     assert.throws(() => assertSameCatalogExecutables(base, invalid));
   }
 });
+
+// Explicit selection also owns publication order; package directory sorting
+// must not publish Grok before an Owner-selected Kimi release.
+test('selected releases retain the explicitly requested publication order', () => {
+  const definitions = [{ id: 'grok', shipping: true }, { id: 'kimi', shipping: true }];
+  const selection = { schema: 1, providers: ['kimi', 'grok'], baseCatalogTag: 'catalog-v1.19.0' };
+  assert.deepEqual(selectReleaseDefinitions(definitions, selection), [definitions[1], definitions[0]]);
+});

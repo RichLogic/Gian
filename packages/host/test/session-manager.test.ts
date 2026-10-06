@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -15,6 +15,7 @@ import type {
 } from '@gian/shared';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager } from '../src/session/manager.js';
+import { ProtocolV2Host } from '../src/proxy/protocol-v2-session-client.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
 import type {
   ProxyClient,
@@ -4259,6 +4260,11 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
         { value: 'high', displayName: 'High' },
       ],
     },
+    {
+      id: 'sandbox_profile', displayName: 'Sandbox', binding: 'session',
+      control: 'select', required: false, defaultValue: 'workspace',
+      choices: [{ value: 'workspace', displayName: 'Workspace' }],
+    },
   ];
     // The default executor avoids the FakeProxyManager client swap; declare
     // the capability and catalog before the first bring-up so initialize()
@@ -4276,6 +4282,7 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
         executor: 'claude',
         model: 'gpt-fast',
         thinking_effort: 'low',
+        session_config: { sandbox_profile: 'workspace' },
       });
       sessions.persistTurnConfigOptions(session.id, catalogOptions, 'rev-1');
     // The stale low effort survives until the model switch — exactly the
@@ -4326,7 +4333,10 @@ test('setModel atomically re-resolves effort for catalog-capable proxies', async
     assert.equal(fields.model, 'gpt-standard');
     assert.equal(fields.thinking_effort, 'medium');
     assert.deepEqual(fields.turn_config, { model: 'gpt-standard', thinking: 'medium' });
-    assert.ok(Array.isArray(fields.turn_config_options));
+    assert.deepEqual((fields.turn_config_options as Array<{ id: string }>).map(option => option.id), ['model', 'thinking']);
+    assert.deepEqual(proxyMgr.client.resolveCalls[0]?.sessionConfig, { sandbox_profile: 'workspace' });
+    await sessions.sendMessage(session.id, 'after model switch');
+    assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.config, { model: 'gpt-standard', thinking: 'medium' });
     assert.equal(typeof fields.turn_config_revision, 'string');
     assert.notEqual(fields.turn_config_revision, 'rev-1');
   } finally {
@@ -4354,3 +4364,137 @@ test('setModel without catalog.resolve keeps the legacy synchronous write', asyn
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('legacy mixed-binding turn snapshots cannot dispatch or persist immutable sandbox values', async () => {
+  const { dir, db, wsId, proxyMgr, sessions } = setup();
+  try {
+    const session = await sessions.createSession({ workspace_id: wsId, executor: 'claude' });
+    sessions.persistTurnConfigOptions(session.id, [{
+      id: 'sandbox_profile', displayName: 'Sandbox', binding: 'session',
+      control: 'select', required: false, defaultValue: 'workspace',
+    }, {
+      id: 'verbosity', displayName: 'Verbosity', binding: 'turn',
+      control: 'select', required: false, defaultValue: 'quiet',
+    }], 'legacy-mixed');
+    db.prepare('UPDATE sessions SET turn_config_json = ? WHERE id = ?')
+      .run(JSON.stringify({ sandbox_profile: 'workspace', verbosity: 'quiet' }), session.id);
+    await sessions.sendMessage(session.id, 'resume old snapshot');
+    assert.deepEqual(proxyMgr.client.startTurnCalls.at(-1)?.config, { verbosity: 'quiet' });
+    assert.deepEqual(sessions.getSession(session.id).turn_config, { verbosity: 'quiet' });
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+for (const thinking of ['on', 'off'] as const) {
+  test(`first non-default model turn resolves on the owning ProtocolV2Client: ${thinking}`, async (t) => {
+    const { dir, db, wsId, proxyMgr, sessions } = setup();
+    const entry = join(dir, 'model-toggle-proxy.mjs');
+    const log = join(dir, 'model-toggle-requests.jsonl');
+    writeFileSync(entry, String.raw`
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const stamp = '2026-10-03T00:00:00.000Z';
+const log = ${JSON.stringify(log)};
+const catalog = (model = 'k3') => ({
+  catalogRevision: 'model-specific-fixture', input: [{ type: 'text' }], slashCommands: [],
+  specialCatalogs: { model: 'model', thinking: 'thinking' },
+  configOptions: [{
+    id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false,
+    defaultValue: model, choices: [{ value: 'k3', displayName: 'K3' }, { value: 'highspeed', displayName: 'Highspeed' }],
+  }, {
+    id: 'thinking', displayName: 'Thinking', binding: 'turn', control: 'select', required: false,
+    defaultValue: model === 'highspeed' ? 'on' : 'low',
+    choices: (model === 'highspeed' ? ['on'] : ['low', 'medium', 'high']).map(value => ({ value, displayName: value })),
+  }, {
+    id: 'sandbox_profile', displayName: 'Sandbox', binding: 'session', control: 'select', required: false,
+    defaultValue: 'workspace', choices: [{ value: 'workspace', displayName: 'Workspace' }],
+  }],
+});
+for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
+  const request = JSON.parse(line);
+  appendFileSync(log, JSON.stringify(request) + '\n');
+  const reply = result => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+  if (request.method === 'initialize') reply({
+    protocol: { name: 'gian.proxy', version: '2.3' },
+    plugin: { id: 'io.gian.model-fixture', name: 'Model fixture', version: '1.0.0' },
+    process: { scope: 'session' }, capabilities: { 'catalog.resolve': 1 },
+  });
+  else if (request.method === 'catalog.list') reply(catalog());
+  else if (request.method === 'catalog.resolve') reply({
+    ...catalog(request.params.turnConfig.model),
+    resolvedDefaults: { sessionConfig: {}, turnConfig: { model: request.params.turnConfig.model, thinking: 'on' } },
+  });
+  else if (request.method === 'session.create') reply({ session: {
+    id: request.params.sessionId, streamId: 'model-stream', state: 'idle',
+    sessionConfig: request.params.config, createdAt: stamp, updatedAt: stamp,
+    nativeSession: { id: 'native-model-fixture' },
+  } });
+  else if (request.method === 'turn.start') {
+    reply({ accepted: true, turnId: request.params.turnId });
+    const identity = {
+      sessionId: request.params.sessionId, streamId: request.params.streamId,
+      turnId: request.params.turnId, sourceTurnId: request.params.turnId, emittedAt: stamp,
+    };
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'turn.started', params: {
+      ...identity, eventId: 'start-model-turn', sequence: 1, data: {},
+    } }) + '\n');
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'turn.completed', params: {
+      ...identity, eventId: 'end-model-turn', sequence: 2, data: { stopReason: 'completed' },
+    } }) + '\n');
+  } else if (request.method === 'session.close' || request.method === 'shutdown') {
+    reply({ ok: true });
+    if (request.method === 'shutdown') break;
+  }
+}
+`);
+    const host = new ProtocolV2Host({
+      executor: 'claude', entry, pluginId: 'io.gian.model-fixture', pluginVersion: '1.0.0',
+      processScope: 'session', dataDir: join(dir, 'protocol-model-data'), hostVersion: '0.6.5-test',
+      log: message => t.diagnostic(message),
+    });
+    t.after(async () => {
+      await host.shutdown().catch(() => undefined);
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const clients = new Map<string, ProxyClient>();
+    proxyMgr.getOrCreate = async (id = 'missing') => {
+      const client = host.createSessionClient(id);
+      clients.set(id, client);
+      return client;
+    };
+    proxyMgr.get = (id?: string) => clients.get(id ?? 'missing');
+    const session = await sessions.createSession({
+      workspace_id: wsId, executor: 'claude', model: 'highspeed',
+      turn_config: { model: 'highspeed', thinking },
+      session_config: { sandbox_profile: 'workspace' },
+    });
+    assert.equal(session.turn_config_options, undefined, 'no manual or create-time pre-resolution');
+    const send = sessions.sendMessage(session.id, 'first non-default model turn');
+    if (thinking === 'on') {
+      await send;
+      const persisted = sessions.getSession(session.id);
+      assert.deepEqual(persisted.turn_config_options?.map(option => option.id), ['model', 'thinking']);
+      assert.deepEqual(persisted.turn_config_options?.find(option => option.id === 'thinking')?.choices?.map(choice => choice.value), ['on']);
+    } else {
+      await assert.rejects(send, /thinking value was not advertised/);
+    }
+    const requests = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+      method: string; params: { turnConfig?: Record<string, unknown>; config?: Record<string, unknown> };
+    });
+    const resolveIndex = requests.findIndex(request => request.method === 'catalog.resolve');
+    assert.ok(resolveIndex >= 0, 'sendMessage must resolve on its real client');
+    assert.deepEqual(requests[resolveIndex]?.params.turnConfig, { model: 'highspeed', thinking });
+    const startIndex = requests.findIndex(request => request.method === 'turn.start');
+    if (thinking === 'on') {
+      assert.ok(startIndex > resolveIndex);
+      assert.deepEqual(requests[startIndex]?.params.config, { model: 'highspeed', thinking: 'on' });
+    } else {
+      assert.equal(startIndex, -1, 'strict Host validator must reject unsupported Off before dispatch');
+    }
+  });
+}

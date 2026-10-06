@@ -2,7 +2,51 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.3**，Runtime **2.1.0**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.4.4**，Runtime **2.1.1**。这是发布目标，不表示当前机器已安装。
+
+## 0.4.4
+
+首次公开发布：2026-09-30T08:50:47Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.4)：2026-09-30T08:50:47Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 按原生 step 分开投影助手文本和思考，工具结果保持命令、文件和搜索呈现；修复复用 durable seq 的 volatile 帧与 Usage 事件身份。已完成 Turn 后的空闲会话支持 Fork 和 Sidechat，指定 Turn 的 Fork 仍不可用。本版不改变 Proxy 线协议，也不改变 Kimi Code 2.1.1 Runtime。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.4) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.4/packages/proxies/kimi-proxy/README.md)
+
+## 0.4.3
+
+首次公开发布：2026-09-28T15:28:15Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.3)：2026-09-28T15:28:15Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 模型目录未变时保留已经返回的 Catalog revision，因此切换模型可以刷新可用的 reasoning，而不再拒绝仍然有效的 revision；底层模型目录变化时必须重新调用 catalog.list。本版不改变 Proxy 线协议，也不改变 Kimi Code 2.1.1 Runtime。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.3) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.3/packages/proxies/kimi-proxy/README.md)
+
+## 0.4.2
+
+首次公开发布：2026-09-27T03:23:17Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.2)：2026-09-27T03:23:17Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 以 0.4.2 重新签发：能力面与 0.4.1 完全一致（Kimi Code 2.1.1 本地 Server API），仅更新版本标识，无功能变更。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.2) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.2/packages/proxies/kimi-proxy/README.md)
+
+## 0.4.1
+
+首次公开发布：2026-09-26T12:48:07Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.1)：2026-09-26T12:48:07Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 改用 Kimi Code 2.1.1 本地 Server API，支持原生会话管理、Steer、结构化交互及计划和 Diff 事件；不再使用 ACP 子进程。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.1) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.1/packages/proxies/kimi-proxy/README.md)
 
 ## 0.3.3
 
@@ -170,4 +214,4 @@
 
 ## 已撤回版本
 
-0.4.0 已于 2026-09-20 撤回，不进入可用版本列表。仓库拆分不构成统一升级所有 Proxy 版本的理由。
+- 0.4.0：2026-09-20 已撤回，不可安装。[依据](https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md)

@@ -128,6 +128,33 @@ function isRequestFault(error: unknown, code: string): boolean {
     && error.code === code;
 }
 
+test('resuming an already-live Side Chat keeps sequence, while recovery resets only a new stream', () => {
+  const host = validator({ sidechat: 1 });
+  listCatalog(host, [{ id: 'sidechat.create', supported: true }]);
+  attach(host);
+  createSidechat(host);
+  const metadata = (sequence: number, streamId = 'stream-side-1') => JSON.stringify(rpc({
+    method: 'session.updated', params: { eventId: `meta-${streamId}-${sequence}`, sessionId: 'sc_1',
+      streamId, sequence, emittedAt: timestamp, data: { state: 'idle' } },
+  }));
+  const resume = (id: string, streamId = 'stream-side-1') => {
+    host.registerRequest(rpc({ id, method: 'sidechat.resume', params: {
+      sidechatId: 'sc_1', parentSessionId: 's_1', resumeRef: { id: 'opaque-ref-1' },
+    } }));
+    host.acceptLine(JSON.stringify(rpc({ id, result: { sidechat: sidechatSnapshot({ streamId }) } })));
+  };
+  host.acceptLine(metadata(1));
+  resume('resume-live');
+  assert.doesNotThrow(() => host.acceptLine(metadata(2)));
+  host.acceptLine(JSON.stringify(rpc({ method: 'runtime.error', params: {
+    eventId: 'runtime-exited', sessionId: 'sc_1', streamId: 'stream-side-1', sequence: 3,
+    emittedAt: timestamp, data: { domainCode: 'RUNTIME_ERROR', message: 'Runtime exited', retryable: true, details: {} },
+  } })));
+  resume('resume-recovery', 'stream-side-2');
+  assert.doesNotThrow(() => host.acceptLine(metadata(1, 'stream-side-2')));
+  assert.throws(() => resume('unexpected-stream', 'stream-side-3'), /changed streamId/);
+});
+
 test('session.fork requires session.replay and atTurn requires fork', () => {
   assert.throws(
     () => validator({ 'session.fork': 1 }),
@@ -761,4 +788,37 @@ test('sidechat and session snapshots reject unknown required fields', () => {
     createdAt: timestamp,
     updatedAt: timestamp,
   }).success, true);
+});
+
+
+test('Side Chat uses global model resolution without weakening ordinary-Session identity checks', () => {
+  const host = validator({ sidechat: 1, 'catalog.resolve': 1 });
+  const option = (id: string, values: string[]) => ({
+    id, role: id === 'model' ? 'model' : 'effort', displayName: id, binding: 'turn',
+    control: 'select', required: true, defaultValue: values[0],
+    choices: values.map(value => ({ value, displayName: value })),
+  });
+  const base = [option('model', ['k3', 'highspeed']), option('thinking', ['max', 'high'])];
+  listCatalog(host, [{ id: 'sidechat.create', supported: true }], base);
+  attach(host);
+  createSidechat(host);
+  const turn = (id: string, sessionId: string, streamId: string, model: string, thinking: string) => rpc({
+    id, method: 'turn.start', params: { sessionId, streamId, turnId: id,
+      input: [{ type: 'text', text: 'test' }], config: { model, thinking } },
+  });
+  assert.throws(() => host.registerRequest(turn('before-resolve', 'sc_1', 'stream-side-1', 'highspeed', 'on')), /not advertised/);
+  assert.throws(() => host.registerRequest(rpc({ id: 'scoped-resolve', method: 'catalog.resolve', params: {
+    catalogRevision: 'cat-1', sessionId: 'sc_1', streamId: 'stream-side-1', sessionConfig: {}, turnConfig: { model: 'highspeed', thinking: 'on' },
+  } })), (error: unknown) => isRequestFault(error, 'SESSION_NOT_FOUND'));
+  host.registerRequest(rpc({ id: 'global-resolve', method: 'catalog.resolve', params: {
+    catalogRevision: 'cat-1', sessionConfig: {}, turnConfig: { model: 'highspeed', thinking: 'on' },
+  } }));
+  host.acceptLine(JSON.stringify(rpc({ id: 'global-resolve', result: {
+    catalogRevision: 'cat-highspeed', input: [{ type: 'text' }], slashCommands: [],
+    configOptions: [base[0], option('thinking', ['on'])], resolvedDefaults: { sessionConfig: {}, turnConfig: { model: 'highspeed', thinking: 'on' } },
+  } })));
+  assert.doesNotThrow(() => host.registerRequest(turn('sidechat-on', 'sc_1', 'stream-side-1', 'highspeed', 'on')));
+  host.forgetRequest('sidechat-on');
+  assert.throws(() => host.registerRequest(turn('sidechat-invalid', 'sc_1', 'stream-side-1', 'highspeed', 'max')), /not advertised/);
+  assert.doesNotThrow(() => host.registerRequest(turn('parent-k3', 's_1', 'stream-1', 'k3', 'max')));
 });

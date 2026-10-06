@@ -7,6 +7,33 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.5] - 2026-10-06
+
+### Added
+
+- Bind an Agent to a custom Runtime path from the Add Agent dialog and Agent settings.
+
+### Fixed
+
+- Offer queued message Send now when the active Proxy advertises mid-turn steering.
+- Preserve the model and thinking selections made after Catalog resolution.
+- Remove phantom blank lines around Markdown blocks in user messages.
+- Keep local Side Chat IDs out of Remote ownership checks.
+- Improve the accessibility and layout of the auto-translation control.
+- Resolve model-specific configuration on live connections before dispatch,
+  including newly created Side Chats; clear rejected starts and terminal state.
+- Keep custom Runtime selection independent of managed Runtime readiness and
+  reject missing Runtime roots before saving an Agent.
+- Accept advertised Question cancellation without inventing required answers.
+- Restore Remote interaction wire identities and preserve file Diff changes.
+- Fetch Catalog broker metadata with the bounded Catalog response budget.
+- Refresh vulnerable transitive dependency pins before stable packaging.
+
+### Notes
+
+- Proxy capabilities depend on separately published certified packages. Kimi
+  native Bash tools do not report file-history diffs; native WriteFile/Edit do.
+
 ## [0.6.4] - 2026-09-28
 
 ### Added

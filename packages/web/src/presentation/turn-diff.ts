@@ -28,14 +28,20 @@ export function projectTurnDiff(items: TranscriptItem[]): TurnDiff | null {
   for (const it of items) {
     if (it.kind !== 'diff' || it.turn !== turn) continue;
     for (const file of it.files) {
-      const previous = byPath.get(file.path);
-      byPath.set(file.path, previous
+      let path = file.path.replaceAll('\\', '/');
+      path = path.replace(/^\.\//, '');
+      const root = it.cwd?.replaceAll('\\', '/').replace(/\/$/, '');
+      if (root && path.startsWith(`${root}/`)) path = path.slice(root.length + 1);
+      const key = `${root ?? ''}\0${path}`;
+      const previous = byPath.get(key);
+      byPath.set(key, previous
         ? {
             ...file,
+            path,
             add: previous.add + file.add,
             del: previous.del + file.del,
           }
-        : file);
+        : { ...file, path });
     }
   }
   const files = [...byPath.values()];

@@ -25,6 +25,7 @@ export {
   UNFILED_WORKSPACE_ID,
   remoteStableUuid,
   remoteActionId,
+  remoteInteractionId,
   resolveRemoteAction,
   projectRemoteInteraction,
 } from './projection.js';

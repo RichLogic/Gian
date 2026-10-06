@@ -6,6 +6,32 @@ import type { RemoteControllerClient, RemoteControllerEnvironment } from '../src
 import { RemoteControllerHub } from '../src/remote/controller-hub.js';
 import { seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 
+test('Remote ownership probes let local Side Chat sends through without weakening binding validation', async () => {
+  const f = setupRemoteHarness();
+  const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);
+  try {
+    const sidechatId = `sc_${generateCanonicalId()}`;
+    assert.equal(hub.owns(sidechatId), false);
+    assert.equal(hub.owns('local-session'), false);
+    assert.equal(hub.owns(generateCanonicalId()), false);
+    assert.equal(await hub.handleMessage({ type: 'message:send', session_id: sidechatId, text: 'Side Chat' }), false);
+    assert.equal(await hub.handleMessage({ type: 'session:stop', session_id: sidechatId }), false);
+    assert.equal(await hub.handleMessage({ type: 'queue:send_now', session_id: sidechatId }), false);
+    assert.throws(() => hub.bindings.get(sidechatId), /closed schema validation/);
+
+    const localId = generateCanonicalId();
+    f.db.prepare('INSERT INTO sessions (id, executor, native_session_id) VALUES (?, ?, ?)')
+      .run(localId, 'codex', generateCanonicalId());
+    hub.bindings.bind({ local_session_id: localId, target: {
+      server_origin: 'https://remote.test', server_identity_fingerprint: 'a'.repeat(64),
+      account_id: '42', host_id: generateCanonicalId(), remote_session_id: generateCanonicalId(),
+    } });
+    assert.equal(hub.owns(localId), true);
+    f.db.prepare('UPDATE remote_execution_bindings SET host_id = ? WHERE local_session_id = ?').run('invalid', localId);
+    assert.throws(() => hub.owns(localId), /closed schema validation/);
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});
+
 test('native send retries reuse a durable command and never execute twice after a lost sync response', async t => {
   const f = setupRemoteHarness();
   const hub = new RemoteControllerHub(f.db, { broadcast() {} } as unknown as WsBroadcaster, f.identity);

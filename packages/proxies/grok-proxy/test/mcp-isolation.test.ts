@@ -8,8 +8,10 @@ import {
   admitHostStreamableHttpServices,
   buildSpawnArgs,
   MAX_HOST_MCP_SERVERS,
+  mcpBoundaryProblem,
   mcpServerNamesFromToml,
   mcpSpawnDenyRules,
+  readMcpListPayload,
   scanDiskConfiguredMcpServers,
   unexpectedMcpServerNames,
 } from '../src/core/mcp-isolation.js';
@@ -75,6 +77,35 @@ test('admission rejects non-http urls, bad ids, duplicates and oversize lists', 
     () => admitHostStreamableHttpServices(hostServices(many)),
     /limited to/,
   );
+});
+
+test('mcp list accepts the business envelope and fails closed on extras', () => {
+  const admitted = admitHostStreamableHttpServices(hostServices([descriptor('hosted')]));
+  const listed = readMcpListPayload({
+    result: {
+      sessionMcpResolved: true,
+      servers: [{
+        name: 'hosted',
+        type: 'http',
+        url: 'https://hosted.example.com/mcp',
+        sourceLabel: 'client',
+        session: { enabled: true, status: 'ready' },
+      }],
+    },
+  });
+  assert.equal(mcpBoundaryProblem(listed.servers, admitted), null);
+  const plugin = readMcpListPayload({
+    servers: [{
+      name: 'hosted',
+      type: 'http',
+      url: 'https://hosted.example.com/mcp',
+      source_label: 'plugin:bundled',
+      session: { status: 'ready' },
+    }],
+    session_mcp_resolved: true,
+  });
+  assert.match(mcpBoundaryProblem(plugin.servers, admitted) ?? '', /plugin/);
+  assert.equal(buildSpawnArgs(['MCPTool(*)'], { disallowMetaTools: false }).includes('--disallowed-tools'), false);
 });
 
 test('blanket MCPTool(*) deny stays in force without Host MCP', () => {
@@ -143,4 +174,36 @@ test('unexpectedMcpServerNames flags effective servers outside the approved set'
     unexpectedMcpServerNames(['hosted', 'plugin-surprise'], ['hosted']),
     ['plugin-surprise'],
   );
+});
+
+test('the MCP scan reads the same Home the child spawn env would use', async () => {
+  const agentHomeDir = await mkdtemp(join(tmpdir(), 'grok-agent-home-'));
+  const legacyHome = await mkdtemp(join(tmpdir(), 'grok-legacy-home-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'grok-mcp-cwd-'));
+  const savedAgentHome = process.env.GIAN_AGENT_HOME;
+  const savedGrokHome = process.env.GROK_HOME;
+  try {
+    await writeFile(join(agentHomeDir, 'config.toml'), '[mcp_servers.from-agent-home]\ncommand = "a"\n');
+    await writeFile(join(legacyHome, 'config.toml'), '[mcp_servers.from-legacy-home]\ncommand = "b"\n');
+
+    // GIAN_AGENT_HOME wins over a stale inherited GROK_HOME, matching the
+    // child env translation in core/home.ts.
+    process.env.GIAN_AGENT_HOME = agentHomeDir;
+    process.env.GROK_HOME = legacyHome;
+    let scan = await scanDiskConfiguredMcpServers(cwd, { userHome: cwd });
+    assert.deepEqual(scan.names, ['from-agent-home']);
+
+    // Legacy fallback still applies when GIAN_AGENT_HOME is absent.
+    delete process.env.GIAN_AGENT_HOME;
+    scan = await scanDiskConfiguredMcpServers(cwd, { userHome: cwd });
+    assert.deepEqual(scan.names, ['from-legacy-home']);
+  } finally {
+    if (savedAgentHome === undefined) delete process.env.GIAN_AGENT_HOME;
+    else process.env.GIAN_AGENT_HOME = savedAgentHome;
+    if (savedGrokHome === undefined) delete process.env.GROK_HOME;
+    else process.env.GROK_HOME = savedGrokHome;
+  }
+  // Env restoration: no leak into later cases.
+  assert.equal(process.env.GIAN_AGENT_HOME, savedAgentHome);
+  assert.equal(process.env.GROK_HOME, savedGrokHome);
 });

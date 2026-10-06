@@ -2164,7 +2164,7 @@ test('native DSH defaults accept the Proxy-owned mode vocabulary', async () => {
     getAgent: () => ({
       id: 'agent-dsh',
       name: 'DeepSeek Harness',
-      proxy: 'dsh',
+      pluginId: 'dsh',
       cliPath: null,
       defaults: { ...defaults },
     }),
@@ -2263,7 +2263,7 @@ test('Proxy defaults validate effort against the catalog resolved for the select
     getAgent: () => ({
       id: 'agent-claude',
       name: 'Claude Code',
-      proxy: 'claude',
+      pluginId: 'claude',
       cliPath: null,
       defaults: { ...defaults },
     }),

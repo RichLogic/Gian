@@ -5,6 +5,9 @@ import type {
   SessionConfigOption,
 } from '@agentclientprotocol/sdk';
 
+import type { GrokPermissionMode } from './permissions.js';
+import type { GrokSandboxProfile } from './sandbox.js';
+
 export type SessionStatus =
   | 'idle'
   | 'running'
@@ -47,6 +50,13 @@ export interface SessionRecord {
   mcpServers: McpServer[];
   attached: boolean;
   lastError: string | null;
+  /**
+   * This session's model/effort. Seeded from evidenced native responses or
+   * inherited from the fork parent; null means the native session has not
+   * reported one (e.g. right after a load/resume of foreign history).
+   */
+  model: string | null;
+  effort: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -67,6 +77,15 @@ export interface CreateSessionParams {
   /** Internal Side Chat reattach path; ordinary session.create remains one
    *  per session-scoped Proxy process. */
   allowAdditional?: boolean;
+  /** Turn draft applied in session `_meta` and again before each prompt. */
+  permissionMode?: GrokPermissionMode;
+  /** Requested child sandbox. Fixed once the process has started. */
+  sandboxProfile?: GrokSandboxProfile;
+  /** Internal fork/Side Chat inheritance: the parent session's model/effort at
+   *  fork time. Never taken from the process-wide default for a resumed
+   *  foreign session. */
+  initialModel?: string;
+  initialEffort?: string;
 }
 
 export interface GetSessionParams {

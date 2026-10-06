@@ -541,7 +541,7 @@ export function BrowserPanel({
     if (!browser || !sessionId || attachPending) return;
     setAttachPending('screenshot');
     afterNativeViewRestored(() => {
-      void attachBrowserPageScreenshot(browser, tabId, sessionId)
+      void attachBrowserPageScreenshot(browser, tabId, sessionId, { dispatch })
         .then(notifyAttachResult)
         .finally(() => setAttachPending(null));
     });

@@ -25,6 +25,7 @@ import {
   identityFingerprint,
   importP256PublicKey,
   parseRelayFrame,
+  parseRemoteControlMessage,
   parseRelayHandshake,
   signBytes,
   verifyBytes,
@@ -38,6 +39,7 @@ import { HostRelaySocket, DeviceRouteTransport } from '../src/remote/host-relay.
 import { devicePublicKeyCanonical } from '../src/remote/device-store.js';
 import { defaultRemoteDeviceGrants } from '../src/remote/grants.js';
 import { RemoteReplayBuffer } from '../src/remote/replay-buffer.js';
+import { remoteInteractionId } from '../src/remote/projection.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 import { makeTestApp } from './fixtures/test-app.js';
 import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
@@ -2534,7 +2536,12 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
     const device = seedDevice(context);
     const crypto = await pairCrypto();
     const transports = MemoryDuplexTransport.pair();
-    const received: Array<{ type?: string; event?: { kind?: string; interaction?: { kind?: string; session_id?: string } } }> = [];
+    const questionId = 'interaction_question_remote_push';
+    const nativeId = 'interaction_b229_remote_push';
+    const received: Array<{ type?: string;
+      event?: { kind?: string; interaction?: { id?: string; kind?: string; session_id?: string } };
+      patch?: { interactions?: { upsert: Array<{ id: string }>; remove_ids: string[] } };
+    }> = [];
     transports.device.onMessage((raw) => {
       void (async () => {
         const frame = parseRelayFrame(raw);
@@ -2545,7 +2552,7 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
           routeId: frame.route_id,
           connectionId: crypto.device.connectionId,
         });
-        received.push(JSON.parse(new TextDecoder().decode(plaintext)));
+        received.push(parseRemoteControlMessage(JSON.parse(new TextDecoder().decode(plaintext))));
       })();
     });
     context.runtime.connectDevice(device, crypto.host, transports.host);
@@ -2565,6 +2572,7 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
       risk: 'low',
       description: 'Pick one',
       payload: {
+        approvalId: questionId,
         questions: [{
           question: 'Which option?',
           multiSelect: false,
@@ -2577,11 +2585,12 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
     const pushed = await waitUntil(
       () => received.find((entry) => entry.type === 'event' && entry.event?.kind === 'interaction.updated') ?? null,
     );
+    assert.equal(pushed.event?.interaction?.id, remoteInteractionId(questionId));
     assert.equal(pushed.event?.interaction?.kind, 'question');
     assert.equal(pushed.event?.interaction?.session_id, created.id);
     const patched = await waitUntil(
       () => received.find((entry) => entry.type === 'state.patch'
-        && JSON.stringify(entry).includes('"interactions"')) ?? null,
+        && entry.patch?.interactions?.upsert.some(item => item.id === remoteInteractionId(questionId))) ?? null,
     );
     assert.ok(patched);
 
@@ -2595,6 +2604,7 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
       category: 'question',
       risk: 'low',
       description: 'Kimi asks',
+      payload: { approvalId: nativeId },
       subject: 'AskUserQuestion',
       nativeOptions: [
         { optionId: 'opt-a', label: 'Option A', kind: 'allow_once' },
@@ -2607,7 +2617,14 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
         && entry.event?.kind === 'interaction.updated'
         && entry.event.interaction?.kind === 'native_choice') ?? null,
     );
+    assert.equal(kimiPushed.event?.interaction?.id, remoteInteractionId(nativeId));
     assert.equal(kimiPushed.event?.interaction?.session_id, created.id);
+    for (const id of [questionId, nativeId]) {
+      context.approvals.resolve(id, 'decline', 'tool');
+      await waitUntil(() => received.find(entry => entry.type === 'state.patch'
+        && entry.patch?.interactions?.remove_ids.includes(remoteInteractionId(id))) ?? null);
+    }
+    await Promise.all([asking, kimiAsking]);
   } finally {
     teardownRemoteHarness(context);
   }

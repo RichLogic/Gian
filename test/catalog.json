@@ -275,6 +275,7 @@
     {
       "id": "host-system",
       "patterns": [
+        "packages/host/test/agent-custom-runtime.test.ts",
         "packages/host/test/agent-manager.test.ts",
         "packages/host/test/agent-updater-safety.test.ts",
         "packages/host/test/agents-routes.test.ts",
@@ -671,6 +672,7 @@
       "id": "kimi-proxy-unit",
       "patterns": [
         "packages/proxies/kimi-proxy/test/customization.test.ts",
+        "packages/proxies/kimi-proxy/test/projector.test.ts",
         "packages/proxies/kimi-proxy/test/task-queue.test.ts"
       ],
       "module": "kimi-proxy",
@@ -729,6 +731,7 @@
     {
       "id": "grok-proxy-unit",
       "patterns": [
+        "packages/proxies/grok-proxy/test/acp-wire.test.ts",
         "packages/proxies/grok-proxy/test/input-localfile.test.ts",
         "packages/proxies/grok-proxy/test/slash-policy.test.ts",
         "packages/proxies/grok-proxy/test/catalog.test.ts",

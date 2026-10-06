@@ -1,5 +1,6 @@
 import {
   requestViolation,
+  ProxyProtocolError,
   type ForkAnchor,
   type ForkOrigin,
   type InitializeResult,
@@ -389,18 +390,19 @@ export class ProtocolV2SessionClient implements ProxyClient {
     catalogRevision: string;
     sessionConfig: Record<string, string | boolean | number | null>;
     turnConfig: Record<string, string | boolean | number | null>;
-  }): Promise<import('@gian/shared').ResolvedProxyCatalog> {
+  }, scope: 'session' | 'global' = 'session'): Promise<import('@gian/shared').ResolvedProxyCatalog> {
     return normalizeProtocolCatalog(await this.host.request<import('@gian/shared').ResolvedProxyCatalog>('catalog.resolve', {
       catalogRevision: params.catalogRevision,
       sessionConfig: params.sessionConfig,
       turnConfig: params.turnConfig,
-      ...(this.stream ? { sessionId: this.hostSessionId, streamId: this.stream } : {}),
-    }));
+      ...(scope === 'session' && this.stream ? { sessionId: this.hostSessionId, streamId: this.stream } : {}),
+    }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS }));
   }
 
   async startTurn(params: StartTurnParams) {
     const turnId = params.turnId;
     if (!turnId) throw new Error('gian.proxy/2 turn.start requires a Host turnId.');
+    const previousState = this.state;
     this.activeTurnId = turnId;
     this.state = 'running';
     const accepted = this.currentSession();
@@ -413,7 +415,15 @@ export class ProtocolV2SessionClient implements ProxyClient {
         config: params.config,
       }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
     } catch (error) {
-      if (this.activeTurnId === turnId) this.activeTurnId = null;
+      if (this.activeTurnId === turnId) {
+        this.activeTurnId = null;
+        // Configuration rejection never starts a Provider turn. Roll back
+        // only that optimistic state; runtime faults/timeouts stay fenced.
+        if (this.state === 'running' && error instanceof ProxyProtocolError
+          && ['CONFIG_VALUE_INVALID', 'CONFIG_BINDING_INVALID'].includes(error.code)) {
+          this.state = previousState;
+        }
+      }
       throw error;
     }
     return {

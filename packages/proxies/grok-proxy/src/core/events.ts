@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { renderUnifiedDiff } from './diff.js';
+
 export const EXCLUDED_EXTENSIONS = [
   'rewind',
   'cancel_rewind',
@@ -43,13 +45,45 @@ function stableId(prefix: string, value: unknown): string {
 }
 
 /** gian.proxy/2 `diff.updated` data. File path lives only in `files`. */
-export function grokDiffUpdatedData(path: string, diff: string) {
+export function grokDiffUpdatedData(
+  path: string,
+  diff: string,
+  options: { status?: 'added' | 'modified' | 'deleted'; truncated?: boolean } = {},
+) {
   return {
     diffId: stableId('diff', { path, diff }),
     diff,
-    truncated: false,
-    files: [{ path, status: 'modified' as const }],
+    truncated: options.truncated === true,
+    files: [{ path, status: options.status ?? ('modified' as const) }],
   };
+}
+
+/**
+ * One tool_call_update diff content item. A pre-rendered runtime extension
+ * diff (`diff`/`unifiedDiff`) is kept verbatim; the standard ACP v1
+ * `oldText`/`newText` pair is rendered into a unified diff. Returns null when
+ * the item carries no usable diff data.
+ */
+export function diffEventFromContentItem(payload: Record<string, unknown>): {
+  path: string;
+  diff: string;
+  truncated: boolean;
+  status: 'added' | 'modified' | 'deleted';
+} | null {
+  const path = String(payload.path ?? 'unknown');
+  const rendered = payload.diff ?? payload.unifiedDiff;
+  if (typeof rendered === 'string' && rendered.length > 0) {
+    return { path, diff: rendered, truncated: false, status: 'modified' };
+  }
+  const oldText = typeof payload.oldText === 'string' ? payload.oldText : null;
+  const newText = typeof payload.newText === 'string' ? payload.newText : null;
+  if (oldText === null && newText === null) return null;
+  // Only a missing newText evidences deletion; an emptied file (newText '')
+  // is a modification — the runtime said nothing about removing the file.
+  const status = oldText === null ? 'added' : newText === null ? 'deleted' : 'modified';
+  const patch = renderUnifiedDiff(path, oldText ?? '', newText ?? '');
+  if (!patch.diff) return null;
+  return { path, diff: patch.diff, truncated: patch.truncated, status };
 }
 
 export function jsonClone(value: unknown): unknown {
@@ -224,7 +258,10 @@ function subagentActivity(
   };
 }
 
-export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
+export function translateSessionUpdate(
+  update: unknown,
+  activities?: ReadonlyMap<string, Record<string, unknown>>,
+): TranslatedEvent[] {
   const value = record(update);
   const kind = String(value.sessionUpdate ?? '');
 
@@ -264,18 +301,22 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
 
   if (kind === 'tool_call_update') {
     const activityId = String(value.toolCallId ?? '');
+    const previous = activities?.get(activityId);
+    const previousName = record(record(previous?.presentation).data).name;
     const content = Array.isArray(value.content) ? value.content : [];
     const text = toolContentText(content);
     const events: TranslatedEvent[] = [];
     for (const item of content) {
       const payload = record(item);
       if (payload.type !== 'diff') continue;
+      const rendered = diffEventFromContentItem(payload);
+      if (!rendered) continue;
       events.push({
         method: 'diff.updated',
-        data: grokDiffUpdatedData(
-          String(payload.path ?? 'unknown'),
-          String(payload.diff ?? payload.unifiedDiff ?? ''),
-        ),
+        data: grokDiffUpdatedData(rendered.path, rendered.diff, {
+          status: rendered.status,
+          truncated: rendered.truncated,
+        }),
       });
     }
     const status = activityStatus(value.status);
@@ -284,11 +325,11 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
       data: {
         activityId: activityId || 'grok-tool',
         kind: 'tool',
-        title: String(value.title ?? 'Tool'),
+        title: String(value.title ?? previous?.title ?? 'Tool'),
         status,
         presentation: {
           type: 'tool',
-          data: { name: String(value.kind ?? value.title ?? 'tool') },
+          data: { name: String(value.kind ?? previousName ?? value.title ?? 'tool') },
         },
         ...(value.rawOutput !== undefined || text || Array.isArray(value.locations)
           ? {
@@ -331,14 +372,21 @@ export function translateSessionUpdate(update: unknown): TranslatedEvent[] {
     }];
   }
 
-  if (kind === 'current_mode_update' || kind === 'current_model_update' || kind === 'config_update') {
+  if (kind === 'current_mode_update' || kind === 'current_model_update' || kind === 'config_update'
+    || kind === 'model_changed' || kind === 'config_option_update'
+    || kind === 'session_info_update' || kind === 'session_summary_generated') {
     return [{
       method: 'session.updated',
       data: { updatedAt: new Date().toISOString() },
     }];
   }
 
-  if (kind === 'available_commands_update') {
+  // These native bookkeeping updates duplicate the structured tool,
+  // interaction, or prompt lifecycle. response_completed is a model step,
+  // not proof that the enclosing ACP prompt has ended.
+  if (kind === 'available_commands_update' || kind === 'tool_call_delta_chunk'
+    || kind === 'pending_interaction' || kind === 'interaction_resolved'
+    || kind === 'response_completed' || kind === 'turn_completed') {
     return [];
   }
 
@@ -403,7 +451,11 @@ function compactEvents(name: string): TranslatedEvent[] {
   return events;
 }
 
-export function translateExtension(method: string, params: unknown): TranslatedEvent[] {
+export function translateExtension(
+  method: string,
+  params: unknown,
+  activities?: ReadonlyMap<string, Record<string, unknown>>,
+): TranslatedEvent[] {
   const name = extensionName(method);
   if (isExcludedExtension(name)) return [];
   const payload = record(params);
@@ -415,7 +467,10 @@ export function translateExtension(method: string, params: unknown): TranslatedE
   if (normalized === 'session_notification' || normalized === 'session/notification') {
     const update = record(payload.update ?? payload.sessionUpdate);
     if (Object.keys(update).length === 0) return [];
-    return translateSessionUpdate(update);
+    return translateSessionUpdate(update, activities);
+  }
+  if (normalized === 'settings/update' || normalized === 'session/prompt_complete') {
+    return [{ method: 'session.updated', data: { updatedAt: new Date().toISOString() } }];
   }
   // x.ai/sessions/changed: the native session directory changed (create,
   // rename, delete, or sync elsewhere). Session-scoped, not turn-scoped.
@@ -477,12 +532,18 @@ export function translateExtension(method: string, params: unknown): TranslatedE
     }];
   }
   if (/diff/.test(normalized)) {
+    const rendered = diffEventFromContentItem(
+      payload.path === undefined && payload.file !== undefined
+        ? { ...payload, path: payload.file }
+        : payload,
+    );
+    if (!rendered) return [];
     return [{
       method: 'diff.updated',
-      data: grokDiffUpdatedData(
-        String(payload.path ?? payload.file ?? 'unknown'),
-        String(payload.diff ?? payload.unifiedDiff ?? ''),
-      ),
+      data: grokDiffUpdatedData(rendered.path, rendered.diff, {
+        status: rendered.status,
+        truncated: rendered.truncated,
+      }),
     }];
   }
   if (/model/.test(normalized)) {

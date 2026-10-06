@@ -17,6 +17,7 @@ import { EventEmitter } from 'node:events';
 import { KimiServerRestClient } from './rest-client.js';
 import { KimiServerSupervisor, type KimiServerSupervisorResult } from './server-supervisor.js';
 import { WsSocket } from './ws.js';
+import { KimiProtocolError } from '../transport/protocol.js';
 
 export interface SessionCursor {
   seq: number;
@@ -62,6 +63,11 @@ export class KimiServerRuntime {
   private readonly subscriptions = new Map<string, SessionCursor | undefined>();
   private reconnectAttempts = 0;
   private nextRequestId = 1;
+  private readonly pendingSubscriptions = new Map<string, {
+    sessionId: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }>();
 
   constructor(private readonly options: { kimiBin: string; endpoint?: { baseUrl: string; token: string } }) {
     this.events.setMaxListeners(0);
@@ -99,8 +105,8 @@ export class KimiServerRuntime {
     });
   }
 
-  /** Latest cursor bookkeeping: the projector advances this per durable frame
-   *  so a reconnect resumes exactly after what was delivered. */
+  /** Latest cursor bookkeeping: advance on each delivered durable frame so
+   *  reconnects and send-time subscription checks skip delivered history. */
   advanceCursor(sessionId: string, cursor: SessionCursor): void {
     const current = this.subscriptions.get(sessionId);
     if (current === undefined || cursor.seq > current.seq) {
@@ -121,14 +127,27 @@ export class KimiServerRuntime {
       this.subscriptions.set(sessionId, cursor ?? existing);
     }
     const effective = this.subscriptions.get(sessionId);
-    await this.sendWhenOpen({
-      type: 'subscribe',
-      id: this.nextId(),
-      payload: {
-        session_ids: [sessionId],
-        ...(effective !== undefined ? { cursors: { [sessionId]: effective } } : {}),
-      },
+    const id = this.nextId();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const acknowledged = new Promise<void>((resolve, reject) => {
+      this.pendingSubscriptions.set(id, { sessionId, resolve, reject });
+      timer = setTimeout(() => reject(new KimiProtocolError('RUNTIME_ERROR', `Kimi event subscription for ${sessionId} timed out.`, true)), CONNECT_TIMEOUT_MS);
+      timer.unref();
     });
+    try {
+      // Sending on a socket is not an attach barrier: a negative ACK must
+      // fail before a prompt can run unseen, and fast turns must wait for ACK.
+      await Promise.all([this.sendWhenOpen({
+        type: 'subscribe', id,
+        payload: {
+          session_ids: [sessionId],
+          ...(effective !== undefined ? { cursors: { [sessionId]: effective } } : {}),
+        },
+      }), acknowledged]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      this.pendingSubscriptions.delete(id);
+    }
   }
 
   private nextId(): string {
@@ -168,6 +187,7 @@ export class KimiServerRuntime {
     socket.on('message', (raw: string) => this.handleMessage(raw));
     socket.on('close', () => {
       this.socket = null;
+      for (const pending of this.pendingSubscriptions.values()) pending.reject(new Error('Kimi event socket closed before subscription was acknowledged.'));
       if (this.stopped) return;
       this.events.emit('down');
       this.scheduleReconnect();
@@ -208,8 +228,19 @@ export class KimiServerRuntime {
     }
     const type = typeof frame.type === 'string' ? frame.type : '';
     if (type === 'ack') {
-      // Subscription acks are informational: resync_required arrives both in
-      // the ack payload and as its own frame, which we handle below.
+      const pending = typeof frame.id === 'string' ? this.pendingSubscriptions.get(frame.id) : undefined;
+      if (pending !== undefined) {
+        const payload = (frame.payload ?? {}) as Record<string, unknown>;
+        if (frame.code === 0 && Array.isArray(payload.accepted) && payload.accepted.includes(pending.sessionId)) {
+          pending.resolve();
+        } else if (Array.isArray(payload.not_found) && payload.not_found.includes(pending.sessionId)) {
+          pending.reject(new KimiProtocolError('NATIVE_SESSION_NOT_FOUND', `Kimi event subscription rejected for ${pending.sessionId}: native session was not found.`));
+        } else {
+          pending.reject(new KimiProtocolError('RUNTIME_ERROR', `Kimi event subscription rejected for ${pending.sessionId}: session was not accepted.`, true));
+        }
+      }
+      // Reconnect/unsubscribe ACKs have no awaiting attach. A separate
+      // resync_required frame owns cursor recovery, as on the native server.
       return;
     }
     if (type === 'ping') {
@@ -238,11 +269,21 @@ export class KimiServerRuntime {
       return;
     }
     if (typeof frame.session_id !== 'string' || typeof frame.seq !== 'number') return;
+    // Rechecking a subscription must start after delivered durable facts,
+    // rather than replaying from the original attach cursor on every send.
+    // Volatile text reuses a durable seq and does not advance the journal.
+    if (frame.volatile !== true && this.subscriptions.has(frame.session_id)) {
+      this.advanceCursor(frame.session_id, {
+        seq: frame.seq,
+        ...(typeof frame.epoch === 'string' ? { epoch: frame.epoch } : {}),
+      });
+    }
     this.events.emit('session-event', frame as unknown as KimiServerEventFrame);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const pending of this.pendingSubscriptions.values()) pending.reject(new Error('Kimi event runtime stopped before subscription was acknowledged.'));
     try { this.socket?.close(); } catch { /* already gone */ }
     this.socket = null;
     await this.supervisor?.stop();

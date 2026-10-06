@@ -107,6 +107,34 @@ interface MarkdownBoundaryNode {
   children?: MarkdownBoundaryNode[];
 }
 
+/**
+ * mdast-util-to-hast pretty-prints `\n` whitespace text nodes between block
+ * children (`<ol>\n<li>…</li>\n</ol>\n<p>…`). Under normal white-space
+ * (assistant bubbles) they collapse away, but the user bubble is pre-wrap, so
+ * each renders as a phantom empty line around lists, quotes and tables. Drop
+ * them where HTML whitespace is semantically insignificant — block containers
+ * only. Inline contexts (`p`, cells, code) keep every whitespace node: a
+ * whitespace-only run between inline elements is a real space or soft break.
+ */
+const INSIGNIFICANT_WHITESPACE_PARENTS = new Set([
+  'ul', 'ol', 'li', 'blockquote', 'dl', 'table', 'thead', 'tbody', 'tfoot', 'tr',
+]);
+
+function rehypeTightBlockWhitespace() {
+  const visit = (node: MarkdownBoundaryNode, blockParent: boolean) => {
+    if (!node.children) return;
+    if (blockParent) {
+      node.children = node.children.filter(child =>
+        child.type !== 'text' || !child.value?.includes('\n') || child.value.trim() !== '');
+    }
+    for (const child of node.children) {
+      visit(child, child.type === 'element'
+        && INSIGNIFICANT_WHITESPACE_PARENTS.has((child as { tagName?: string }).tagName ?? ''));
+    }
+  };
+  return (tree: MarkdownBoundaryNode) => visit(tree, true);
+}
+
 function remarkBoundarySpaces({ source }: { source: string }) {
   return (tree: unknown) => {
     const blocks = (tree as MarkdownBoundaryNode).children ?? [];
@@ -132,6 +160,7 @@ export function MarkdownText({ children, preserveBoundarySpaces = false }: { chi
   const makeRehype = useContext(FileRefRehypeContext);
   const rehypePlugins = useMemo(
     () => [
+      rehypeTightBlockWhitespace,
       rehypeKatex,
       // Tagged languages only (`detect: false`); mermaid stays unhighlighted
       // so the `code` override sees the raw diagram source.

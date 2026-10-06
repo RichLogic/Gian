@@ -153,14 +153,6 @@ const BASELINE = {
       ]
     }
   },
-  "packages/web/src/controllers/use-app-shortcuts.ts": {
-    "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
-      "count": 1,
-      "snippets": [
-        "executor === 'codex'"
-      ]
-    }
-  },
   "packages/web/src/operations/session.ts": {
     "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
       "count": 1,
@@ -170,14 +162,6 @@ const BASELINE = {
     }
   },
   "packages/web/src/operations/task.ts": {
-    "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
-      "count": 1,
-      "snippets": [
-        "executor === 'codex'"
-      ]
-    }
-  },
-  "packages/web/src/views/SessionMain.tsx": {
     "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
       "count": 1,
       "snippets": [

@@ -13,6 +13,7 @@ import {
 
 import { GrokProxyService } from '../src/core/service.js';
 import type { QuestionOutcome } from '../src/core/types.js';
+import { GrokProtocolV2Adapter } from '../src/protocol/v2-adapter.js';
 import { GrokAcpClient } from '../src/runtime/grok-acp-client.js';
 
 interface Deferred<T> {
@@ -37,11 +38,16 @@ interface ReverseCall {
 class QuestioningAgent {
   readonly reverseCalls: ReverseCall[] = [];
   private clientRef: Client | null = null;
+  private connRef: AgentSideConnection | null = null;
 
-  constructor(private readonly mode: 'question' | 'plan' | 'elicit') {}
+  constructor(private readonly mode: 'question' | 'plan' | 'elicit' | 'elicit-schema' | 'permission') {}
 
   bind(client: Client): void {
     this.clientRef = client;
+  }
+
+  bindConnection(connection: AgentSideConnection): void {
+    this.connRef = connection;
   }
 
   agent(): Agent {
@@ -69,9 +75,24 @@ class QuestioningAgent {
       loadSession: async ({ sessionId }: { sessionId: string }) => ({ sessionId }),
       listSessions: async () => ({ sessions: [{ sessionId: 'native-q', cwd: '/workspace', title: 'q' }] }),
       async prompt(params: PromptRequest) {
+        if (self.mode === 'permission') {
+          if (!self.connRef) throw new Error('agent connection missing');
+          const response = await self.connRef.requestPermission({
+            sessionId: params.sessionId,
+            toolCall: { toolCallId: 'tc-perm', title: 'Run tests', kind: 'execute' },
+            options: [
+              { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+              { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+            ],
+          });
+          self.reverseCalls.push({ method: 'session/request_permission', params: {}, response });
+          return { stopReason: 'end_turn' as const };
+        }
         const method = self.mode === 'question'
           ? 'x.ai/ask_user_question'
-          : self.mode === 'plan' ? 'x.ai/exit_plan_mode' : 'x.ai/mcp/elicit';
+          : self.mode === 'plan'
+            ? 'x.ai/exit_plan_mode'
+            : 'x.ai/mcp/elicit';
         const payload = self.mode === 'question'
           ? {
             sessionId: params.sessionId,
@@ -87,7 +108,22 @@ class QuestioningAgent {
           }
           : self.mode === 'plan'
             ? { sessionId: params.sessionId, toolCallId: 'tc-plan', planContent: '# Plan' }
-            : { sessionId: params.sessionId, serverName: 'files' };
+            : self.mode === 'elicit-schema'
+              ? {
+                sessionId: params.sessionId,
+                serverName: 'files',
+                requestedSchema: {
+                  type: 'object',
+                  properties: {
+                    path: { type: 'string', title: 'Path', minLength: 1 },
+                    level: { type: 'string', enum: ['ro', 'rw'], enumNames: ['Read only', 'Read write'] },
+                    recursive: { type: 'boolean', description: 'Recurse into subdirectories' },
+                    token: { type: 'string', title: 'Token', minLength: 5, maxLength: 10 },
+                  },
+                  required: ['path', 'level'],
+                },
+              }
+              : { sessionId: params.sessionId, serverName: 'files' };
         const raw = self.clientRef?.extMethod as
           | ((method: string, params: unknown) => Promise<unknown>)
           | undefined;
@@ -97,6 +133,7 @@ class QuestioningAgent {
         return { stopReason: 'end_turn' as const };
       },
       async cancel() {},
+      async extNotification() {},
     } as unknown as Agent;
   }
 }
@@ -112,7 +149,10 @@ function makeService(agent: QuestioningAgent, events: Array<{ method: string; da
       const agentStream = ndJsonStream(agentToClient.writable, clientToAgent.readable);
       const clientStream = ndJsonStream(clientToAgent.writable, agentToClient.readable);
       const exit = deferred<{ code: number | null; signal: null }>();
-      new AgentSideConnection(() => agent.agent(), agentStream);
+      new AgentSideConnection((connection) => {
+        agent.bindConnection(connection);
+        return agent.agent();
+      }, agentStream);
       return {
         connection: new ClientSideConnection(() => boundClient, clientStream),
         exit: exit.promise as never,
@@ -255,8 +295,83 @@ test('mcp elicit decline keeps the agent moving without fabricated content', asy
     actionId: 'decline',
   });
   await waitForEvent(events, 'turn.completed');
-  assert.equal(agent.reverseCalls[0]!.response, 'decline');
+  // The runtime parses the MCP ElicitResult envelope; a bare string or an
+  // { accept: ... } shape is malformed and would cancel natively.
+  assert.deepEqual(agent.reverseCalls[0]!.response, { action: 'decline' });
   await service.close();
+});
+
+test('mcp elicit accept returns the ElicitResult action envelope with typed content', async () => {
+  const agent = new QuestioningAgent('elicit-schema');
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, events);
+  const created = await service.createSession({ cwd: '/workspace' });
+  void service.beginTurn({ sessionId: created.session.id, input: [{ type: 'text', text: 'elicit' }] });
+  const requested = await waitForEvent(events, 'question.requested');
+  assert.equal(requested.kind, 'mcp_elicit');
+  await service.respondQuestion({
+    questionId: String(requested.questionId),
+    responseId: 'r1',
+    actionId: 'submit',
+    values: { content: { path: '/tmp', level: 'rw', recursive: true } },
+  });
+  await waitForEvent(events, 'turn.completed');
+  assert.deepEqual(agent.reverseCalls[0]!.response, {
+    action: 'accept',
+    content: { path: '/tmp', level: 'rw', recursive: true },
+  });
+  await service.close();
+});
+
+test('a pending permission settles as cancelled on interrupt and the prompt unwinds', async () => {
+  const agent = new QuestioningAgent('permission');
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, events);
+  const created = await service.createSession({ cwd: '/workspace' });
+  void service.beginTurn({ sessionId: created.session.id, input: [{ type: 'text', text: 'perm' }] });
+  const requested = await waitForEvent(events, 'approval.requested');
+  assert.ok(requested.approvalId);
+  // Interrupt while the native prompt is parked in requestPermission: the
+  // reverse request must settle without the client answering it.
+  await service.interruptTurn({ sessionId: created.session.id });
+  await waitForEvent(events, 'turn.completed');
+  assert.equal(agent.reverseCalls.length, 1);
+  assert.deepEqual(agent.reverseCalls[0]!.response, { outcome: { outcome: 'cancelled' } });
+  const resolved = events.filter((item) => item.method === 'approval.resolved');
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0]!.data.optionId, null);
+  await service.close();
+});
+
+test('a permission answered through the native option id settles selected', async () => {
+  const agent = new QuestioningAgent('permission');
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, events);
+  const created = await service.createSession({ cwd: '/workspace' });
+  void service.beginTurn({ sessionId: created.session.id, input: [{ type: 'text', text: 'perm' }] });
+  const requested = await waitForEvent(events, 'approval.requested');
+  await service.respondApproval({
+    sessionId: created.session.id,
+    approvalId: String(requested.approvalId),
+    nativeOptionId: 'allow',
+  });
+  await waitForEvent(events, 'turn.completed');
+  assert.deepEqual(agent.reverseCalls[0]!.response, {
+    outcome: { outcome: 'selected', optionId: 'allow' },
+  });
+  await service.close();
+});
+
+test('closing the session settles a parked permission before native close', async () => {
+  const agent = new QuestioningAgent('permission');
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, events);
+  const created = await service.createSession({ cwd: '/workspace' });
+  void service.beginTurn({ sessionId: created.session.id, input: [{ type: 'text', text: 'perm' }] });
+  await waitForEvent(events, 'approval.requested');
+  await service.close();
+  assert.equal(agent.reverseCalls.length, 1);
+  assert.deepEqual(agent.reverseCalls[0]!.response, { outcome: { outcome: 'cancelled' } });
 });
 
 test('question outcome type covers the accepted annotation shape', () => {
@@ -266,4 +381,134 @@ test('question outcome type covers the accepted annotation shape', () => {
     annotations: { q: { notes: 'freeform' } },
   };
   assert.equal(outcome.kind, 'submitted');
+});
+
+test('mcp elicit enforces schema length constraints before any native accept', async () => {
+  const agent = new QuestioningAgent('elicit-schema');
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, events);
+  const protocolEvents: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.8-test', (method, params) => {
+    protocolEvents.push({ method, params: params as Record<string, unknown> });
+  });
+  const waitForProtocol = async (method: string): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const found = protocolEvents.find((event) => event.method === method);
+      if (found) return found.params;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`Timed out waiting for ${method}; saw ${protocolEvents.map((item) => item.method).join(',')}`);
+  };
+
+  await adapter.handle({ id: 'i1', method: 'initialize', params: {
+    protocol: { name: 'gian.proxy', versions: ['2.3'] },
+    host: { name: 'Gian', version: '0.0.0' },
+  } });
+  const created = await adapter.handle({ id: 's1', method: 'session.create', params: {
+    sessionId: 'host-elicit',
+    workspace: { cwd: '/workspace', roots: ['/workspace'] },
+    config: {},
+  } }) as { session: { id: string; streamId: string } };
+  await adapter.handle({ id: 't1', method: 'turn.start', params: {
+    sessionId: created.session.id,
+    streamId: created.session.streamId,
+    turnId: 'turn-elicit',
+    input: [{ type: 'text', text: 'elicit' }],
+  } });
+  const requested = await waitForProtocol('interaction.requested');
+  const requestedData = requested.data as {
+    interactionId: string;
+    inputs: Array<{ id: string; minimumLength?: number; maximumLength?: number }>;
+  };
+  // The constraint is advertised to the Host…
+  const token = requestedData.inputs.find((input) => input.id === 'token');
+  assert.equal(token?.minimumLength, 5);
+  assert.equal(token?.maximumLength, 10);
+
+  const respond = (id: string, responseId: string, tokenValue: string) => adapter.handle({
+    id,
+    method: 'interaction.respond',
+    params: {
+      sessionId: created.session.id,
+      streamId: created.session.streamId,
+      turnId: 'turn-elicit',
+      interactionId: requestedData.interactionId,
+      responseId,
+      actionId: 'submit',
+      values: { path: '/tmp', level: 'rw', token: tokenValue },
+    },
+  });
+
+  // …and enforced on submission: too short and too long are both rejected
+  // before any native answer exists.
+  await assert.rejects(
+    respond('r1', 'resp-1', 'abc'),
+    (error: unknown) => (error as { code?: number }).code === -32602
+      && /at least 5 characters/.test((error as Error).message),
+  );
+  await assert.rejects(
+    respond('r2', 'resp-2', 'x'.repeat(11)),
+    (error: unknown) => (error as { code?: number }).code === -32602
+      && /at most 10 characters/.test((error as Error).message),
+  );
+  assert.equal(agent.reverseCalls.length, 0);
+
+  // A valid submission still accepts; the failed attempts settled nothing.
+  await respond('r3', 'resp-3', 'abcde');
+  await waitForProtocol('turn.completed');
+  assert.deepEqual(agent.reverseCalls[0]!.response, {
+    action: 'accept',
+    content: { path: '/tmp', level: 'rw', token: 'abcde' },
+  });
+  await service.close();
+});
+
+
+async function adapterInteraction(mode: 'question' | 'plan', t: { after(fn: () => Promise<void>): void }) {
+  const agent = new QuestioningAgent(mode);
+  const serviceEvents: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const { service } = makeService(agent, serviceEvents);
+  t.after(() => service.close());
+  const events: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const adapter = new GrokProtocolV2Adapter(service, '0.3.9-test', (method, params) => {
+    events.push({ method, data: (params as { data: Record<string, unknown> }).data });
+  });
+  await adapter.handle({ id: 'init', method: 'initialize', params: {
+    protocol: { name: 'gian.proxy', versions: ['2.3'] }, host: { name: 'Gian', version: '0.0.0' },
+  } });
+  const created = await adapter.handle({ id: 'create', method: 'session.create', params: {
+    sessionId: `host-${mode}`, workspace: { cwd: '/workspace', roots: ['/workspace'] }, config: {},
+  } }) as { session: { id: string; streamId: string } };
+  const identity = { sessionId: created.session.id, streamId: created.session.streamId, turnId: `turn-${mode}` };
+  await adapter.handle({ id: 'start', method: 'turn.start', params: {
+    ...identity, input: [{ type: 'text', text: mode }],
+  } });
+  const requested = await waitForEvent(events, 'interaction.requested');
+  return { agent, adapter, events, requested, identity };
+}
+
+test('Question cancel resolves as cancelled on the Host wire, including an identical retry', async (t) => {
+  const { agent, adapter, events, requested, identity } = await adapterInteraction('question', t);
+  const params = { ...identity, interactionId: requested.interactionId, responseId: 'cancel-once', actionId: 'cancel' };
+  await adapter.handle({ id: 'cancel', method: 'interaction.respond', params });
+  await waitForEvent(events, 'turn.completed');
+  await adapter.handle({ id: 'cancel-retry', method: 'interaction.respond', params });
+  assert.deepEqual(agent.reverseCalls[0]?.response, { outcome: 'cancelled' });
+  const resolved = events.filter(event => event.method === 'interaction.resolved');
+  assert.equal(resolved.length, 1);
+  assert.deepEqual(resolved[0]?.data, { interactionId: requested.interactionId, outcome: 'cancelled' });
+});
+
+test('Plan return exposes optional feedback and sends it to the native cancelled outcome', async (t) => {
+  const { agent, adapter, events, requested, identity } = await adapterInteraction('plan', t);
+  const inputs = requested.inputs as Array<{ id: string; type: string; required: boolean }>;
+  assert.deepEqual(inputs.map(input => [input.id, input.type, input.required]), [['feedback', 'text', false]]);
+  await adapter.handle({ id: 'return-plan', method: 'interaction.respond', params: {
+    ...identity, interactionId: requested.interactionId, responseId: 'return-once', actionId: 'cancel',
+    values: { feedback: 'Only touch the Grok fixture.' },
+  } });
+  await waitForEvent(events, 'turn.completed');
+  assert.deepEqual(agent.reverseCalls[0]?.response, { outcome: 'cancelled', feedback: 'Only touch the Grok fixture.' });
+  assert.equal((await waitForEvent(events, 'interaction.resolved')).outcome, 'cancelled');
 });

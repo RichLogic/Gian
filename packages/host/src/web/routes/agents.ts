@@ -381,6 +381,26 @@ function normalizeHome(
   return { error: 'home.kind must be managed or custom' };
 }
 
+function normalizeRuntime(
+  value: unknown,
+): { kind: 'managed' } | { kind: 'custom'; path: string } | undefined | { error: string } {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { error: 'runtime must be an object' };
+  }
+  const runtime = value as Record<string, unknown>;
+  const keys = Object.keys(runtime);
+  if (runtime.kind === 'managed') {
+    return keys.length === 1 ? { kind: 'managed' } : { error: 'managed runtime accepts only kind' };
+  }
+  if (runtime.kind === 'custom') {
+    return keys.length === 2 && typeof runtime.path === 'string'
+      ? { kind: 'custom', path: runtime.path }
+      : { error: 'custom runtime requires kind and path' };
+  }
+  return { error: 'runtime.kind must be managed or custom' };
+}
+
 const MAX_RUNTIME_API_JSON_BYTES = 64 * 1024;
 
 async function readBoundedJson(c: { req: { raw: Request } }): Promise<unknown> {
@@ -431,6 +451,9 @@ export function registerAgentRoutes(
     catalogService?: CatalogService;
     /** Test seam around the native folder picker; production uses pickPath. */
     pickHome?: () => ReturnType<typeof pickPath>;
+    /** Test seam around the native file picker for a custom Runtime path
+     *  (ADR-0094); production uses pickPath('file', …). */
+    pickRuntime?: () => ReturnType<typeof pickPath>;
     /** Count of in-flight Sessions (running/pending) bound to one Agent;
      *  guards PATCH disable. */
     hasRunningSessionsForAgent?: (agentId: string) => number;
@@ -731,6 +754,8 @@ export function registerAgentRoutes(
       }
       const home = normalizeHome(body.home);
       if (home && 'error' in home) return c.json({ error: home.error }, 400);
+      const runtime = normalizeRuntime(body.runtime);
+      if (runtime && 'error' in runtime) return c.json({ error: runtime.error }, 400);
       const defaultsPatch = body.defaults && typeof body.defaults === 'object'
         && !Array.isArray(body.defaults)
         ? normalizeDefaultsPatch(body.defaults as Record<string, unknown>)
@@ -741,6 +766,7 @@ export function registerAgentRoutes(
         ...(pluginId ? { pluginId } : {}),
         ...(isProductExecutor(body.proxy) ? { proxy: body.proxy } : {}),
         ...(home ? { home } : {}),
+        ...(runtime ? { runtime } : {}),
         ...(cliPath !== undefined ? { cliPath } : {}),
         defaults: defaultsPatch,
       });
@@ -791,6 +817,13 @@ export function registerAgentRoutes(
         return c.json({
           error: 'CLI path is managed globally by Gian and cannot be configured per Agent.',
           code: 'CLI_PATH_MANAGED',
+        }, 400);
+      }
+      // ADR-0094 phase 1: the Runtime binding is create-only.
+      if (body.runtime !== undefined) {
+        return c.json({
+          error: 'The Runtime binding is set at Agent creation; delete and recreate the Agent to change it.',
+          code: 'RUNTIME_EDIT_UNSUPPORTED',
         }, 400);
       }
       if (body.cliPath !== undefined) {
@@ -924,6 +957,18 @@ export function registerAgentRoutes(
       return c.json({ error: 'file picker only available on macOS' }, 400);
     }
     const outcome = await (options.pickHome?.() ?? pickPath('folder', 'Select Agent HOME'));
+    if (outcome.kind === 'ok') return c.json({ path: outcome.path });
+    if (outcome.kind === 'canceled') return c.json({ canceled: true });
+    return c.json({ error: outcome.error }, 500);
+  });
+
+  // ADR-0094: custom Runtime paths are files (executables or launch scripts),
+  // unlike HOME folders.
+  app.post('/api/agents/pick-runtime', async c => {
+    if (!options.pickRuntime && process.platform !== 'darwin') {
+      return c.json({ error: 'file picker only available on macOS' }, 400);
+    }
+    const outcome = await (options.pickRuntime?.() ?? pickPath('file', 'Select Agent Runtime'));
     if (outcome.kind === 'ok') return c.json({ path: outcome.path });
     if (outcome.kind === 'canceled') return c.json({ canceled: true });
     return c.json({ error: outcome.error }, 500);

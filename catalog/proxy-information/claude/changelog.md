@@ -144,4 +144,4 @@
 
 ## 已撤回版本
 
-0.4.0 已于 2026-09-20 撤回，不进入可用版本列表。仓库拆分不构成统一升级所有 Proxy 版本的理由。
+- 0.4.0：2026-09-20 已撤回，不可安装。[依据](https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md)

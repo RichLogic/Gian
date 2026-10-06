@@ -42,6 +42,30 @@ function childClasses(el: Element): string[] {
   return [...el.children].map(child => child.className);
 }
 
+/** Whitespace-only text nodes containing a newline render as phantom empty
+ *  lines under the user bubble's pre-wrap when they sit at block boundaries
+ *  (mdast-util-to-hast pretty-prints them there). Inline parents (`p`, cells,
+ *  code) are fine — that whitespace is a real space or soft break. */
+function phantomWhitespaceNodes(root: Element): Text[] {
+  const inlineParents = new Set(['P', 'TD', 'TH', 'CODE', 'PRE', 'A', 'STRONG', 'EM', 'DEL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+  const offenders: Text[] = [];
+  const walk = (node: Node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const value = (child as Text).data;
+        if (value.includes('\n') && value.trim() === ''
+          && !inlineParents.has((child.parentElement?.tagName ?? ''))) {
+          offenders.push(child as Text);
+        }
+      } else {
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+  return offenders;
+}
+
 describe('UserMessage markdown', () => {
   it('renders bold/italic/inline code, lists and headings in the bubble', () => {
     const { container } = render(
@@ -68,6 +92,24 @@ describe('UserMessage markdown', () => {
   it('keeps soft line breaks in text nodes so the pre-wrap bubble still shows them', () => {
     const { container } = render(<UserMessage item={userMsg('line one\nline two')} />);
     expect(container.querySelector('.user-text')!.textContent).toBe('line one\nline two');
+  });
+
+  it('drops pretty-print whitespace around block elements (pre-wrap bubble phantom lines)', () => {
+    const { container } = render(<UserMessage item={userMsg('9. first line\n\nsecond line')} />);
+    const text = container.querySelector('.msg-text')!;
+    expect(text.querySelector('ol')!.getAttribute('start')).toBe('9');
+    expect(text.textContent).toContain('first line');
+    expect(text.textContent).toContain('second line');
+    expect(phantomWhitespaceNodes(text)).toEqual([]);
+  });
+
+  it('keeps multi-line lists tight while preserving soft breaks inside items', () => {
+    const { container } = render(<UserMessage item={userMsg('1. aaa\n2. bbb\n3. ccc')} />);
+    const text = container.querySelector('.msg-text')!;
+    expect(text.querySelectorAll('li')).toHaveLength(3);
+    expect(phantomWhitespaceNodes(text)).toEqual([]);
+    const soft = render(<UserMessage item={userMsg('1. aaa\ncontinued')} />);
+    expect(soft.container.querySelector('li')!.textContent).toBe('aaa\ncontinued');
   });
 
   it('renders pre-markdown history harmlessly: unpaired markers stay literal', () => {
@@ -181,5 +223,14 @@ describe('UserMessage composer document markdown', () => {
       'message-inline-reference',
       'user-md-seg',
     ]);
+  });
+
+  it('drops pretty-print whitespace around blocks inside a document segment', () => {
+    const { container } = render(
+      <UserMessage item={docMsg([{ type: 'text', text: '9. first line\n\nsecond line' }])} />,
+    );
+    const seg = container.querySelector('.user-md-seg')!;
+    expect(seg.querySelector('ol')!.getAttribute('start')).toBe('9');
+    expect(phantomWhitespaceNodes(seg)).toEqual([]);
   });
 });

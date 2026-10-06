@@ -12,6 +12,7 @@ import {
   nativeChoiceLabel,
   nativeOptionRole,
   optionByRole,
+  queueSendNowEnabled,
   steerAdvertised,
 } from '../src/components/composer/capabilities.js';
 
@@ -48,6 +49,27 @@ describe('modesFromCapabilities / steerAdvertised / optionByRole', () => {
     expect(steerAdvertised(null)).toBeUndefined();
     expect(steerAdvertised({ capabilities: { 'turn.steer': {} } })).toBe(true);
     expect(steerAdvertised({ capabilities: {} })).toBe(false);
+    expect(queueSendNowEnabled({
+      executor: 'kimi', steerAdvertised: true, completed: false,
+    })).toBe(true);
+    expect(queueSendNowEnabled({
+      executor: 'kimi', steerAdvertised: false, completed: false,
+    })).toBe(false);
+    expect(queueSendNowEnabled({
+      executor: 'kimi', steerAdvertised: undefined, completed: false,
+    })).toBe(false);
+    expect(queueSendNowEnabled({
+      executor: 'codex', steerAdvertised: undefined, completed: false,
+    })).toBe(false);
+    expect(queueSendNowEnabled({
+      executor: 'codex', steerAdvertised: true, completed: false,
+    })).toBe(true);
+    expect(queueSendNowEnabled({
+      executor: 'kimi', steerAdvertised: true, completed: true,
+    })).toBe(false);
+    expect(queueSendNowEnabled({
+      executor: 'codex', steerAdvertised: true, completed: false, remoteUnavailable: true,
+    })).toBe(false);
     expect(optionByRole([approval], 'approval_mode')).toBe(approval);
     expect(optionByRole([approval], 'model')).toBeUndefined();
   });

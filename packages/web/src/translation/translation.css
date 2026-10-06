@@ -1,5 +1,7 @@
-/* Auto-translate is a Fast-style text chip: accent wash + ring when on,
-   quiet text when off (Owner 2026-09-24 — no switch chrome here). */
+/* Auto-translate is a Fast-style icon chip (lucide `book-type`): accent wash
+   + ring when on, quiet icon when off (Owner 2026-09-24 — no switch chrome
+   here; icon-only since 2026-09-29, label lives on title/aria). The new-session
+   form keeps the same classes on its text-label button. */
 .translation-auto {
   margin-left: auto; flex: 0 0 auto;
   display: inline-flex; align-items: center;
@@ -11,6 +13,7 @@
   white-space: nowrap;
   cursor: pointer;
 }
+.translation-auto svg { display: block; }
 .translation-auto:hover { background: var(--row-hover); color: var(--text); }
 .translation-auto:disabled { opacity: 0.45; cursor: default; }
 .translation-auto.on,
@@ -22,7 +25,6 @@
 /* A zero-width portal span can sit between the chip and the nav buttons,
    so this must be a general-sibling override, not adjacent (+). */
 .translation-auto ~ .transcript-navbtns { margin-left: 0; flex-shrink: 0; }
-.ns-translation-underbar .translation-auto { min-height: 44px; }
 .translation-block { margin-top: 12px; min-width: 0; font-size: 0.9em; color: var(--text); }
 .translation-heading { display: flex; align-items: center; gap: 6px; }
 .translation-collapse { display: inline-flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--muted); padding: 4px 0; font: inherit; cursor: pointer; }

@@ -124,6 +124,12 @@ class InteractionResponseLedger {
     this.entries.set(responseId, fingerprint);
     return 'new';
   }
+
+  /** Roll back a fresh entry when the downstream submission failed, so the
+   *  Host's retry with the same responseId is submitted for real. */
+  forget(responseId: string): void {
+    this.entries.delete(responseId);
+  }
 }
 
 class ReplayPager {
@@ -132,17 +138,25 @@ class ReplayPager {
     events: readonly unknown[];
   }>();
 
+  /** Page over the per-session snapshot. `latest` (the fresh full snapshot)
+   *  is required for a null cursor and ignored otherwise: continuation pages
+   *  are served from the stored snapshot so earlier events are never lost. */
   page(
     sessionId: string,
-    latest: { replayStreamId: string; events: readonly unknown[] },
+    latest: { replayStreamId: string; events: readonly unknown[] } | null,
     cursor: string | null,
     limit: number,
   ) {
-    const snapshot = cursor === null ? latest : this.active.get(sessionId);
+    if (cursor === null) {
+      if (latest === null) {
+        throw new KimiProtocolError('INTERNAL', 'Replay snapshot is missing for a fresh cursor.');
+      }
+      this.active.set(sessionId, { replayStreamId: latest.replayStreamId, events: latest.events });
+    }
+    const snapshot = this.active.get(sessionId);
     if (snapshot === undefined) {
       throw new KimiProtocolError('INVALID_PARAMS', 'Replay cursor has no active snapshot.');
     }
-    if (cursor === null) this.active.set(sessionId, snapshot);
     const offset = cursor === null || /^(0|[1-9]\d*)$/.test(cursor) ? Number(cursor ?? 0) : Number.NaN;
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > snapshot.events.length) {
       throw new KimiProtocolError('INVALID_PARAMS', 'Invalid replay cursor.');
@@ -220,6 +234,7 @@ export class KimiProtocolV2Adapter {
   private readonly replayPager = new ReplayPager();
   private readonly createFingerprints = new Map<string, string>();
   private catalogRevision = '';
+  private readonly knownCatalogRevisions = new Map<string, string | undefined>();
 
   constructor(
     private readonly service: KimiProxyService,
@@ -252,7 +267,7 @@ export class KimiProtocolV2Adapter {
       const result = await this.route(request);
       return { ok: true, result, notifications: queue ?? [] };
     } catch (error) {
-      return { ok: false, error, notifications: queue ?? [] };
+      return { ok: false, error: normalizeKimiError(error), notifications: queue ?? [] };
     } finally {
       if (queue) this.notificationQueue = previous;
     }
@@ -358,7 +373,14 @@ export class KimiProtocolV2Adapter {
   // ---- catalog ----
 
   private async catalog() {
-    return this.finishCatalog(await this.projectedOptions({}));
+    const payload = await this.finishCatalog(await this.projectedOptions({}));
+    if (payload.catalogRevision !== this.catalogRevision) {
+      this.knownCatalogRevisions.clear();
+      this.catalogRevision = payload.catalogRevision;
+    }
+    this.knownCatalogRevisions.set(payload.catalogRevision,
+      (payload.configOptions.find((option) => option.id === 'model') as { defaultValue?: string } | undefined)?.defaultValue);
+    return payload;
   }
 
   private async projectedOptions(turnConfig: TurnConfigMap): Promise<Array<Record<string, unknown>>> {
@@ -387,7 +409,11 @@ export class KimiProtocolV2Adapter {
         })),
       });
       const selected = models.find((model) => model.model === selectedModel);
-      const efforts = (selected?.support_efforts ?? []).filter((effort) => typeof effort === 'string' && effort !== '');
+      const alwaysThinking = selected?.capabilities?.includes('always_thinking') === true;
+      const canThink = alwaysThinking || selected?.capabilities?.includes('thinking') === true;
+      const efforts = (selected?.support_efforts ?? []).filter((effort) => (
+        typeof effort === 'string' && effort !== '' && !(alwaysThinking && effort === 'off')
+      ));
       if (efforts.length > 0) {
         options.push({
           id: 'thinking',
@@ -398,8 +424,22 @@ export class KimiProtocolV2Adapter {
           required: true,
           defaultValue: selected?.default_effort !== undefined && efforts.includes(selected.default_effort)
             ? selected.default_effort
-            : efforts[0],
+            : efforts[Math.floor(efforts.length / 2)],
           choices: efforts.map((effort) => ({ value: effort, displayName: effort })),
+        });
+      } else if (canThink) {
+        // Kimi 2.1.1's model selector defaults genuine boolean thinking to
+        // on; always_thinking models expose only on, never a disable choice.
+        options.push({
+          id: 'thinking',
+          displayName: 'Thinking',
+          description: 'Enable thinking for the selected model.',
+          binding: 'turn',
+          control: 'select',
+          required: true,
+          defaultValue: 'on',
+          choices: (alwaysThinking ? ['on'] : ['on', 'off'])
+            .map((value) => ({ value, displayName: value === 'on' ? 'On' : 'Off' })),
         });
       }
     }
@@ -456,13 +496,18 @@ export class KimiProtocolV2Adapter {
       actions: payload.actions,
       slashCommands: payload.slashCommands,
     });
-    this.catalogRevision = payload.catalogRevision;
     return payload;
   }
 
   private async resolveCatalog(params: Record<string, unknown>) {
     const catalogRevision = nonEmptyString(params.catalogRevision, 'catalogRevision');
-    if (catalogRevision !== this.catalogRevision) {
+    const baseline = await this.projectedOptions({});
+    const currentRevision = (await this.finishCatalog(baseline)).catalogRevision;
+    if (currentRevision !== this.catalogRevision) {
+      this.knownCatalogRevisions.clear();
+      this.catalogRevision = currentRevision;
+    }
+    if (!this.knownCatalogRevisions.has(catalogRevision)) {
       throw new KimiProtocolError('CONFIG_VALUE_INVALID', 'Unknown catalogRevision; call catalog.list again.');
     }
     const sessionConfig = record(params.sessionConfig);
@@ -487,10 +532,14 @@ export class KimiProtocolV2Adapter {
       ...(typeof turnConfig.thinking === 'string' ? { thinking: turnConfig.thinking } : {}),
       ...(typeof turnConfig.approval_mode === 'string' ? { approval_mode: turnConfig.approval_mode } : {}),
     };
-    const baseline = await this.projectedOptions({});
-    const baselineModel = (baseline.find((option) => option.id === 'model') as { defaultValue?: string } | undefined)?.defaultValue;
+    // The supplied revision may be a model-specific draft. Comparing only
+    // with catalog.list's default model breaks switches back to that model.
+    const baselineModel = this.knownCatalogRevisions.get(catalogRevision);
     const modelChanged = requested.model !== undefined && requested.model !== baselineModel;
     const projected = await this.projectedOptions(requested);
+    if (turnConfig.thinking !== undefined && !projected.some((option) => option.id === 'thinking') && !modelChanged) {
+      throw new KimiProtocolError('CONFIG_VALUE_INVALID', 'Thinking is not supported by the selected model.');
+    }
     const resolved: Record<string, ConfigValue> = {};
     for (const option of projected) {
       const id = option.id as string;
@@ -508,6 +557,8 @@ export class KimiProtocolV2Adapter {
       }
     }
     const payload = await this.finishCatalog(projected);
+    this.knownCatalogRevisions.set(payload.catalogRevision,
+      (payload.configOptions.find((option) => option.id === 'model') as { defaultValue?: string } | undefined)?.defaultValue);
     return {
       ...payload,
       resolvedDefaults: {
@@ -560,6 +611,14 @@ export class KimiProtocolV2Adapter {
         sessionId, cwd, history,
         ...(nativeId !== undefined ? { nativeSessionId: nativeId } : {}),
       });
+      // Rebind refreshes the stream: the cached session must follow it. The
+      // entry is updated in place so a Side Chat keeps its resumeRef/anchor.
+      const entry = this.sessions.get(sessionId)!;
+      entry.streamId = result.snapshot.streamId as string;
+      entry.state = result.snapshot.state as string;
+      entry.updatedAt = result.snapshot.updatedAt as string;
+      const sidechat = this.sidechats.get(sessionId);
+      if (sidechat !== undefined) sidechat.streamId = entry.streamId;
       this.turnLedger.attach(sessionId, result.snapshot.streamId as string);
       return { session: result.snapshot };
     }
@@ -571,11 +630,6 @@ export class KimiProtocolV2Adapter {
     this.createFingerprints.set(sessionId, fingerprint);
     this.trackSession(sessionId, result.snapshot, false);
     this.turnLedger.attach(sessionId, result.snapshot.streamId as string);
-    if (result.replayNotifications !== undefined) {
-      for (const notification of result.replayNotifications) {
-        this.emit(notification.method, notification.params);
-      }
-    }
     return { session: result.snapshot };
   }
 
@@ -620,15 +674,23 @@ export class KimiProtocolV2Adapter {
   }
 
   private serialize(session: AttachedSession): Record<string, unknown> {
+    const live = this.service.describeSession(session.id);
+    const state = live.state === 'idle'
+      || live.state === 'running'
+      || live.state === 'waiting_interaction'
+      || live.state === 'stale'
+      ? live.state
+      : session.state as 'idle' | 'running' | 'waiting_interaction' | 'stale';
     return {
       id: session.id,
       nativeSession: { id: session.nativeSessionId },
       streamId: session.streamId,
-      state: session.state as 'idle' | 'running' | 'waiting_interaction' | 'stale',
+      state,
       sessionConfig: {},
       ...(session.lastError !== null ? { lastError: session.lastError } : {}),
+      ...(live.availableActions !== undefined ? { availableActions: live.availableActions } : {}),
       createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
+      updatedAt: typeof live.updatedAt === 'string' ? live.updatedAt : session.updatedAt,
     };
   }
 
@@ -645,6 +707,16 @@ export class KimiProtocolV2Adapter {
       return { accepted: true, turnId };
     }
     try {
+      if (config.thinking !== undefined) {
+        const options = await this.projectedOptions({
+          ...(typeof config.model === 'string' ? { model: config.model } : {}),
+        });
+        const thinking = options.find((option) => option.id === 'thinking');
+        const choices = (thinking?.choices ?? []) as Array<{ value: ConfigValue }>;
+        if (!choices.some((choice) => Object.is(choice.value, config.thinking))) {
+          throw new KimiProtocolError('CONFIG_VALUE_INVALID', 'Thinking value was not advertised for the selected model.');
+        }
+      }
       await this.service.startTurn({
         sessionId,
         streamId,
@@ -700,9 +772,14 @@ export class KimiProtocolV2Adapter {
     if (observed === 'duplicate') {
       return { accepted: true, interactionId, responseId };
     }
-    await this.service.respondInteraction({
-      sessionId, streamId, turnId, interactionId, actionId, values,
-    });
+    try {
+      await this.service.respondInteraction({
+        sessionId, streamId, turnId, interactionId, actionId, values,
+      });
+    } catch (error) {
+      this.responseLedger.forget(responseId);
+      throw error;
+    }
     return { accepted: true, interactionId, responseId };
   }
 
@@ -760,13 +837,10 @@ export class KimiProtocolV2Adapter {
     const limit = typeof params.limit === 'number' && params.limit > 0 ? Math.min(params.limit, 500) : 200;
     const cursor = params.cursor === null || params.cursor === undefined ? null : String(params.cursor);
     this.turnLedger.requireStream(sessionId, streamId);
-    const result = await this.service.replay({ sessionId, streamId, cursor });
-    return this.replayPager.page(
-      sessionId,
-      { replayStreamId: result.replayStreamId, events: result.events },
-      cursor,
-      limit,
-    );
+    // Continuation pages come from the pager's snapshot; only a fresh cursor
+    // refetches the (full) snapshot from the service.
+    const latest = cursor === null ? await this.service.replay({ sessionId, streamId }) : null;
+    return this.replayPager.page(sessionId, latest, cursor, limit);
   }
 
   // ---- fork & side chat ----
@@ -817,7 +891,9 @@ export class KimiProtocolV2Adapter {
     const resumeRefRaw = record(params.resumeRef);
     const resumeRef = { id: nonEmptyString(resumeRefRaw.id, 'resumeRef.id') };
     const existing = this.sidechats.get(sidechatId);
-    if (existing !== undefined && existing.resumeRef.id === resumeRef.id) {
+    const live = this.service.get(sidechatId);
+    if (existing !== undefined && existing.resumeRef.id === resumeRef.id
+      && live !== undefined && live.state !== 'stale') {
       return { sidechat: this.serializeSidechat(existing) };
     }
     const snapshot = await this.service.resumeSidechat({ sidechatId, parentSessionId, resumeRef });
@@ -846,17 +922,18 @@ export class KimiProtocolV2Adapter {
   }
 
   private serializeSidechat(sidechat: AttachedSidechat): Record<string, unknown> {
+    const live = this.service.requireSession(sidechat.id);
     return {
       id: sidechat.id,
       parentSessionId: sidechat.parentSessionId,
       streamId: sidechat.streamId,
-      state: sidechat.state as 'idle' | 'running' | 'waiting_interaction' | 'stale',
+      state: live.state === 'attaching' ? 'idle' : live.state,
       resumeRef: sidechat.resumeRef,
       anchor: sidechat.anchor,
       sessionConfig: {},
       ...(sidechat.lastError !== null ? { lastError: sidechat.lastError } : {}),
       createdAt: sidechat.createdAt,
-      updatedAt: sidechat.updatedAt,
+      updatedAt: live.updatedAt,
     };
   }
 

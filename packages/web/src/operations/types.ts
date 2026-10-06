@@ -102,6 +102,7 @@ export type OperationName =
   | 'agent.checkProxyUpdate'
   | 'agent.pickCliPath'
   | 'agent.pickHome'
+  | 'agent.pickRuntime'
   | 'agent.create'
   | 'agent.delete'
   | 'agent.patch'
@@ -225,6 +226,7 @@ export const OPERATION_POLICIES = {
   'agent.switchProxy': 'pending',
   'agent.pickCliPath': 'pending',
   'agent.pickHome': 'pending',
+  'agent.pickRuntime': 'pending',
   'agent.restartApp': 'pending',
   'catalog.sync': 'pending',
   'catalog.installProxy': 'pending',
@@ -335,7 +337,6 @@ export interface OptimisticOverlay {
   /** Set after timeout/disconnect — outcome unknown, never rolled back. */
   unresolved?: boolean;
 }
-
 /** Transient state of one dispatched operation run (proposal §4.3). */
 export interface OperationRun {
   id: string;
@@ -344,6 +345,9 @@ export interface OperationRun {
   phase: 'optimistic' | 'pending' | 'confirmed' | 'failed' | 'timed-out';
   startedAt: number;
   error?: string;
+  /** Machine-readable failure code when the executor surfaced one (e.g. the
+   *  Host's REST error code), so views can map errors to their cause. */
+  errorCode?: string;
   /** REST executor result, recorded on success (Phase 3a) so views can
    *  consume the created/updated entity (e.g. select the workspace or
    *  subtask a pending create returned) from `useOperationRun`. */

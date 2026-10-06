@@ -1209,6 +1209,38 @@ export class SessionManager {
     const proxySessionId = await this.proxySessions.ensure(session);
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
+    // A new/restored client has only its default-model Catalog. Resolve the
+    // actual next-Turn draft on that same live connection before its strict
+    // validator admits turn.start; UI-only resolution belongs to another
+    // connection and is not proof of this session's advertised values.
+    if (client.resolveCatalog && this.proxySessions.getProtocolCapabilities(
+      session.executor, this.agentResolver?.cliPathForSession(session),
+    )?.['catalog.resolve'] !== undefined) {
+      const catalog = await client.catalog();
+      const turnDraft: Record<string, ConfigValue> = {};
+      const sessionConfig: Record<string, ConfigValue> = {};
+      for (const option of catalog.configOptions) {
+        if (option.binding === 'session') {
+          const value = session.executor_config.values[option.id];
+          if (value !== undefined) sessionConfig[option.id] = value;
+          continue;
+        }
+        const roleValue = option.role === 'model' ? session.model
+          : option.role === 'effort' ? session.thinking_effort
+            : option.role === 'approval_mode' ? session.approval_mode
+              : option.role === 'fast' ? session.service_tier === 'fast' : undefined;
+        const value = session.turn_config?.[option.id]
+          ?? session.executor_config.values[option.id]
+          ?? roleValue;
+        if (value !== undefined && value !== null && value !== '') turnDraft[option.id] = value;
+      }
+      const resolved = await client.resolveCatalog({ catalogRevision: catalog.catalogRevision, sessionConfig, turnConfig: turnDraft });
+      const options = resolved.configOptions.filter((option) => option.binding === 'turn');
+      const revision = `turn-config-${createHash('sha256').update(JSON.stringify(options)).digest('hex').slice(0, 24)}`;
+      this.persistTurnConfigOptions(sessionId, options, revision);
+      session.turn_config_options = options;
+      session.turn_config_revision = revision;
+    }
     if (session.executor === 'codex') {
       await ensureSessionAttachmentDir(sessionId, this.dataDir);
     }
@@ -1286,9 +1318,10 @@ export class SessionManager {
       session.executor,
       this.agentResolver?.cliPathForSession(session),
     );
-    const turnOptions = session.turn_config_options !== undefined
-      ? session.turn_config_options
-      : (catalog?.configOptions.filter((option) => option.binding === 'turn') ?? []);
+    // Older model-switch snapshots may contain the full Catalog. Never
+    // dispatch its immutable Session options as next-Turn configuration.
+    const turnOptions = (session.turn_config_options ?? catalog?.configOptions ?? [])
+      .filter((option) => option.binding === 'turn');
     const config: Record<string, string | boolean | number | null> = {};
     const draft: Record<string, string | boolean | number | null> = {};
     // Conditions on a Turn-bound option may reference a Session-bound option
@@ -1470,6 +1503,7 @@ export class SessionManager {
     const effortOption = options?.find((option) => option.role === 'effort');
     if (
       !catalog
+      || !options
       || protocolCapabilities?.['catalog.resolve'] === undefined
       || !modelOption
       || !effortOption
@@ -1479,7 +1513,10 @@ export class SessionManager {
     }
 
     // 1. Drop the stale effort and select the target model.
-    const turnConfig: Record<string, ConfigValue> = { ...(session.turn_config ?? {}) };
+    const turnOptionIds = new Set(options.filter((option) => option.binding === 'turn').map((option) => option.id));
+    const turnConfig: Record<string, ConfigValue> = Object.fromEntries(
+      Object.entries(session.turn_config ?? {}).filter(([id]) => turnOptionIds.has(id)),
+    );
     delete turnConfig[effortOption.id];
     turnConfig[modelOption.id] = stored;
 
@@ -1487,10 +1524,16 @@ export class SessionManager {
     //    proxy. An invalid combination fails here, before anything persists.
     const resolved = await this.resolveCatalog(session.executor, {
       catalogRevision: catalog.catalogRevision,
-      sessionConfig: {},
+      sessionConfig: Object.fromEntries(catalog.configOptions
+        .filter((option) => option.binding === 'session')
+        .flatMap((option) => {
+          const value = session.executor_config.values[option.id];
+          return value === undefined ? [] : [[option.id, value]];
+        })),
       turnConfig,
     }, sessionId, cliPath);
-    const resolvedEffort = resolved.configOptions.find((option) => option.role === 'effort');
+    const resolvedTurnOptions = resolved.configOptions.filter((option) => option.binding === 'turn');
+    const resolvedEffort = resolvedTurnOptions.find((option) => option.role === 'effort');
     let effort: string | null = null;
     if (resolvedEffort) {
       const candidate = turnConfig[resolvedEffort.id]
@@ -1509,11 +1552,14 @@ export class SessionManager {
     }
 
     // 3. One transaction for the whole canonical update.
-    const nextTurnConfig: Record<string, ConfigValue> = { ...turnConfig };
+    const resolvedTurnIds = new Set(resolvedTurnOptions.map((option) => option.id));
+    const nextTurnConfig: Record<string, ConfigValue> = Object.fromEntries(
+      Object.entries(turnConfig).filter(([id]) => resolvedTurnIds.has(id)),
+    );
     if (effort !== null && resolvedEffort) nextTurnConfig[resolvedEffort.id] = effort;
     const now = new Date().toISOString();
     const revision = `turn-config-${createHash('sha256')
-      .update(JSON.stringify(resolved.configOptions))
+      .update(JSON.stringify(resolvedTurnOptions))
       .digest('hex')
       .slice(0, 24)}`;
     this.db.transaction(() => {
@@ -1530,7 +1576,7 @@ export class SessionManager {
         stored,
         effort,
         JSON.stringify(nextTurnConfig),
-        JSON.stringify(resolved.configOptions),
+        JSON.stringify(resolvedTurnOptions),
         revision,
         now,
         sessionId,
@@ -1542,7 +1588,7 @@ export class SessionManager {
       model: stored,
       thinking_effort: effort,
       turn_config: nextTurnConfig,
-      turn_config_options: resolved.configOptions,
+      turn_config_options: resolvedTurnOptions,
       turn_config_revision: revision,
       updated_at: now,
     });
@@ -1945,10 +1991,11 @@ export class SessionManager {
       queueRevision: this.queue.getRevision(sessionId),
     });
     if (this.turns.has(sessionId)) {
-      if (session.executor !== 'codex') {
-        // Claude/Kimi have no mid-turn injection — "send now" can't beat the
-        // auto-drain. Refuse WITHOUT popping: the old pop-then-SESSION_BUSY
-        // path lost the message from both the queue and the transcript.
+      const canSteer = await this.turnSteerAdvertised(sessionId) === true;
+      if (!canSteer) {
+        // A running turn accepts queued text only when the Proxy advertises
+        // turn.steer. Refuse without popping: popping first dropped the
+        // message from both the queue and the transcript.
         throw new Error(`a turn is already running; the queue drains automatically when it completes`);
       }
       const drained = this.queue.sendNow(sessionId, expectedQueueRevision);
@@ -2021,10 +2068,25 @@ export class SessionManager {
     };
   }
 
-  /** Codex-only mid-turn injection (`turn/steer`): append the message to the
-   *  session's ACTIVE turn instead of queueing it for the next one. The user
-   *  message is recorded on the active turn so the transcript shows it inline
-   *  with the work it steered. */
+  /** `undefined` when the Proxy client is missing or its initialize result
+   *  cannot be read. An explicit capabilities map without `turn.steer` is false. */
+  private async turnSteerAdvertised(sessionId: string): Promise<boolean | undefined> {
+    const client = this.proxy.get(sessionId);
+    if (!client) return undefined;
+    try {
+      const initialized = await client.initialize();
+      const capabilities = initialized?.capabilities;
+      if (!capabilities || typeof capabilities !== 'object') return undefined;
+      return capabilities['turn.steer'] !== undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Mid-turn injection (`turn.steer`): append the message to the session's
+   *  ACTIVE turn instead of queueing it for the next one. The user message is
+   *  recorded on the active turn so the transcript shows it inline with the
+   *  work it steered. */
   async steerMessage(
     sessionId: string,
     text: string,

@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { matchChangedFilePath, projectTurnDiff } from '../src/presentation/turn-diff.js';
 import type { DiffFile, DiffItem, TranscriptItem } from '../src/types.js';
+import { parseDiffUpdated } from '../src/transcript/apply.js';
 
 function file(path: string, add: number, del: number): DiffFile {
   return { path, add, del, hunks: [] };
@@ -19,6 +20,27 @@ function user(id: string): TranscriptItem {
 }
 
 describe('projectTurnDiff', () => {
+  it('retains the Host launch cwd through the actual transcript projection', () => {
+    const envelope = { session_id: 's', turn: 1, call_id: 'absolute', ts: 1000, event: 'file_change',
+      data: { cwd: '/repo/task', files: [{ path: '/repo/task/a.ts', added: 1, removed: 0 }] } };
+    const absolute = parseDiffUpdated(envelope)!;
+    const relative = parseDiffUpdated({ ...envelope, call_id: 'relative',
+      data: { cwd: '/repo/task', files: [{ path: 'a.ts', added: 1, removed: 0 }] } })!;
+    expect(absolute.cwd).toBe('/repo/task');
+    expect(projectTurnDiff([absolute, relative])?.files).toHaveLength(1);
+  });
+  it('merges absolute and relative paths under the same launch root without merging different roots', () => {
+    const items: TranscriptItem[] = [
+      { ...diff('absolute', 1, [file('/repo/task/src/a.ts', 2, 1)]), cwd: '/repo/task' },
+      { ...diff('relative', 1, [file('src/a.ts', 3, 1)]), cwd: '/repo/task' },
+      { ...diff('other-root', 1, [file('src/a.ts', 1, 0)]), cwd: '/repo/other' },
+    ];
+    const out = projectTurnDiff(items);
+    expect(out?.files).toHaveLength(2);
+    expect(out?.files[0]).toMatchObject({ path: 'src/a.ts', add: 5, del: 2 });
+    expect(projectTurnDiff([{ ...diff('literal-folder', 1, [file('a/source.ts', 1, 0)]), cwd: '/repo/task' }])?.files[0]?.path)
+      .toBe('a/source.ts');
+  });
   it('returns null when no turn produced a diff', () => {
     expect(projectTurnDiff([])).toBeNull();
     expect(projectTurnDiff([user('u1')])).toBeNull();

@@ -14,6 +14,7 @@ import {
   generateCanonicalId,
   generateUuidV7,
   parseRemoteMethodParams,
+  parseRemoteControlMessage,
   remoteStateSnapshotSchema,
   type StateSnapshotPart,
 } from '@gian/remote-protocol';
@@ -23,6 +24,7 @@ import {
   assertNoLeak,
   capRemoteTranscriptItems,
   remoteActionId,
+  remoteInteractionId,
   remoteStableUuid,
 } from '../src/remote/projection.js';
 import { hostServiceTier } from '../src/remote/command-adapter.js';
@@ -726,6 +728,98 @@ test('interaction.respond rejects unissued action ids and snapshot lists pending
   }
 });
 
+for (const [label, approvalId] of [
+  ['UUID', randomUUID()],
+  ['Provider', 'interaction_b229_computer_use'],
+] as const) {
+  test(`Remote interaction lifecycle maps ${label} ids and preserves Provider replies`, async (t) => {
+    const context = setupRemoteHarness();
+    try {
+      const device = seedDevice(context);
+      const session = await context.sessions.createSession({ workspace_id: context.workspaceId,
+        task_id: context.taskId, agent_id: 'agent-claude-review', type: 'subtask' });
+      const responses: Array<{ interactionId: string; actionId: string }> = [];
+      t.mock.method(context.proxy.client, 'respondInteraction', async (params: { interactionId: string; actionId: string }) => {
+        responses.push(params);
+      });
+      const asking = context.approvals.request({
+        sessionId: session.id, turnId: 'provider-turn-computer-use', category: 'command', risk: 'high',
+        description: 'Allow Computer Use to use "System Events"?', subject: 'Computer Use',
+        payload: { approvalId },
+        nativeOptions: [
+          { optionId: 'allow-system-events', label: 'Allow', kind: 'allow_once' },
+          { optionId: 'reject-system-events', label: 'Decline', kind: 'reject_once' },
+        ],
+      });
+      void asking.catch(() => undefined);
+      const refresh = () => context.runtime.commands.execute(device, command('state.refresh', {}));
+      const initial = await refresh();
+      assert.equal(initial.ok, true, initial.error?.message);
+      const snapshot = remoteStateSnapshotSchema.parse(initial.data);
+      const card = snapshot.interactions[0]!;
+      assert.equal(card.kind, 'native_choice');
+      assert.equal(card.id, remoteInteractionId(approvalId));
+      if (label === 'UUID') assert.equal(card.id, approvalId);
+      else assert.notEqual(card.id, approvalId);
+      assert.equal(card.presentation.actions[0]!.id, remoteActionId(approvalId, 'native:allow-system-events'));
+      const reconnected = remoteStateSnapshotSchema.parse((await refresh()).data);
+      assert.equal(reconnected.interactions[0]!.id, card.id);
+
+      const frames = context.runtime.replay.replayAfter(-1, context.runtime.replay.currentRevision);
+      assert.notEqual(frames, 'snapshot');
+      const messages = frames.map(frame => parseRemoteControlMessage(frame.message));
+      assert.ok(messages.some(message => message.type === 'event'
+        && message.event.kind === 'interaction.updated' && message.event.interaction.id === card.id));
+      assert.ok(messages.some(message => message.type === 'state.patch'
+        && message.patch.interactions?.upsert.some(item => item.id === card.id)));
+
+      const replyParams = { interaction_id: card.id, interaction_revision: card.revision,
+        action_id: card.presentation.actions[0]!.id };
+      const stale = await context.runtime.commands.execute(device, command('interaction.respond', {
+        ...replyParams, interaction_revision: '999',
+      }));
+      assert.equal(stale.error?.code, 'PRECONDITION_FAILED');
+      const forged = await context.runtime.commands.execute(device, command('interaction.respond', {
+        ...replyParams, action_id: randomUUID(),
+      }));
+      assert.equal(forged.error?.code, 'REMOTE_CAPABILITY_DENIED');
+      const unknown = await context.runtime.commands.execute(device, command('interaction.respond', {
+        ...replyParams, interaction_id: randomUUID(),
+      }));
+      assert.equal(unknown.error?.code, 'PRECONDITION_FAILED');
+      assert.equal(responses.length, 0);
+
+      const request = command('interaction.respond', replyParams);
+      const reply = await context.runtime.commands.execute(device, request);
+      assert.equal(reply.ok, true, reply.error?.message);
+      const result = REMOTE_METHOD_RESULTS['interaction.respond'].parse(reply.data);
+      assert.deepEqual(result, { interaction_id: card.id, revision: '1', resolved: true });
+      assert.equal(responses.length, 1);
+      assert.equal(responses[0]!.interactionId, approvalId);
+      assert.equal(responses[0]!.actionId, 'allow-system-events');
+      const persisted = context.db.prepare('SELECT interaction_id FROM proxy_interactions WHERE session_id = ?')
+        .get(session.id) as { interaction_id: string };
+      assert.equal(persisted.interaction_id, approvalId);
+
+      // Provider acknowledgement removes the pending Host record and broadcasts
+      // approval:updated; Remote must remove the exact card issued above.
+      context.approvals.resolve(approvalId, 'allow_once', 'tool');
+      await asking;
+      const after = context.runtime.replay.replayAfter(-1, context.runtime.replay.currentRevision);
+      assert.notEqual(after, 'snapshot');
+      assert.ok(after.map(frame => parseRemoteControlMessage(frame.message)).some(message => (
+        message.type === 'state.patch' && message.patch.interactions?.remove_ids.includes(card.id)
+      )));
+      assert.equal(remoteStateSnapshotSchema.parse((await refresh()).data).interactions.length, 0);
+      const retry = await context.runtime.commands.execute(device, { ...request, attempt_id: generateCanonicalId() });
+      assert.deepEqual(retry, reply);
+      const resolved = await context.runtime.commands.execute(device, command('interaction.respond', replyParams));
+      assert.equal(resolved.error?.code, 'PRECONDITION_FAILED');
+      assert.equal(responses.length, 1);
+    } finally { teardownRemoteHarness(context); }
+  });
+}
+
 test('session.page honors cursor and future command ids expire', async () => {
   const context = setupRemoteHarness();
   try {
@@ -992,6 +1086,7 @@ test('interaction.respond translates wire answer keys back to original question 
       risk: 'low',
       description: 'Claude is asking you a question',
       payload: {
+        approvalId: 'interaction_question_rollout',
         questions: [{
           question: questionText,
           multiSelect: false,
@@ -1003,9 +1098,7 @@ test('interaction.respond translates wire answer keys back to original question 
     const pending = context.approvals.listPending();
     assert.equal(pending.length, 1);
     const snapshot = await context.runtime.commands.execute(device, command('state.refresh', {}));
-    const interactions = (snapshot.data as {
-      interactions: Array<{ id: string; presentation: { inputs?: Array<{ id: string }> } }>;
-    }).interactions;
+    const interactions = remoteStateSnapshotSchema.parse(snapshot.data).interactions;
     assert.equal(interactions.length, 1);
     const wireInputId = interactions[0]!.presentation.inputs?.[0]?.id;
     assert.ok(wireInputId);
@@ -1019,8 +1112,8 @@ test('interaction.respond translates wire answer keys back to original question 
       return originalRespond(params as never);
     };
     const respond = await context.runtime.commands.execute(device, command('interaction.respond', {
-      interaction_id: pending[0]!.id,
-      interaction_revision: '0',
+      interaction_id: interactions[0]!.id,
+      interaction_revision: interactions[0]!.revision,
       action_id: remoteActionId(pending[0]!.id, 'submit_answers'),
       values: { [wireInputId]: 'Blue-green' },
     }));

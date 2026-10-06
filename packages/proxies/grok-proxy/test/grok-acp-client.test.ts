@@ -22,6 +22,7 @@ import {
 import {
   GROK_SPAWN_PREFIX,
   GrokAcpClient,
+  grokChildProcessEnv,
   type GrokAcpExit,
   type GrokAcpTransportFactory,
 } from '../src/runtime/grok-acp-client.js';
@@ -174,6 +175,19 @@ test('locks the Grok ACP argv prefix that disables MCP tools', () => {
   ]);
 });
 
+test('requested sandbox overrides an inherited GROK_SANDBOX', () => {
+  const env = grokChildProcessEnv({
+    PATH: '/usr/bin',
+    GROK_SANDBOX: 'off',
+    GROK_HOME: '/inherited',
+    GIAN_AGENT_HOME: '/served',
+  }, 'read-only');
+  assert.equal(env.GROK_SANDBOX, 'read-only');
+  assert.equal(env.GROK_DISABLE_AUTOUPDATER, '1');
+  assert.equal(env.GROK_HOME, '/served');
+  assert.equal(env.PATH, '/usr/bin');
+});
+
 test('requires an absolute managed binary path', () => {
   assert.throws(
     () => new GrokAcpClient({ binaryPath: 'grok', cwd: '/tmp' }),
@@ -227,6 +241,9 @@ test('negotiates ACP v1 without filesystem or terminal reverse capabilities', as
         writeTextFile: false,
       },
       terminal: false,
+    },
+    _meta: {
+      clientIdentifier: 'gian-grok-proxy',
     },
   });
 

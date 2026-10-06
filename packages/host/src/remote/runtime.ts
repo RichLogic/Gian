@@ -43,6 +43,7 @@ import {
   RemoteProjector,
   isRemoteSessionVisible,
   projectRemoteInteraction,
+  remoteInteractionId,
 } from './projection.js';
 import { RemoteReplayBuffer } from './replay-buffer.js';
 import { HttpRemoteServerAuthClient } from './server-client.js';
@@ -1044,7 +1045,7 @@ export class RemoteRuntime {
   private publishInteraction(interactionId: string, maybeResolved: boolean): void {
     const pending = this.sessions.getPendingApproval(interactionId);
     if (!pending) {
-      if (maybeResolved) this.publishRemove('interactions', interactionId);
+      if (maybeResolved) this.publishRemove('interactions', remoteInteractionId(interactionId));
       return;
     }
     if (!this.projector.isSessionIdVisible(pending.sessionId)) return;

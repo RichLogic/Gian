@@ -51,6 +51,27 @@ function notify(
 const OPTIONS = { uncertainTurnMessage: 'Turn interrupted — outcome uncertain.' };
 
 describe('projectSideChatSnapshot', () => {
+  it('ends a failed turn and releases only optimistic sends older than the terminal', () => {
+    const at = '2026-08-20T08:01:00.000Z';
+    const terminalTs = Date.parse(at);
+    const failedSnapshot = snapshot({ state: 'idle', events: [
+      notify('turn.started', {}, 'pt-1'),
+      notify('turn.failed', { error: { message: 'Runtime fenced' } }, 'pt-1', at),
+    ] });
+    const projected = projectSideChatSnapshot(failedSnapshot, 'kimi', OPTIONS);
+    expect(projected.some(item => item.kind === 'error')).toBe(true);
+    expect(projected.some(item => item.kind === 'turn-end')).toBe(true);
+    const echo: MsgItem = {
+      kind: 'user', id: 'optimistic:sc-1:send-old', text: 'unmatched input', exec: 'kimi',
+      ts: terminalTs - 1, turn: 0, pending: true,
+    };
+    expect(mergeSideChatEchoes(projected, [echo], failedSnapshot).at(-1))
+      .toMatchObject({ pending: false, failed: true });
+    expect(mergeSideChatEchoes(projected, [{ ...echo, ts: terminalTs + 1 }], failedSnapshot).at(-1))
+      .toMatchObject({ pending: true });
+    expect(mergeSideChatEchoes(projected, [echo], { ...failedSnapshot, state: 'running' }).at(-1))
+      .toMatchObject({ pending: true });
+  });
   it('preserves the ordered composer document for inline quote rendering', () => {
     const quote = {
       type: 'pastedText' as const,

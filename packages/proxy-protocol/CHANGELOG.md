@@ -1,5 +1,14 @@
 # Proxy Protocol Changelog
 
+## 1.0.2
+
+- Allow advertised interaction cancellation without supplying required answers;
+  submission and any supplied values remain strictly validated.
+- Preserve Side Chat sequence and active turns when resuming the same live
+  route. Reject changed parent, resume identity or immutable configuration.
+- Permit a new Runtime stream only after an explicit Side Chat runtime failure.
+- Supported wire versions and public exports remain unchanged.
+
 ## 1.0.1
 
 - Validate model-dependent Turn options against Session-scoped resolved Catalog

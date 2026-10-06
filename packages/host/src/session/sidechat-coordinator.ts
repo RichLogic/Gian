@@ -155,9 +155,10 @@ function configConditionsMatch(
 
 function dispatchableTurnConfig(record: SidechatRecord): Record<string, ConfigValue> {
   const result: Record<string, ConfigValue> = {};
+  const values = { ...record.sessionConfig, ...record.turnConfig };
   for (const option of record.turnConfigOptions) {
-    if (!configConditionsMatch(option.visibleWhen, record.turnConfig)
-      || !configConditionsMatch(option.enabledWhen, record.turnConfig)) continue;
+    if (!configConditionsMatch(option.visibleWhen, values)
+      || !configConditionsMatch(option.enabledWhen, values)) continue;
     const value = record.turnConfig[option.id];
     if (value !== undefined) result[option.id] = value;
   }
@@ -423,12 +424,29 @@ export class SidechatCoordinator {
     turnConfig?: Record<string, ConfigValue>,
   ): Promise<void> {
     const child = this.requireChildClient(sidechatId);
-    const record = turnConfig === undefined
+    let record = turnConfig === undefined
       ? this.store.get(sidechatId)
       : this.persistTurnConfigSnapshot(sidechatId, turnConfig);
     if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
-    this.store.appendUserInput(sidechatId, turnId, storedInput, contextItems, composerDocument);
     try {
+      // A fork may inherit a model-specific draft while the child connection
+      // has only the default-model Catalog. Resolve on the same live Proxy
+      // connection before its SDK validates turn.start. Side Chat ids cannot
+      // be used with ordinary Session methods, so use global model inspection.
+      if ((await child.initialize()).capabilities['catalog.resolve'] !== undefined) {
+        const catalog = await child.catalog();
+        const resolved = await child.resolveCatalog({
+          catalogRevision: catalog.catalogRevision,
+          sessionConfig: record.sessionConfig,
+          turnConfig: dispatchableTurnConfig(record),
+        }, 'global');
+        const options = inheritTurnOptionRoles(resolved.configOptions, record.turnConfigOptions);
+        const config = reconcileTurnConfig(options, record.turnConfig);
+        record = this.store.setTurnConfigCatalog(sidechatId, config, options, resolved.catalogRevision);
+        if (!record) throw requestViolation('SESSION_NOT_FOUND', `Side Chat ${sidechatId} was not found`);
+        this.broadcaster.broadcast({ type: 'sidechat:updated', sidechat: toPublicSidechat(record) });
+      }
+      this.store.appendUserInput(sidechatId, turnId, storedInput, contextItems, composerDocument);
       await child.startTurn({
         sessionId: sidechatId,
         turnId,

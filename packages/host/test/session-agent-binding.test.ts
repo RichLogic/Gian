@@ -430,7 +430,7 @@ test('failed Codex creation revokes the provisional identity and publishes no Se
   }
 });
 
-test('Session snapshots an immutable Runtime Profile and reuses its exact pair', async () => {
+test('legacy Session preserves its Runtime snapshot while resume selects the current Proxy', async () => {
   const agent = makeAgent({ proxy: 'codex', cliPath: '/agents/codex-current' });
   const profile: AgentRuntimeProfile = {
     id: 'profile-old',
@@ -484,7 +484,7 @@ test('Session snapshots an immutable Runtime Profile and reuses its exact pair',
       sessionId: session.id,
       executor: 'codex',
       cliPath: profile.cliPath,
-      proxyVersion: profile.proxyVersion,
+      proxyVersion: null,
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -854,7 +854,7 @@ test('ws session:create without agent_id and executor fails AGENT_REQUIRED', asy
   assert.equal(error?.request_type, 'session:create');
 });
 
-test('open Runtime Profile hydrates byte-for-byte and launch uses binding plugin version', async () => {
+test('open Runtime Profile hydrates byte-for-byte without treating its CLI version as a Proxy pin', async () => {
   const agent = makeAgent({ proxy: 'codex', cliPath: '/agents/codex-current' });
   const { dir, db, wsId, proxyMgr, sessions } = setup({
     agents: [agent],
@@ -906,7 +906,7 @@ test('open Runtime Profile hydrates byte-for-byte and launch uses binding plugin
       sessionId: session.id,
       executor: 'codex',
       cliPath: openProfile.path,
-      proxyVersion: '0.4.0',
+      proxyVersion: null,
     });
     assert.notEqual(proxyMgr.acquires.at(-1)?.proxyVersion, openProfile.version);
 
@@ -1004,7 +1004,7 @@ test('exact binding wins over a conflicting runtime_profile column and identity 
       sessionId: session.id,
       executor: 'codex',
       cliPath: '/opt/binding/bin',
-      proxyVersion: '0.4.0',
+      proxyVersion: null,
     });
 
     const other = await sessions.createSession({ workspace_id: wsId, agent_id: agent.id });

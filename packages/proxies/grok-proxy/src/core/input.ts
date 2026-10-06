@@ -110,3 +110,38 @@ export async function toPromptBlocks(input: InputItem[]): Promise<ContentBlock[]
 export function firstText(input: InputItem[]): string {
   return input.find((item): item is Extract<InputItem, { type: 'text' }> => item.type === 'text')?.text ?? '';
 }
+
+/** Text and images the native interject request accepts. Files are rejected. */
+export async function toInterjectPayload(input: InputItem[]): Promise<{
+  text: string;
+  content: Array<Record<string, unknown>>;
+}> {
+  const texts: string[] = [];
+  const content: Array<Record<string, unknown>> = [];
+  for (const item of input) {
+    if (item.type === 'text') {
+      texts.push(item.text);
+      content.push({ type: 'text', text: item.text });
+      continue;
+    }
+    if (item.type === 'localFile') {
+      throw createAppError(
+        400,
+        'CAPABILITY_NOT_SUPPORTED',
+        'Steer accepts text and images only. File attachments are rejected.',
+      );
+    }
+    const mimeType = inferImageMime(item.path, item.mimeType);
+    if (!mimeType) {
+      throw createAppError(400, 'INVALID_IMAGE_TYPE', `Cannot infer an image MIME type for ${item.path}.`);
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(item.path);
+    } catch (error) {
+      throw createAppError(400, 'IMAGE_READ_FAILED', `Could not read local image ${item.path}: ${String(error)}`);
+    }
+    content.push({ type: 'image', data: bytes.toString('base64'), mimeType });
+  }
+  return { text: texts.join('\n'), content };
+}

@@ -50,8 +50,14 @@ function startV2Proxy(environment: NodeJS.ProcessEnv = {}) {
   };
 }
 
-test('Grok CLI negotiates gian.proxy/2.1 independently from its ACP runtime version', async () => {
+test('Grok CLI negotiates gian.proxy/2.1 independently from its ACP runtime version', async t => {
   const proxy = startV2Proxy();
+  t.after(async () => {
+    if (proxy.child.exitCode !== null || proxy.child.signalCode !== null) return;
+    proxy.send({ jsonrpc: '2.0', id: 'cleanup', method: 'shutdown', params: {} });
+    await Promise.race([waitForExit(proxy.child), new Promise<void>(resolveTimeout => setTimeout(resolveTimeout, 1000))]);
+    if (proxy.child.exitCode === null && proxy.child.signalCode === null) proxy.child.kill();
+  });
   proxy.send({
     jsonrpc: '2.0',
     id: 'req-1',
@@ -66,14 +72,22 @@ test('Grok CLI negotiates gian.proxy/2.1 independently from its ACP runtime vers
   const result = initializeResultSchema.parse(initialized.result);
   assert.equal(result.protocol.version, '2.1');
   assert.equal(result.plugin.id, 'grok');
-  assert.equal(result.plugin.version, '0.3.6');
+  const manifest = JSON.parse(await readFile('manifest.json', 'utf8')) as { pluginVersion: string };
+  assert.equal(result.plugin.version, manifest.pluginVersion);
   assert.equal(result.process.scope, 'session');
   assert.equal(result.capabilities.interaction, 1);
-  // Live 1.0.41 stdio registers no x.ai/* methods and initialize cannot
-  // probe them, so the Proxy honestly declares nothing here.
+  // The fake runtime answers the interject probe with session-not-found on
+  // the prefixed wire, so steer is advertised. Rename and delete stay off.
   assert.equal(result.capabilities['session.native.delete'], undefined);
-  assert.equal(result.capabilities['turn.steer'], undefined);
+  assert.equal(result.capabilities['turn.steer'], 1);
   assert.equal(result.capabilities['slash.list'], undefined);
+  // Fork and Side Chat are declared unconditionally; the catalog actions
+  // carry the dynamic support state and the first head fork confirms native
+  // x.ai/session/fork. The Host refuses undeclared capabilities before any
+  // request, so an undeclared fork could never confirm itself.
+  assert.equal(result.capabilities['sidechat'], 1);
+  assert.equal(result.capabilities['session.fork'], 1);
+  assert.equal(result.capabilities['session.fork.atTurn'], 1);
   // Host Streamable HTTP MCP injection is supported as of this Proxy version.
   assert.equal(result.capabilities['integration.mcp.streamableHttp'], 1);
 
@@ -97,6 +111,25 @@ test('Grok CLI negotiates gian.proxy/2.1 independently from its ACP runtime vers
 
   proxy.send({ jsonrpc: '2.0', id: 'req-4', method: 'shutdown', params: {} });
   assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-4', result: { ok: true } });
+  assert.equal(await waitForExit(proxy.child), 0);
+});
+
+test('turn.steer stays undeclared when the prefixed interject probe is method-not-found', async () => {
+  const proxy = startV2Proxy({ GROK_TEST_EXT_METHODS: 'none' });
+  proxy.send({
+    jsonrpc: '2.0',
+    id: 'req-1',
+    method: 'initialize',
+    params: {
+      protocol: { name: 'gian.proxy', versions: ['2.1'] },
+      host: { name: 'Gian', version: '9.9.9' },
+    },
+  });
+  const initialized = await proxy.next() as { id: string; result: unknown };
+  const result = initializeResultSchema.parse(initialized.result);
+  assert.equal(result.capabilities['turn.steer'], undefined);
+  proxy.send({ jsonrpc: '2.0', id: 'req-2', method: 'shutdown', params: {} });
+  assert.deepEqual(await proxy.next(), { jsonrpc: '2.0', id: 'req-2', result: { ok: true } });
   assert.equal(await waitForExit(proxy.child), 0);
 });
 
@@ -185,7 +218,9 @@ test('Grok runtime uses the locked ACP command and forces the workspace sandbox'
   const permission = catalog.result?.configOptions?.find(option => option.id === 'permission_mode');
   assert.equal(catalog.result?.specialCatalogs?.approvalMode, 'permission_mode');
   assert.equal(permission?.role, undefined);
-  assert.equal(permission?.binding, 'session');
+  assert.equal(permission?.binding, 'turn');
+  const sandbox = catalog.result?.configOptions?.find(option => option.id === 'sandbox_profile');
+  assert.equal(sandbox?.binding, 'session');
   assert.deepEqual(permission?.choices?.map(choice => choice.value), ['default', 'auto', 'always_approve']);
   const recorded = JSON.parse(await readFile(recordPath, 'utf8')) as {
     argv: string[];
@@ -360,7 +395,7 @@ test('Grok CLI lists native sessions and rejects session-bound turn config', asy
         streamId: created.result?.session?.streamId,
         turnId: 'turn-bind',
         input: [{ type: 'text', text: 'ping' }],
-        config: { model: 'grok-4.6' },
+        config: { sandbox_profile: 'workspace' },
       },
     });
     const rejected = proxyErrorResponseSchema.parse(await proxy.nextResult('req-5'));

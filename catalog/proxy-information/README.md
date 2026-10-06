@@ -11,8 +11,9 @@
 | Kimi Code | [基本信息](kimi/basic.md) | [中文](kimi/tutorial.md) / [English](kimi/tutorial.en.md) | [版本更新](kimi/changelog.md) |
 | DeepSeek Harness | [基本信息](ai.deepseek.harness/basic.md) | [中文](ai.deepseek.harness/tutorial.md) / [English](ai.deepseek.harness/tutorial.en.md) | [版本更新](ai.deepseek.harness/changelog.md) |
 | ZCode | [基本信息](com.zhipu.zcode/basic.md) | [中文](com.zhipu.zcode/tutorial.md) / [English](com.zhipu.zcode/tutorial.en.md) | [版本更新](com.zhipu.zcode/changelog.md) |
+| Grok Build | [基本信息](grok/basic.md) | [中文](grok/tutorial.md) / [English](grok/tutorial.en.md) | [版本更新](grok/changelog.md) |
 
-先读 Claude 的完整流程，再看 DSH 的依赖关系和 ZCode 的外部 App 例外。五份教程均按同样的九个章节组织，但能力、运行方式和限制按各自实现撰写，不套同一份能力说明。
+先读 Claude 的完整流程，再看 DSH 的依赖关系、ZCode 的外部 App 例外与 Grok 的会话级 Runtime。六份教程均按同样的九个章节组织，但能力、运行方式和限制按各自实现撰写，不套同一份能力说明。
 
 ## 这份稿件的边界
 
@@ -21,7 +22,7 @@
 - 发布组合快照使用已发布的 Proxy 认证记录，并保留上一份签名 Catalog 的未更新组合，不表示这台机器已经安装该 Runtime。
 - 版本历史合并同版本的新旧仓库分发，不把迁移当成新的 Proxy 版本。已撤回的 0.4.0 不作为可用版本。
 - 旧 Release 多数只有整仓库比较链接，不能当作某个 Proxy 的详细变更记录。历史版本的发布日期、协议、CLI 声明均有证据；无法准确归因的功能变更明确标为未记录，不能补写想象中的“新增/修复”。
-- Grok 仍为 shipping=false，不混入当前五个公开 Integration 的教程。它需要单独完成准入后再加入。
+- Grok 0.3.5 已完成独立准入；Catalog 只声明 Grok CLI 1.0.41 真实 stdio 暴露的能力。
 
 ## 审阅重点
 
@@ -33,7 +34,7 @@
 
 ## 给实现与发布使用的文件
 
-- `localizations.json`：五个 Proxy 的中英文名称与简介。`tutorial.md` 是中文，`tutorial.en.md` 是英文；`history-copy.en.json` 维护历史说明的英文翻译，日期、版本、摘要与证据仍只来自原 `changelog.json`。
+- `localizations.json`：六个 Proxy 的中英文名称与简介。`tutorial.md` 是中文，`tutorial.en.md` 是英文；`history-copy.en.json` 维护历史说明的英文翻译，日期、版本、摘要与证据仍只来自原 `changelog.json`。
 - 双语编译输出增加签名资产 `catalog-localizations-v1.json` 和 `docs/<pluginId>/<locale>/*.md`，不改变旧 v1 索引字段。Gian 根据界面语言选 `en` 或 `zh-CN`，文档 URL 和缓存按语言隔离；旧 Catalog 没有双语资产时保留其原始内容，不伪造翻译。
 - [信息与发布合同](CONTRACT.md)：字段来源、三段展示、校验规则、旧数据迁移和验收要求。
 - 每个 Proxy 的 changelog.json：唯一的结构化历史内容源；changelog.md 是便于审阅的投影，不应独立维护两份历史。
@@ -45,6 +46,6 @@
 
 发布时复制 official-source 到临时目录，再由本目录生成四份正文，覆盖旧占位内容；不在旧 strict schema 中加入新字段。完整历史的维护索引仍为 changelog.json，当前签名资产只承载其 Markdown 投影，不冒充已经支持新的 wire-level release index。basic.md、CONTRACT.md 和 evidence 是维护与审阅材料，不作为用户机器的基本信息发布。
 
-历史编号有空缺时不补造未发布版本。本稿列出 50 个唯一版本、53 次公开分发；其中 28 个旧版本尚不足以恢复完整的功能变更说明，均显式保留证据边界。
+历史编号有空缺时不补造未发布版本。本稿列出 52 个唯一版本、55 次公开分发；其中 28 个旧版本尚不足以恢复完整的功能变更说明，均显式保留证据边界。
 
 校验器默认只读；显式传 --render 才从 changelog.json 重新生成 changelog.md。依赖复用仓库已锁定的 SemVer 与 Markdown parser，不需要新增一套依赖版本。

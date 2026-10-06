@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import { generateCanonicalId, executionSyncResultSchema, type ExecutionSession } from '@gian/remote-protocol';
 import type { EventEnvelope } from '@gian/shared';
 import { RemoteExecutionBindings } from '../src/remote/execution-bindings.js';
-import { RemoteExecutionReplicas } from '../src/remote/execution-journal.js';
+import { RemoteExecutionJournal, RemoteExecutionReplicas } from '../src/remote/execution-journal.js';
 import { remoteHistoryEvent } from '../src/remote/controller-hub.js';
-import { remoteStableUuid } from '../src/remote/projection.js';
+import { remoteInteractionId, remoteStableUuid } from '../src/remote/projection.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 
 test('exported executions belong to Repos, not remote Tasks, and another same-account device can resume history', async () => {
@@ -61,17 +61,32 @@ test('replicas persist contiguous history, real interaction resolution, and reje
     const device = f.runtime.devices.get(seeded.id)!;
     const remote = await f.sessions.createSession({ workspace_id: f.workspaceId, agent_id: 'agent-claude-review' });
     f.runtime.executions.register(remote.id, device);
-    const approvalId = generateCanonicalId();
+    const approvalId = 'interaction_b229_history';
+    const wireId = remoteInteractionId(approvalId);
+    const asking = f.approvals.request({ sessionId: remote.id, turnId: 'provider-turn-history', turnNumber: 1,
+      category: 'command', description: 'Write result.txt', risk: 'high', payload: { approvalId } });
+    void asking.catch(() => undefined);
     const event: EventEnvelope = { session_id: remote.id, turn: 1, call_id: approvalId, ts: Date.now(),
       event: 'approval_requested', data: {}, display: { type: 'interaction.approval', data: {
         approvalId, title: 'Write file', category: 'command', description: 'Write result.txt', risk: 'low', scopeOptions: ['once'],
       } } };
     f.runtime.executions.append(event);
+    const pending = f.runtime.executions.sync(device, { session_id: remote.id, after: 0 });
+    assert.equal(pending.interactions[0]?.id, wireId);
+    assert.ok('interaction' in pending.events[0]!);
+    assert.equal(pending.events[0].interaction.id, wireId);
+    f.approvals.resolve(approvalId, 'decline', 'tool');
+    await asking;
     f.runtime.executions.append({ ...event, event: 'approval_resolved', display: { type: 'interaction.resolved',
       data: { approvalId, decision: 'decline', auto: false } } });
-    const data = f.runtime.executions.sync(device, { session_id: remote.id, after: 0 });
+    // Recreate the journal to prove persisted source ids need no alias cache.
+    const data = new RemoteExecutionJournal(f.db, f.sessions, f.runtime.projector)
+      .sync(device, { session_id: remote.id, after: 0 });
+    assert.equal(data.interactions.length, 0);
     assert.ok('interaction' in data.events[0]!);
     assert.ok('resolution' in data.events[1]!);
+    assert.equal(data.events[0].interaction.id, wireId);
+    assert.equal(data.events[1].resolution.interaction_id, wireId);
     const localId = generateCanonicalId();
     f.db.prepare('INSERT INTO sessions (id, executor, native_session_id, task_id) VALUES (?, ?, ?, ?)')
       .run(localId, 'claude', generateCanonicalId(), f.taskId);
@@ -88,7 +103,10 @@ test('replicas persist contiguous history, real interaction resolution, and reje
     const history = new RemoteExecutionReplicas(f.db).items(localId).map(entry => remoteHistoryEvent(localId, entry));
     assert.equal(history[0]?.display?.type, 'interaction.approval');
     assert.equal(history[1]?.display?.type, 'interaction.resolved');
-    if (history[1]?.display?.type === 'interaction.resolved') assert.equal(history[1].display.data.decision, 'decline');
+    if (history[0]?.display?.type === 'interaction.approval' && history[1]?.display?.type === 'interaction.resolved') {
+      assert.equal(history[1].display.data.decision, 'decline');
+      assert.equal(history[1].display.data.approvalId, history[0].display.data.approvalId);
+    }
     assert.throws(() => replicas.apply(binding, { ...data, session: { ...data.session, id: generateCanonicalId() } }), /cross-session/);
     assert.throws(() => replicas.apply(binding, { ...data, events: [], cursor: 0 }), /stale history/);
     assert.throws(() => replicas.apply(binding, { ...data, stream_id: generateCanonicalId() }), /stream changed/);

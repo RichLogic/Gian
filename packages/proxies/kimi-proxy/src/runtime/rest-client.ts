@@ -91,15 +91,23 @@ export class KimiServerRestClient {
     if (options.json !== undefined) init.body = JSON.stringify(options.json);
     else if (options.body !== undefined) init.body = new Uint8Array(options.body);
     let response: Response;
+    let raw: string;
     try {
       response = await fetch(this.url(path, options.query), init);
+      // The deadline covers the response body too: a stalled stream must not
+      // wait forever after the headers have arrived.
+      raw = await response.text();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new KimiTransportError(`Kimi server request ${method} ${path} failed: ${message}`, error);
+      throw new KimiTransportError(
+        controller.signal.aborted
+          ? `Kimi server request ${method} ${path} timed out after ${timeoutMs}ms.`
+          : `Kimi server request ${method} ${path} failed: ${message}`,
+        error,
+      );
     } finally {
       clearTimeout(timer);
     }
-    const raw = await response.text().catch(() => '');
     let envelope: Envelope<T> | null = null;
     try {
       envelope = raw === '' ? null : JSON.parse(raw) as Envelope<T>;
@@ -114,7 +122,18 @@ export class KimiServerRestClient {
         httpStatus: response.status,
       });
     }
-    if (envelope.code !== 0) {
+    // kap-server 2.1.1 reports a successful :dismiss as QUESTION_DISMISSED
+    // (40909), not code 0. The official client permits this only for dismiss;
+    // answering an already-dismissed question with the same code is an error.
+    const data = envelope.data as unknown;
+    const dismissed = response.ok && method === 'POST'
+      && /^\/api\/v1\/sessions\/[^/]+\/questions\/[^/:]+:dismiss$/.test(path)
+      && envelope.code === 40909
+      && typeof data === 'object' && data !== null
+      && (data as { dismissed?: unknown }).dismissed === true
+      && typeof (data as { dismissed_at?: unknown }).dismissed_at === 'string'
+      && Number.isFinite(Date.parse((data as { dismissed_at: string }).dismissed_at));
+    if (envelope.code !== 0 && !dismissed) {
       throw new KimiApiError({
         code: envelope.code,
         msg: envelope.msg,

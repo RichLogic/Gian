@@ -14,6 +14,21 @@ export interface CreateAgentDialogInput {
   pluginId: string;
   name: string;
   home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  /** ADR-0094: present only for Custom integrations; the Host probes the path
+   *  before persisting the Agent. */
+  runtime?: { kind: 'custom'; path: string };
+}
+
+/** Sentinel value of the Integration <select> for the Custom mode (ADR-0094):
+ *  the user supplies the Runtime and HOME; the Proxy stays an installed
+ *  Integration. Never a real pluginId. */
+export const CUSTOM_INTEGRATION = '__custom__';
+
+/** Field-scoped create errors, keyed by the input that caused them. The Host
+ *  error codes map here: RUNTIME_* → runtime, AGENT_HOME_* → home. */
+export interface AgentDialogFieldErrors {
+  runtime?: string;
+  home?: string;
 }
 
 function nextAgentName(base: string, agents: UserAgentStatus[]): string {
@@ -27,41 +42,70 @@ function nextAgentName(base: string, agents: UserAgentStatus[]): string {
 
 export function AgentDialog({
   integrations,
+  customIntegrations = integrations,
   agents,
   initialPluginId,
   busy,
   error,
+  fieldErrors,
   onPickHome,
+  onPickRuntime,
   onSubmit,
   onClose,
 }: {
   integrations: ProxyCatalogItem[];
+  customIntegrations?: ProxyCatalogItem[];
   agents: UserAgentStatus[];
   initialPluginId?: string;
   busy: boolean;
   error: string;
+  fieldErrors?: AgentDialogFieldErrors;
   onPickHome: () => Promise<string | null>;
+  onPickRuntime: () => Promise<string | null>;
   onSubmit: (input: CreateAgentDialogInput) => void;
   onClose: () => void;
 }) {
   const t = useT();
-  const initial = integrations.some(item => item.pluginId === initialPluginId)
+  const initial = initialPluginId === CUSTOM_INTEGRATION
+    || integrations.some(item => item.pluginId === initialPluginId)
     ? initialPluginId!
-    : integrations[0]?.pluginId ?? '';
+    : integrations[0]?.pluginId ?? CUSTOM_INTEGRATION;
   const [pluginId, setPluginId] = useState(initial);
   const [homeMode, setHomeMode] = useState<'default' | 'managed' | 'custom'>('managed');
   const [customHome, setCustomHome] = useState('');
   const [defaultHome, setDefaultHome] = useState('');
   const [homeSupported, setHomeSupported] = useState(true);
   const [checkingHome, setCheckingHome] = useState(false);
+  // Custom mode (ADR-0094): the Proxy is one of the installed Integrations;
+  // Runtime/HOME are user-provided paths. Typed paths survive a Proxy switch
+  // (owner design 2026-09-30) — they are re-validated on submit instead.
+  const [customProxyId, setCustomProxyId] = useState(customIntegrations[0]?.pluginId ?? '');
+  const [runtimePath, setRuntimePath] = useState('');
+
+  const isCustom = pluginId === CUSTOM_INTEGRATION;
 
   useEffect(() => {
+    if (pluginId === CUSTOM_INTEGRATION) return;
     if (integrations.some(item => item.pluginId === pluginId)) return;
-    setPluginId(integrations[0]?.pluginId ?? '');
+    setPluginId(integrations[0]?.pluginId ?? CUSTOM_INTEGRATION);
   }, [integrations, pluginId]);
 
   useEffect(() => {
+    if (customProxyId && customIntegrations.some(item => item.pluginId === customProxyId)) return;
+    setCustomProxyId(customIntegrations[0]?.pluginId ?? '');
+  }, [customIntegrations, customProxyId]);
+
+  useEffect(() => {
     let alive = true;
+    // Custom mode keeps the typed HOME across Proxy switches; the
+    // managed/default radios only exist for plain Integrations.
+    if (isCustom) {
+      setHomeMode('managed');
+      setDefaultHome('');
+      setHomeSupported(true);
+      setCheckingHome(false);
+      return () => { alive = false; };
+    }
     setHomeMode('managed');
     setCustomHome('');
     setDefaultHome('');
@@ -84,16 +128,30 @@ export function AgentDialog({
       .catch(() => { if (alive) setHomeSupported(true); })
       .finally(() => { if (alive) setCheckingHome(false); });
     return () => { alive = false; };
-  }, [pluginId]);
+  }, [pluginId, isCustom]);
 
-  const selected = integrations.find(item => item.pluginId === pluginId) ?? null;
+  const selected = isCustom
+    ? customIntegrations.find(item => item.pluginId === customProxyId) ?? null
+    : integrations.find(item => item.pluginId === pluginId) ?? null;
+  const customRuntimeValid = runtimePath.trim().startsWith('/');
+  const customHomeValid = customHome.trim().startsWith('/');
   const customValid = homeMode !== 'custom' || customHome.trim().length > 0;
   const defaultHomeInUse = agents.some(agent => agent.home?.path === defaultHome);
   const createDisabled = busy || checkingHome || !selected || !customValid
-    || (homeMode === 'default' && (!defaultHome || defaultHomeInUse));
+    || (isCustom && (!customRuntimeValid || !customHomeValid))
+    || (!isCustom && homeMode === 'default' && (!defaultHome || defaultHomeInUse));
 
   function create() {
     if (createDisabled || !selected) return;
+    if (isCustom) {
+      onSubmit({
+        pluginId: selected.pluginId,
+        name: nextAgentName(selected.displayName, agents),
+        home: { kind: 'custom', path: customHome.trim() },
+        runtime: { kind: 'custom', path: runtimePath.trim() },
+      });
+      return;
+    }
     onSubmit({
       pluginId: selected.pluginId,
       name: nextAgentName(selected.displayName, agents),
@@ -111,9 +169,11 @@ export function AgentDialog({
         <div className="field">
           <div className="field-lbl">
             <span>{t('agents.integration')}</span>
-            <span className="field-hint">{t('agents.add.dialog.installedOnly')}</span>
+            <span className="field-hint">{t(isCustom
+              ? 'agents.add.dialog.customHint'
+              : 'agents.add.dialog.installedOnly')}</span>
           </div>
-          {integrations.length > 0 ? (
+          {integrations.length > 0 || customIntegrations.length > 0 ? (
             <select
               className="select"
               aria-label={t('agents.integration')}
@@ -125,6 +185,7 @@ export function AgentDialog({
               {integrations.map(item => (
                 <option key={item.pluginId} value={item.pluginId}>{item.displayName}</option>
               ))}
+              <option value={CUSTOM_INTEGRATION}>{t('agents.add.dialog.custom')}</option>
             </select>
           ) : (
             <p className="s2-help">{t('agents.add.dialog.noneInstalled')}</p>
@@ -137,12 +198,74 @@ export function AgentDialog({
           )}
         </div>
 
+        {isCustom && (
+          <>
+            <div className="field">
+              <div className="field-lbl">
+                <span>{t('agents.add.dialog.customProxy')}</span>
+                <span className="field-hint">{t('agents.add.dialog.customProxyHint')}</span>
+              </div>
+              <select
+                className="select"
+                aria-label={t('agents.add.dialog.customProxy')}
+                value={customProxyId}
+                disabled={busy}
+                onChange={event => setCustomProxyId(event.target.value)}
+              >
+                {customIntegrations.map(item => (
+                  <option key={item.pluginId} value={item.pluginId}>{item.displayName}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="field">
+              <div className="field-lbl">
+                <span>{t('agents.add.dialog.runtimePath')}</span>
+                <span className="field-hint">{t('agents.add.dialog.runtimePathHint')}</span>
+              </div>
+              <div className="wsn-row">
+                <input className="input mono" aria-label={t('agents.add.dialog.runtimePath')}
+                       value={runtimePath} disabled={busy}
+                       placeholder="/absolute/path/to/runtime"
+                       onChange={event => setRuntimePath(event.target.value)}
+                       onKeyDown={event => { if (event.key === 'Enter') create(); }} />
+                <button type="button" className="btn sm secondary" disabled={busy}
+                        onClick={() => { void onPickRuntime().then(path => {
+                          if (path) setRuntimePath(path);
+                        }); }}>
+                  {t('settings.agents.browse')}
+                </button>
+              </div>
+              {fieldErrors?.runtime && <p className="field-error" role="alert">{fieldErrors.runtime}</p>}
+            </div>
+          </>
+        )}
+
         <div className="field">
           <div className="field-lbl">
             <span>HOME Path</span>
-            <span className="field-hint">{t('agents.add.dialog.homeFixed')}</span>
+            <span className="field-hint">{t(isCustom
+              ? 'agents.add.dialog.customHomeHint'
+              : 'agents.add.dialog.homeFixed')}</span>
           </div>
-          {!homeSupported ? (
+          {isCustom ? (
+            <>
+              <div className="wsn-row">
+                <input className="input mono" aria-label="HOME Path"
+                       value={customHome} disabled={busy}
+                       placeholder="/absolute/path/to/home"
+                       onChange={event => setCustomHome(event.target.value)}
+                       onKeyDown={event => { if (event.key === 'Enter') create(); }} />
+                <button type="button" className="btn sm secondary" disabled={busy}
+                        onClick={() => { void onPickHome().then(path => {
+                          if (path) setCustomHome(path);
+                        }); }}>
+                  {t('settings.agents.browse')}
+                </button>
+              </div>
+              {fieldErrors?.home && <p className="field-error" role="alert">{fieldErrors.home}</p>}
+            </>
+          ) : !homeSupported ? (
             <input className="input" aria-label="HOME Path"
                    value={t('agents.home.external')} disabled />
           ) : (

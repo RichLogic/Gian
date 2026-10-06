@@ -6,10 +6,9 @@ source export, not a copy of private Git history.
 
 ## Contents
 
-- Claude, Codex, Kimi, DSH and ZCode shipping Proxies, each independently versioned.
+- Claude, Codex, Kimi, Grok, DSH and ZCode shipping Proxies, each independently versioned.
 - Release versions come from each Proxy package on GianDev main. Export does
   not assign a repository-wide version or automatically bump Proxy versions.
-- Grok source remains non-shipping. Its presence does not authorize a release.
 - DSH Proxy includes its exact Bridge rather than relying on an App-bundled copy.
 - Catalog source, Markdown documentation, logos, compiler and signing workflows.
 - Exact public `@gian/proxy-protocol` archive dependency from RichLogic/Gian.

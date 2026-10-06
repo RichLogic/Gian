@@ -82,6 +82,11 @@ export interface RemoteProjectionDeps {
   workspacePath?: (sessionId: string) => string | null;
 }
 
+/** Stable wire identity; Host and Provider records keep their original ids. */
+export function remoteInteractionId(interactionId: string): string {
+  return remoteStableUuid('interaction', interactionId);
+}
+
 export function remoteActionId(interactionId: string, key: string): string {
   return remoteStableUuid('action', `${interactionId}:${key}`);
 }
@@ -147,7 +152,7 @@ export function projectRemoteInteraction(record: ApprovalRecord, revision: strin
       tone: decision === 'decline' || decision === 'keep_planning' ? 'danger' as const : 'default' as const,
     }));
   return {
-    id: record.id,
+    id: remoteInteractionId(record.id),
     revision,
     session_id: record.sessionId,
     turn_id: UUID_RE.test(record.turnId) ? record.turnId : remoteStableUuid('turn', record.turnId),

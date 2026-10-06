@@ -2,7 +2,29 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.2**，Runtime **0.16.5**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.4.2**，Runtime **0.16.9**。这是发布目标，不表示当前机器已安装。
+
+## 0.4.2
+
+首次公开发布：2026-09-26T14:05:47Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.2)：2026-09-26T14:05:47Z。
+- 对应 CLI：0.16.9（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 保持 ZCode CLI 0.16.9 的固定源码与能力，仅缩短托管 Runtime 资产名，使官方 GitHub CDN 重定向符合 Gian 0.6.3 的 URL 长度边界。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.2) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.4.2/packages/proxies/zcode-proxy/README.md)
+
+## 0.4.1
+
+首次公开发布：2026-09-26T12:21:03Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.1)：2026-09-26T12:21:03Z。
+- 对应 CLI：0.16.9（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 改为从固定上游源码构建并托管 ZCode CLI 0.16.9，提供模型目录、文件与图片输入、Steer、Fork、结构化交互和原生事件。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.1) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.4.1/packages/proxies/zcode-proxy/README.md)
 
 ## 0.3.2
 
@@ -86,4 +108,4 @@
 
 ## 已撤回版本
 
-0.4.0 已于 2026-09-20 撤回，不进入可用版本列表。仓库拆分不构成统一升级所有 Proxy 版本的理由。
+- 0.4.0：2026-09-20 已撤回，不可安装。[依据](https://github.com/RichLogic/Gian-Proxies/blob/51dc9e3ac2aa8a1430abf353b898de2e0df6f1d2/CHANGELOG.md)

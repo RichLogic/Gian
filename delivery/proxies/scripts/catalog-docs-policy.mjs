@@ -8,7 +8,7 @@ export function selectReleaseDefinitions(definitions, selection) {
     || !/^catalog-v1\.[1-9][0-9]*\.0$/.test(selection.baseCatalogTag ?? '')) {
     throw new Error('Invalid explicit Proxy release selection or signed base Catalog');
   }
-  return shipping.filter(item => selection.providers.includes(item.id));
+  return selection.providers.map(id => shipping.find(item => item.id === id));
 }
 
 export function assertSelectedCatalogExecutables(previous, next, selectedIds) {

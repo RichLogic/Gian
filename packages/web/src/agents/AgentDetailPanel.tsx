@@ -388,6 +388,27 @@ export function AgentDetailPanel({
       <div className="p2-body">
         {errorNotice}
 
+        {agent.runtime?.kind === 'custom' && (
+          <section className="ag-sec">
+            <span className="s2-subhead">
+              {t('agents.detail.customRuntime')}
+              <HelpHint text={t('agents.detail.customRuntimeHelp')} />
+            </span>
+            <div className="sec-line">
+              <span className="rt-line">
+                <span className="mono cli-path-val" data-testid="agent-runtime-path">
+                  {agent.runtime.path}
+                </span>
+              </span>
+            </div>
+            {agent.cli.state !== 'ready' && (
+              <p className="field-error" role="alert">
+                {agent.cli.readinessIssue?.message ?? agent.cli.error ?? t('agents.detail.customRuntimeInvalid')}
+              </p>
+            )}
+          </section>
+        )}
+
         <section className="ag-sec">
           <span className="s2-subhead">
             {externalHome ? t('agents.home.state') : 'HOME'}

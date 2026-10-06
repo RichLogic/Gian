@@ -1,26 +1,12 @@
 /**
- * Native `x.ai/*` extension-method support detection for the stdio
- * `grok agent` runtime.
+ * Native `x.ai/*` extension-method support for one stdio attach.
  *
- * Live verification against the published 1.0.41 binary (2026-09-25) showed
- * that its stdio surface registers NONE of the `x.ai/*` extension request
- * methods the source tree carries handlers for: `x.ai/interject`,
- * `x.ai/session/rename`, `x.ai/session/fork`, `x.ai/session/usage`,
- * `x.ai/skills/list`, and `x.ai/mcp/list` all answer JSON-RPC -32601
- * "Method not found" — before and after `session/new`. The initialize
- * metadata (`_meta.grokShell`, `_meta.agentVersion`, `agentCapabilities`)
- * advertises no per-method extension surface either, so a version floor
- * proves nothing: `agentVersion >= 1.0.0` was sufficient for the source but
- * not for the shipped binary.
- *
- * Policy (honest by default):
- *  - Every method starts `unknown` and `supports()` reports false until the
- *    runtime POSITIVELY confirms it on this attach.
- *  - A method is confirmed by a successful call and refuted by a -32601
- *    "Method not found" response. A refuted method fails fast for the rest
- *    of the attach instead of repeating the live misreport.
- *  - A future upstream contract that advertises per-method support in
- *    initialize metadata can pre-confirm through `advertise()`.
+ * Custom methods travel as `_x.ai/...`. A bare `x.ai/...` request is not
+ * evidence that the runtime lacks the method. `grokShell` and
+ * `agentVersion` do not confirm a method. `supports()` stays false until
+ * this attach confirms it. Only a JSON-RPC -32601 on the prefixed wire
+ * refutes it. Timeouts, auth failures, and parameter errors leave the
+ * method unknown.
  */
 
 export type GrokExtMethodState = 'unknown' | 'confirmed' | 'refuted';
@@ -130,9 +116,8 @@ export function extensionSupportFromInitialize(
     ? record.agentVersion.trim()
     : null;
   const support = new LiveExtensionSupport(grokShell, agentVersion);
-  // Future upstream contract: an explicit per-method surface advertisement in
-  // initialize _meta pre-confirms those methods. 1.0.41 publishes none, so
-  // this stays silent for it.
+  // An explicit per-method list in initialize _meta can pre-confirm. The
+  // published stdio metadata does not include one, so this stays silent.
   const advertised = record['x.ai/extMethods'];
   if (Array.isArray(advertised)) {
     support.advertise(advertised.map((value) => String(value)));

@@ -382,7 +382,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
         ?? 'The previous turn was interrupted — its outcome is uncertain.';
       current.setItemsBySidechat(previous => {
         const projected = projectSideChatSnapshot(snapshot, executor, { uncertainTurnMessage });
-        const next = mergeSideChatEchoes(projected, previous[snapshot.id] ?? []);
+        const next = mergeSideChatEchoes(projected, previous[snapshot.id] ?? [], snapshot);
         return { ...previous, [snapshot.id]: next };
       });
     };

@@ -20,12 +20,10 @@ import {
 } from '../transport/protocol.js';
 import {
   CodexNativeHistoryWatcher,
-  IncrementalReplayTracker,
   listCodexNativeSessions,
   NativeTurnIdentityStore,
-  replayCodexNativeSession,
-  type NativeReplay,
 } from './native-history.js';
+import { IncrementalReplayTracker, NativeHistoryIndex, NativeReplaySnapshot } from './native-replay.js';
 
 export type ConfigValue = string | boolean | number | null;
 
@@ -88,11 +86,11 @@ class TurnLedger {
 }
 
 class ReplayPager {
-  private readonly active = new Map<string, { streamId: string; events: readonly unknown[] }>();
+  private readonly active = new Map<string, NativeReplaySnapshot>();
 
-  page(
+  async page(
     sessionId: string,
-    latest: { streamId: string; events: readonly unknown[] },
+    latest: NativeReplaySnapshot,
     cursor: string | null,
     limit: number,
   ) {
@@ -100,22 +98,21 @@ class ReplayPager {
     if (snapshot === undefined) {
       throw new CodexJsonRpcError(-32602, 'Replay cursor has no active snapshot.');
     }
-    if (cursor === null) this.active.set(sessionId, snapshot);
+    if (cursor === null) {
+      this.close(sessionId);
+      this.active.set(sessionId, snapshot.retain());
+    }
     const offset = cursor === null || /^(0|[1-9]\d*)$/.test(cursor) ? Number(cursor ?? 0) : Number.NaN;
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset > snapshot.events.length) {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > snapshot.eventCount) {
       throw new CodexJsonRpcError(-32602, 'Invalid replay cursor.');
     }
-    const end = Math.min(offset + limit, snapshot.events.length);
-    const nextCursor = end < snapshot.events.length ? String(end) : null;
-    if (nextCursor === null) this.active.delete(sessionId);
-    return {
-      replayStreamId: snapshot.streamId,
-      events: snapshot.events.slice(offset, end),
-      nextCursor,
-    };
+    const result = await snapshot.page(offset, limit);
+    if (result.nextCursor === null) this.close(sessionId);
+    return result;
   }
 
   close(sessionId: string): void {
+    this.active.get(sessionId)?.close();
     this.active.delete(sessionId);
   }
 }
@@ -1061,8 +1058,9 @@ export class CodexProtocolV2Adapter {
   private readonly activityOutputByTurn = new Map<string, Map<string, string>>();
   private readonly openContentByTurn = new Map<string, Map<string, OpenContent>>();
   private readonly planTextByTurn = new Map<string, Map<string, string>>();
-  private readonly replayBySession = new Map<string, NativeReplay>();
+  private readonly replayBySession = new Map<string, NativeReplaySnapshot>();
   private readonly replayTrackers = new Map<string, IncrementalReplayTracker>();
+  private readonly historyIndexes = new Map<string, NativeHistoryIndex>();
   private readonly replayPager = new ReplayPager();
   private readonly historyWatchers = new Map<string, CodexNativeHistoryWatcher>();
   private readonly ledger = new TurnLedger();
@@ -1085,6 +1083,10 @@ export class CodexProtocolV2Adapter {
     private readonly emitEvent: V2EventSink,
   ) {
     service.setEventSink((method, params) => this.translateEvent(method, params));
+  }
+
+  async close(): Promise<void> {
+    await Promise.all([...this.historyIndexes.keys()].map(id => this.discardNativeReplay(id)));
   }
 
   async handle(request: WireRequest): Promise<unknown> {
@@ -1141,7 +1143,9 @@ export class CodexProtocolV2Adapter {
         return request.method === 'customization.list'
           ? await this.service.inspectCustomizations(request.params as never)
           : await this.service.customizationDetail(request.params as never);
-      case 'shutdown': return { ok: true };
+      case 'shutdown':
+        await this.close();
+        return { ok: true };
       default:
         throw new CodexJsonRpcError(-32601, `Unknown method "${request.method}".`);
     }
@@ -1348,32 +1352,12 @@ export class CodexProtocolV2Adapter {
     this.sessions.set(session.id, session);
     this.sessionByServiceId.set(session.serviceSessionId, session);
     this.ledger.attach(session.id, session.streamId);
-    const replayTracker = new IncrementalReplayTracker();
-    replayTracker.attach(
-      replayCodexNativeSession(session.id, session.nativeSessionId, undefined, this.identityStore),
-      Boolean(nativeSessionId) && history !== 'none',
-    );
-    this.replayTrackers.set(session.id, replayTracker);
-    this.replayBySession.set(session.id, replayTracker.replay());
-    const historyWatcher = new CodexNativeHistoryWatcher(
-      session.nativeSessionId,
-      () => {
-        if (!this.sessions.has(session.id)) return;
-        const full = replayCodexNativeSession(
-          session.id,
-          session.nativeSessionId,
-          undefined,
-          this.identityStore,
-        );
-        if (!replayTracker.observe(full)) return;
-        this.replayBySession.set(session.id, replayTracker.replay());
-        this.emitSessionEvent('history.changed', session, {
-          reason: 'native-history-changed',
-        });
-      },
-    );
-    historyWatcher.start();
-    this.historyWatchers.set(session.id, historyWatcher);
+    try {
+      await this.attachNativeReplay(session, Boolean(nativeSessionId) && history !== 'none');
+    } catch (error) {
+      await this.detachSession(session).catch(() => undefined);
+      throw error;
+    }
     void this.publishCatalogIfCommandsArrive(session);
     this.sessionCreateFingerprints.set(session.id, fingerprint);
     return { session: this.serialize(session) };
@@ -1553,7 +1537,26 @@ export class CodexProtocolV2Adapter {
       source,
       forked.session as ServiceSessionShape,
     );
-    this.attachNativeReplay(child, true);
+    try {
+      await this.attachNativeReplay(child, true);
+      if (this.historyIndexes.get(source.id)?.sourceAvailable && !this.historyIndexes.get(child.id)?.sourceAvailable) {
+        throw new CodexProtocolError('INTERNAL', 'Codex Fork history is unavailable in the selected Home.');
+      }
+    } catch (error) {
+      const failure = standardError(error);
+      const cleanup: string[] = [];
+      try { await this.detachSession(child); }
+      catch (closeError) { cleanup.push(`detach failed: ${String(closeError)}`); }
+      finally {
+        this.sessions.delete(child.id);
+        this.sessionByServiceId.delete(child.serviceSessionId);
+        this.ledger.close(child.id);
+      }
+      try { await this.service.archiveNativeThread(child.nativeSessionId); }
+      catch (archiveError) { cleanup.push(`archive failed: ${String(archiveError)}`); }
+      if (cleanup.length) failure.message += ` Fork child ${child.nativeSessionId} cleanup: ${cleanup.join('; ')}`;
+      throw failure;
+    }
     const result = {
       session: this.serialize(child),
       origin: {
@@ -1593,31 +1596,69 @@ export class CodexProtocolV2Adapter {
     return session;
   }
 
-  private attachNativeReplay(session: AttachedSession, importExisting: boolean): void {
-    const replayTracker = new IncrementalReplayTracker();
-    replayTracker.attach(
-      replayCodexNativeSession(session.id, session.nativeSessionId, undefined, this.identityStore),
-      importExisting,
-    );
-    this.replayTrackers.set(session.id, replayTracker);
-    this.replayBySession.set(session.id, replayTracker.replay());
-    const historyWatcher = new CodexNativeHistoryWatcher(
-      session.nativeSessionId,
-      () => {
-        if (!this.sessions.has(session.id)) return;
-        const full = replayCodexNativeSession(
-          session.id,
-          session.nativeSessionId,
-          undefined,
-          this.identityStore,
-        );
-        if (!replayTracker.observe(full)) return;
-        this.replayBySession.set(session.id, replayTracker.replay());
-        this.emitSessionEvent('history.changed', session, { reason: 'native-history-changed' });
-      },
-    );
-    historyWatcher.start();
-    this.historyWatchers.set(session.id, historyWatcher);
+  private async attachNativeReplay(session: AttachedSession, importExisting: boolean): Promise<void> {
+    await this.discardNativeReplay(session.id);
+    const index = new NativeHistoryIndex(session.id, session.nativeSessionId, undefined, this.identityStore);
+    this.historyIndexes.set(session.id, index);
+    try {
+      const snapshot = await index.refresh();
+      if (!this.sessions.has(session.id) || this.historyIndexes.get(session.id) !== index) {
+        snapshot.close();
+        throw new CodexProtocolError('SESSION_CLOSED', 'Session closed while loading native history.');
+      }
+      const tracker = new IncrementalReplayTracker();
+      tracker.attach(snapshot, importExisting);
+      this.replayTrackers.set(session.id, tracker);
+      this.replaceReplay(session.id, tracker.replay());
+      const watcher = new CodexNativeHistoryWatcher(session.nativeSessionId, async () => {
+        try { await this.refreshHistory(session, false); }
+        catch (error) { this.reportHistoryError(session, error); }
+      });
+      watcher.start();
+      this.historyWatchers.set(session.id, watcher);
+    } catch (error) {
+      if (this.historyIndexes.get(session.id) === index) await this.discardNativeReplay(session.id);
+      else await index.close();
+      throw error;
+    }
+  }
+
+  private replaceReplay(sessionId: string, snapshot: NativeReplaySnapshot): void {
+    this.replayBySession.get(sessionId)?.close();
+    this.replayBySession.set(sessionId, snapshot);
+  }
+
+  private async refreshHistory(session: AttachedSession, rebase: boolean): Promise<void> {
+    const index = this.historyIndexes.get(session.id);
+    const tracker = this.replayTrackers.get(session.id);
+    if (!index || !tracker) return;
+    const snapshot = await index.refresh();
+    if (this.historyIndexes.get(session.id) !== index || !this.sessions.has(session.id)) {
+      snapshot.close();
+      return;
+    }
+    const changed = rebase ? (tracker.rebase(snapshot), true) : tracker.observe(snapshot);
+    if (changed) this.replaceReplay(session.id, tracker.replay());
+    if (changed && !rebase) this.emitSessionEvent('history.changed', session, { reason: 'native-history-changed' });
+  }
+
+  private reportHistoryError(session: AttachedSession, error: unknown): void {
+    if (!this.sessions.has(session.id)) return;
+    console.warn(`[codex-history] session=${session.id}: ${String(error)}`);
+    this.emitSessionEvent('session.updated', session, { lastError: `Native history unavailable: ${String(error)}` });
+  }
+
+  private async discardNativeReplay(sessionId: string): Promise<void> {
+    this.historyWatchers.get(sessionId)?.stop();
+    this.historyWatchers.delete(sessionId);
+    this.replayPager.close(sessionId);
+    this.replayBySession.get(sessionId)?.close();
+    this.replayBySession.delete(sessionId);
+    this.replayTrackers.get(sessionId)?.close();
+    this.replayTrackers.delete(sessionId);
+    const index = this.historyIndexes.get(sessionId);
+    this.historyIndexes.delete(sessionId);
+    await index?.close();
   }
 
   private sidechatAnchor(session: AttachedSession): SidechatAnchor {
@@ -1639,7 +1680,7 @@ export class CodexProtocolV2Adapter {
     }
     const boundary = this.latestTerminalBoundary(session.id);
     if (boundary) return { type: 'turn', ...boundary };
-    if ((this.replayBySession.get(session.id)?.events.length ?? 0) === 0) return { type: 'empty' };
+    if ((this.replayBySession.get(session.id)?.eventCount ?? 0) === 0) return { type: 'empty' };
     throw new CodexProtocolError(
       'FORK_BOUNDARY_UNAVAILABLE',
       'No stable Host turn identity is available in this attach generation.',
@@ -1708,7 +1749,7 @@ export class CodexProtocolV2Adapter {
     );
     const idle = !activeTurnId && session.state === 'idle';
     const boundary = this.latestTerminalBoundary(session.id);
-    const historyEmpty = (this.replayBySession.get(session.id)?.events.length ?? 0) === 0;
+    const historyEmpty = (this.replayBySession.get(session.id)?.eventCount ?? 0) === 0;
     const sidechatEnabled = activeInputReady || (idle && (boundary !== null || historyEmpty));
     const sidechatReason = activeTurnId
       ? 'Wait for the active input boundary to become available.'
@@ -1991,8 +2032,7 @@ export class CodexProtocolV2Adapter {
       sessionId: session.serviceSessionId,
       ...(activeTurn ? { force: true } : {}),
     });
-    this.historyWatchers.get(session.id)?.stop();
-    this.historyWatchers.delete(session.id);
+    await this.discardNativeReplay(session.id);
     this.ledger.close(session.id);
     // session.close ends one attachment generation, not the durable Host
     // identity. Force Recover creates a fresh facade with the same sessionId
@@ -2001,9 +2041,6 @@ export class CodexProtocolV2Adapter {
     this.sessionCreateFingerprints.delete(session.id);
     this.sessions.delete(session.id);
     this.sessionByServiceId.delete(session.serviceSessionId);
-    this.replayBySession.delete(session.id);
-    this.replayTrackers.delete(session.id);
-    this.replayPager.close(session.id);
     this.terminalOrderBySession.delete(session.id);
     for (const [responseId, response] of this.interactionResponses) {
       if (response.sessionId === session.id) this.interactionResponses.delete(responseId);
@@ -2043,21 +2080,17 @@ export class CodexProtocolV2Adapter {
     };
   }
 
-  private replay(params: Record<string, unknown>) {
+  private async replay(params: Record<string, unknown>) {
     const session = this.requireOrdinaryAttached(String(params.sessionId ?? ''), String(params.streamId ?? ''));
-    const state = this.replayBySession.get(session.id)
-      ?? { streamId: stableId('replay', session.id), events: [] };
-    const result = this.replayPager.page(
+    if (params.cursor === null || params.cursor === undefined) await this.refreshHistory(session, false);
+    const state = this.replayBySession.get(session.id);
+    if (!state) throw new CodexProtocolError('SESSION_STALE', 'Native replay is not attached.');
+    const result = await this.replayPager.page(
       session.id,
       state,
       params.cursor === null || typeof params.cursor === 'string' ? params.cursor : null,
       typeof params.limit === 'number' ? params.limit : 100,
     );
-    if (result.nextCursor === null) {
-      this.replayTrackers.get(session.id)?.acknowledge();
-      const replay = this.replayTrackers.get(session.id)?.replay();
-      if (replay) this.replayBySession.set(session.id, replay);
-    }
     return result;
   }
 
@@ -2332,15 +2365,7 @@ export class CodexProtocolV2Adapter {
         const nativeSessionId = nonEmptyString(data.newNativeSessionId);
         if (!nativeSessionId) return;
         this.updateSession(session, { nativeSessionId });
-        this.historyWatchers.get(session.id)?.retarget(nativeSessionId);
-        const tracker = this.replayTrackers.get(session.id);
-        if (tracker) {
-          tracker.attach(
-            replayCodexNativeSession(session.id, nativeSessionId, undefined, this.identityStore),
-            false,
-          );
-          this.replayBySession.set(session.id, tracker.replay());
-        }
+        void this.attachNativeReplay(session, false).catch(error => this.reportHistoryError(session, error));
         this.emitSessionEvent('session.updated', session, sessionUpdatedData({
           nativeSession: { id: nativeSessionId },
           updatedAt: session.updatedAt,
@@ -2509,15 +2534,7 @@ export class CodexProtocolV2Adapter {
   }
 
   private rebaseHistory(session: AttachedSession): void {
-    const tracker = this.replayTrackers.get(session.id);
-    if (!tracker) return;
-    tracker.rebase(replayCodexNativeSession(
-      session.id,
-      session.nativeSessionId,
-      undefined,
-      this.identityStore,
-    ));
-    this.replayBySession.set(session.id, tracker.replay());
+    void this.refreshHistory(session, true).catch(error => this.reportHistoryError(session, error));
   }
 
   private emitSessionEvent(

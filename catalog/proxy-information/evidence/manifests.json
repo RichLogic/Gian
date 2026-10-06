@@ -1,5 +1,55 @@
 [
   {
+    "tag": "proxy-grok-v0.3.6",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.6",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.6/gian-proxy-grok-0.3.6-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:5d5c44bd06be7e905454e6e175354d42a520a307217b4c95577c2b06f42da422",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "grok",
+    "pluginVersion": "0.3.6",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "grok",
+      "displayName": "Grok CLI",
+      "verifiedVersions": [
+        "1.0.41"
+      ]
+    },
+    "process": {
+      "scope": "session"
+    }
+  },
+  {
+    "tag": "proxy-grok-v0.3.5",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.5",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.5/gian-proxy-grok-0.3.5-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:91fcff2528bcdb4dcfa7d11144234c9047e5852ce15ed9436184d92485d6f946",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "grok",
+    "pluginVersion": "0.3.5",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "grok",
+      "displayName": "Grok CLI",
+      "verifiedVersions": [
+        "1.0.41"
+      ]
+    },
+    "process": {
+      "scope": "session"
+    }
+  },
+  {
     "tag": "proxy-zcode-v0.3.1",
     "url": "https://github.com/RichLogic/Gian/releases/tag/proxy-zcode-v0.3.1",
     "manifestUrl": "https://github.com/RichLogic/Gian/releases/download/proxy-zcode-v0.3.1/gian-proxy-zcode-0.3.1-darwin-arm64.tar.gz.manifest.json",
@@ -1263,6 +1313,206 @@
       "displayName": "Kimi Code",
       "verifiedVersions": [
         "2.1.0"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-dsh-v0.3.3",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.3",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.3/gian-proxy-dsh-0.3.3-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:a22a2a0564d0715927012b3009b45cd858cdb74e865338ec2a09c6b908a010af",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "ai.deepseek.harness",
+    "pluginVersion": "0.3.3",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "deepseek-harness",
+      "displayName": "DeepSeek Harness",
+      "verifiedVersions": [
+        "0.1.5-rc.3"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-zcode-v0.4.1",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.1",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.4.1/gian-proxy-zcode-0.4.1-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:01f65f496458df058e718f34832eb07bf86dce532b7aab33fd5c601416181282",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "com.zhipu.zcode",
+    "pluginVersion": "0.4.1",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "zcode",
+      "displayName": "ZCode Runtime",
+      "verifiedVersions": [
+        "0.16.9"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-kimi-v0.4.1",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.1",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.1/gian-proxy-kimi-0.4.1-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:78e3f4c59c261c1d00dace25f44de7d039ce84e2d87d43c2f3362ac13bd70d86",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.4.1",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.1"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-zcode-v0.4.2",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.2",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.4.2/gian-proxy-zcode-0.4.2-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:7edc05c64413c2733971ff12beac9b11d13a34191af7ba8789e75dc1891af963",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "com.zhipu.zcode",
+    "pluginVersion": "0.4.2",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "zcode",
+      "displayName": "ZCode Runtime",
+      "verifiedVersions": [
+        "0.16.9"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-kimi-v0.4.2",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.2",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.2/gian-proxy-kimi-0.4.2-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:fa9940414c3086a4200c4e2d03d3103f1eba7ebff6701994ebe034eb3c6592cb",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.4.2",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.1"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-kimi-v0.4.3",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.3",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.3/gian-proxy-kimi-0.4.3-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:9df8227f76d074fb74e6ebc7a685fcb30e590e0695bb9eb8881ae951a75e0b07",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.4.3",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.1"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-codex-v0.3.3",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.3",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.3/gian-proxy-codex-0.3.3-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:16f9c9a6ac60dd78c3de2a09c8044acf97c4872dd7b2603ca4f2ebbb58000a31",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "codex",
+    "pluginVersion": "0.3.3",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "codex",
+      "displayName": "Codex CLI",
+      "verifiedVersions": [
+        "0.159.2"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-kimi-v0.4.4",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.4",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.4/gian-proxy-kimi-0.4.4-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:dd2c3555bb8355e78285c3d7477784032eeac29433bf853c3d4a6d5c4e01a657",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.4.4",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.1"
       ]
     },
     "process": {

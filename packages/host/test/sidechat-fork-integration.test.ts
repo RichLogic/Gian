@@ -1256,3 +1256,70 @@ test('a timed-out Side Chat RPC rejects and quarantines only that Side Chat', as
     rmSync(ctx.dir, { recursive: true, force: true });
   }
 });
+
+
+test('Side Chat resolves inherited model-dependent options on its child before sending and still rejects invalid values', async () => {
+  const ctx = setup();
+  try {
+    const base = await ctx.proxyMgr.client.catalog();
+    const model = {
+      id: 'model', displayName: 'Model', role: 'model' as const, binding: 'turn' as const,
+      control: 'select' as const, required: true, defaultValue: 'highspeed',
+      choices: [{ value: 'k3', displayName: 'K3' }, { value: 'highspeed', displayName: 'Highspeed' }],
+    };
+    const thinking = {
+      id: 'thinking', displayName: 'Thinking', role: 'effort' as const, binding: 'turn' as const,
+      control: 'select' as const, required: true, defaultValue: 'on',
+      choices: [{ value: 'on', displayName: 'On' }],
+      enabledWhen: [{ optionId: 'execution_mode', oneOf: ['agent'] }],
+    };
+    const selected = { ...base, configOptions: [
+      ...base.configOptions.filter(option => option.binding === 'session'), model, thinking,
+    ] };
+    ctx.proxyMgr.client.catalog = (async () => selected) as typeof ctx.proxyMgr.client.catalog;
+    const createSidechat = ctx.proxyMgr.client.createSidechat.bind(ctx.proxyMgr.client);
+    ctx.proxyMgr.client.createSidechat = async params => ({
+      ...await createSidechat(params), turnConfigOptions: undefined, turnConfigRevision: undefined,
+    }) as never;
+    const parent = await ctx.sessions.createSession({
+      workspace_id: ctx.wsId, executor: 'claude', model: 'highspeed', thinking_effort: 'on',
+    });
+    const created = await ctx.sessions.createSidechat(parent.id, 'sc-model-context');
+    assert.deepEqual(created.turn_config, { model: 'highspeed', thinking: 'on' });
+    const child = ctx.proxyMgr.client.children.get(created.id)!;
+    let resolved = false;
+    let invalid = false;
+    const resolveCalls: unknown[] = [];
+    Object.assign(child, {
+      initialize: async () => ({ ...stubInitialize('claude'), capabilities: { 'catalog.resolve': 1 } }),
+      catalog: async () => ({ ...selected, catalogRevision: 'base-k3', configOptions: [
+        { ...model, defaultValue: 'k3' }, { ...thinking, defaultValue: 'max', choices: [{ value: 'max', displayName: 'Max' }] },
+      ] }),
+      resolveCatalog: async (params: { catalogRevision: string; turnConfig: Record<string, ConfigValue> }, scope: string) => {
+        assert.equal(scope, 'global', 'Side Chat must not be passed to an ordinary Session method');
+        resolveCalls.push(params);
+        assert.equal(params.catalogRevision, 'base-k3');
+        assert.deepEqual(params.turnConfig, { model: 'highspeed', thinking: 'on' });
+        resolved = true;
+        return { ...selected, catalogRevision: 'resolved-highspeed', configOptions: invalid
+          ? [model, { ...thinking, choices: [{ value: 'off', displayName: 'Off' }] }]
+          : selected.configOptions };
+      },
+    });
+    const startTurn = child.startTurn.bind(child);
+    child.startTurn = async params => {
+      if (!resolved) throw new ProxyProtocolError('CONFIG_VALUE_INVALID', 'thinking value was not advertised', 'request');
+      return startTurn(params);
+    };
+    await ctx.sessions.sendMessage(created.id, 'inherited On');
+    assert.equal(resolveCalls.length, 1);
+    assert.deepEqual(child.startTurnCalls[0]?.config, { model: 'highspeed', thinking: 'on' });
+    assert.equal(ctx.sessions.getSession(parent.id).thinking_effort, 'on');
+    // A newly resolved schema remains authoritative: never silently forward
+    // or discard a value it stopped advertising.
+    invalid = true;
+    await assert.rejects(ctx.sessions.sendMessage(created.id, 'invalid On'),
+      (error: unknown) => error instanceof ProxyProtocolError && error.code === 'CONFIG_VALUE_INVALID');
+    assert.equal(child.startTurnCalls.length, 1);
+  } finally { rmSync(ctx.dir, { recursive: true, force: true }); }
+});

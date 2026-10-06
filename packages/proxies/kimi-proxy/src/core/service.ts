@@ -58,10 +58,47 @@ export interface TurnConfigMap {
 }
 
 const INTERRUPT_SETTLE_MS = 15_000;
-const MESSAGE_PAGE_SIZE = 200;
+// kap-server 2.1.1 routes/messages.ts and routes/sessions.ts each validate
+// page_size as integer 1..100. These are native API limits, not replay limits.
+const MESSAGE_PAGE_SIZE = 100;
+const NATIVE_SESSION_PAGE_SIZE = 100;
+/** Best-effort native abort while fencing a turn must not hang. */
+const FENCE_ABORT_TIMEOUT_MS = 3_000;
+/** Terminal-facet REST budgets: enrichment may never stall a terminal. */
+const FINAL_USAGE_TIMEOUT_MS = 8_000;
+const DIFF_REQUEST_TIMEOUT_MS = 5_000;
+const DIFF_PHASE_BUDGET_MS = 8_000;
 
 function sha32(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 32);
+}
+
+/** The 2.1.1 server validates question answers as a kind-discriminated union
+ *  ({kind:"single",option_id} / {kind:"multi",option_ids} / {kind:"other",text});
+ *  raw UI values (string / string[]) are rejected. Each value is wrapped by
+ *  the input type recorded when the question was projected. */
+function wrapQuestionAnswers(
+  inputs: Array<{ id: string; type: string }> | undefined,
+  values: Record<string, unknown>,
+): Record<string, unknown> {
+  const inputTypes = new Map((inputs ?? []).map((input) => [input.id, input.type]));
+  const answers: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (key === 'note') continue;
+    const type = inputTypes.get(key);
+    if (type === 'single_select' && typeof value === 'string') {
+      answers[key] = { kind: 'single', option_id: value };
+    } else if (type === 'multi_select' && Array.isArray(value)) {
+      answers[key] = { kind: 'multi', option_ids: value };
+    } else if (typeof value === 'string') {
+      answers[key] = { kind: 'other', text: value };
+    } else if (Array.isArray(value)) {
+      answers[key] = { kind: 'multi', option_ids: value };
+    } else {
+      answers[key] = value;
+    }
+  }
+  return answers;
 }
 
 function nowIso(): string {
@@ -110,6 +147,11 @@ export class KimiProxyService {
   private register(record: Omit<SessionRecord, 'streamId' | 'createdAt' | 'updatedAt' | 'projector' | 'lastCompleted'> & {
     streamId?: string;
   }): SessionRecord {
+    const attached = this.byNative.get(record.nativeSessionId);
+    if (attached !== undefined && attached !== record.sessionId) {
+      // Exclusive attach: one native session belongs to one Gian session.
+      throw new KimiProtocolError('CONFLICT', `Kimi session ${record.nativeSessionId} is already attached to session ${attached}.`);
+    }
     const now = nowIso();
     const projector = new KimiSessionProjector({
       gianSessionId: record.sessionId,
@@ -117,9 +159,19 @@ export class KimiProxyService {
       nextSequence: () => this.nextSequence(record.sessionId),
       emit: (notification) => this.emitSink(notification),
       onFinalized: () => this.onTurnFinalizedById(record.sessionId),
+      onBindingOverflow: (gianTurnId) => {
+        const current = this.records.get(record.sessionId);
+        if (current === undefined) return;
+        void this.fenceActiveTurn(
+          current,
+          gianTurnId,
+          'The Kimi event stream overflowed the turn-start buffer; the turn was fenced rather than projected incompletely.',
+        );
+      },
       finalUsage: async () => {
         const info = await this.runtime.rest.request<KimiSessionInfo>(
           'GET', `/api/v1/sessions/${record.nativeSessionId}`,
+          { timeoutMs: FINAL_USAGE_TIMEOUT_MS },
         );
         return (info.usage ?? null) as Record<string, unknown> | null;
       },
@@ -191,17 +243,31 @@ export class KimiProxyService {
     }
     this.clearInterruptTimer(record.sessionId);
     this.reconcileState(record);
+    this.emitSessionUpdated(record);
   }
 
   // ---- runtime events ----
 
-  private handleFrame(frame: { type: string; seq: number; session_id?: string; payload: Record<string, unknown> }): void {
+  private handleFrame(frame: {
+    type: string;
+    seq: number;
+    session_id?: string;
+    volatile?: boolean;
+    offset?: number;
+    payload: Record<string, unknown>;
+  }): void {
     const sessionId = typeof frame.session_id === 'string' ? frame.session_id : '';
     const gianId = this.byNative.get(sessionId);
     if (gianId === undefined) return;
     const record = this.records.get(gianId);
     if (record === undefined) return;
-    record.projector.handleFrame({ type: frame.type, seq: frame.seq, payload: frame.payload });
+    record.projector.handleFrame({
+      type: frame.type,
+      seq: frame.seq,
+      payload: frame.payload,
+      ...(frame.volatile === true ? { volatile: true } : {}),
+      ...(typeof frame.offset === 'number' ? { offset: frame.offset } : {}),
+    });
     this.reconcileState(record);
   }
 
@@ -210,8 +276,9 @@ export class KimiProxyService {
     if (gianId === undefined) return;
     const record = this.records.get(gianId);
     if (record === undefined) return;
-    if (record.projector.hasActiveTurn()) {
-      await record.projector.failTurn('The Kimi server requested a state resync while the turn was running.', true);
+    const resyncTurnId = record.activeTurn?.gianTurnId ?? null;
+    if (resyncTurnId !== null) {
+      await this.fenceActiveTurn(record, resyncTurnId, 'The Kimi server requested a state resync while the turn was running.');
     }
     try {
       const info = await this.runtime.rest.request<KimiSessionInfo>('GET', `/api/v1/sessions/${notice.sessionId}`);
@@ -223,8 +290,9 @@ export class KimiProxyService {
 
   private handleRuntimeDown(): void {
     for (const record of this.records.values()) {
-      if (record.projector.hasActiveTurn()) {
-        void record.projector.failTurn('The Kimi server exited while the turn was running.', true);
+      const downTurnId = record.activeTurn?.gianTurnId ?? null;
+      if (downTurnId !== null) {
+        void this.fenceActiveTurn(record, downTurnId, 'The Kimi server exited while the turn was running.');
       }
       this.clearInterruptTimer(record.sessionId);
       this.setState(record, 'stale');
@@ -254,7 +322,7 @@ export class KimiProxyService {
     cwd: string;
     nativeSessionId?: string;
     history?: 'none' | 'replay';
-  }): Promise<{ snapshot: Record<string, unknown>; replayNotifications?: OuterNotification[] }> {
+  }): Promise<{ snapshot: Record<string, unknown> }> {
     await this.ensureStarted();
     const existing = this.records.get(params.sessionId);
     if (existing !== undefined) {
@@ -272,10 +340,8 @@ export class KimiProxyService {
       existing.projector.setStreamId(existing.streamId);
       this.setState(existing, 'idle');
       await this.subscribeNative(existing, { seq: info.last_seq ?? 0 });
-      const replayNotifications = params.history === 'replay'
-        ? this.replayNotifications(existing, await this.fetchReplay(existing))
-        : undefined;
-      return { snapshot: this.snapshot(existing), ...(replayNotifications !== undefined ? { replayNotifications } : {}) };
+      // History arrives via the host's own session.replay pull; no push here.
+      return { snapshot: this.snapshot(existing) };
     }
 
     if (params.nativeSessionId !== undefined) {
@@ -301,10 +367,8 @@ export class KimiProxyService {
       });
       this.setState(record, 'idle');
       await this.subscribeNative(record, { seq: info.last_seq ?? 0 });
-      const replayNotifications = params.history === 'replay'
-        ? this.replayNotifications(record, await this.fetchReplay(record))
-        : undefined;
-      return { snapshot: this.snapshot(record), ...(replayNotifications !== undefined ? { replayNotifications } : {}) };
+      // History arrives via the host's own session.replay pull; no push here.
+      return { snapshot: this.snapshot(record) };
     }
 
     // Fresh native session. The workspace must be registered first (the
@@ -329,11 +393,28 @@ export class KimiProxyService {
     return { snapshot: this.snapshot(record) };
   }
 
-  private async subscribeNative(record: SessionRecord, cursor?: SessionCursor): Promise<void> {
+  private async subscribeNative(
+    record: SessionRecord,
+    cursor?: SessionCursor,
+    options: { retainOnFailure?: boolean; resume?: boolean } = {},
+  ): Promise<void> {
     try {
+      // A native child/fork is persisted but cold. kap-server's WS
+      // broadcaster accepts only live sessions; listing one message resumes
+      // it without sending a prompt or changing the user's configuration.
+      if (options.resume !== false) {
+        await this.runtime.rest.request('GET', `/api/v1/sessions/${record.nativeSessionId}/messages`, {
+          query: { page_size: 1 },
+        });
+      }
       await this.runtime.subscribe(record.nativeSessionId, cursor);
     } catch (error) {
-      this.dropRecord(record);
+      if (options.retainOnFailure === true) {
+        this.setState(record, 'stale');
+        this.emitSessionUpdated(record);
+      } else {
+        this.dropRecord(record);
+      }
       throw error instanceof KimiProtocolError
         ? error
         : new KimiProtocolError('RUNTIME_ERROR', `Kimi event subscription failed: ${error instanceof Error ? error.message : String(error)}`, true);
@@ -350,54 +431,19 @@ export class KimiProxyService {
 
   private async fetchAllMessages(nativeSessionId: string): Promise<KimiMessage[]> {
     const messages: KimiMessage[] = [];
-    let afterId: string | undefined = undefined;
+    let beforeId: string | undefined = undefined;
     for (;;) {
       const page: { items: KimiMessage[]; has_more?: boolean } = await this.runtime.rest.request<{ items: KimiMessage[]; has_more?: boolean }>(
         'GET',
         `/api/v1/sessions/${nativeSessionId}/messages`,
-        { query: { page_size: MESSAGE_PAGE_SIZE, ...(afterId !== undefined ? { after_id: afterId } : {}) } },
+        { query: { page_size: MESSAGE_PAGE_SIZE, ...(beforeId !== undefined ? { before_id: beforeId } : {}) } },
       );
       messages.push(...page.items);
       if (page.has_more !== true || page.items.length === 0) break;
-      afterId = page.items.at(-1)!.id;
+      beforeId = page.items.at(-1)!.id;
     }
-    return messages;
-  }
-
-  private async fetchReplay(record: SessionRecord): Promise<{
-    replayStreamId: string;
-    events: Array<Record<string, unknown>>;
-  }> {
-    const messages = await this.fetchAllMessages(record.nativeSessionId);
-    const revision = sha32([messages.length, messages.at(-1)?.id ?? '']);
-    const replayStreamId = `replay:kimi:${record.nativeSessionId}:${revision}:v1`;
-    const events = buildReplayEvents({
-      sessionId: record.sessionId,
-      nativeSessionId: record.nativeSessionId,
-      replayStreamId,
-      messages,
-    }) as unknown as Array<Record<string, unknown>>;
-    return { replayStreamId, events };
-  }
-
-  /** Convert attach-replay events into live-stream notifications carrying the
-   *  fresh stream id and outer sequence numbers (response-barrier ordered). */
-  private replayNotifications(record: SessionRecord, replay: {
-    replayStreamId: string;
-    events: Array<Record<string, unknown>>;
-  }): OuterNotification[] {
-    void replay.replayStreamId;
-    return replay.events.map((event) => {
-      const { method, ...rest } = event as { method?: string } & Record<string, unknown>;
-      return {
-        method: method as string,
-        params: {
-          ...rest,
-          streamId: record.streamId,
-          sequence: this.nextSequence(record.sessionId),
-        },
-      };
-    });
+    // Native messages are newest first; replay needs chronological order.
+    return messages.reverse();
   }
 
   snapshot(record: SessionRecord): Record<string, unknown> {
@@ -407,9 +453,54 @@ export class KimiProxyService {
       streamId: record.streamId,
       state: record.state === 'attaching' ? 'idle' : record.state,
       sessionConfig: {},
+      availableActions: this.availableActions(record),
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     };
+  }
+
+  describeSession(sessionId: string): Record<string, unknown> {
+    return this.snapshot(this.requireSession(sessionId));
+  }
+
+  /** Fork and side chat share one gate. Unsupported actions belong only in
+   *  Catalog, never in availableActions, even when disabled. */
+  private availableActions(record: SessionRecord): Record<string, { enabled: boolean; reason?: string }> {
+    const busy = record.activeTurn !== null
+      || record.state === 'running'
+      || record.state === 'waiting_interaction';
+    const ready = !busy && record.state !== 'stale' && record.state !== 'attaching' && record.lastCompleted !== null;
+    const gate = ready
+      ? { enabled: true }
+      : {
+          enabled: false,
+          reason: busy
+            ? 'Wait for the active turn to finish.'
+            : 'No completed turn is available to fork from.',
+        };
+    return {
+      'sidechat.create': { ...gate },
+      'session.fork': { ...gate },
+    };
+  }
+
+  private emitSessionUpdated(record: SessionRecord): void {
+    const state = record.state === 'attaching' ? 'idle' : record.state;
+    this.emitSink({
+      method: 'session.updated',
+      params: {
+        eventId: `evt-${sha32([record.sessionId, 'session.updated', state, record.updatedAt]).slice(0, 16)}`,
+        sessionId: record.sessionId,
+        streamId: record.streamId,
+        sequence: this.nextSequence(record.sessionId),
+        emittedAt: nowIso(),
+        data: {
+          state,
+          availableActions: this.availableActions(record),
+          updatedAt: record.updatedAt,
+        },
+      },
+    });
   }
 
   async closeSession(sessionId: string, streamId: string): Promise<void> {
@@ -430,11 +521,12 @@ export class KimiProxyService {
   }): Promise<{ sessions: Array<Record<string, unknown>>; nextCursor: string | null }> {
     await this.ensureStarted();
     const limit = params.limit ?? 100;
-    let afterId: string | undefined = undefined;
+    let beforeId: string | undefined = undefined;
     if (params.cursor !== null && params.cursor !== undefined && params.cursor !== '') {
       try {
-        const parsed = JSON.parse(Buffer.from(params.cursor, 'base64url').toString('utf8')) as { after?: unknown };
-        if (typeof parsed.after === 'string') afterId = parsed.after;
+        const parsed = JSON.parse(Buffer.from(params.cursor, 'base64url').toString('utf8')) as { before?: unknown; after?: unknown };
+        const pivot = parsed.before ?? parsed.after; // Retain readability of older opaque cursors.
+        if (typeof pivot === 'string') beforeId = pivot;
       } catch {
         throw new KimiProtocolError('INVALID_PARAMS', 'cursor is not a valid native list cursor.');
       }
@@ -444,10 +536,10 @@ export class KimiProxyService {
       '/api/v1/sessions',
       {
         query: {
-          page_size: Math.min(limit, 200),
+          page_size: Math.min(limit, NATIVE_SESSION_PAGE_SIZE),
           busy: false,
           include_archive: false,
-          ...(afterId !== undefined ? { after_id: afterId } : {}),
+          ...(beforeId !== undefined ? { before_id: beforeId } : {}),
         },
       },
     );
@@ -457,7 +549,7 @@ export class KimiProxyService {
       return true;
     });
     const nextCursor = page.has_more === true && page.items.length > 0
-      ? Buffer.from(JSON.stringify({ after: page.items.at(-1)!.id }), 'utf8').toString('base64url')
+      ? Buffer.from(JSON.stringify({ before: page.items.at(-1)!.id }), 'utf8').toString('base64url')
       : null;
     return {
       sessions: items.map((session) => ({
@@ -501,28 +593,49 @@ export class KimiProxyService {
     if (record.activeTurn !== null) {
       throw new KimiProtocolError('SESSION_BUSY', 'A turn is already active.');
     }
+    // An attach-time ACK is no longer proof after a socket/server restart.
+    // Resume the native session and confirm the current subscription before
+    // submitting any prompt, including a cached Side Chat's first send.
+    await this.ensureStarted();
+    await this.subscribeNative(record, undefined, {
+      retainOnFailure: true,
+      resume: record.state === 'stale',
+    });
+    if (record.state === 'stale') this.setState(record, 'idle');
     const promptId = `gian-${sha32([record.nativeSessionId, params.turnId, built])}`;
-    const response = await this.runtime.rest.request<{
+    // Frames that beat the POST response are buffered in the projector and
+    // flushed by bindTurn, so a fast native turn loses no events.
+    record.projector.beginBinding();
+    let response: {
       prompt_id: string;
       status: 'running' | 'queued' | 'blocked';
-    }>('POST', `/api/v1/sessions/${record.nativeSessionId}/prompts`, {
-      json: {
-        content: built.content,
-        prompt_id: promptId,
-        ...(built.skills.length > 0 ? { skills: built.skills } : {}),
-        ...(params.config.model !== undefined ? { model: params.config.model } : {}),
-        ...(params.config.thinking !== undefined ? { thinking: params.config.thinking } : {}),
-        ...(params.config.approval_mode !== undefined ? { permission_mode: params.config.approval_mode } : {}),
-      },
-    }).catch((error: unknown) => {
+    };
+    try {
+      response = await this.runtime.rest.request<{
+        prompt_id: string;
+        status: 'running' | 'queued' | 'blocked';
+      }>('POST', `/api/v1/sessions/${record.nativeSessionId}/prompts`, {
+        json: {
+          content: built.content,
+          prompt_id: promptId,
+          ...(built.skills.length > 0 ? { skills: built.skills } : {}),
+          ...(params.config.model !== undefined ? { model: params.config.model } : {}),
+          ...(params.config.thinking !== undefined ? { thinking: params.config.thinking } : {}),
+          ...(params.config.approval_mode !== undefined ? { permission_mode: params.config.approval_mode } : {}),
+        },
+      });
+    } catch (error) {
+      record.projector.discardBinding();
       if (error instanceof KimiApiError && error.code === 40927) {
         throw new KimiProtocolError('CONFLICT', 'The Kimi server already accepted this turn (prompt id conflict).');
       }
       throw error;
-    });
+    }
     if (response.status === 'queued') {
-      // The server had an active prompt we did not start; never present a
-      // queued submission as our turn.
+      // The server had an active prompt we did not start: never present a
+      // queued submission as our turn, and never leave it queued to run later.
+      record.projector.discardBinding();
+      await this.abortNativePrompt(record, response.prompt_id);
       throw new KimiProtocolError('SESSION_BUSY', 'The Kimi session already has an active prompt.');
     }
     record.activeTurn = {
@@ -531,8 +644,7 @@ export class KimiProxyService {
       nativeTurnId: null,
       interruptAccepted: false,
     };
-    record.projector.bindTurn({ gianTurnId: params.turnId, promptId: response.prompt_id });
-    this.setState(record, 'running');
+    // turn.started precedes the buffered frames that bindTurn flushes.
     this.emitSink({
       method: 'turn.started',
       params: {
@@ -546,6 +658,11 @@ export class KimiProxyService {
         data: {},
       },
     });
+    record.projector.bindTurn({ gianTurnId: params.turnId, promptId: response.prompt_id });
+    // The flush may have surfaced a buffered approval/question: converge on
+    // waiting_interaction instead of blindly reporting running.
+    this.setState(record, record.projector.pendingInteractions.size > 0 ? 'waiting_interaction' : 'running');
+    this.emitSessionUpdated(record);
   }
 
   async steerTurn(params: {
@@ -607,19 +724,50 @@ export class KimiProxyService {
     });
     if (result.aborted) {
       record.projector.markInterruptAccepted();
-      const timer = setTimeout(() => {
-        this.interruptTimers.delete(params.sessionId);
-        if (record.activeTurn !== null && record.activeTurn.gianTurnId === params.turnId) {
-          void record.projector.failTurn(
-            'The Kimi server accepted the abort but the turn never ended; the runtime was fenced.',
-            true,
-          );
-        }
-      }, INTERRUPT_SETTLE_MS);
-      timer.unref();
-      this.interruptTimers.set(params.sessionId, timer);
     }
-    // aborted=false: the prompt already finished; its own terminal stands.
+    // aborted=false means the prompt already finished and its terminal is in
+    // flight; either way the watchdog fences the turn if no terminal lands.
+    this.armInterruptWatchdog(record, params.turnId);
+  }
+
+  private armInterruptWatchdog(record: SessionRecord, gianTurnId: string): void {
+    this.clearInterruptTimer(record.sessionId);
+    const timer = setTimeout(() => {
+      this.interruptTimers.delete(record.sessionId);
+      if (record.activeTurn !== null && record.activeTurn.gianTurnId === gianTurnId) {
+        void this.fenceActiveTurn(
+          record,
+          gianTurnId,
+          'The interrupted turn never received a terminal event from the Kimi server; the runtime was fenced.',
+        );
+      }
+    }, INTERRUPT_SETTLE_MS);
+    timer.unref();
+    this.interruptTimers.set(record.sessionId, timer);
+  }
+
+  /** Best-effort native isolation: a fenced turn must not leave its native
+   *  prompt running unattributed. */
+  private async abortNativePrompt(record: SessionRecord, promptId: string): Promise<void> {
+    try {
+      await this.runtime.rest.request(
+        'POST',
+        `/api/v1/sessions/${record.nativeSessionId}/prompts/${promptId}:abort`,
+        { json: {}, timeoutMs: FENCE_ABORT_TIMEOUT_MS },
+      );
+    } catch { /* the runtime may already be gone */ }
+  }
+
+  /** Fence one specific turn. The bounded abort wait can let that turn
+   *  finalize and a fresh turn bind in the meantime, so the turn identity is
+   *  re-verified after the wait: a fence never fails a turn it did not set
+   *  out to fence. */
+  private async fenceActiveTurn(record: SessionRecord, gianTurnId: string, message: string): Promise<void> {
+    if (record.activeTurn?.gianTurnId !== gianTurnId) return;
+    await this.abortNativePrompt(record, record.activeTurn.promptId);
+    if (record.activeTurn?.gianTurnId !== gianTurnId) return;
+    if (record.projector.activeGianTurnId() !== gianTurnId) return;
+    await record.projector.failTurn(message, true);
   }
 
   private clearInterruptTimer(sessionId: string): void {
@@ -684,11 +832,7 @@ export class KimiProxyService {
           throw error;
         });
       } else {
-        const answers: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(params.values)) {
-          if (key === 'note') continue;
-          answers[key] = value;
-        }
+        const answers = wrapQuestionAnswers(pending.inputs, params.values);
         const note = params.values.note;
         await this.runtime.rest.request(
           'POST',
@@ -707,8 +851,11 @@ export class KimiProxyService {
         });
       }
     }
-    record.projector.resolveInteraction(params.interactionId);
+    const resolvedHere = record.projector.resolveInteraction(params.interactionId);
     this.reconcileState(record);
+    // WS may report the native resolution before REST answers. Its fact is
+    // already projected; accepting this response must not resolve it twice.
+    if (!resolvedHere) return;
     this.emitSink({
       method: 'interaction.resolved',
       params: {
@@ -719,7 +866,12 @@ export class KimiProxyService {
         turnId: params.turnId,
         sourceTurnId: record.activeTurn?.promptId ?? pending.turnId,
         emittedAt: nowIso(),
-        data: { interactionId: params.interactionId, outcome: 'submitted', actionId: params.actionId },
+        data: {
+          interactionId: params.interactionId,
+          ...(pending.kind === 'question' && params.actionId === 'decline'
+            ? { outcome: 'cancelled' }
+            : { outcome: 'submitted', actionId: params.actionId }),
+        },
       },
     });
   }
@@ -834,6 +986,10 @@ export class KimiProxyService {
     if (payload === null) {
       throw new KimiProtocolError('SIDECHAT_UNAVAILABLE', 'The resume reference is not readable.');
     }
+    const existing = this.records.get(params.sidechatId);
+    if (existing !== undefined && existing.activeTurn !== null) {
+      throw new KimiProtocolError('SESSION_BUSY', 'Cannot resume while the Side Chat turn is still settling.');
+    }
     await this.ensureStarted();
     const info = await this.runtime.rest.request<KimiSessionInfo>('GET', `/api/v1/sessions/${payload.nativeSessionId}`);
     if (info.busy === true) {
@@ -891,28 +1047,22 @@ export class KimiProxyService {
 
   // ---- replay ----
 
+  /** Full replay snapshot; the adapter owns cursor pagination over it. */
   async replay(params: {
     sessionId: string;
     streamId: string;
-    cursor: string | null;
-  }): Promise<{ replayStreamId: string; events: Array<Record<string, unknown>>; nextCursor: string | null }> {
+  }): Promise<{ replayStreamId: string; events: Array<Record<string, unknown>> }> {
     const record = this.requireStream(params.sessionId, params.streamId);
     const messages = await this.fetchAllMessages(record.nativeSessionId);
     const revision = sha32([messages.length, messages.at(-1)?.id ?? '']);
-    const replayStreamId = `replay:kimi:${record.nativeSessionId}:${revision}:v1`;
+    const replayStreamId = `replay:kimi:${record.nativeSessionId}:${revision}:v2`;
     const events = buildReplayEvents({
       sessionId: record.sessionId,
       nativeSessionId: record.nativeSessionId,
       replayStreamId,
       messages,
     });
-    const offset = params.cursor === null ? 0 : Number.parseInt(params.cursor, 10);
-    if (!Number.isSafeInteger(offset) || offset < 0 || (params.cursor !== null && String(offset) !== params.cursor)) {
-      throw new KimiProtocolError('INVALID_PARAMS', 'Invalid replay cursor.');
-    }
-    const page = events.slice(offset, offset + 200);
-    const nextCursor = offset + page.length < events.length ? String(offset + page.length) : null;
-    return { replayStreamId, events: page as unknown as Array<Record<string, unknown>>, nextCursor };
+    return { replayStreamId, events: events as unknown as Array<Record<string, unknown>> };
   }
 
   // ---- catalog facts ----
@@ -996,10 +1146,11 @@ export class KimiProxyService {
     truncated: boolean;
     files: Array<Record<string, unknown>>;
   } | null> {
+    const deadline = Date.now() + DIFF_PHASE_BUDGET_MS;
     const changes = await this.runtime.rest.request<{ changes: KimiFileChange[] }>(
       'GET',
       `/api/v1/sessions/${nativeSessionId}/file-history/changes`,
-      { query: { turn_id: nativeTurnId } },
+      { query: { turn_id: nativeTurnId }, timeoutMs: DIFF_REQUEST_TIMEOUT_MS },
     );
     if (changes.changes.length === 0) return null;
     const files: Array<Record<string, unknown>> = [];
@@ -1011,16 +1162,21 @@ export class KimiProxyService {
         truncated = true;
         continue;
       }
+      if (Date.now() >= deadline) {
+        // The facet budget is spent: keep the file facts, skip the content.
+        truncated = true;
+        continue;
+      }
       try {
         const before = await this.runtime.rest.request<{ content: { content?: string; binary?: boolean } }>(
           'GET',
           `/api/v1/sessions/${nativeSessionId}/file-history/content`,
-          { query: { turn_id: nativeTurnId, path: change.path, phase: 'before' } },
+          { query: { turn_id: nativeTurnId, path: change.path, phase: 'before' }, timeoutMs: DIFF_REQUEST_TIMEOUT_MS },
         );
         const after = await this.runtime.rest.request<{ content: { content?: string; binary?: boolean } }>(
           'GET',
           `/api/v1/sessions/${nativeSessionId}/file-history/content`,
-          { query: { turn_id: nativeTurnId, path: change.path, phase: 'after' } },
+          { query: { turn_id: nativeTurnId, path: change.path, phase: 'after' }, timeoutMs: DIFF_REQUEST_TIMEOUT_MS },
         );
         const rendered = renderUnifiedDiff(
           change.path,

@@ -184,6 +184,44 @@ export function buildSessionCreatePayload(
   };
 }
 
+/** Merge explicit chip state onto catalog values. Turn-bound model and
+ *  effort replace a value catalog resolve already filled; the other roles
+ *  only fill gaps. */
+export function overlayExplicitCatalogChoices(
+  options: ConfigOption[],
+  values: Record<string, ConfigValue>,
+  explicit: {
+    model?: string;
+    effort?: ThinkingEffort | null;
+    mode?: ApprovalMode | null;
+    serviceTier?: 'fast' | null;
+    configuredOptions?: Record<string, ConfigValue>;
+  },
+): Record<string, ConfigValue> {
+  const next: Record<string, ConfigValue> = { ...values };
+  for (const option of options) {
+    if (option.role === 'model' && explicit.model
+      && (option.binding === 'turn' || next[option.id] === undefined)) {
+      next[option.id] = explicit.model;
+    } else if (
+      option.role === 'effort'
+      && explicit.effort
+      && (option.binding === 'turn' || next[option.id] === undefined)
+      && option.choices?.some(choice => Object.is(choice.value, explicit.effort))
+    ) {
+      next[option.id] = explicit.effort;
+    } else if (option.role === 'approval_mode' && explicit.mode && next[option.id] === undefined) {
+      next[option.id] = explicit.mode;
+    } else if (option.role === 'fast' && next[option.id] === undefined) {
+      next[option.id] = explicit.serviceTier === 'fast';
+    } else if (!option.role && next[option.id] === undefined) {
+      const configured = explicit.configuredOptions?.[option.id];
+      if (configured !== undefined) next[option.id] = configured;
+    }
+  }
+  return next;
+}
+
 /** Last-used new-session choices, remembered across opens (localStorage). */
 const LAST_KEY = 'gian.new-session.last.v1';
 /** Legacy one-shot draft key used before drafts were isolated per Task /
@@ -714,28 +752,13 @@ function SessionCreateForm({
       setCatalogResolveError(null);
       return;
     }
-    const values: Record<string, ConfigValue> = { ...catalogValues };
-    for (const option of catalog.configOptions) {
-      if (option.role === 'model' && model && values[option.id] === undefined) {
-        values[option.id] = model;
-      }
-      else if (
-        option.role === 'effort'
-        && effort
-        && values[option.id] === undefined
-        && option.choices?.some(choice => Object.is(choice.value, effort))
-      ) values[option.id] = effort;
-      else if (option.role === 'approval_mode' && mode && values[option.id] === undefined) {
-        values[option.id] = mode;
-      } else if (option.role === 'fast' && values[option.id] === undefined) {
-        values[option.id] = serviceTier === 'fast';
-      } else if (!option.role && values[option.id] === undefined) {
-        // Agent option defaults (e.g. provider) must survive the resolve
-        // round-trip; the resolved Proxy default must not override them.
-        const configured = configuredDefaults?.options?.[option.id];
-        if (configured !== undefined) values[option.id] = configured;
-      }
-    }
+    const values = overlayExplicitCatalogChoices(catalog.configOptions, catalogValues, {
+      model,
+      effort,
+      mode,
+      serviceTier,
+      configuredOptions: configuredDefaults?.options,
+    });
     const configs = createConfigsFromCatalog(executor, catalog.configOptions, values);
     const signature = JSON.stringify({
       executor,
@@ -774,9 +797,10 @@ function SessionCreateForm({
       const resolvedFast = optionByRole(nextOptions, 'fast');
       const fromCatalog = modelsFromCatalog(resolvedModel);
       if (fromCatalog.length > 0) setModels(fromCatalog);
-      const modelValue = resolvedModel ? nextDefaults[resolvedModel.id] : undefined;
+      const mergedDefaults = applyResolvedDefaults(catalogValues, nextDefaults);
+      const modelValue = resolvedModel ? mergedDefaults[resolvedModel.id] : undefined;
       if (typeof modelValue === 'string') setModel(modelValue);
-      const effortValue = resolvedEffort ? nextDefaults[resolvedEffort.id] : undefined;
+      const effortValue = resolvedEffort ? mergedDefaults[resolvedEffort.id] : undefined;
       if (typeof effortValue === 'string') setEffort(effortValue);
       const approvalValue = resolvedApproval ? nextDefaults[resolvedApproval.id] : undefined;
       if (isApprovalMode(approvalValue)) setMode(approvalValue);
@@ -1042,14 +1066,35 @@ function SessionCreateForm({
     ? wsRows.filter(w => w.name.toLowerCase().includes(query))
     : wsRows;
 
+  function commitTurnChoices(
+    updates: Array<[ConfigOption | undefined, ConfigValue | null | undefined]>,
+  ) {
+    setCatalogValues(current => {
+      let next: Record<string, ConfigValue> | null = null;
+      for (const [option, value] of updates) {
+        if (!option || option.binding !== 'turn') continue;
+        if (value === undefined || value === null || value === '') continue;
+        if (Object.is(current[option.id], value)) continue;
+        next ??= { ...current };
+        next[option.id] = value;
+      }
+      return next ?? current;
+    });
+  }
+
   function pickModel(next: string) {
     setModel(next);
     const meta = displayModels.find(m => m.model === next);
     const efforts = supportedEfforts(meta);
     // Keep an explicit effort only when the new model supports it.
-    if (effort && efforts.length > 0 && !efforts.includes(effort)) {
-      setEffort(defaultEffort(meta));
-    }
+    const replacement = effort && efforts.length > 0 && !efforts.includes(effort)
+      ? defaultEffort(meta)
+      : null;
+    if (replacement) setEffort(replacement);
+    commitTurnChoices([
+      [catalogModel, next],
+      ...(replacement ? [[catalogEffort, replacement] as [ConfigOption | undefined, ConfigValue]] : []),
+    ]);
     if (turnFast && serviceTier === 'fast') {
       const nextValues = {
         ...catalogViewValues,
@@ -1182,28 +1227,15 @@ function SessionCreateForm({
       return;
     }
     const catalogReady = catalog.configOptions.length > 0;
-    const values: Record<string, ConfigValue> = { ...catalogValues };
-    if (catalogReady) {
-      for (const option of catalog.configOptions) {
-        if (option.role === 'model' && model && values[option.id] === undefined) {
-          values[option.id] = model;
-        }
-        else if (
-          option.role === 'effort'
-          && effort
-          && values[option.id] === undefined
-          && option.choices?.some(choice => Object.is(choice.value, effort))
-        ) values[option.id] = effort;
-        else if (option.role === 'approval_mode' && mode && values[option.id] === undefined) {
-          values[option.id] = mode;
-        } else if (option.role === 'fast' && values[option.id] === undefined) {
-          values[option.id] = serviceTier === 'fast';
-        } else if (!option.role && values[option.id] === undefined) {
-          const configured = configuredDefaults?.options?.[option.id];
-          if (configured !== undefined) values[option.id] = configured;
-        }
-      }
-    }
+    const values = catalogReady
+      ? overlayExplicitCatalogChoices(catalog.configOptions, catalogValues, {
+        model,
+        effort,
+        mode,
+        serviceTier,
+        configuredOptions: configuredDefaults?.options,
+      })
+      : catalogValues;
     const payload = buildSessionCreatePayload({
       workspaceId: selectedWs,
       sessionName,
@@ -1592,6 +1624,18 @@ function SessionCreateForm({
                 ))}
               </div>
             )}
+
+          <button
+            type="button"
+            className={`translation-auto${autoTranslate ? ' on' : ''}`}
+            data-testid="ns-auto-translation"
+            title={t('translation.auto')}
+            aria-pressed={autoTranslate}
+            disabled={creating || createUnknown || checkingTranslation}
+            onClick={() => { void toggleAutoTranslate(); }}
+          >
+            {t('translation.auto')}
+          </button>
           </div>
         {agentDrop.open && agentDrop.pos && agents && createPortal(
           <div
@@ -1689,19 +1733,6 @@ function SessionCreateForm({
           document.body,
         )}
 
-        <div className="main-underbar ns-translation-underbar">
-          <button
-            type="button"
-            className={`translation-auto${autoTranslate ? ' on' : ''}`}
-            data-testid="ns-auto-translation"
-            title={t('translation.auto')}
-            aria-pressed={autoTranslate}
-            disabled={creating || createUnknown || checkingTranslation}
-            onClick={() => { void toggleAutoTranslate(); }}
-          >
-            {t('translation.auto')}
-          </button>
-        </div>
         <div className="composer">
           {/* Hidden file input — triggered by the plus button */}
           <input
@@ -1926,6 +1957,7 @@ function SessionCreateForm({
                           className={`mp-row${displayEffort === level ? ' active' : ''}`}
                           onClick={() => {
                             setEffort(level);
+                            commitTurnChoices([[catalogEffort, level]]);
                             thinkDrop.setOpen(false);
                           }}
                         >

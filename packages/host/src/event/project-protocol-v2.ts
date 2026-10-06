@@ -149,6 +149,19 @@ function projectActivity(
         },
     }];
   }
+  if (type === 'file-search') {
+    return [{
+      session_id: sessionId,
+      turn,
+      call_id: activityId,
+      ts,
+      type: 'activity.file-search',
+      data: {
+        pattern: String(presentationData.pattern ?? title),
+        kind: presentationData.searchKind === 'glob' ? 'glob' : 'grep',
+      },
+    }];
+  }
   if (type === 'agent') {
     const state = String(presentationData.state ?? 'running');
     return [{

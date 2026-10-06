@@ -71,6 +71,11 @@ async function makeApp(
   ) => Promise<ProxyCatalog>,
   hasRunningSessionsForAgent?: (agentId: string) => number,
   seedAgents?: Array<Record<string, unknown>>,
+  pickRuntime?: () => Promise<
+    | { kind: 'ok'; path: string }
+    | { kind: 'canceled' }
+    | { kind: 'error'; error: string }
+  >,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'gian-agents-route-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -113,6 +118,7 @@ async function makeApp(
       ? { resolveDefaultsCatalog: async (_kind, base, config) => resolveDefaultsCatalog(base, config) }
       : {}),
     ...(pickHome ? { pickHome } : {}),
+    ...(pickRuntime ? { pickRuntime } : {}),
     ...(hasRunningSessionsForAgent ? { hasRunningSessionsForAgent } : {}),
   });
   return { app, agents, root, bins };
@@ -748,4 +754,74 @@ test('GET agent status keeps a null proxy alias readable without gating readines
   // listed and addressable, with readiness carried by the dedicated field.
   assert.equal(status.ready, false, 'fixture plugin is not installed in this env');
   assert.match(status.proxyName, /io\.gian\.fixture|Fixture/);
+});
+
+test('POST /api/agents accepts a custom Runtime binding (ADR-0094)', async t => {
+  const { app, bins } = await makeApp(t);
+  const response = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Company Claude',
+      pluginId: 'claude',
+      runtime: { kind: 'custom', path: bins.claude },
+    }),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { agent: UserAgentStatus };
+  assert.deepEqual(body.agent.runtime, { kind: 'custom', path: bins.claude });
+});
+
+test('POST /api/agents rejects a malformed runtime binding', async t => {
+  const { app } = await makeApp(t);
+  const response = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Bad Runtime', pluginId: 'claude', runtime: 'nope' }),
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json() as { error: string }).error, /runtime must be an object/);
+});
+
+test('POST /api/agents rejects a custom Runtime that fails the probe', async t => {
+  const { app, root } = await makeApp(t);
+  const response = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Broken Claude',
+      pluginId: 'claude',
+      runtime: { kind: 'custom', path: join(root, 'bin', 'missing-runtime') },
+    }),
+  });
+  assert.equal(response.status, 400);
+  const body = await response.json() as { error: string; code?: string };
+  assert.equal(body.code, 'RUNTIME_INVALID');
+});
+
+test('PATCH /api/agents/:id rejects Runtime edits (create-only binding)', async t => {
+  const { app, bins } = await makeApp(t);
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Company Claude', pluginId: 'claude', runtime: { kind: 'custom', path: bins.claude } }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ runtime: { kind: 'managed' } }),
+  });
+  assert.equal(patched.status, 400);
+  assert.equal((await patched.json() as { code?: string }).code, 'RUNTIME_EDIT_UNSUPPORTED');
+});
+
+test('POST /api/agents/pick-runtime returns the picked file path', async t => {
+  const { app } = await makeApp(t, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => ({ kind: 'ok', path: '/Users/test/bin/claude-company' }));
+  const response = await app.request('/api/agents/pick-runtime', { method: 'POST' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { path: '/Users/test/bin/claude-company' });
 });

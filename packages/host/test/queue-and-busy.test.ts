@@ -122,6 +122,37 @@ class FakeCodexProxyClient extends FakeProxyClient {
   readonly executor = 'codex' as const;
   steerCalls: Array<{ sessionId: string; input: unknown[] }> = [];
   failNextSteer: Error | null = null;
+  async initialize() {
+    const initialized = await super.initialize();
+    return { ...initialized, capabilities: { 'turn.steer': 1 } };
+  }
+  async steerTurn(params: { sessionId: string; input: unknown[] }) {
+    this.steerCalls.push(params);
+    if (this.failNextSteer) {
+      const error = this.failNextSteer;
+      this.failNextSteer = null;
+      throw error;
+    }
+    return { ok: true as const, turnId: 'proxy_turn' };
+  }
+}
+
+/** Kimi-shaped client. `advertiseSteer` defaults on; the method can exist
+ *  without the capability so the host gate is not "has steerTurn". */
+class FakeKimiProxyClient extends FakeProxyClient {
+  readonly executor = 'kimi' as const;
+  steerCalls: Array<{ sessionId: string; input: unknown[] }> = [];
+  failNextSteer: Error | null = null;
+  constructor(private readonly advertiseSteer = true) {
+    super();
+  }
+  async initialize() {
+    const initialized = await super.initialize();
+    return {
+      ...initialized,
+      capabilities: this.advertiseSteer ? { 'turn.steer': 1 } : {},
+    };
+  }
   async steerTurn(params: { sessionId: string; input: unknown[] }) {
     this.steerCalls.push(params);
     if (this.failNextSteer) {
@@ -954,6 +985,74 @@ test('QUEUE-004: sendQueuedNow while busy on codex steers every entry into the a
       ['turn-A', 'later-1', 'later-2']);
     const turns = db.prepare('SELECT COUNT(*) AS c FROM turns WHERE session_id = ?').get(session.id) as { c: number };
     assert.equal(turns.c, 1, 'steered messages must not mint new turns');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: an unreadable capability advertisement preserves the busy queue', async () => {
+  const client = new FakeCodexProxyClient();
+  const ctx = setup(client);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({ workspace_id: ctx.wsId, executor: 'codex' });
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+    client.initialize = async () => { throw new Error('capabilities unavailable'); };
+    await assert.rejects(sessions.sendQueuedNow(session.id), /turn is already running/);
+    assert.deepEqual(queue.list(session.id).map(entry => entry.text), ['later']);
+    assert.equal(client.steerCalls.length, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy on kimi steers when turn.steer is advertised', async () => {
+  const kimiClient = new FakeKimiProxyClient();
+  const ctx = setup(kimiClient);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'kimi',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later-1');
+    sessions.enqueueMessage(session.id, 'later-2');
+
+    await sessions.sendQueuedNow(session.id);
+
+    assert.equal(kimiClient.steerCalls.length, 2, 'both queued entries steered');
+    const firstInput = kimiClient.steerCalls[0]!.input as Array<{ type: string; text?: string }>;
+    assert.equal(firstInput[0]?.text, 'later-1', 'FIFO steer order');
+    assert.equal(queue.list(session.id).length, 0, 'queue drained');
+    assert.equal(kimiClient.startTurnCalls.length, 1, 'no new turn started');
+  } finally {
+    teardown(ctx);
+  }
+});
+
+test('QUEUE-004: sendQueuedNow while busy refuses steerTurn when turn.steer is not advertised', async () => {
+  const kimiClient = new FakeKimiProxyClient(false);
+  const ctx = setup(kimiClient);
+  try {
+    const { sessions, queue } = ctx;
+    const session = await sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'kimi',
+    });
+
+    await sessions.sendMessage(session.id, 'turn-A');
+    sessions.enqueueMessage(session.id, 'later');
+
+    await assert.rejects(
+      sessions.sendQueuedNow(session.id),
+      /turn is already running/,
+    );
+    assert.equal(queue.list(session.id).length, 1, 'queue entry preserved');
+    assert.equal(kimiClient.steerCalls.length, 0, 'unadvertised steerTurn must not run');
+    assert.equal(kimiClient.startTurnCalls.length, 1, 'no second turn started');
   } finally {
     teardown(ctx);
   }

@@ -490,7 +490,7 @@ test('session/turn/sidechat RPCs carry bounded deadlines', async () => {
   // production deadline to the bounded client request. The client-side
   // timeout mechanics themselves (settle, late-response watermark) are
   // covered by the fixture-based tests above.
-  const calls: Array<{ method: string; options?: { timeoutMs?: number } }> = [];
+  const calls: Array<{ method: string; params?: unknown; options?: { timeoutMs?: number } }> = [];
   const sessionSnapshot = {
     id: 'session-1',
     streamId: 'stream-1',
@@ -525,8 +525,8 @@ test('session/turn/sidechat RPCs carry bounded deadlines', async () => {
       configOptions: [],
       slashCommands: [],
     }),
-    request: async (method: string, _params: unknown, options?: { timeoutMs?: number }) => {
-      calls.push({ method, options });
+    request: async (method: string, params: unknown, options?: { timeoutMs?: number }) => {
+      calls.push({ method, params, options });
       return results[method] ?? {};
     },
     createSessionClient: (sessionId: string) => (
@@ -542,6 +542,10 @@ test('session/turn/sidechat RPCs carry bounded deadlines', async () => {
     config: {},
   });
   await session.interruptTurn();
+  await session.resolveCatalog({ catalogRevision: 'rev-1', sessionConfig: {}, turnConfig: {} });
+  await session.resolveCatalog({ catalogRevision: 'rev-1', sessionConfig: {}, turnConfig: {} }, 'global');
+  assert.equal((calls.filter(call => call.method === 'catalog.resolve')[0]?.params as { sessionId: string }).sessionId, 'session-1');
+  assert.equal((calls.filter(call => call.method === 'catalog.resolve')[1]?.params as { sessionId?: string }).sessionId, undefined);
   await session.respondInteraction({
     sessionId: 'session-1',
     interactionId: 'int-1',
@@ -558,8 +562,30 @@ test('session/turn/sidechat RPCs carry bounded deadlines', async () => {
   assert.deepEqual(deadlineFor('session.create'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('turn.start'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('turn.interrupt'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
+  assert.deepEqual(deadlineFor('catalog.resolve'), [PROXY_SESSION_RPC_TIMEOUT_MS, PROXY_SESSION_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('interaction.respond'), [PROXY_SESSION_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('sidechat.create'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('sidechat.resume'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
   assert.deepEqual(deadlineFor('sidechat.close'), [PROXY_SIDECHAT_RPC_TIMEOUT_MS]);
+});
+
+
+test('rejected turn configuration leaves the attached client idle without a phantom interrupt target', async () => {
+  const calls: string[] = [];
+  const client = new ProtocolV2SessionClient({
+    pluginId: 'kimi', executor: 'kimi',
+    request: async (method: string) => {
+      calls.push(method);
+      throw new ProxyProtocolError('CONFIG_VALUE_INVALID', 'thinking was not advertised', 'request');
+    },
+  } as never, 'sc-config');
+  client.attachFromSnapshot('stream-sc-config');
+  await assert.rejects(client.startTurn({
+    sessionId: 'sc-config', turnId: 'rejected-turn',
+    input: [{ type: 'text', text: 'test' }], config: { thinking: 'on' },
+  }), /thinking was not advertised/);
+  const snapshot = (client as unknown as { currentSession(): { state: string } }).currentSession();
+  assert.equal(snapshot.state, 'idle');
+  await assert.rejects(client.interruptTurn(), /active turn/i);
+  assert.deepEqual(calls, ['turn.start']);
 });

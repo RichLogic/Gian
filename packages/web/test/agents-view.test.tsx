@@ -43,6 +43,7 @@ vi.mock('../src/api.js', async () => {
     installAgentProxy: vi.fn(),
     pickAgentCliPath: vi.fn(),
     pickAgentHome: vi.fn(),
+    pickAgentRuntime: vi.fn(),
     syncProxyCatalog: vi.fn(),
     installCatalogProxy: vi.fn(),
     installManagedRuntime: vi.fn(),
@@ -114,6 +115,10 @@ const READY = catalogItem({
   installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
   availableActions: ['create_agent'],
 });
+const EXTERNAL_READY = {
+  ...READY,
+  runtime: { state: 'ready' as const, displayName: 'Acme Runtime' },
+};
 const INSTALLABLE = catalogItem({
   pluginId: 'io.acme.installable',
   displayName: 'Acme Installable',
@@ -189,6 +194,7 @@ function agent(overrides: Partial<UserAgentStatus>): UserAgentStatus {
     proxy: overrides.proxy !== undefined ? overrides.proxy : 'claude',
     ...(overrides.enabled !== undefined ? { enabled: overrides.enabled } : {}),
     home: overrides.home !== undefined ? overrides.home : { kind: 'managed', path: '/Users/test/.gian/homes/claude/a-1' },
+    ...(overrides.runtime !== undefined ? { runtime: overrides.runtime } : {}),
     cliPath: overrides.cliPath !== undefined ? overrides.cliPath : '/bin/claude',
     defaults: overrides.defaults ?? { model: '', thinking: '', mode: '' },
     proxyName: overrides.proxyName ?? 'Claude Code',
@@ -256,6 +262,7 @@ function mockApi(agents: UserAgentStatus[], catalog: ProxyCatalogList | Error = 
   }));
   vi.mocked(api.deleteAgent).mockResolvedValue(undefined);
   vi.mocked(api.pickAgentHome).mockResolvedValue('/Users/test/custom-home');
+  vi.mocked(api.pickAgentRuntime).mockResolvedValue('/Users/test/bin/acme-runtime');
   vi.mocked(api.syncProxyCatalog).mockResolvedValue(catalogList());
   vi.mocked(api.installCatalogProxy).mockResolvedValue({ pluginId: 'io.acme.installable', pluginVersion: '1.0.0' });
   vi.mocked(api.installManagedRuntime).mockResolvedValue({} as never);
@@ -347,8 +354,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(screen.queryByTestId('proxy-catalog-list')).toBeNull();
     expect(screen.queryByTestId('agent-draft-panel')).toBeNull();
     const integration = within(dialog).getByRole('combobox', { name: 'Agent Integration' });
-    expect(within(integration).getAllByRole('option')).toHaveLength(1);
+    expect(within(integration).getAllByRole('option')).toHaveLength(2);
     expect(within(integration).getByRole('option', { name: 'Acme Ready' })).toBeTruthy();
+    expect(within(integration).getByRole('option', { name: 'Custom' })).toBeTruthy();
     expect(within(integration).queryByRole('option', { name: 'Acme Installable' })).toBeNull();
     expect(within(integration).queryByRole('option', { name: 'Acme Updatable' })).toBeNull();
   });
@@ -906,6 +914,119 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
       pluginId: 'io.acme.ready',
       home: { kind: 'custom', path: '/Users/test/custom-home' },
     }));
+  });
+
+  it('creates a Custom Agent with a user-provided Runtime and HOME (ADR-0094)', async () => {
+    mockApi([], catalogList([EXTERNAL_READY]));
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    fireEvent.change(within(dialog).getByLabelText('Agent Integration'), { target: { value: '__custom__' } });
+
+    // Custom mode: Proxy picker plus required Runtime/HOME path fields; the
+    // managed/default HOME radios are replaced by a required HOME input.
+    expect(within(dialog).getByLabelText('Proxy')).toBeTruthy();
+    expect(within(dialog).queryByLabelText('Create a new Gian-managed HOME')).toBeNull();
+    const save = within(dialog).getByTestId('agent-create-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(within(dialog).getByLabelText('Runtime Path'), {
+      target: { value: '/Users/test/bin/acme-runtime' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/custom-home' },
+    });
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready',
+      pluginId: 'io.acme.ready',
+      home: { kind: 'custom', path: '/Users/test/custom-home' },
+      runtime: { kind: 'custom', path: '/Users/test/bin/acme-runtime' },
+    }));
+  });
+
+  it('offers an installed trusted Proxy for Custom mode when its managed Runtime is missing', async () => {
+    mockApi([], catalogList([catalogItem({
+      pluginId: 'io.acme.company', displayName: 'Company Proxy',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0' },
+      runtime: { state: 'setup_required', displayName: 'Company CLI' },
+      availableActions: [],
+    })]));
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(within(dialog).getByLabelText('Agent Integration')).toHaveValue('__custom__');
+    expect(within(dialog).getByLabelText('Proxy')).toHaveValue('io.acme.company');
+    fireEvent.change(within(dialog).getByLabelText('Runtime Path'), { target: { value: '/test/bin/runtime' } });
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), { target: { value: '/test/home' } });
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith(expect.objectContaining({
+      pluginId: 'io.acme.company', runtime: { kind: 'custom', path: '/test/bin/runtime' },
+    })));
+  });
+
+  it('keeps typed Custom paths when the Proxy selection changes', async () => {
+    mockApi([], catalogList([EXTERNAL_READY, catalogItem({
+      pluginId: 'io.acme.second',
+      displayName: 'Acme Second',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state: 'ready', displayName: 'Acme Second Runtime' },
+      availableActions: ['create_agent'],
+    })]));
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    fireEvent.change(within(dialog).getByLabelText('Agent Integration'), { target: { value: '__custom__' } });
+    fireEvent.change(within(dialog).getByLabelText('Runtime Path'), {
+      target: { value: '/Users/test/bin/acme-runtime' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/custom-home' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Proxy'), { target: { value: 'io.acme.second' } });
+    expect((within(dialog).getByLabelText('Runtime Path') as HTMLInputElement).value)
+      .toBe('/Users/test/bin/acme-runtime');
+    expect((within(dialog).getByLabelText('HOME Path') as HTMLInputElement).value)
+      .toBe('/Users/test/custom-home');
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ pluginId: 'io.acme.second', name: 'Acme Second' }),
+    ));
+  });
+
+  it('maps a custom Runtime probe failure onto the Runtime Path field', async () => {
+    mockApi([], catalogList([EXTERNAL_READY]));
+    vi.mocked(api.createAgent).mockRejectedValue(
+      new api.AgentApiError('Selected Runtime is incompatible with the trusted Manifest.', 'RUNTIME_INVALID'),
+    );
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    fireEvent.change(within(dialog).getByLabelText('Agent Integration'), { target: { value: '__custom__' } });
+    fireEvent.change(within(dialog).getByLabelText('Runtime Path'), {
+      target: { value: '/Users/test/bin/acme-runtime' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/custom-home' },
+    });
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(within(dialog).getByText(/incompatible with the trusted Manifest/)).toBeTruthy());
+    // Field-scoped: the dialog-level error stays empty and the dialog stays open.
+    expect(within(dialog).queryByText('Agent creation failed')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'New Agent' })).toBeTruthy();
+  });
+
+  it('shows a Custom Agent Runtime read-only in the detail panel', async () => {
+    mockApi([agent({
+      name: 'Company Claude',
+      runtime: { kind: 'custom', path: '/Users/test/bin/claude-company' },
+    })]);
+    renderAgents();
+    fireEvent.click(await screen.findByTestId(/^agent-row-/));
+    const panel = await screen.findByTestId('agents-detail-panel');
+    expect(within(panel).getByTestId('agent-runtime-path').textContent)
+      .toBe('/Users/test/bin/claude-company');
   });
 
   it('Add Agent on an empty catalog opens a disabled modal and starts Catalog sync', async () => {

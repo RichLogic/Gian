@@ -21,6 +21,11 @@ import { DeletedAgentDialog } from '../components/DeletedAgentDialog.js';
 import { PlanChip } from '../components/PlanChip.js';
 import { QueueList } from '../components/QueueList.js';
 import type { ActionControlState } from '../components/action-gating.js';
+import {
+  fetchSteerCached,
+  peekSteerCached,
+  queueSendNowEnabled,
+} from '../components/composer/capabilities.js';
 import { TurnDiffChip } from '../components/TurnDiffChip.js';
 import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
 import { useT } from '../i18n/index.js';
@@ -177,6 +182,17 @@ export function SessionMain({
   // input — the composer blocks and a banner explains how to reopen. The host
   // enforces the same rule in `sendMessage` and the queue drain.
   const sessionCompleted = session.completed_at != null;
+  const [advertisedSteer, setAdvertisedSteer] = useState<boolean | undefined>(() => (
+    peekSteerCached(session.executor, session.agent_id)
+  ));
+  useEffect(() => {
+    let alive = true;
+    setAdvertisedSteer(peekSteerCached(session.executor, session.agent_id));
+    void fetchSteerCached(session.executor, session.agent_id)
+      .then(advertised => { if (alive) setAdvertisedSteer(advertised); })
+      .catch(() => { if (alive) setAdvertisedSteer(undefined); });
+    return () => { alive = false; };
+  }, [session.executor, session.agent_id]);
   const [remoteStatus, setRemoteStatus] = useState('connecting');
   useEffect(() => {
     if (!session.remote_execution) return;
@@ -446,9 +462,12 @@ export function SessionMain({
             onRemove={sessionCompleted || remoteUnavailable ? undefined : onQueueRemove}
             onUpdate={sessionCompleted || remoteUnavailable ? undefined : onQueueUpdate}
             onClear={sessionCompleted || remoteUnavailable ? undefined : onQueueClear}
-            onSendNow={session.executor === 'codex' && !sessionCompleted && !remoteUnavailable
-              ? onQueueSendNow
-              : undefined}
+            onSendNow={queueSendNowEnabled({
+              executor: session.executor,
+              steerAdvertised: advertisedSteer,
+              completed: sessionCompleted,
+              remoteUnavailable,
+            }) ? onQueueSendNow : undefined}
             readOnly={sessionCompleted || remoteUnavailable}
           />
           <UnderbarPanelGroup sessionId={session.id}>

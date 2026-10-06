@@ -24,7 +24,9 @@ export async function verifyManagedRuntimeCandidates(directory = join(rootDir, '
   if (manifest.schemaVersion !== 1 || manifest.platform !== 'darwin-arm64' || !Array.isArray(manifest.candidates)) {
     throw new Error('Managed Runtime candidate manifest is invalid.');
   }
-  const tempRoot = await mkdtemp(join(tmpdir(), 'gian-runtime-verify-'));
+  // ZCode creates a Unix socket below HOME. macOS's per-user TMPDIR can be
+  // long enough that the socket name exceeds sun_path and listen fails EINVAL.
+  const tempRoot = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'grv-'));
   try {
     for (const candidate of manifest.candidates) {
       const assetPath = join(candidateDir, candidate.asset.name);

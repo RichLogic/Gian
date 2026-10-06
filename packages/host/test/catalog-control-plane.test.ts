@@ -110,6 +110,31 @@ function waitWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+test('Catalog broker distinguishes upstream errors from bounded assets and handles pre-aborted requests', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-catalog-broker-error-'));
+  const socket = join(root, 'broker.sock');
+  let status = 502;
+  const server = createServer((_request, response) => {
+    response.writeHead(status, { 'content-length': '1024' });
+    response.end('x'.repeat(1024));
+  });
+  await new Promise<void>(resolve => server.listen(socket, resolve));
+  try {
+    const broker = createCatalogBrokerNetwork({ socketPath: socket, policy: compileSequence(2).policy });
+    const request = { tag: 'catalog-v1.2.0', asset: 'assets/small.png', maxBytes: 10 };
+    await assert.rejects(broker.download(request), /failed \(502\).*assets\/small\.png/);
+    status = 200;
+    await assert.rejects(broker.download(request), /too large.*assets\/small\.png.*10 bytes/);
+    const abort = new AbortController();
+    abort.abort();
+    await assert.rejects(broker.latest({ signal: abort.signal }), (error: unknown) =>
+      error instanceof Error && error.name === 'AbortError');
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const PNG = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
   'hex',

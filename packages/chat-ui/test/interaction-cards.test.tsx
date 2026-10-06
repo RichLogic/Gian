@@ -59,6 +59,21 @@ describe('ApprovalCard — generic permission', () => {
 });
 
 describe('ApprovalCard — protocol (gian.proxy/2.0) path', () => {
+  it('allows native question dismissal without inventing a required answer', async () => {
+    const onApprove = vi.fn();
+    render(<ApprovalCard item={approval({
+      cmd: '', interactionKind: 'question', category: 'other',
+      inputs: [{ id: 'choice', type: 'single_select', label: 'Choice', required: true,
+        choices: [{ value: 'a', displayName: 'A' }] }],
+      actions: [{ id: 'accept', label: 'Submit', style: 'primary' },
+        { id: 'decline', label: 'Dismiss', style: 'danger' }],
+    })} onApprove={onApprove} />);
+    expect(screen.getByText('Submit')).toBeDisabled();
+    expect(screen.getByText('Dismiss')).toBeEnabled();
+    await userEvent.setup().click(screen.getByText('Dismiss'));
+    expect(onApprove).toHaveBeenCalledWith('ap-1', 'decline', undefined,
+      { category: 'other', nativeOptionId: 'decline' });
+  });
   it('renders verbatim action buttons, danger pinned last, primary degraded to secondary', async () => {
     const user = userEvent.setup();
     const onApprove = vi.fn();

@@ -553,9 +553,23 @@ export async function loadResolvedProxyCatalog(
   return postJson(`/api/proxy/${executor}/catalog/resolve${query}`, params);
 }
 
+/** Agent API failure carrying the Host's machine-readable `code` when one was
+ *  returned, so views can map errors to the field that caused them. */
+export class AgentApiError extends Error {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'AgentApiError';
+    if (code !== undefined) this.code = code;
+  }
+}
+
 async function agentResponse<T>(response: Response): Promise<T> {
-  const body = await response.json() as T & { error?: string };
-  if (!response.ok) throw new Error(body.error ?? `Agent request failed (${response.status})`);
+  const body = await response.json() as T & { error?: string; code?: string };
+  if (!response.ok) {
+    throw new AgentApiError(body.error ?? `Agent request failed (${response.status})`, body.code);
+  }
   return body;
 }
 
@@ -882,6 +896,9 @@ export interface CreateAgentInput {
   pluginId?: string;
   proxy?: ProductExecutor;
   home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  /** ADR-0094: per-Agent Runtime binding; 'custom' pins a user-provided
+   *  Runtime path probed by the Host before the Agent is persisted. */
+  runtime?: { kind: 'managed' } | { kind: 'custom'; path: string };
   cliPath?: string | null;
   defaults?: Partial<AgentProxyDefaults>;
 }
@@ -917,6 +934,14 @@ export async function pickAgentHome(agentId?: string): Promise<string | null> {
     ? `/api/agents/${encodeURIComponent(agentId)}/pick-home`
     : '/api/agents/pick-home';
   const response = await fetch(path, { method: 'POST' });
+  const body = await agentResponse<{ path?: string; canceled?: boolean }>(response);
+  return body.path ?? null;
+}
+
+/** Open the native file picker for a Custom Agent's Runtime path (ADR-0094).
+ *  Picks a file (executable or launch script), unlike the HOME folder picker. */
+export async function pickAgentRuntime(): Promise<string | null> {
+  const response = await fetch('/api/agents/pick-runtime', { method: 'POST' });
   const body = await agentResponse<{ path?: string; canceled?: boolean }>(response);
   return body.path ?? null;
 }
@@ -1989,4 +2014,9 @@ export async function loadCustomizationDetail(
     `/api/agents/${encodeURIComponent(agentId)}/customizations/${kind}/items/${encodeURIComponent(itemId)}${customizationQuery(workspaceId, options.refresh ?? false)}`,
   );
   return agentResponse<CustomizationDetailResult>(response);
+}
+
+/** Same-origin link preview query; Host owns SSRF validation. */
+export function fetchLinkPreviewResponse(url: string, signal?: AbortSignal): Promise<Response> {
+  return fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal });
 }

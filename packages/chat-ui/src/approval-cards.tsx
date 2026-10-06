@@ -256,7 +256,7 @@ export function ApprovalCard({
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
-              disabled={resolving || !inputsReady || Boolean(
+              disabled={resolving || (actionDecision(action.id) !== 'decline' && !inputsReady) || Boolean(
                 item.externalUrl && action.id === 'accept' && !externalUrlOpened,
               )}
               onClick={() => onApprove(
@@ -335,7 +335,7 @@ export function ApprovalCard({
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
-              disabled={resolving || !inputsReady}
+              disabled={resolving || (actionDecision(action.id) !== 'decline' && !inputsReady)}
               onClick={() => onApprove(
                 item.approvalId,
                 actionDecision(action.id),
@@ -437,7 +437,7 @@ function dangerLastNative<T extends { kind: string }>(options: T[]): T[] {
 }
 
 function actionDecision(actionId: string): ApprovalDecision {
-  if (actionId.startsWith('reject') || actionId === 'decline' || actionId === 'cancelled') {
+  if (actionId.startsWith('reject') || ['decline', 'cancel', 'cancelled', 'dismiss'].includes(actionId)) {
     return 'decline';
   }
   if (actionId.includes('always') || actionId.includes('session')) return 'allow_session';

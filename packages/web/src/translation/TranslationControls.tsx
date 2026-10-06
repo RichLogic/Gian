@@ -39,16 +39,26 @@ export function TranslationResult({ value, onRetry }: { value: ReadingTranslatio
   </div>;
 }
 
+/** lucide.dev `book-type` (24-grid, project 1.5px stroke) — the Auto
+ *  translate chip is icon-only; the label stays on title/aria. */
+const BOOK_TYPE_PATHS = ['M10 13h4', 'M12 6v7', 'M16 8V6H8v2',
+  'M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20'];
+
 export function AutoTranslationChip({ controller }: { controller: TranslationController }) {
   const t = useT();
   const on = controller.state.enabled;
+  const label = t('translation.auto');
   return <button type="button"
     className={`translation-auto${on ? ' on' : ''}`}
-    title={t('translation.auto')}
+    title={label}
+    aria-label={label}
     aria-pressed={on}
     disabled={!controller.ready || controller.saving || !!controller.sending}
     onClick={() => void controller.toggle(!on)}>
-    {t('translation.auto')}
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor"
+      strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {BOOK_TYPE_PATHS.map(d => <path key={d} d={d} />)}
+    </svg>
   </button>;
 }
 

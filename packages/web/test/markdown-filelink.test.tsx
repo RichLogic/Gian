@@ -59,7 +59,11 @@ describe('MarkdownText file linkification', () => {
     const onOpen = renderMd('edit `App.tsx` then run');
     const link = onOpen.container.querySelector('code a');
     expect(link).toBeTruthy();
-    expect(link!.textContent).toBe('App.tsx');
+    const label = link!.cloneNode(true) as HTMLElement;
+    label.querySelectorAll('[aria-hidden="true"]').forEach(icon => icon.remove());
+    expect(label.textContent).toBe('App.tsx');
+    fireEvent.click(link!);
+    expect(onOpen).toHaveBeenCalledWith('/repo/packages/web/src/App.tsx', undefined);
   });
 
   it('does NOT linkify inside a fenced code block (code stays literal)', () => {
