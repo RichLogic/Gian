@@ -17,6 +17,7 @@ overrides:
   lodash-es: 4.18.1
   dompurify: 3.4.16
   katex: 0.18.7
+  '@modelcontextprotocol/sdk': 1.31.0
 
 patchedDependencies:
   '@agentclientprotocol/sdk@0.23.0':
@@ -190,8 +191,8 @@ importers:
         specifier: workspace:*
         version: link:../proxies/kimi-proxy
       '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@4.4.3)
+        specifier: 1.31.0
+        version: 1.31.0(zod@4.4.3)
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
@@ -211,8 +212,8 @@ importers:
         specifier: workspace:*
         version: link:../../shared
       '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@4.4.3)
+        specifier: 1.31.0
+        version: 1.31.0(zod@4.4.3)
       zod:
         specifier: ^4.3.6
         version: 4.4.3
@@ -453,8 +454,8 @@ importers:
         specifier: workspace:*
         version: link:../tool-cli
       '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@4.4.3)
+        specifier: 1.31.0
+        version: 1.31.0(zod@4.4.3)
     devDependencies:
       '@types/node':
         specifier: ^24.12.2
@@ -1458,8 +1459,8 @@ packages:
     resolution: {integrity: sha512-K8BeapFUfrfxbRAUQAG5oBOCwo1+bNWzaVnPxTCutkfrTBn6T/j91FIhqxWJ32SUeQ9T3iy1zcmPZ5ROZEvDrg==}
     engines: {node: '>=22.12.0'}
 
-  '@modelcontextprotocol/sdk@1.29.0':
-    resolution: {integrity: sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==}
+  '@modelcontextprotocol/sdk@1.31.0':
+    resolution: {integrity: sha512-UvTMgnNlnIBO/22ob2RcVGDlcvOslQs8T59+FTGdA0L27a39fdGF/EDETNtDVK4DZGpwomlsYpRdA8UXcVL/pw==}
     engines: {node: '>=18'}
     peerDependencies:
       '@cfworker/json-schema': ^4.1.1
@@ -5076,7 +5077,7 @@ snapshots:
     dependencies:
       '@chevrotain/types': 11.1.2
 
-  '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
+  '@modelcontextprotocol/sdk@1.31.0(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.15(hono@4.13.7)
       ajv: 8.20.0
