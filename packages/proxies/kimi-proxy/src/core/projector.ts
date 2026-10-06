@@ -479,7 +479,7 @@ export class KimiSessionProjector {
             { id: 'accept', label: 'Submit', style: 'primary' },
             { id: 'decline', label: 'Dismiss', style: 'danger' },
           ],
-          context: { questionId },
+          context: { questionId, 'gian.cancelInputOptionalActions': ['decline'] },
         }, turn);
         return true;
       }

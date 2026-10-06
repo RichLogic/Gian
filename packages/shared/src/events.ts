@@ -287,6 +287,8 @@ export interface ApprovalRequestedData {
   actions?: InteractionAction[];
   /** gian.proxy/2.0 interaction inputs, rendered as-is when present. */
   inputs?: InteractionInput[];
+  /** Explicit Proxy opt-in; omitted keeps legacy required-input behavior. */
+  cancelInputOptionalActions?: string[];
 }
 
 export interface InteractionAction {

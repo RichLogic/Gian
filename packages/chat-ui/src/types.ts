@@ -200,6 +200,8 @@ export interface ApprovalItem {
   actions?: import('@gian/shared').InteractionAction[];
   /** gian.proxy/2.0 inputs — when present, collect values with the submit action. */
   inputs?: import('@gian/shared').InteractionInput[];
+  /** Proxy-declared cancellation may omit required answers; absent keeps legacy validation. */
+  cancelInputOptionalActions?: string[];
   /** True when `cmd` came from the interaction's `context.subject` (a tool
    *  name / command / path) rather than the prose title — drives mono-block
    *  vs prose-text rendering on the unified interaction card. */

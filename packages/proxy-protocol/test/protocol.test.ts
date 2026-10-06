@@ -1183,6 +1183,7 @@ test('advertised question cancellation accepts no answers while submission remai
   validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
   validator.acceptLine(notification('interaction.requested', 2, {
     interactionId: 'question-empty', presentation: { kind: 'questions' },
+    context: { 'gian.cancelInputOptionalActions': ['decline'] },
     inputs: [{ id: 'choice', type: 'single_select', label: 'Choice', required: true,
       choices: [{ value: 'a', displayName: 'A' }] }],
     actions: [{ id: 'accept', label: 'Submit', style: 'primary' },
@@ -1194,6 +1195,57 @@ test('advertised question cancellation accepts no answers while submission remai
     params: { ...params, actionId: 'accept' } })), /required/);
   assert.doesNotThrow(() => validator.registerRequest(rpc({ id: 'dismiss', method: 'interaction.respond',
     params: { ...params, actionId: 'decline' } })));
+});
+
+test('explicit cancellation supports opaque action IDs without guessing their names', () => {
+  const validator = new HostProtocolValidator({ pluginId: 'codex', processScope: 'shared' });
+  initialize(validator, { interaction: 1 }); attach(validator); startTurn(validator);
+  validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
+  validator.acceptLine(notification('interaction.requested', 2, {
+    interactionId: 'opaque-question', presentation: { kind: 'questions' },
+    inputs: [{ id: 'answer', type: 'text', label: 'Answer', required: true }],
+    actions: [{ id: 'opaque-native-action-42', label: 'Dismiss', style: 'danger' }],
+    context: { 'gian.cancelInputOptionalActions': ['opaque-native-action-42'] },
+  }, 't_1'));
+  assert.doesNotThrow(() => validator.registerRequest(rpc({ id: 'opaque-cancel', method: 'interaction.respond',
+    params: { sessionId: 's_1', streamId: 'stream-1', turnId: 't_1', responseId: 'opaque-response',
+      interactionId: 'opaque-question', actionId: 'opaque-native-action-42', values: {} } })));
+});
+
+test('legacy required-input cancellation keeps released 1.0.1 validation', () => {
+  const validator = new HostProtocolValidator({ pluginId: 'codex', processScope: 'shared' });
+  initialize(validator, { interaction: 1 }); attach(validator); startTurn(validator);
+  validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
+  validator.acceptLine(notification('interaction.requested', 2, {
+    interactionId: 'legacy-question', presentation: { kind: 'questions' },
+    inputs: [{ id: 'choice', type: 'single_select', label: 'Choice', required: true,
+      choices: [{ value: 'a', displayName: 'A' }] }],
+    actions: [{ id: 'decline', label: 'Dismiss', style: 'danger' }],
+  }, 't_1'));
+  assert.throws(() => validator.registerRequest(rpc({ id: 'legacy-empty', method: 'interaction.respond',
+    params: { sessionId: 's_1', streamId: 'stream-1', turnId: 't_1', responseId: 'legacy-response',
+      interactionId: 'legacy-question', actionId: 'decline', values: {} } })), /required/);
+});
+
+test('rejection with feedback still requires its advertised inputs', () => {
+  const validator = new HostProtocolValidator({ pluginId: 'codex', processScope: 'shared' });
+  initialize(validator, { interaction: 1 });
+  attach(validator);
+  startTurn(validator);
+  validator.acceptLine(notification('turn.started', 1, {}, 't_1'));
+  validator.acceptLine(notification('interaction.requested', 2, {
+    interactionId: 'feedback', presentation: { kind: 'questions' },
+    context: { 'gian.cancelInputOptionalActions': ['cancel'] },
+    inputs: [{ id: 'feedback', type: 'multiline_text', label: 'Feedback', required: true }],
+    actions: [{ id: 'reject_with_feedback', label: 'Revise with feedback', style: 'danger' },
+      { id: 'cancel', label: 'Cancel', style: 'danger' }],
+  }, 't_1'));
+  const params = { sessionId: 's_1', streamId: 'stream-1', turnId: 't_1',
+    interactionId: 'feedback', responseId: 'response-feedback', values: {} };
+  assert.throws(() => validator.registerRequest(rpc({ id: 'missing-feedback', method: 'interaction.respond',
+    params: { ...params, actionId: 'reject_with_feedback' } })), /required/);
+  assert.doesNotThrow(() => validator.registerRequest(rpc({ id: 'with-feedback', method: 'interaction.respond',
+    params: { ...params, values: { feedback: 'Please revise the plan' }, actionId: 'reject_with_feedback' } })));
 });
 
 test('conversation delta usage is accepted at most once per turn', () => {

@@ -256,12 +256,12 @@ export function ApprovalCard({
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
-              disabled={resolving || (actionDecision(action.id) !== 'decline' && !inputsReady) || Boolean(
+              disabled={resolving || (!cancelsWithoutInputs(item, action.id) && !inputsReady) || Boolean(
                 item.externalUrl && action.id === 'accept' && !externalUrlOpened,
               )}
               onClick={() => onApprove(
                 item.approvalId,
-                actionDecision(action.id),
+                cancelsWithoutInputs(item, action.id) ? 'decline' : actionDecision(action.id),
                 answers,
                 {
                   category: item.category,
@@ -335,10 +335,10 @@ export function ApprovalCard({
             <button
               key={action.id}
               className={actionButtonClass(action.style)}
-              disabled={resolving || (actionDecision(action.id) !== 'decline' && !inputsReady)}
+              disabled={resolving || (!cancelsWithoutInputs(item, action.id) && !inputsReady)}
               onClick={() => onApprove(
                 item.approvalId,
-                actionDecision(action.id),
+                cancelsWithoutInputs(item, action.id) ? 'decline' : actionDecision(action.id),
                 answers,
                 {
                   category: item.category,
@@ -434,6 +434,12 @@ function dangerLast<T extends { style: 'primary' | 'secondary' | 'danger' }>(act
 /** Reject-kind native options pin to the end of the row (stable partition). */
 function dangerLastNative<T extends { kind: string }>(options: T[]): T[] {
   return [...options.filter(o => !o.kind.startsWith('reject')), ...options.filter(o => o.kind.startsWith('reject'))];
+}
+
+// Preserve legacy required-input behavior unless the producing Proxy explicitly
+// opts into valueless cancellation. Rejection with feedback is not cancellation.
+function cancelsWithoutInputs(item: ApprovalItem, actionId: string): boolean {
+  return item.cancelInputOptionalActions?.includes(actionId) === true;
 }
 
 function actionDecision(actionId: string): ApprovalDecision {

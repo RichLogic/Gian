@@ -2,7 +2,9 @@
 
 ## 1.0.2
 
-- Allow advertised interaction cancellation without supplying required answers;
+- Allow explicit Proxy opt-in to valueless cancellation through the existing
+  opaque `context['gian.cancelInputOptionalActions']` action-ID list. Without that declaration,
+  released 1.0.1 required-input validation is preserved. Rejection with feedback,
   submission and any supplied values remain strictly validated.
 - Preserve Side Chat sequence and active turns when resuming the same live
   route. Reject changed parent, resume identity or immutable configuration.

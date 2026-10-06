@@ -660,3 +660,16 @@ test('grok elicitation projects schema-derived form inputs', () => {
     ['recursive', 'single_select', false],
   ]);
 });
+
+test('cancellation input exceptions require explicit advertised action IDs', () => {
+  for (const declaration of [undefined, true, 'decline', ['unknown'], ['decline'], ['decline', 42]]) {
+    const [event] = projectProtocolV2Notification(v2Notification('interaction.requested', {
+      interactionId: 'cancel-optional', presentation: { kind: 'question' },
+      inputs: [{ id: 'answer', type: 'text', label: 'Answer', required: true }],
+      actions: [{ id: 'decline', label: 'Dismiss', style: 'danger' }],
+      context: declaration === undefined ? {} : { 'gian.cancelInputOptionalActions': declaration },
+    }), 'session-1', 1);
+    const expected = Array.isArray(declaration) ? declaration.filter(id => id === 'decline') : undefined;
+    assert.deepEqual((event?.data as Record<string, unknown>).cancelInputOptionalActions, expected);
+  }
+});

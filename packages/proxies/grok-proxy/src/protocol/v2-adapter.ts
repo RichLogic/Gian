@@ -2170,21 +2170,18 @@ export class GrokProtocolV2Adapter {
         },
         inputs,
         actions,
-        ...(data.plan !== undefined || data.questions !== undefined || data.requestedSchema !== undefined
-          ? {
-            context: {
-              // The Host projects context.subject onto the interaction card;
-              // the plan body keeps its newlines there. context.plan stays as
-              // the raw trace copy.
-              ...(typeof data.plan === 'string' && data.plan ? { subject: data.plan } : {}),
-              ...(data.plan !== undefined && data.plan !== null ? { plan: String(data.plan) } : {}),
-              ...(data.requestedSchema !== undefined && data.requestedSchema !== null
-                ? { requestedSchema: jsonValue(data.requestedSchema) }
-                : {}),
-              ...(data.questions !== undefined ? { questions: jsonValue(data.questions) } : {}),
-            },
-          }
-          : {}),
+        context: {
+          'gian.cancelInputOptionalActions': actions.filter(action => ['decline', 'cancel'].includes(action.id)).map(action => action.id),
+          // The Host projects context.subject onto the interaction card;
+          // the plan body keeps its newlines there. context.plan stays as
+          // the raw trace copy.
+          ...(typeof data.plan === 'string' && data.plan ? { subject: data.plan } : {}),
+          ...(data.plan !== undefined && data.plan !== null ? { plan: String(data.plan) } : {}),
+          ...(data.requestedSchema !== undefined && data.requestedSchema !== null
+            ? { requestedSchema: jsonValue(data.requestedSchema) }
+            : {}),
+          ...(data.questions !== undefined ? { questions: jsonValue(data.questions) } : {}),
+        },
       });
       return;
     }

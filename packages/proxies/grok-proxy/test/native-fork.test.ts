@@ -32,6 +32,7 @@ function deferred<T>(): Deferred<T> {
 class ExtRecordingAgent {
   readonly extRequests: Array<{ method: string; params: unknown }> = [];
   private clientRef: Client | null = null;
+  private forksCreated = 0;
 
   constructor(
     private readonly meta: Record<string, unknown> = {},
@@ -80,7 +81,7 @@ class ExtRecordingAgent {
         }
         if (logical === 'x.ai/session/fork') {
           return {
-            newSessionId: 'native-forked',
+            newSessionId: ++this.forksCreated === 1 ? 'native-forked' : `native-forked-${this.forksCreated}`,
             chatMessagesCopied: 4,
             updatesCopied: 9,
             planStateCopied: true,
@@ -334,14 +335,15 @@ test('a head fork confirms the native method with one real call, never a probe',
   const stack = await forkStack();
   const session = await attachAndRunTurn(stack);
 
-  // Not advertised before confirmation — and initialize/catalog never sent a
-  // speculative fork call to prove it.
+  // The head action may make the first confirming call. Exact-turn forks
+  // still require confirmation; initialize/catalog sends no disk-mutating probe.
   const before = await stack.adapter.handle(v2('c1', 'catalog.list', {})) as {
     actions: Array<{ id: string; supported: boolean; reason?: string }>;
   };
   const forkAction = before.actions.find((action) => action.id === 'session.fork');
-  assert.equal(forkAction?.supported, false);
-  assert.match(forkAction?.reason ?? '', /not confirmed/);
+  assert.equal(forkAction?.supported, true);
+  assert.equal(before.actions.find((action) => action.id === 'session.fork.atTurn')?.supported, false);
+  assert.equal(stack.service.supportsAtTurnFork(), false, 'advertised head action must not invent confirmation');
   assert.equal(forkWireCalls(stack).length, 0);
 
   // The user's real fork request doubles as the confirming call.
@@ -387,7 +389,8 @@ test('an unregistered native fork refutes on the first real call and fails fast 
       sessionId: 'host-fork-refuted',
       anchor: { type: 'head' },
     })),
-    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CAPABILITY_NOT_SUPPORTED',
+    (error: unknown) => ((error as { domainCode?: string; code?: string }).domainCode
+      ?? (error as { code?: string }).code) === 'CAPABILITY_NOT_SUPPORTED',
   );
   assert.equal(forkWireCalls(stack).length, 1, 'the confirming call reached the wire once');
   // Refuted sticks to this attach: a retry is refused locally, no new call.
@@ -398,7 +401,8 @@ test('an unregistered native fork refutes on the first real call and fails fast 
       sessionId: 'host-fork-refuted-2',
       anchor: { type: 'head' },
     })),
-    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CAPABILITY_NOT_SUPPORTED',
+    (error: unknown) => ((error as { domainCode?: string; code?: string }).domainCode
+      ?? (error as { code?: string }).code) === 'CAPABILITY_NOT_SUPPORTED',
   );
   assert.equal(forkWireCalls(stack).length, 1);
   await stack.service.close();
@@ -414,7 +418,8 @@ test('an exact-turn fork never becomes the confirming call', async () => {
       sessionId: 'host-fork-unconfirmed',
       anchor: { type: 'turn', turnId: 'turn-full' },
     })),
-    (error: unknown) => (error as { domainCode?: string }).domainCode === 'CAPABILITY_NOT_SUPPORTED',
+    (error: unknown) => ((error as { domainCode?: string; code?: string }).domainCode
+      ?? (error as { code?: string }).code) === 'CAPABILITY_NOT_SUPPORTED',
   );
   assert.equal(forkWireCalls(stack).length, 0, 'no wire call before native fork is confirmed');
   await stack.service.close();

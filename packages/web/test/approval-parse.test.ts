@@ -109,3 +109,13 @@ describe('parseApprovalRequested', () => {
     expect(withoutSubject && 'hasSubject' in withoutSubject).toBe(false);
   });
 });
+
+it('passes only advertised cancellation input exception IDs', () => {
+  for (const declaration of [undefined, true, 'decline', ['unknown'], ['decline'], ['decline', 42]]) {
+    const item = parseApprovalRequested(envelope({
+      actions: [{ id: 'decline', label: 'Dismiss', style: 'danger' }], cancelInputOptionalActions: declaration,
+    }));
+    const expected = Array.isArray(declaration) ? declaration.filter(id => id === 'decline') : undefined;
+    expect(item?.cancelInputOptionalActions).toEqual(expected);
+  }
+});

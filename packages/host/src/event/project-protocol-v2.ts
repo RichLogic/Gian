@@ -388,6 +388,10 @@ function projectInteractionRequested(
       ...(externalUrl ? { externalUrl } : {}),
       ...(protocolActions.length > 0 ? { actions: protocolActions } : {}),
       ...(protocolInputs.length > 0 ? { inputs: protocolInputs } : {}),
+      ...(Array.isArray(asRecord(data.context)['gian.cancelInputOptionalActions']) ? {
+        cancelInputOptionalActions: (asRecord(data.context)['gian.cancelInputOptionalActions'] as unknown[])
+          .filter((id): id is string => typeof id === 'string' && protocolActions.some(action => action.id === id)),
+      } : {}),
     },
   }];
 }

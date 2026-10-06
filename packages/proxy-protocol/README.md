@@ -26,3 +26,18 @@ root also exports Node-backed helpers and is not a browser compatibility claim.
 Package SemVer is independent of the `gian.proxy` wire versions. A package
 upgrade does not grant support for a wire version or optional capability that
 the peer did not negotiate.
+
+## Cancellation input requirements
+
+SDK 1.0.2 keeps the released 1.0.1 required-input rules by default. A Proxy
+whose native Runtime can cancel an interaction without answers may declare
+only those advertised action IDs in the existing opaque context extension:
+
+```ts
+context: { 'gian.cancelInputOptionalActions': ['decline'] }
+```
+
+Other actions, including rejection with required feedback, retain input
+validation. Unknown actions and invalid supplied values remain rejected.
+This optional metadata changes neither wire negotiation nor the required
+request fields; existing Proxies can keep their SDK and artifact versions.

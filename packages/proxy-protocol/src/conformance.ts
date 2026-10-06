@@ -71,6 +71,7 @@ interface ResolvedTurnOptions {
 }
 
 interface InteractionState {
+  cancelInputOptionalActions: Set<string>;
   actions: Set<string>;
   inputs: ReadonlyArray<{
     id: string;
@@ -1301,10 +1302,9 @@ export class HostProtocolValidator {
         );
       }
     }
-    // Required answers constrain submission, not an advertised cancellation.
-    // Supplied values remain validated; this exact action was checked above.
-    const cancellation = params.actionId.startsWith('reject')
-      || ['decline', 'cancel', 'cancelled', 'dismiss'].includes(params.actionId);
+    // Preserve legacy requirements unless this exact action was explicitly
+    // declared as valueless cancellation. Opaque IDs carry no inferred meaning.
+    const cancellation = interaction.cancelInputOptionalActions.has(params.actionId);
     for (const input of interaction.inputs) {
       if (!cancellation && input.required && params.values[input.id] === undefined) {
         throw jsonRpcRequestViolation(
@@ -1508,6 +1508,9 @@ export class HostProtocolValidator {
         fault(`Interaction ${id} was requested more than once.`);
       }
       turn.interactions.set(id, {
+        cancelInputOptionalActions: new Set(Array.isArray(notification.params.data.context?.['gian.cancelInputOptionalActions'])
+          ? (notification.params.data.context!['gian.cancelInputOptionalActions'] as unknown[]).filter((id): id is string => typeof id === 'string')
+          : []),
         actions: new Set(notification.params.data.actions.map((action) => action.id)),
         inputs: notification.params.data.inputs.map((input) => ({
           id: input.id,

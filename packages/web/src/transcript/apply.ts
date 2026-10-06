@@ -1143,6 +1143,10 @@ export function parseApprovalRequested(env: EventEnvelope): ApprovalItem | null 
     ...(nativeOptions && nativeOptions.length > 0 ? { nativeOptions } : {}),
     ...(actions && actions.length > 0 ? { actions } : {}),
     ...(inputs && inputs.length > 0 ? { inputs } : {}),
+    ...(Array.isArray(data.cancelInputOptionalActions) ? {
+      cancelInputOptionalActions: data.cancelInputOptionalActions
+        .filter((id): id is string => typeof id === 'string' && Boolean(actions?.some(action => action.id === id))),
+    } : {}),
     ...(typeof data.subject === 'string' && data.subject ? { hasSubject: true } : {}),
     ...(interactionKind ? { interactionKind } : {}),
     ...(tone ? { tone } : {}),
