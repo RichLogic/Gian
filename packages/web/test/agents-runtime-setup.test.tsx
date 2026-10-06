@@ -599,7 +599,12 @@ describe('Proxy Runtime setup (WP6 discover/probe on the WP4 page)', () => {
     const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
     expect(within(dialog).queryByLabelText('Path')).toBeNull();
     expect(within(dialog).queryByPlaceholderText('/usr/local/bin/acme')).toBeNull();
-    expect(within(dialog).getByText(/Install an Agent Integration/)).toBeTruthy();
+    // An installed Proxy may be selected for Custom even without a managed
+    // Runtime. A lower-level probe must not fill either explicit path or make
+    // the new Agent creatable without the user's Runtime/HOME selections.
+    expect((within(dialog).getByRole('combobox', { name: 'Proxy' }) as HTMLSelectElement).value).toBe(PLUGIN_ID);
+    expect((within(dialog).getByRole('textbox', { name: 'Runtime Path' }) as HTMLInputElement).value).toBe('');
+    expect((within(dialog).getByRole('textbox', { name: 'HOME Path' }) as HTMLInputElement).value).toBe('');
     expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(true);
     expect(api.createAgent).not.toHaveBeenCalled();
   });
