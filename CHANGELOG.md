@@ -14,6 +14,8 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 - Bind an Agent to a custom Runtime path from the Add Agent dialog and Agent settings.
 
 ### Fixed
+- Packaged Desktop can connect to an explicitly selected external Host without
+  claiming its instance; managed Host ownership and Host version checks remain enforced.
 
 - Offer queued message Send now when the active Proxy advertises mid-turn steering.
 - Preserve the model and thinking selections made after Catalog resolution.

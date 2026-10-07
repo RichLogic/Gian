@@ -186,3 +186,56 @@ test('desktop health negotiation rejects a missing or mismatched Host version', 
     true,
   );
 });
+
+
+test('custom packaged Host checks its version without claiming Desktop ownership', async () => {
+  let starts = 0;
+  const request: HealthRequest = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, version: '0.6.5', instanceId: 'external-host' }),
+  });
+  const options = {
+    healthUrl: 'http://127.0.0.1:19000/health',
+    manageHost: false,
+    managedInstanceId: 'desktop-generated-id',
+    expectedVersion: '0.6.5',
+    request,
+    maxChecks: 1,
+    startHost: () => { starts += 1; },
+  };
+  assert.equal((await ensureHostAvailable(options)).ready, true);
+  assert.equal((await ensureHostAvailable({ ...options, expectedVersion: '0.6.6' })).ready, false);
+  assert.equal(starts, 0);
+});
+
+test('Desktop-managed Host retains the generated ownership check', async () => {
+  const request: HealthRequest = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, version: '0.6.5', instanceId: 'owned-host' }),
+  });
+  const options = {
+    healthUrl: 'http://127.0.0.1:19000/health',
+    manageHost: true,
+    managedInstanceId: 'wrong-owner',
+    expectedVersion: '0.6.5',
+    request,
+    maxChecks: 1,
+  };
+  assert.equal((await ensureHostAvailable(options)).ready, false);
+  assert.equal((await ensureHostAvailable({ ...options, managedInstanceId: 'owned-host' })).ready, true);
+});
+
+test('an explicitly pinned custom Host identity is still verified', async () => {
+  const request: HealthRequest = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, instanceId: 'external-host' }),
+  });
+  assert.equal((await ensureHostAvailable({
+    healthUrl: 'http://127.0.0.1:19000/health',
+    manageHost: false,
+    managedInstanceId: 'irrelevant-local-id',
+    expectedInstanceId: 'different-external-host',
+    request,
+    maxChecks: 1,
+  })).ready, false);
+});

@@ -22,6 +22,9 @@ export interface EnsureHostAvailableOptions {
   manageHost: boolean;
   startHost?: () => Promise<void> | void;
   requestHeaders?: Readonly<Record<string, string>>;
+  /** Identity generated for a Host this Desktop owns. Custom Hosts do not share it. */
+  managedInstanceId?: string;
+  /** An explicit external identity pin remains strict regardless of ownership. */
   expectedInstanceId?: string;
   expectedVersion?: string;
   request?: HealthRequest;
@@ -74,7 +77,8 @@ export async function ensureHostAvailable({
   manageHost,
   startHost,
   requestHeaders = {},
-  expectedInstanceId,
+  managedInstanceId,
+  expectedInstanceId = manageHost ? managedInstanceId : undefined,
   expectedVersion,
   request = fetch,
   sleep = defaultSleep,

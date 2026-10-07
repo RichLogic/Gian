@@ -906,7 +906,7 @@ async function loadGianSurface(window: BrowserWindow): Promise<boolean> {
       ...(desktopToken
         ? { requestHeaders: { [DESKTOP_TOKEN_HEADER]: desktopToken } }
         : {}),
-      ...(desktopInstanceId ? { expectedInstanceId: desktopInstanceId } : {}),
+      ...(desktopInstanceId ? { managedInstanceId: desktopInstanceId } : {}),
       expectedVersion: app.getVersion(),
     });
     if (window.isDestroyed()) return false;
