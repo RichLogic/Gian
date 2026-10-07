@@ -1,0 +1,86 @@
+name: Publish Gian 0.6.5 with Owner Waiver
+on:
+  workflow_dispatch:
+    inputs:
+      authorization_sha256:
+        description: SHA-256 of the explicit Owner authorization attached to the 0.6.5 draft
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: gian-public-promotion
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'RichLogic/Gian' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify exact signed 0.6.5 build and explicit Owner decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTHORIZATION_SHA256: ${{ inputs.authorization_sha256 }}
+        run: |
+          mkdir -p evidence assets
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/37569158721" > evidence/run.json
+          gh run download 37569158721 --name release-build-37569158721 --dir evidence
+          gh release view v0.6.5 --json tagName,isDraft,targetCommitish > evidence/draft.json
+          gh release download v0.6.5 --dir assets
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {sha256, releaseAssets} from './scripts/delivery-certificate.mjs';
+          const json = p => JSON.parse(readFileSync(p, 'utf8'));
+          const source = '18aab4fd2f6f592b5a600408a6b66036133c4c45';
+          const run = json('evidence/run.json');
+          assert.equal(run.id, 37569158721);
+          assert.equal(run.head_sha, source);
+          assert.equal(run.conclusion, 'success');
+          assert.equal(run.path, '.github/workflows/release.yml');
+          assert.equal(run.event, 'workflow_dispatch');
+          assert.equal(run.head_branch, 'main');
+          assert.equal(run.repository.full_name, 'RichLogic/Gian');
+          const build = json('evidence/release-build-receipt.json');
+          assert.equal(build.schema, 1);
+          assert.equal(build.sha, source);
+          assert.equal(String(build.runId), '37569158721');
+          assert.equal(build.version, '0.6.5');
+          const draft = json('evidence/draft.json');
+          assert.equal(draft.tagName, 'v0.6.5');
+          assert.equal(draft.isDraft, true);
+          assert.equal(draft.targetCommitish, source);
+          assert.equal(sha256(readFileSync('assets/release-build-receipt.json')), sha256(readFileSync('evidence/release-build-receipt.json')));
+          assert.deepEqual(releaseAssets('assets'), build.assets);
+          const bytes = readFileSync('assets/owner-release-authorization.json');
+          assert.match(process.env.AUTHORIZATION_SHA256 ?? '', /^[a-f0-9]{64}$/);
+          assert.equal(sha256(bytes), process.env.AUTHORIZATION_SHA256);
+          const owner = JSON.parse(bytes);
+          assert.equal(owner.schema, 1);
+          assert.equal(owner.kind, 'gian-owner-publication-v1');
+          assert.equal(owner.decision, 'PUBLISH_WITHOUT_REMAINING_DESKTOP_TESTS');
+          assert.equal(owner.version, '0.6.5');
+          assert.equal(owner.sha, source);
+          assert.equal(String(owner.buildRunId), '37569158721');
+          assert.equal(owner.authorizedBy.toLowerCase(), process.env.GITHUB_ACTOR.toLowerCase());
+          assert.equal(owner.authorizedBy.toLowerCase(), process.env.GITHUB_REPOSITORY_OWNER.toLowerCase());
+          const age = Date.now() - Date.parse(owner.authorizedAt);
+          assert.ok(Number.isFinite(age) && age >= -60000 && age <= 86400000);
+          assert.equal(owner.checks.gatekeeper, 'PASS');
+          for (const id of ['packaged-lifecycle', 'notifications', 'restart-recovery', 'auto-update']) {
+            assert.equal(owner.checks[id], 'NOT_RUN');
+          }
+          assert.deepEqual(owner.assets, build.assets);
+          console.log('Exact signed artifacts verified; four desktop checks explicitly waived by Owner, still NOT_RUN.');
+          JS
+      - name: Publish existing immutable assets without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit v0.6.5 --draft=false --latest
+          test "$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')" = v0.6.5
