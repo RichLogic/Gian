@@ -38,7 +38,7 @@ export interface UserAgent {
    *  the CLI receives its parent as process HOME. */
   home?: AgentHomeBinding | null;
   /** Per-Agent Runtime binding. Absent/null means the managed generation;
-   *  `custom` pins a user-provided Runtime path (ADR-0094). */
+   *  `custom` pins a user-provided Runtime path (ADR-0102). */
   runtime?: AgentRuntimeBinding | null;
   /** @deprecated Migration/development compatibility only. Production APIs
    *  reject this input and managed execution never resolves from it. */

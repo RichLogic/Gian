@@ -38,12 +38,13 @@ export function bridgeArgs(argv: string[], explicit: string | undefined): string
 }
 
 /**
- * The packaged app's Node binary is Team-ID-signed with the hardened runtime,
- * so macOS library validation refuses to dlopen DSH's adhoc-signed
- * node-addon-require-builtin addon. DSH's cordis loader falls back to Node's
- * internal ESM loader when `--expose-internals` is present in execArgv, so a
- * `.js` bridge command is launched through the current Node executable with
- * that flag instead of relying on the script's shebang.
+ * Re-checked for @deepseek-ai/dsh@0.2.0-rc.2. cordis-plugin-loader still
+ * require()s Node internals only when `--expose-internals` is in execArgv,
+ * and otherwise dlopens the adhoc-signed node-addon-require-builtin addon.
+ * dsh-app-boot's internalModules() still loads that addon directly. The
+ * packaged Node binary is Team-ID-signed with the hardened runtime, so macOS
+ * library validation refuses that dlopen. A `.js` bridge command therefore
+ * still launches through the current Node executable with the flag.
  */
 export function resolveNodeLauncher(launch: Omit<BridgeLaunch, 'managedProfile'>): Omit<BridgeLaunch, 'managedProfile'> {
   if (!launch.bridgeCommand.endsWith('.js')) return launch;

@@ -158,7 +158,7 @@ test('a none-Runtime Proxy cannot bind a custom Runtime path', async t => {
   );
 });
 
-test('update rejects Runtime edits (create-only binding, ADR-0094 phase 1)', async t => {
+test('update rejects Runtime edits (create-only binding, ADR-0102 phase 1)', async t => {
   const { root, manager } = await customHarness(t);
   const runtimePath = join(root, 'bin', 'claude-company');
   await executable(runtimePath, 'claude 2.1.159');

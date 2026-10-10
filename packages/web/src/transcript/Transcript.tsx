@@ -12,7 +12,7 @@
  * Local Web and Remote Web render the same components — this file only maps
  * web state onto chat-ui's DTOs/callbacks.
  */
-import { useMemo, type ReactNode } from 'react';
+import { useCallback, useMemo, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import {
   renderChatItem,
@@ -34,7 +34,7 @@ import {
 } from './TranscriptSelectionActions.js';
 import { EventFeedRow } from './EventFeed.js';
 import type { TranslationController } from '../translation/use-translation.js';
-import { TranslationButton, TranslationResult } from '../translation/TranslationControls.js';
+import { TranslationButton, TranslationEchoPendingRow, TranslationResult, TranslationSendRow } from '../translation/TranslationControls.js';
 
 // Pure transcript machinery re-exported for existing import paths.
 export {
@@ -126,6 +126,28 @@ export function Transcript({
       .map(transcriptItemIdentity)),
     [items],
   );
+  // The send-echo's inline translation progress row needs the per-session
+  // TranslationController, so the item renderer is a closure over it: a
+  // `sendTranslation`-marked echo (appended by beginTranslationEcho before
+  // its dispatch exists) renders the row under its bubble. Composer sends
+  // carry controller send state (error/retry affordances); flows without it
+  // (the new-session first message) still get the bare Translating row.
+  const renderWithTranslation = useCallback((item: TranscriptItem, ctx: RenderItemContext): ReactNode => {
+    if (item.kind !== 'user' || !translation || !item.sendTranslation) return renderItem(item, ctx);
+    const identity = transcriptItemIdentity(item);
+    const row = translation.sending
+      ? <TranslationSendRow controller={translation} />
+      : <TranslationEchoPendingRow />;
+    const message = <UserMessage item={item} sendStatus={row} />;
+    if (ctx.isCurrentUser && ctx.currentUserRef) {
+      return (
+        <div key={identity} ref={ctx.currentUserRef} data-current-user="true">
+          {message}
+        </div>
+      );
+    }
+    return <UserMessage key={identity} item={item} sendStatus={row} />;
+  }, [translation]);
   return (
     <ChatTranscript
       items={items}
@@ -139,7 +161,7 @@ export function Transcript({
       onLoadOlder={onLoadOlder}
       historyError={historyError}
       onRetryHistory={onRetryHistory}
-      renderItem={renderItem}
+      renderItem={renderWithTranslation}
       workingIndicator={<GianMascot size={36} state="working" title={t('transcript.workingEllipsis')} />}
       renderAssistantFooterActions={(item, turnEnd: StatusItem | undefined) => <>
           {forkAtTurn && <ForkFromTurnControl
@@ -153,6 +175,7 @@ export function Transcript({
         </>}
       renderAssistantTranslation={translation ? item => <TranslationResult
         value={translation.result(`turn:${item.turn}`, item.text)}
+        expanded={translation.isReadExpanded(`turn:${item.turn}`)}
         onRetry={() => void translation.read(item.text, `turn:${item.turn}`)} /> : undefined}
       renderTurnEndFooter={forkAtTurn
         ? (item: StatusItem) => (

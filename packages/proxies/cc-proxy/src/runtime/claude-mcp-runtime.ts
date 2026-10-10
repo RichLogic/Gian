@@ -27,6 +27,11 @@ const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
 const GATEWAY_MODELS_CACHE_MAX_BYTES = 1024 * 1024;
 const GATEWAY_MODELS_MAX_ENTRIES = 1000;
 const GATEWAY_MODEL_TEXT_MAX_LENGTH = 512;
+const BUILTIN_FALLBACK_ALIAS_MODELS = new Set(['opus', 'sonnet', 'haiku']);
+const CURRENT_SETTINGS_MODEL_DESCRIPTION = 'From the current Claude settings configuration.';
+const BUILTIN_FALLBACK_ALIAS_DESCRIPTION = 'Unverified alias from the built-in list.';
+const BUILTIN_FALLBACK_MODEL_ERROR_PREFIX =
+  'This model is an unverified alias from the built-in fallback list; the current CLI may not support it.';
 
 function nonNegativeInteger(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -402,6 +407,21 @@ function expandHome(raw: string, home: string): string {
   return raw;
 }
 
+/** Absolute `HOME=` / `export HOME=` in a wrapper. `$` and relative values
+ *  fail closed so `$HOME` inside `CLAUDE_CONFIG_DIR` is not expanded against
+ *  the Host's own home. */
+export function extractHomeFromScript(scriptText: string): string | null {
+  const match = scriptText.match(/(?:^|[\n;])\s*(?:export\s+)?HOME\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s;#]+)/);
+  if (!match?.[1]) return null;
+  let value = match[1];
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  value = value.trim();
+  if (!value || value.includes('$') || !isAbsolute(value)) return null;
+  return value;
+}
+
 /**
  * Extract the value assigned to CLAUDE_CONFIG_DIR in a wrapper script,
  * resolving only the expansions we understand: `$HOME`, a leading `~`, and
@@ -423,6 +443,30 @@ export function extractClaudeConfigDirFromScript(scriptText: string, home: strin
   return value;
 }
 
+/** Extract a literal `ANTHROPIC_BASE_URL` assignment from a wrapper script.
+ *  `$` expansions are not resolved here: an unreadable value fails closed
+ *  instead of being compared with the gateway cache. */
+export function extractAnthropicBaseUrlFromScript(scriptText: string): string | null {
+  const match = scriptText.match(/ANTHROPIC_BASE_URL\s*=\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/);
+  if (!match?.[1]) return null;
+  let value = match[1];
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  value = value.trim();
+  if (!value || value.includes('$') || value.length > 2048) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(value) || !/^https?:\/\//i.test(value)) return null;
+  return value;
+}
+
+function readWrapperAnthropicBaseUrl(executable: string = claudeExecutable()): string | null {
+  const head = readFileHead(executable, SCRIPT_PROBE_BYTES);
+  // A NUL byte means a real binary, not a wrapper script.
+  if (!head || head.includes(0)) return null;
+  return extractAnthropicBaseUrlFromScript(head.toString('utf8'));
+}
+
 /** Read the first `maxBytes` of a file, or null when unreadable. */
 function readFileHead(path: string, maxBytes: number): Buffer | null {
   try {
@@ -439,16 +483,55 @@ function readFileHead(path: string, maxBytes: number): Buffer | null {
   }
 }
 
+function readSettingsObject(path: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Top-level merge. `settings.local.json` overrides the same key and leaves
+ *  every other key from `settings.json`. */
+export function readMergedClaudeSettings(dir: string): unknown | null {
+  const base = readSettingsObject(join(dir, 'settings.json'));
+  const local = readSettingsObject(join(dir, 'settings.local.json'));
+  if (!base && !local) return null;
+  if (!base) return local;
+  if (!local) return base;
+  return { ...base, ...local };
+}
+
+/** A readable settings file in the directory. Model discovery merges both
+ *  files; this path only identifies the profile directory. */
+function preferredSettingsFile(dir: string): string | null {
+  for (const name of ['settings.local.json', 'settings.json']) {
+    const path = join(dir, name);
+    try {
+      JSON.parse(readFileSync(path, 'utf8'));
+      return path;
+    } catch {
+      // Missing, unreadable, or invalid JSON — try the other file.
+    }
+  }
+  return null;
+}
+
 /**
- * Locate the Claude settings.json the configured CLI actually reads, trying
+ * Locate the Claude settings file the configured CLI actually reads, trying
  * in order:
- *   a. `$CLAUDE_CONFIG_DIR/settings.json` (when the env var is set),
+ *   a. `$CLAUDE_CONFIG_DIR` (when the env var is set),
  *   b. a CLAUDE_CONFIG_DIR assignment inside the configured CLI when that CLI
  *      is a text wrapper script (binary executables are skipped),
- *   c. `~/.claude/settings.json`.
- * An explicit CLAUDE_CONFIG_DIR is authoritative: a missing or invalid
- * settings file there must not borrow another Agent's global models.
- * Only legacy, unscoped discovery falls through wrapper/global candidates.
+ *   c. `~/.claude` under a wrapper `HOME=` when the script assigns one,
+ *      otherwise the process home.
+ * Within a directory, valid `settings.local.json` is preferred over
+ * `settings.json`. A wrapper `HOME=` also supplies `$HOME` for that script.
+ * An explicit CLAUDE_CONFIG_DIR, and a wrapper HOME, are authoritative:
+ * a missing or invalid profile there must not borrow the process home.
+ * Only legacy, unscoped discovery falls through to the process home.
  */
 export function resolveClaudeSettingsPath(options?: {
   env?: NodeJS.ProcessEnv;
@@ -459,37 +542,30 @@ export function resolveClaudeSettingsPath(options?: {
   const home = options?.home ?? homedir();
   const executable = options?.executable ?? claudeExecutable();
 
-  const candidates: string[] = [];
-
   const fromEnv = env.CLAUDE_CONFIG_DIR?.trim();
   if (fromEnv) {
     const expanded = expandHome(fromEnv, home);
     if (!isAbsolute(expanded)) return null;
-    const path = join(expanded, 'settings.json');
-    try {
-      JSON.parse(readFileSync(path, 'utf8'));
-      return path;
-    } catch {
-      return null;
-    }
+    return preferredSettingsFile(expanded);
   }
 
+  const dirs: string[] = [];
+  let scriptHome: string | null = null;
   const head = readFileHead(executable, SCRIPT_PROBE_BYTES);
   // A NUL byte means we're looking at a real binary, not a wrapper script.
   if (head && !head.includes(0)) {
-    const dir = extractClaudeConfigDirFromScript(head.toString('utf8'), home);
-    if (dir) candidates.push(join(dir, 'settings.json'));
+    const script = head.toString('utf8');
+    scriptHome = extractHomeFromScript(script);
+    const dir = extractClaudeConfigDirFromScript(script, scriptHome ?? home);
+    if (dir) dirs.push(dir);
   }
 
-  candidates.push(join(home, '.claude', 'settings.json'));
-
-  for (const candidate of candidates) {
-    try {
-      JSON.parse(readFileSync(candidate, 'utf8'));
-      return candidate;
-    } catch {
-      // Missing file / unreadable / invalid JSON — try the next candidate.
-    }
+  // Claude reads ~/.claude from the HOME it was started with. A wrapper
+  // assignment is that home, so a missing profile must not borrow another.
+  dirs.push(join(scriptHome ?? home, '.claude'));
+  for (const dir of dirs) {
+    const found = preferredSettingsFile(dir);
+    if (found) return found;
   }
   return null;
 }
@@ -501,6 +577,20 @@ export function parseAvailableModels(settings: unknown): string[] {
   const raw = (settings as Record<string, unknown>).availableModels;
   if (!Array.isArray(raw)) return [];
   return raw.filter((m): m is string => typeof m === 'string' && m.length > 0);
+}
+
+/** The settings.json `model` field, trimmed. Aliases and full model ids are
+ *  kept verbatim so the catalog can offer the value the CLI is configured
+ *  to use. Blank and non-string values are ignored. */
+export function parseSettingsModel(settings: unknown): string | null {
+  if (!settings || typeof settings !== 'object') return null;
+  const raw = (settings as Record<string, unknown>).model;
+  if (typeof raw !== 'string') return null;
+  const model = raw.trim();
+  if (!model || model.length > GATEWAY_MODEL_TEXT_MAX_LENGTH) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F]/.test(model)) return null;
+  return model;
 }
 
 interface ClaudeGatewayModel {
@@ -531,24 +621,48 @@ function isGatewayModelDiscoveryEnabled(value: unknown): boolean {
   return normalized === '1' || normalized === 'true';
 }
 
-/** Validate Claude Code's gateway-model discovery cache against the settings
- * profile that owns it. A cache is usable only when its base URL exactly
- * matches settings.env.ANTHROPIC_BASE_URL and every model entry has the
- * expected id/display_name shape. Invalid caches fail closed to []. */
+function gatewayDiscoveryExplicitlyDisabled(settings: unknown): boolean {
+  if (!isRecord(settings) || !isRecord(settings.env)) return false;
+  if (!('CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY' in settings.env)) return false;
+  return !isGatewayModelDiscoveryEnabled(
+    settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,
+  );
+}
+
+/** Base URL from settings.env, and only when that profile turned gateway
+ *  discovery on. A URL with discovery left unset stays unused. */
+function enabledSettingsGatewayBaseUrl(settings: unknown): string | null {
+  if (!isRecord(settings) || !isRecord(settings.env)) return null;
+  if (!isGatewayModelDiscoveryEnabled(
+    settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,
+  )) return null;
+  const raw = settings.env.ANTHROPIC_BASE_URL;
+  if (typeof raw !== 'string') return null;
+  const baseUrl = raw.trim();
+  return baseUrl || null;
+}
+
+/** Validate Claude Code's gateway-model discovery cache. A cache is usable
+ *  when discovery is not explicitly disabled and its baseUrl exactly matches
+ *  either the enabled settings.env.ANTHROPIC_BASE_URL or the wrapper script's
+ *  ANTHROPIC_BASE_URL. Every model entry must still have the expected
+ *  id/display_name shape. Invalid caches fail closed to []. */
 function parseGatewayModelsCache(
   settings: unknown,
   cache: unknown,
+  wrapperBaseUrl?: string | null,
 ): ClaudeGatewayModel[] {
-  if (!isRecord(settings) || !isRecord(settings.env) || !isRecord(cache)) return [];
-  if (!isGatewayModelDiscoveryEnabled(
-    settings.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY,
-  )) return [];
-  const rawExpectedBaseUrl = settings.env.ANTHROPIC_BASE_URL;
+  if (gatewayDiscoveryExplicitlyDisabled(settings) || !isRecord(cache)) return [];
+  const expectedBaseUrls = new Set<string>();
+  const settingsBaseUrl = enabledSettingsGatewayBaseUrl(settings);
+  if (settingsBaseUrl) expectedBaseUrls.add(settingsBaseUrl);
+  const wrapper = wrapperBaseUrl?.trim() ?? '';
+  if (wrapper) expectedBaseUrls.add(wrapper);
+  if (expectedBaseUrls.size === 0) return [];
   const rawCacheBaseUrl = cache.baseUrl;
-  if (typeof rawExpectedBaseUrl !== 'string' || typeof rawCacheBaseUrl !== 'string') return [];
-  const expectedBaseUrl = rawExpectedBaseUrl.trim();
+  if (typeof rawCacheBaseUrl !== 'string') return [];
   const cacheBaseUrl = rawCacheBaseUrl.trim();
-  if (!expectedBaseUrl || !cacheBaseUrl || cacheBaseUrl !== expectedBaseUrl) return [];
+  if (!cacheBaseUrl || !expectedBaseUrls.has(cacheBaseUrl)) return [];
   if (!Array.isArray(cache.models)
     || cache.models.length === 0
     || cache.models.length > GATEWAY_MODELS_MAX_ENTRIES) return [];
@@ -572,15 +686,34 @@ function parseGatewayModelsCache(
 function readGatewayModelsCache(
   settingsPath: string,
   settings: unknown,
+  wrapperBaseUrl?: string | null,
 ): ClaudeGatewayModel[] {
   const cachePath = join(dirname(settingsPath), 'cache', 'gateway-models.json');
   const raw = readFileHead(cachePath, GATEWAY_MODELS_CACHE_MAX_BYTES + 1);
   if (!raw || raw.byteLength > GATEWAY_MODELS_CACHE_MAX_BYTES) return [];
   try {
-    return parseGatewayModelsCache(settings, JSON.parse(raw.toString('utf8')));
+    return parseGatewayModelsCache(settings, JSON.parse(raw.toString('utf8')), wrapperBaseUrl);
   } catch {
     return [];
   }
+}
+
+function isUnrecognizedModelError(text: string): boolean {
+  const sample = text.toLowerCase();
+  return /model[^\n]{0,160}(does not exist|doesn't exist|do not exist|not found|unknown|unsupported|not supported|invalid|not available|no access)/.test(sample)
+    || /(unknown|invalid|unsupported|unrecognized) model\b/.test(sample)
+    || /no such model/.test(sample)
+    || /not a valid model/.test(sample);
+}
+
+function annotateBuiltinFallbackModelError(
+  fallbackActive: boolean,
+  model: string | null,
+  detail: string,
+): string {
+  if (!fallbackActive || !model || !BUILTIN_FALLBACK_ALIAS_MODELS.has(model)) return detail;
+  if (!isUnrecognizedModelError(detail)) return detail;
+  return `${BUILTIN_FALLBACK_MODEL_ERROR_PREFIX}\n${detail}`;
 }
 
 /** Stable slug for building capability ids out of arbitrary model strings. */
@@ -622,6 +755,20 @@ function claudeExecutable() {
   return 'claude';
 }
 
+/** Label the empty-model Default entry with the model Claude reported at
+ *  init. Returns false when nothing changed, including a repeat of the same
+ *  id. Concrete catalog rows are left alone. */
+export function labelDefaultModel(models: ModelCapabilities[], detectedModelId: string): boolean {
+  const id = detectedModelId.trim();
+  if (!id) return false;
+  const entry = models.find((model) => model.isDefault && model.model === '');
+  if (!entry) return false;
+  const displayName = `Default · ${id}`;
+  if (entry.displayName === displayName) return false;
+  entry.displayName = displayName;
+  return true;
+}
+
 /**
  * Normalize a session display name for the Claude CLI `--name` flag
  * (SESSION-NAME-001). Strips control characters (incl. CR/LF) and caps the
@@ -641,6 +788,8 @@ export function sanitizeDisplayName(raw: string | null | undefined): string | nu
 export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   private readonly sessions = new Map<string, ManagedSession>();
   private discoveredModels: ModelCapabilities[] = [];
+  /** True only while the menu is the built-in opus/sonnet/haiku list. */
+  private builtinFallbackActive = false;
   private discoveredPermissionModes: string[] = [];
   private modelDiscoveryPromise: Promise<void> | null = null;
   private readonly approvalServer: ApprovalServer;
@@ -710,32 +859,36 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     ]);
     const supportedEfforts = parseEffortLevelsFromHelp(helpText);
     this.discoveredPermissionModes = parseClaudePermissionModesFromHelp(helpText);
-    // Model menu sources, in priority order:
-    //  1. The `availableModels` list from the Claude settings.json the
-    //     configured CLI actually reads (see resolveClaudeSettingsPath).
-    //  2. Claude Code's gateway discovery cache from that same profile, but
-    //     only when its baseUrl matches settings.env.ANTHROPIC_BASE_URL.
-    //     Both custom sources are local file reads and spend no Agent SDK
-    //     credit.
-    //  3. The static alias menu (opus / sonnet / haiku + "no --model" = the
-    //     configured default) as fallback. Aliases are stable (always the
-    //     latest of that family), so this list never goes stale. The
-    //     interactive `/model` picker shows exactly this set, so scraping its
-    //     TUI would discover nothing extra.
+    // Model menu sources, in priority order. All of them are local file
+    // reads and spend no Agent SDK credit.
+    //  1. `availableModels` from the Claude settings.json the configured CLI
+    //     reads, plus `settings.model` when that value is not already listed.
+    //  2. The gateway discovery cache from that same profile, when its
+    //     baseUrl matches an enabled settings.env.ANTHROPIC_BASE_URL or an
+    //     ANTHROPIC_BASE_URL assignment in the configured CLI wrapper.
+    //     `settings.model` is still added when the cache does not contain it.
+    //     An explicit discovery disable in settings rejects the cache.
+    //  3. `settings.model` alone, when neither list above is usable.
+    //  4. The static alias menu (opus / sonnet / haiku + Default). Those
+    //     aliases are unverified and may be unknown to the current CLI.
     // `probeCurrentModel` (gated off by default) only enriches the Default
     // entry's label with the resolved concrete name; it never changes which
     // models are offered.
     let settingsModels: string[] = [];
     let gatewayModels: ClaudeGatewayModel[] = [];
+    let configuredModel: string | null = null;
     try {
       const settingsPath = resolveClaudeSettingsPath();
+      const wrapperBaseUrl = readWrapperAnthropicBaseUrl();
       if (settingsPath) {
-        const settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as unknown;
+        const settings = readMergedClaudeSettings(dirname(settingsPath))
+          ?? JSON.parse(readFileSync(settingsPath, 'utf8')) as unknown;
         settingsModels = parseAvailableModels(settings);
+        configuredModel = parseSettingsModel(settings);
         if (settingsModels.length > 0) {
           this.emit('debug', `[runtime] Model menu from ${settingsPath} availableModels (${settingsModels.length} entries)`);
         } else {
-          gatewayModels = readGatewayModelsCache(settingsPath, settings);
+          gatewayModels = readGatewayModelsCache(settingsPath, settings, wrapperBaseUrl);
           if (gatewayModels.length > 0) {
             this.emit('debug', `[runtime] Model menu from ${dirname(settingsPath)} gateway cache (${gatewayModels.length} entries)`);
           }
@@ -764,24 +917,48 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       "Uses Claude Code's configured default model.",
       true,
     );
-    if (settingsModels.length > 0 || gatewayModels.length > 0) {
+    type MenuEntry = {
+      idPrefix: string;
+      model: string;
+      displayName: string;
+      description: string;
+    };
+    const configuredEntry = (model: string): MenuEntry => ({
+      idPrefix: 'claude-settings',
+      model,
+      displayName: model,
+      description: CURRENT_SETTINGS_MODEL_DESCRIPTION,
+    });
+    let menu: MenuEntry[] | null = null;
+    if (settingsModels.length > 0) {
+      menu = settingsModels.map((model) => ({
+        idPrefix: 'claude-settings',
+        model,
+        displayName: model,
+        description: 'From Claude settings availableModels.',
+      }));
+      if (configuredModel && !settingsModels.includes(configuredModel)) {
+        menu.push(configuredEntry(configuredModel));
+      }
+    } else if (gatewayModels.length > 0) {
+      menu = gatewayModels.map((model) => ({
+        idPrefix: 'claude-gateway',
+        model: model.id,
+        displayName: model.displayName,
+        description: 'From Claude gateway model discovery cache.',
+      }));
+      if (configuredModel && !gatewayModels.some((model) => model.id === configuredModel)) {
+        menu.push(configuredEntry(configuredModel));
+      }
+    } else if (configuredModel) {
+      menu = [configuredEntry(configuredModel)];
+    }
+    if (menu) {
+      this.builtinFallbackActive = false;
       const usedIds = new Set<string>();
-      const configuredModels = settingsModels.length > 0
-        ? settingsModels.map((model) => ({
-            idPrefix: 'claude-settings',
-            model,
-            displayName: model,
-            description: 'From Claude settings availableModels.',
-          }))
-        : gatewayModels.map((model) => ({
-            idPrefix: 'claude-gateway',
-            model: model.id,
-            displayName: model.displayName,
-            description: 'From Claude gateway model discovery cache.',
-          }));
       this.discoveredModels = [
         defaultEntry,
-        ...configuredModels.map((entry) => {
+        ...menu.map((entry) => {
           const slug = slugifyModelId(entry.model);
           let id = `${entry.idPrefix}-${slug}`;
           for (let n = 2; usedIds.has(id); n++) id = `${entry.idPrefix}-${slug}-${n}`;
@@ -790,11 +967,12 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         }),
       ];
     } else {
+      this.builtinFallbackActive = true;
       this.discoveredModels = [
         defaultEntry,
-        alias('claude-alias-opus', 'opus', 'Opus', 'Most capable for complex work.'),
-        alias('claude-alias-sonnet', 'sonnet', 'Sonnet', 'Best for everyday tasks.'),
-        alias('claude-alias-haiku', 'haiku', 'Haiku', 'Fastest for quick answers.'),
+        alias('claude-alias-opus', 'opus', 'Opus', `Most capable for complex work. ${BUILTIN_FALLBACK_ALIAS_DESCRIPTION}`),
+        alias('claude-alias-sonnet', 'sonnet', 'Sonnet', `Best for everyday tasks. ${BUILTIN_FALLBACK_ALIAS_DESCRIPTION}`),
+        alias('claude-alias-haiku', 'haiku', 'Haiku', `Fastest for quick answers. ${BUILTIN_FALLBACK_ALIAS_DESCRIPTION}`),
       ];
     }
     this.emit('debug', `[runtime] Discovered ${this.discoveredModels.length} models: ${this.discoveredModels.map((m) => m.model || '(default)').join(', ')}`);
@@ -867,9 +1045,12 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       throw new Error(`No session found for ${sessionId}`);
     }
 
-    // Kill any still-running process for this session.
-    if (session.activeProcess && !session.activeProcess.killed) {
-      session.activeProcess.kill('SIGTERM');
+    // Detach a previous child before signaling it. Its exit is asynchronous
+    // and must not be charged to the process this call is about to spawn.
+    const previous = session.activeProcess;
+    if (previous) {
+      session.activeProcess = null;
+      if (!previous.killed) previous.kill('SIGTERM');
     }
 
     // Permission bridge: bypassPermissions skips the MCP roundtrip entirely
@@ -926,6 +1107,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     // block. When this is true we suppress the result-side text and only
     // signal turn completion.
     let streamedAnyText = false;
+    let streamedTextLength = 0;
     const emittedUnknownKeys = new Set<string>();
     let currentContext: { used: number } | null = null;
     let currentModel: string | null = null;
@@ -951,6 +1133,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         if (eventType === 'system' && event.subtype === 'init') {
           if (typeof event.model === 'string') {
             session.detectedModelId = event.model;
+            if (labelDefaultModel(this.discoveredModels, event.model)) {
+              this.emit('defaultModelLabeled', event.model);
+            }
           }
         }
 
@@ -1041,6 +1226,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
 
             if (blockType === 'text' && typeof b.text === 'string' && b.text.length > 0) {
               streamedAnyText = true;
+              streamedTextLength += b.text.length;
               const itemId = typeof b.id === 'string' && b.id
                 ? b.id
                 : `${messageId}_${blockIdx}`;
@@ -1143,12 +1329,14 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       this.emit('debug', `[runtime] post-spawn error for ${sessionId}: ${err.message}`);
     });
 
-    proc.on('exit', (code, signal) => {
+    let exitSettled = false;
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (exitSettled) return;
+      exitSettled = true;
       // A manual stop removes this ManagedSession immediately so the next turn
-      // can register a replacement under the same Gian session id. SIGTERM is
-      // asynchronous, though: the old child may exit after that replacement is
-      // already live. Never let the retired child clear or terminate the new
-      // registration's state.
+      // can register a replacement under the same Gian session id. An interrupt
+      // instead detaches the child before SIGTERM. Either way the retired
+      // child's exit must not clear or terminate the live registration.
       if (this.sessions.get(sessionId) !== session || session.activeProcess !== proc) {
         this.emit('debug', `[runtime] Ignoring stale child exit for ${sessionId} (code=${code}, signal=${signal})`);
         return;
@@ -1171,11 +1359,21 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
         this.emit('channelReply', sessionId, replyText);
       }
 
-      const exitError = resultError
+      const rawExitError = resultError
         ?? (code !== 0 && stderrText.trim() ? stderrText.trim() : undefined);
-      this.emit('processExited', sessionId, code, signal, exitError);
-      this.emit('debug', `[runtime] Turn process exited for ${sessionId} (code=${code}, signal=${signal})`);
-    });
+      const exitError = rawExitError
+        ? annotateBuiltinFallbackModelError(this.builtinFallbackActive, session.model, rawExitError)
+        : undefined;
+      this.emit('processExited', sessionId, code, signal, exitError, streamedTextLength);
+      this.emit('debug', `[runtime] Turn process exited for ${sessionId} (code=${code}, signal=${signal}, streamed=${streamedTextLength})`);
+    };
+    proc.on('exit', onExit);
+    // 'exit' is delivered on a later turn of the event loop. If the child
+    // already died before the listener was attached, the event is gone and
+    // the turn would stay running with no terminal signal.
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      onExit(proc.exitCode, proc.signalCode);
+    }
   }
 
   async respondPermission(
@@ -1220,6 +1418,21 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     this.cleanupAfterTurn(session);
     this.approvalServer.dropConnection(sessionId);
     this.sessions.delete(sessionId);
+  }
+
+  /** Interrupt keeps the registration. Deleting it makes the next turn pass
+   *  --session-id for an id Claude already created, and that CLI exits 0. */
+  interruptActiveProcess(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const proc = session.activeProcess;
+    session.activeProcess = null;
+    if (proc && !proc.killed) proc.kill('SIGTERM');
+    // Claude creates the session during init. An interrupt before that event
+    // must keep --session-id; --resume of an id Claude never wrote fails.
+    if (session.detectedModelId !== null) session.hasHadFirstTurn = true;
+    this.cleanupAfterTurn(session);
+    this.approvalServer.dropConnection(sessionId);
   }
 
   async stop(): Promise<void> {

@@ -13,7 +13,7 @@ vi.mock('../src/api.js', () => {
   return {
     loadChanged: never,
     loadProxyModels: never,
-    loadProxyCapabilities: vi.fn(async () => ({ capabilities: { 'turn.steer': 1 } })),
+    loadProxyCapabilities: async () => ({ capabilities: { 'turn.steer': 1 } }),
     loadSlashCommands: never,
     loadSessionSlashCommands: never,
     loadNativeConfig: never,
@@ -159,7 +159,7 @@ describe('WT-003: finalized worktree Session composer', () => {
   beforeEach(() => localStorage.clear());
 
   for (const outcome of ['merged', 'discarded'] as const) {
-    it(`stays fully interactive after the worktree is ${outcome} (ADR-0080)`, () => {
+    it(`stays fully interactive after the worktree is ${outcome} (ADR-0080)`, async () => {
       renderSession(sessionContractFixture({
         status: 'done',
         branch: 'worktree/finalized',
@@ -175,7 +175,7 @@ describe('WT-003: finalized worktree Session composer', () => {
       const drawer = screen.getByText('queued follow-up').closest('.queue-drawer');
       expect(drawer).not.toBeNull();
       const queueUi = within(drawer as HTMLElement);
-      expect(queueUi.getByRole('button', { name: 'Send now' })).toBeInTheDocument();
+      expect(await queueUi.findByRole('button', { name: 'Send now' })).toBeInTheDocument();
       expect(queueUi.getByRole('button', { name: 'Clear' })).toBeInTheDocument();
       expect(queueUi.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
       expect(queueUi.getByRole('button', { name: 'Remove' })).toBeInTheDocument();

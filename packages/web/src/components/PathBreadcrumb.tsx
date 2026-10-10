@@ -9,6 +9,9 @@ export interface PathSegment {
   label: string;
   copyHint?: string;
   editing?: boolean;
+  /** Environment segment only: the session executes on a paired remote
+   *  environment — the segment carries a globe marker. */
+  remote?: boolean;
   /** Marks the one segment that owns the session menu (click opens it, the
    *  caret shows). */
   menuAnchor?: boolean;
@@ -86,6 +89,17 @@ function ChevronRight({ size = 12 }: { size?: number }) {
   return (
     <svg data-icon="chevron-right" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="m9 18 6-6-6-6" />
+    </svg>
+  );
+}
+
+/** lucide "globe" — the environment segment of a Remote Control session. */
+function GlobeIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg data-icon="globe" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+      <path d="M2 12h20" />
     </svg>
   );
 }
@@ -301,6 +315,9 @@ export function PathBreadcrumb({ segments, onRenameSubmit, onRenameCancel, sessi
                 >
                   {seg.kind === 'branch' && (
                     <span className="path-seg-icon"><WorktreeIcon /></span>
+                  )}
+                  {seg.kind === 'environment' && seg.remote && (
+                    <span className="path-seg-icon" data-testid="path-seg-remote"><GlobeIcon /></span>
                   )}
                   <span className="path-seg-label">{seg.label}</span>
                   {(seg.menuAnchor || (seg.kind === 'branch' && branchMenu)) && (

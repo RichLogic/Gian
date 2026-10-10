@@ -20,10 +20,11 @@ export {
   BRIDGE_PROTOCOL_VERSION,
   DSH_SESSION_FORMAT_VERSION,
 } from './schema.js';
+import { BRIDGE_PACKAGE_VERSION } from './package-version.js';
 
 /** Cordis hook name used when the bundle is mounted as a DSH plugin row. */
 export const BRIDGE_SERVICE_NAME = 'gian-dsh-bridge';
-export const BRIDGE_SERVICE_VERSION = '0.1.3';
+export const BRIDGE_SERVICE_VERSION = BRIDGE_PACKAGE_VERSION;
 export const name = BRIDGE_SERVICE_NAME;
 export const inject = ['agents', 'sessions'];
 

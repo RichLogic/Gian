@@ -83,5 +83,6 @@ describe('performance-sensitive API clients', () => {
     await expect(api.loadWorkingTrees({ refresh: true })).rejects.toThrow(
       'working trees request failed (503)',
     );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

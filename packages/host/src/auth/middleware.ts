@@ -11,9 +11,10 @@ const PUBLIC_PATHS = new Set([
   '/ws',
 ]);
 
-export function requireAuth(): MiddlewareHandler {
+export function requireAuth(options?: { required?: boolean }): MiddlewareHandler {
+  const required = options?.required ?? AUTH_REQUIRED;
   return async (c, next) => {
-    if (!AUTH_REQUIRED) {
+    if (!required) {
       await next();
       return;
     }

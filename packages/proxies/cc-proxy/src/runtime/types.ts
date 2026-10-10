@@ -67,7 +67,11 @@ export interface ClaudeRuntimeEvents {
     code: number | null,
     signal: string | null,
     errorDetail?: string,
+    /** Assistant text already emitted for this process, in UTF-16 code units. */
+    streamedLength?: number,
   ];
+  /** The empty-model Default entry was labeled with the model from init. */
+  defaultModelLabeled: [modelId: string];
   debug: [message: string];
 }
 
@@ -127,8 +131,13 @@ export interface ClaudeRuntime extends EventEmitter<ClaudeRuntimeEvents> {
     extra?: { updatedInput?: Record<string, unknown>; message?: string },
   ): Promise<void>;
 
-  /** Kill the Claude Code process for a session. */
+  /** Kill the Claude Code process and drop the registered session. */
   killSession(sessionId: string): void;
+
+  /** Stop the in-flight CLI without dropping the registered session.
+   *  The next sendMessage resumes the same Claude session id. Optional so
+   *  test doubles can keep using killSession as their only stop. */
+  interruptActiveProcess?(sessionId: string): void;
 
   /** Check whether a session's Claude Code process is alive. */
   isSessionAlive(sessionId: string): boolean;

@@ -60,7 +60,8 @@
   font-size: var(--fz-11);
   color: var(--danger, #d33);
 }
-.msg-text code {
+.msg-text code,
+.translation-bubble code {
   font-family: var(--font-mono);
   font-size: 11.5px;
   padding: 1px 5px;
@@ -69,29 +70,56 @@
   color: var(--text);
 }
 
-/* Markdown rendering inside assistant bubbles */
-.msg-text.md { min-width: 0; overflow-wrap: break-word; }
-.msg-text.md > * { margin: 0; }
-.msg-text.md > * + * { margin-top: 8px; }
+/* Markdown rendering inside assistant bubbles AND translation bubbles: the
+   `.translation-bubble.md` scope shares every element style so translated
+   markdown never renders unstyled (blockquote/katex/table overflow fixes
+   included). */
+.msg-text.md,
+.translation-bubble.md { min-width: 0; overflow-wrap: break-word; }
+.msg-text.md > *,
+.translation-bubble.md > * { margin: 0; }
+.msg-text.md > * + *,
+.translation-bubble.md > * + * { margin-top: 8px; }
 .msg-text.md h1,
 .msg-text.md h2,
 .msg-text.md h3,
-.msg-text.md h4 {
+.msg-text.md h4,
+.translation-bubble.md h1,
+.translation-bubble.md h2,
+.translation-bubble.md h3,
+.translation-bubble.md h4 {
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.01em;
 }
-.msg-text.md h1 { font-size: 17px; margin-top: 12px; }
-.msg-text.md h2 { font-size: 15px; margin-top: 12px; }
-.msg-text.md h3 { font-size: 13.5px; margin-top: 10px; }
-.msg-text.md h4 { font-size: 12.5px; color: var(--text-2); }
+/* Negative tracking reads badly on CJK translations — reset it in the
+   translation bubble only. */
+.translation-bubble.md h1,
+.translation-bubble.md h2,
+.translation-bubble.md h3,
+.translation-bubble.md h4 {
+  letter-spacing: normal;
+}
+.msg-text.md h1,
+.translation-bubble.md h1 { font-size: 17px; margin-top: 12px; }
+.msg-text.md h2,
+.translation-bubble.md h2 { font-size: 15px; margin-top: 12px; }
+.msg-text.md h3,
+.translation-bubble.md h3 { font-size: 13.5px; margin-top: 10px; }
+.msg-text.md h4,
+.translation-bubble.md h4 { font-size: 12.5px; color: var(--text-2); }
 .msg-text.md ul,
-.msg-text.md ol {
+.msg-text.md ol,
+.translation-bubble.md ul,
+.translation-bubble.md ol {
   padding-left: 22px;
 }
-.msg-text.md li + li { margin-top: 3px; }
-.msg-text.md li > p { margin: 0; }
-.msg-text.md pre {
+.msg-text.md li + li,
+.translation-bubble.md li + li { margin-top: 3px; }
+.msg-text.md li > p,
+.translation-bubble.md li > p { margin: 0; }
+.msg-text.md pre,
+.translation-bubble.md pre {
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
@@ -102,7 +130,8 @@
   overflow-x: auto;
   white-space: pre;
 }
-.msg-text.md pre code {
+.msg-text.md pre code,
+.translation-bubble.md pre code {
   background: transparent;
   padding: 0;
   font-size: inherit;
@@ -200,27 +229,35 @@ body[data-theme="dark"] .code-block .hljs-symbol,
 body[data-theme="dark"] .code-block .hljs-meta { color: oklch(0.78 0.13 65); }
 
 /* Display math can overflow a narrow bubble — scroll it like a code block. */
-.msg-text.md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
-.msg-text.md blockquote {
+.msg-text.md .katex-display,
+.translation-bubble.md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.msg-text.md blockquote,
+.translation-bubble.md blockquote {
   border-left: 2px solid var(--surface-3);
   padding-left: 10px;
   color: var(--text-2);
 }
-.msg-text.md a {
+.msg-text.md a,
+.translation-bubble.md a {
   color: var(--accent);
   text-decoration: underline;
   text-decoration-color: color-mix(in oklch, var(--accent) 40%, transparent);
   text-underline-offset: 2px;
 }
-.msg-text.md a:hover { text-decoration-color: var(--accent); }
-.msg-text.md hr {
+.msg-text.md a:hover,
+.translation-bubble.md a:hover { text-decoration-color: var(--accent); }
+.msg-text.md hr,
+.translation-bubble.md hr {
   border: none;
   border-top: 1px solid var(--surface-3);
   margin: 10px 0;
 }
-.msg-text.md table {
+.msg-text.md table,
+.translation-bubble.md table {
   border-collapse: collapse;
-  font-size: 12px;
+  /* Keep the 12px-at-default hierarchy against the 14px body, but ride the
+   * chat font-size setting through the zone scale like every --fz-* token. */
+  font-size: calc(12px * var(--zone-scale, 1));
 }
 /* The table scrolls inside its own wrapper on narrow viewports instead of
    widening the transcript (and the whole page) — same pattern as <pre>. */
@@ -229,12 +266,15 @@ body[data-theme="dark"] .code-block .hljs-meta { color: oklch(0.78 0.13 65); }
   overflow-x: auto;
 }
 .msg-text.md th,
-.msg-text.md td {
+.msg-text.md td,
+.translation-bubble.md th,
+.translation-bubble.md td {
   border: 1px solid var(--surface-3);
   padding: 4px 8px;
   text-align: left;
 }
-.msg-text.md th { background: var(--surface-2); font-weight: 600; }
+.msg-text.md th,
+.translation-bubble.md th { background: var(--surface-2); font-weight: 600; }
 
 .msg.user .msg-text {
   max-width: 88%;
@@ -472,7 +512,7 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
 .approval-plan-md table {
   border-collapse: collapse;
   margin: 8px 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--zone-scale, 1));
 }
 .approval-plan-md th,
 .approval-plan-md td {
@@ -1024,19 +1064,20 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
 
 /* ── from gian-v2.css: user-bubble attachments ──────────────────────────── */
 
-/* Inline image attachments in a user bubble. Sit above .msg-text so a
- * combined text+image message keeps a sensible reading order; for an
- * image-only send (text empty) this is the entire bubble. Pending echo's
- * opacity dim is inherited from `.msg.user.pending`. */
+/* Inline image attachments in a user bubble. They sit BELOW .msg-text
+ * (reading order: original bubble → thumbnails → translation); for an
+ * image-only send (text empty) this block is the entire bubble. Pending
+ * echo's opacity dim is inherited from `.msg.user.pending`. */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   max-width: 88%;
 }
-.msg.user .msg-attachments { justify-content: flex-end; margin-bottom: 4px; }
-/* Composer-document bubbles interleave attachment chips inside .msg-text, so
- * their image previews sit BELOW it instead — swap the gap direction. */
+.msg.user .msg-attachments { justify-content: flex-end; }
+/* Any attachments block following the bubble (regular sends after the
+ * bubble-first reorder, and composer-document galleries) gets its gap from
+ * the adjacency rule. */
 .msg.user .msg-text + .msg-attachments { margin-top: 6px; margin-bottom: 0; }
 .msg-att {
   display: block;
@@ -1177,21 +1218,17 @@ textarea.approval-text-field { min-height: 48px; resize: vertical; }
 }
 .inline-reference-document { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* Text segments between reference chips are tiny markdown documents (the
- * composer exports literal markdown; see UserMarkdownSegment). Paragraphs
- * stay inline with collapsed margins so consecutive segments and chips rejoin
- * into one flow; block structure inside a segment (lists, fences, headings)
- * keeps its block layout. Segment-internal paragraph breaks come back as a
- * line break since the paragraphs themselves are inline. Boundary newlines
- * markdown would swallow are explicit elements: `.user-md-br` for a soft line
- * break, `.user-md-gap` for a paragraph break. */
+/* The composer document renders as ONE markdown source (reference chips come
+ * back as inline slots; see InlineReferenceDocument). Paragraphs stay inline
+ * with collapsed margins so text and chips read as one flow; block structure
+ * (lists, fences, headings) keeps its block layout — including blocks that
+ * span a chip. Paragraph breaks come back as a line gap since the paragraphs
+ * themselves are inline. */
 .user-md-seg { display: inline; }
 .user-md-seg > * { margin: 0; }
 .user-md-seg > * + * { margin-top: 6px; }
 .user-md-seg p { display: inline; }
 .user-md-seg p + p::before { content: ""; display: block; height: 6px; }
-.user-md-br { display: block; }
-.user-md-gap { display: block; height: 6px; }
 
 /* Reference detail popover (floating preview card) */
 .ref-pop {

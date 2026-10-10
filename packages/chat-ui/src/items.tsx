@@ -390,6 +390,7 @@ export function UserMessage({
   item,
   sendUnknown = false,
   onRetrySend,
+  sendStatus,
 }: {
   item: MsgItem;
   /** A still-pending echo whose send outcome is unknown (the app's send
@@ -399,6 +400,10 @@ export function UserMessage({
   /** Retry affordance for a failed echo; the host app re-dispatches the SAME
    *  send. Absent: no retry button. */
   onRetrySend?: () => void;
+  /** Host-app slot under the bubble (and its attachments) for pre-dispatch
+   *  send state — Gian Web renders the translated send's inline
+   *  Translating / Retry / Send-original row here. */
+  sendStatus?: ReactNode;
 }) {
   const t = useChatUiT();
   const zoom = useContext(ImageZoomContext);
@@ -418,6 +423,34 @@ export function UserMessage({
     >
       <div className="msg-body">
         {!inlineDocument && <ContextCards items={item.contextItems ?? []} className="message-context-cards" />}
+        {/* Reading order: original bubble → attachment thumbnails →
+            translation block. */}
+        {(hasText || inlineDocument) && (
+          <div
+            className="msg-text user-text md user-md"
+            data-transcript-selectable="true"
+            data-transcript-source-id={transcriptItemIdentity(item)}
+            data-transcript-source-kind="user"
+            data-transcript-turn={item.turn}
+          >
+            {inlineDocument ? (
+              <InlineReferenceDocument
+                document={inlineDocument}
+                attachments={attachments}
+                contextItems={item.contextItems}
+                onAttachmentActivate={attachment => {
+                  if (!zoom || !isNativeImageMime(attachment.mime ?? '') || !attachment.url) return false;
+                  zoom(attachment.url, attachment.name);
+                  return true;
+                }}
+              />
+            ) : (
+              // The composer is a markdown editor: user text is the same
+              // literal markdown the transcript shows for assistants.
+              <MarkdownText>{item.text}</MarkdownText>
+            )}
+          </div>
+        )}
         {!inlineDocument && attachments.length > 0 && (
           <div className="msg-attachments user-attachments">
             {attachments.map((a, i) => (
@@ -468,32 +501,7 @@ export function UserMessage({
             ))}
           </div>
         )}
-        {(hasText || inlineDocument) && (
-          <div
-            className="msg-text user-text md user-md"
-            data-transcript-selectable="true"
-            data-transcript-source-id={transcriptItemIdentity(item)}
-            data-transcript-source-kind="user"
-            data-transcript-turn={item.turn}
-          >
-            {inlineDocument ? (
-              <InlineReferenceDocument
-                document={inlineDocument}
-                attachments={attachments}
-                contextItems={item.contextItems}
-                onAttachmentActivate={attachment => {
-                  if (!zoom || !isNativeImageMime(attachment.mime ?? '') || !attachment.url) return false;
-                  zoom(attachment.url, attachment.name);
-                  return true;
-                }}
-              />
-            ) : (
-              // The composer is a markdown editor: user text is the same
-              // literal markdown the transcript shows for assistants.
-              <MarkdownText>{item.text}</MarkdownText>
-            )}
-          </div>
-        )}
+        {sendStatus}
         {item.translation && <div className="translation-block translation-sent">
           <div className="translation-label">{t('translation.sentLabel')}</div>
           <div className="translation-bubble md"><MarkdownText>{item.translation.text}</MarkdownText></div>

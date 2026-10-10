@@ -81,6 +81,7 @@ const state = {
   models: scenario.models ?? [],
   defaultModel: scenario.default_model ?? null,
   wsClients: new Set(),
+  journal: new Map(),
   wsConnections: 0,
 };
 
@@ -161,6 +162,9 @@ function emitFrame(sessionId, type, payload, options = {}) {
     ...(Number.isInteger(options.offset) ? { offset: options.offset } : {}),
     payload: { type, ...payload },
   };
+  const journal = state.journal.get(sessionId) ?? [];
+  journal.push(frame);
+  state.journal.set(sessionId, journal);
   for (const client of state.wsClients) {
     if (client.subscriptions.has(sessionId)) client.sendJson(frame);
   }
@@ -185,6 +189,14 @@ function scheduleScript(sessionId, script, promptId) {
       timers.delete(timer);
       ownedTimers.delete(timer);
       if (ownedTimers.size === 0) promptTimers.delete(`${sessionId}\0${promptId}`);
+      if (step.op === 'disconnect') {
+        for (const client of [...state.wsClients]) {
+          state.wsClients.delete(client);
+          client.socket.destroy();
+        }
+        log({ kind: 'ws-disconnect', sessionId });
+        return;
+      }
       if (step.type === 'turn.ended') {
         session.busy = false;
         session.activePrompt = null;
@@ -352,6 +364,12 @@ function attachWs(req, socket) {
           accepted.push(sid);
           cursors[sid] = { seq: session.info.last_seq, epoch: `ep_${sid.slice(-8)}` };
           client.subscriptions.add(sid);
+          const cursor = frame.payload?.cursors?.[sid];
+          if (cursor !== undefined) {
+            for (const event of state.journal.get(sid) ?? []) {
+              if (event.seq > cursor.seq) client.sendJson(event);
+            }
+          }
         }
         const sendAck = () => {
           log({ kind: 'subscription-ack', accepted, notFound });

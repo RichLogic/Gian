@@ -108,6 +108,9 @@ export const REST_MUTATION_TO_OPERATION = {
   pickAgentHome: ['agent.pickHome'],
   syncProxyCatalog: ['catalog.sync'],
   installCatalogProxy: ['catalog.installProxy'],
+  uninstallIntegration: ['catalog.uninstallProxy'],
+  connectRemoteEnvironment: ['remote.connectEnvironment'],
+  removeRemoteEnvironment: ['remote.removeEnvironment'],
   installManagedRuntime: ['catalog.installRuntime'],
   updateCatalogProxy: ['catalog.updateProxy'],
   rollbackCatalogProxy: ['catalog.rollbackProxy'],
@@ -399,11 +402,13 @@ export function runChecks(rootDir = DEFAULT_ROOT) {
         report('direct-fetch', filePath, lineOf(sourceFile, node), 'direct `fetch` outside api.ts/operations — route through a registered operation (proposal §4.1)');
       }
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && isFeatureFile(rel)) {
+        if (node.importClause?.isTypeOnly) return;
         const spec = node.moduleSpecifier.text;
         if (/(^|\/)api(\.js)?$/.test(spec)) {
           const named = node.importClause?.namedBindings;
           if (named && ts.isNamedImports(named)) {
             for (const el of named.elements) {
+              if (el.isTypeOnly) continue;
               const imported = (el.propertyName ?? el.name).text;
               if (MUTATION_API_NAMES.has(imported)) {
                 report('mutation-import', filePath, lineOf(sourceFile, el), `mutation API \`${imported}\` imported from a view/component/controller — call the operation instead (proposal §4.1)`);

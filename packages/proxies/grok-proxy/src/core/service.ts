@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import type {
   AvailableCommand,
+  InitializeResponse,
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -193,6 +194,7 @@ export class GrokProxyService {
   private readonly unclaimedUpdates = new Map<string, SessionNotification[]>();
   private readonly replayCollectors = new Map<string, SessionNotification[]>();
   private modelState: GrokModelState = {};
+  private capabilityInspection: Promise<InitializeResponse> | null = null;
   private stagedPermission: GrokPermissionMode = 'default';
   private sandboxProfile: GrokSandboxProfile = 'workspace';
   private readonly permissionBySession = new Map<string, PermissionRow>();
@@ -292,6 +294,28 @@ export class GrokProxyService {
   }
 
   async listCapabilities() {
+    const inspection = this.capabilityInspection ??= this.inspectCapabilities();
+    try {
+      const initialized = await inspection;
+      // An empty model snapshot can be transient; do not make it sticky.
+      if ((this.modelState.availableModels?.length ?? 0) === 0
+        && this.capabilityInspection === inspection) {
+        this.capabilityInspection = null;
+      }
+      const catalog = catalogFromModelState(this.modelState, this.catalogPermissionMode(), this.sandboxProfile);
+      return {
+        ...initialized,
+        ...catalog,
+        slashCommands: this.slashCommands,
+      };
+    } catch (error) {
+      if (this.capabilityInspection === inspection) this.capabilityInspection = null;
+      throw error;
+    }
+  }
+
+  /** One process-local metadata snapshot; never shared across Agent HOME profiles. */
+  private async inspectCapabilities(): Promise<InitializeResponse> {
     const aux = this.createRuntime(resolve(tmpdir()), this.auxBoundary());
     try {
       const initialized = await aux.ensureStarted();
@@ -301,16 +325,11 @@ export class GrokProxyService {
       const meta = (initialized as { _meta?: Record<string, unknown> })._meta ?? {};
       this.modelState = modelStateFromUnknown(meta.modelState);
       this.slashCommands = commandsFromUnknown(meta.availableCommands) as AvailableCommand[];
-      const catalog = catalogFromModelState(this.modelState, this.catalogPermissionMode(), this.sandboxProfile);
-      return {
-        ...initialized,
-        ...catalog,
-        slashCommands: this.slashCommands,
-      };
+      return initialized;
     } catch (error) {
       throw mapRuntimeError(error, this.binaryPath);
     } finally {
-      await aux.stop();
+      await aux.stop({ force: true });
     }
   }
 

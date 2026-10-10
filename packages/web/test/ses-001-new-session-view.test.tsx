@@ -18,7 +18,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CodexModelCapabilities, Executor, UserAgentStatus, Workspace } from '@gian/shared';
+import type { CodexModelCapabilities, ConfigOption, Executor, UserAgentStatus, Workspace } from '@gian/shared';
 import {
   loadAgents,
   loadProxyCapabilities,
@@ -69,6 +69,9 @@ vi.mock('../src/api.js', () => ({
   loadProxyCapabilities: vi.fn(),
   loadResolvedProxyCatalog: vi.fn(),
   loadSettings: vi.fn(),
+  connectRemoteEnvironment: vi.fn((input: { server_url: string; code: string; name: string }) =>
+    remoteRequest('/environments', input)),
+  removeRemoteEnvironment: vi.fn(),
 }));
 
 vi.mock('../src/remote-environments.js', async () => ({
@@ -331,6 +334,48 @@ describe('NewSessionView', () => {
     expect(await screen.findByTestId('new-session-translation-error')).toHaveTextContent('Agent unavailable');
     expect(screen.getByTestId('ns-auto-translation')).toHaveAttribute('aria-pressed', 'false');
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('renders the auto-translate control as the shared icon-only chip', async () => {
+    renderView();
+    await screen.findByTestId('ns-agent-picker');
+    const chip = screen.getByTestId('ns-auto-translation');
+    expect(chip).toHaveClass('translation-auto');
+    expect(chip).toHaveAttribute('aria-pressed', 'false');
+    expect(chip).toHaveAttribute('title', 'Auto translate');
+    expect(chip.querySelector('svg')).not.toBeNull();
+    expect(chip.textContent).toBe('');
+  });
+
+  it('never offers the Host-internal gian.translation catalog option as a session extra', async () => {
+    const options = [
+      {
+        id: 'gian.translation', displayName: 'Translation Runtime', binding: 'session' as const,
+        control: 'boolean' as const, required: false, defaultValue: false,
+      },
+      {
+        id: 'workspace_policy', displayName: 'Workspace Policy', binding: 'session' as const,
+        control: 'select' as const, required: false, defaultValue: 'safe',
+        choices: [{ value: 'safe', displayName: 'Safe' }],
+      },
+    ];
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.0',
+      catalogRevision: 'catalog-translation-internal',
+      input: [{ type: 'text' }],
+      configOptions: options,
+      slashCommands: [],
+      capabilities: {},
+      models: [],
+      modes: [],
+    });
+    renderView();
+    await openAgentPicker();
+    await userEvent.click(screen.getByTestId('ns-agent-option-agent-codex-1'));
+    const sessionConfig = await screen.findByTestId('ns-session-config');
+    expect(await screen.findByLabelText('Workspace Policy')).toBeInTheDocument();
+    expect(within(sessionConfig).queryByText('Translation Runtime')).toBeNull();
+    expect(within(sessionConfig).queryByLabelText('Translation Runtime')).toBeNull();
   });
 
   it('keeps takeover attached to the selected Host in the picker menu', async () => {
@@ -1518,6 +1563,105 @@ describe('NewSessionView', () => {
       }),
       firstMessage: 'use the chips',
     }));
+  });
+
+  it.each(['turn', 'session'] as const)('submits the latest %s-bound Grok mode and preserves Sandbox and Thinking', async (binding) => {
+    const grok = { ...agent('grok', 'Grok'), proxy: null };
+    const options: ConfigOption[] = [{
+      id: 'sandbox_profile', displayName: 'Sandbox', binding: 'session',
+      control: 'select', required: false, defaultValue: 'workspace',
+      choices: [{ value: 'workspace', displayName: 'Workspace' }, { value: 'off', displayName: 'Off' }],
+    }, {
+      id: 'model', displayName: 'Model', binding: 'turn', role: 'model',
+      control: 'select', required: false, defaultValue: 'grok-4.7',
+      choices: [{ value: 'grok-4.7', displayName: 'Grok 4.7' }],
+    }, {
+      id: 'reasoning_effort', displayName: 'Thinking', binding: 'turn', role: 'effort',
+      control: 'select', required: false, defaultValue: 'high',
+      choices: [{ value: 'high', displayName: 'High' }, { value: 'low', displayName: 'Low' }],
+    }, {
+      id: 'permission_mode', displayName: 'Mode', binding, role: 'approval_mode',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: [
+        { value: 'default', displayName: 'Default' },
+        { value: 'auto', displayName: 'Auto' },
+        { value: 'always_approve', displayName: 'Always approve' },
+      ],
+    }];
+    const specialCatalogs = { model: 'model', thinking: 'reasoning_effort', approvalMode: 'permission_mode' };
+    vi.mocked(loadAgents).mockResolvedValue([grok]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue({
+      protocolVersion: '2.3', catalogRevision: 'grok-modes', specialCatalogs,
+      input: [{ type: 'text' }], configOptions: options, slashCommands: [],
+      capabilities: { 'catalog.resolve': 1 }, models: [], modes: [],
+    });
+    vi.mocked(loadResolvedProxyCatalog).mockImplementation(async (_executor, request) => {
+      const selectedMode = (binding === 'turn' ? request.turnConfig : request.sessionConfig).permission_mode ?? 'default';
+      return {
+        catalogRevision: 'grok-modes', specialCatalogs,
+        input: [{ type: 'text' }], configOptions: options, slashCommands: [],
+        resolvedDefaults: {
+          sessionConfig: {
+            ...request.sessionConfig,
+            sandbox_profile: request.sessionConfig.sandbox_profile ?? 'workspace',
+            ...(binding === 'session' ? { permission_mode: selectedMode } : {}),
+          },
+          turnConfig: {
+            ...request.turnConfig,
+            model: request.turnConfig.model ?? 'grok-4.7',
+            reasoning_effort: request.turnConfig.reasoning_effort ?? 'high',
+            ...(binding === 'turn' ? { permission_mode: selectedMode } : {}),
+          },
+        },
+      };
+    });
+
+    const { onCreate } = renderView({ initialAgentId: grok.id });
+    await userEvent.selectOptions(await screen.findByLabelText('Sandbox'), 'off');
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Default');
+      expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('High');
+      expect(loadResolvedProxyCatalog).toHaveBeenCalled();
+    });
+    await userEvent.click(screen.getByTestId('ns-thinking-chip'));
+    await userEvent.click(within(document.querySelector('.think-pop') as HTMLElement).getByText('Low', { selector: '.mp-row-title' }));
+    await waitFor(() => expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low'));
+
+    for (const [value, label] of [['always_approve', 'Always approve'], ['auto', 'Auto']] as const) {
+      await userEvent.click(screen.getByTestId('ns-mode-chip'));
+      await userEvent.click(within(document.querySelector('.approval-pop') as HTMLElement).getByText(label, { selector: '.mp-row-title' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent(label);
+        expect(loadResolvedProxyCatalog).toHaveBeenCalledWith('grok', expect.objectContaining({
+          sessionConfig: expect.objectContaining({
+            sandbox_profile: 'off',
+            ...(binding === 'session' ? { permission_mode: value } : {}),
+          }),
+          turnConfig: expect.objectContaining({
+            reasoning_effort: 'low',
+            ...(binding === 'turn' ? { permission_mode: value } : {}),
+          }),
+        }), grok.id);
+      });
+    }
+
+    expect(screen.getByLabelText('Sandbox')).toHaveValue('off');
+    expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low');
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'use the selected mode');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: grok.id, executor: 'grok', model: 'grok-4.7', thinkingEffort: 'low',
+      sessionConfig: {
+        sandbox_profile: 'off',
+        ...(binding === 'session' ? { permission_mode: 'auto' } : {}),
+      },
+      turnConfig: {
+        model: 'grok-4.7', reasoning_effort: 'low',
+        ...(binding === 'turn' ? { permission_mode: 'auto' } : {}),
+      },
+      firstMessage: 'use the selected mode',
+    }));
+    expect(onCreate.mock.calls[0]?.[0].approvalMode).toBeUndefined();
   });
 
   it('does not carry leftover Claude effort onto a Kimi catalog that only advertises on', async () => {

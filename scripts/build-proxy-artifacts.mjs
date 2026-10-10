@@ -23,7 +23,7 @@ const SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z
 const RELEASE_ID_RE = /^[a-z][a-z0-9-]{0,63}$/;
 const ACCEPTANCE_SETUPS = new Set(['default', 'claude-settings', 'kimi-store', 'dsh-profile']);
 
-function canonicalRelativePath(value) {
+export function canonicalRelativePath(value) {
   const candidate = typeof value === 'string' && value.startsWith('./') ? value.slice(2) : value;
   return typeof value === 'string'
     && value.length > 0
@@ -214,7 +214,7 @@ function parseArgs(argv) {
   return args;
 }
 
-async function copyManifestReference(definition, packageDir, reference) {
+export async function copyManifestReference(definition, packageDir, reference) {
   if (!canonicalRelativePath(reference?.path) || !/^[0-9a-f]{64}$/.test(reference?.sha256 ?? '')) {
     throw new Error(`${definition.pluginId} has an invalid Manifest asset reference`);
   }

@@ -8,7 +8,7 @@
  */
 
 import type { LinkPreview, LinkPreviewFetcher } from '@gian/chat-ui';
-import { fetchLinkPreviewResponse } from '../api.js';
+import { loadLinkPreviewResponse } from '../api.js';
 
 export const LINK_PREVIEW_CLIENT_CACHE_MAX = 200;
 
@@ -31,9 +31,8 @@ export function createLinkPreviewClient(options: {
       }
       let preview: LinkPreview | null;
       try {
-        const res = fetchFn
-          ? await fetchFn(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal })
-          : await fetchLinkPreviewResponse(url, signal);
+        const res = fetchFn ? await fetchFn(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal })
+          : await loadLinkPreviewResponse(url, signal);
         preview = res.ok ? sanitize(await res.json()) : null;
       } catch {
         preview = null;

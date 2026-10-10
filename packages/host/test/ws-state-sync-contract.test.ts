@@ -9,6 +9,7 @@ import type { SessionManager } from '../src/session/manager.js';
 import type { TaskManager } from '../src/task/manager.js';
 import { openDatabase } from '../src/storage/db.js';
 import { loadConfig, saveConfig } from '../src/storage/config.js';
+import { InboxService } from '../src/inbox/service.js';
 
 // Authentication mode is captured during module evaluation. Keep this
 // wire-contract harness independent from the developer shell.
@@ -101,7 +102,8 @@ test('WS-001: auth_ok is followed immediately by one complete, runtime-valid sta
       payload: { approvalId: 'approval-sync' },
     });
 
-    const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, db });
+    const inbox = new InboxService(db);
+    const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, db, inbox });
     const frames: Frame[] = [];
     const ws = client(frames);
     handlers.onOpen(new Event('open'), ws);
@@ -115,8 +117,14 @@ test('WS-001: auth_ok is followed immediately by one complete, runtime-valid sta
 
     const sync = parseStateSyncMessage(frames[1]);
     assert.deepEqual(Object.keys(sync).sort(), [
-      'approvals', 'config', 'runner', 'sessions', 'sidechats', 'tasks', 'type', 'workspaces',
+      'approvals', 'config', 'inbox', 'runner', 'sessions', 'sidechats', 'tasks', 'type', 'workspaces',
     ]);
+    assert.deepEqual(sync.inbox, {
+      inbox_revision: 0,
+      pending_count: 0,
+      items: [],
+      truncated: false,
+    });
     assert.deepEqual(sync.sidechats, []);
     assert.deepEqual(sync.sessions, [session]);
     assert.deepEqual(sync.tasks, [task]);

@@ -40,6 +40,64 @@ export function sessionNeedsAttention(
     || ((session.status === 'done' || session.status === 'error') && session.unread === 1);
 }
 
+export interface SessionCanonFact {
+  revision: number;
+  disposition: 'active' | 'archived' | 'deleted';
+  task_id: string | null;
+}
+
+/** Bounded freshness for one in-flight session list. Snapshot writes and
+ *  lifecycle writes bump this; a late HTTP body does not. */
+export interface SessionCanon {
+  snapshot: number;
+  facts: Map<string, SessionCanonFact>;
+}
+
+export function createSessionCanon(): SessionCanon {
+  return { snapshot: 0, facts: new Map() };
+}
+
+export function noteSessionSnapshot(
+  canon: SessionCanon,
+  sessions: readonly Pick<Session, 'id' | 'task_id'>[],
+): void {
+  canon.snapshot += 1;
+  const seen = new Set<string>();
+  for (const session of sessions) {
+    seen.add(session.id);
+    const taskId = session.task_id ?? null;
+    const prev = canon.facts.get(session.id);
+    const same = prev?.disposition === 'active' && prev.task_id === taskId;
+    canon.facts.set(session.id, {
+      revision: same ? prev.revision : (prev?.revision ?? 0) + 1,
+      disposition: 'active',
+      task_id: taskId,
+    });
+  }
+  for (const [id, prev] of [...canon.facts]) {
+    if (seen.has(id) || prev.disposition !== 'active') continue;
+    canon.facts.set(id, {
+      revision: prev.revision + 1,
+      disposition: 'deleted',
+      task_id: prev.task_id,
+    });
+  }
+}
+
+export function noteSessionLifecycle(
+  canon: SessionCanon,
+  sessionId: string,
+  disposition: SessionCanonFact['disposition'],
+  taskId: string | null,
+): void {
+  const prev = canon.facts.get(sessionId);
+  canon.facts.set(sessionId, {
+    revision: (prev?.revision ?? 0) + 1,
+    disposition,
+    task_id: taskId,
+  });
+}
+
 /** Apply a session:updated payload to the active-only client collection. */
 export function applySessionUpdate(
   sessions: Session[],

@@ -145,7 +145,8 @@ export function ProxyDetailPanel({
     && item.installation.updateAvailable
     && actions.includes('install_runtime');
   const canUpdateProxy = actions.includes('update_proxy');
-  const canUninstall = item.installation.state !== 'not_installed'
+  const sourceDevelopment = docSourceId === 'giandev' && item.installation.source === 'giandev';
+  const canUninstall = !sourceDevelopment && item.installation.state !== 'not_installed'
     && installationStatus !== 'not-installed';
   const hasFooterAction = canInstall
     || canUpdateRuntime
@@ -154,9 +155,13 @@ export function ProxyDetailPanel({
     || actions.includes('rollback_proxy');
   const development = !generation && developmentFallback?.plugin.source === 'development'
     ? developmentFallback : undefined;
-  const cliPath = generation ? generation.runtime?.entryPath ?? null : development?.cli.path ?? null;
-  const cliVersion = generation ? generation.runtime?.version ?? null : development?.cli.version ?? null;
-  const proxyVersion = generation?.proxy.pluginVersion
+  const developmentSource = sourceDevelopment || Boolean(development);
+  const cliPath = sourceDevelopment ? item.runtime.path ?? null
+    : generation ? generation.runtime?.entryPath ?? null : development?.cli.path ?? null;
+  const cliVersion = sourceDevelopment ? item.runtime.version ?? null
+    : generation ? generation.runtime?.version ?? null : development?.cli.version ?? null;
+  const proxyVersion = (sourceDevelopment ? item.installation.installedVersion : null)
+    ?? generation?.proxy.pluginVersion
     ?? development?.plugin.version
     ?? (item.installation.state === 'installed' ? item.installation.installedVersion : null);
   // Official Catalog 1.8 introduced history in the v1 overview slot. Older
@@ -240,7 +245,7 @@ export function ProxyDetailPanel({
               <span className="proxy-basic-sep" aria-hidden="true">·</span>
               <span className="mono" aria-label={t('agents.runtime.proxyVersionLabel')}
                     title={t('agents.runtime.proxyVersionLabel')}>{proxyVersion ?? t('agents.proxy.versions.none')}</span>
-              {development && <span className="st muted">{t('agents.runtime.developmentSource')}</span>}
+              {developmentSource && <span className="st muted">{t('agents.runtime.developmentSource')}</span>}
               <CatalogBadgeList item={item} />
             </div>
             <div className="proxy-basic-path">
@@ -282,12 +287,12 @@ export function ProxyDetailPanel({
         <section className="ag-sec proxy-doc-section" ref={node => { sectionRefs.current.versions = node; }}>
           <span className="s2-subhead">{t('agents.proxy.sections.versions')}</span>
           <dl className="kv-grid">
-            <dt>{t(development ? 'agents.runtime.developmentVersion' : 'agents.proxy.versions.installed')}</dt>
+            <dt>{t(developmentSource ? 'agents.runtime.developmentVersion' : 'agents.proxy.versions.installed')}</dt>
             <dd><span className="mono">{proxyVersion ?? t('agents.proxy.versions.none')}</span></dd>
             <dt>{t('agents.proxy.versions.latest')}</dt>
             <dd><span className="mono">{item.installation.latestVersion ?? '—'}</span></dd>
             <dt>{t('agents.proxy.versions.source')}</dt>
-            <dd>{development ? t('agents.runtime.developmentSource') : item.installation.source ?? '—'}</dd>
+            <dd>{developmentSource ? t('agents.runtime.developmentSource') : item.installation.source ?? '—'}</dd>
           </dl>
           {hasVersionHistory
             ? <DocBody url={item.documentation.overview} generation={docGeneration} />

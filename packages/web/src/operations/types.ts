@@ -21,6 +21,8 @@ export type OperationName =
   | 'translation.run'
   | 'translation.cancel'
   | 'translation.setAuto'
+  | 'remote.connectEnvironment'
+  | 'remote.removeEnvironment'
   // Session
   | 'session.create'
   | 'session.fork'
@@ -144,6 +146,8 @@ export const OPERATION_POLICIES = {
   'translation.run': 'pending',
   'translation.cancel': 'pending',
   'translation.setAuto': 'pending',
+  'remote.connectEnvironment': 'pending',
+  'remote.removeEnvironment': 'pending',
   'session.create': 'pending',
   'session.fork': 'pending',
   // Protocol Fork is distinct from the legacy "Fork as executor" operation.

@@ -18,7 +18,7 @@ The session-scoped Proxy forces the workspace sandbox. Agent HOME directories an
 
 ## 4. Installation and dependencies
 
-Install from Agent Integrations. Gian downloads Proxy 0.3.6 and official Grok CLI 1.0.41 from the signed Catalog, then verifies URL, size, SHA-256, version, Manifest and installation receipt before activation.
+Install from Agent Integrations. Gian downloads Proxy 0.3.7 and official Grok CLI 1.0.41 from the signed Catalog, then verifies URL, size, SHA-256, version, Manifest and installation receipt before activation.
 
 ## 5. First use
 

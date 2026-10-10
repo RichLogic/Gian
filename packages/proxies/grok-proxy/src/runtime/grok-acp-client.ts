@@ -100,10 +100,14 @@ export interface GrokAcpExit {
   error?: Error;
 }
 
+export interface GrokAcpStopOptions {
+  force?: boolean;
+}
+
 export interface GrokAcpTransport {
   connection: ClientSideConnection;
   exit: Promise<GrokAcpExit>;
-  stop(): Promise<void>;
+  stop(options?: GrokAcpStopOptions): Promise<void>;
 }
 
 export type GrokAcpTransportFactory = (client: Client) => Promise<GrokAcpTransport>;
@@ -242,8 +246,14 @@ function processTransportFactory(
     return {
       connection,
       exit,
-      async stop() {
+      async stop(stopOptions?: GrokAcpStopOptions) {
         if (child.exitCode !== null || child.signalCode !== null) return;
+        if (stopOptions?.force) {
+          // Metadata-only inspections have no session state to flush.
+          child.kill('SIGKILL');
+          await exit;
+          return;
+        }
         child.stdin.end();
         if (await settlesWithin(exit, options.gracefulStopMs ?? DEFAULT_GRACEFUL_STOP_MS)) return;
         child.kill('SIGTERM');
@@ -636,7 +646,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     await (await this.connection()).closeSession(params);
   }
 
-  async stop(): Promise<void> {
+  async stop(options?: GrokAcpStopOptions): Promise<void> {
     if (this.startPromise && !this.transport) {
       await this.startPromise.catch(() => undefined);
     }
@@ -646,7 +656,7 @@ export class GrokAcpClient extends EventEmitter<GrokAcpClientEvents> {
     this.startPromise = null;
     if (transport) {
       this.expectedStops.add(transport);
-      await transport.stop();
+      await transport.stop(options);
     }
   }
 }

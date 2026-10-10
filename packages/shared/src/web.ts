@@ -51,6 +51,8 @@ export interface StateSyncMessage {
   tasks: Task[];
   approvals: Approval[];
   config: SystemConfig;
+  /** Pending Inbox snapshot for reconnect. Omitted by Hosts that predate it. */
+  inbox?: import('./inbox.js').InboxSyncSnapshot;
 }
 
 export interface EventEnvelope {
@@ -328,7 +330,23 @@ export type ServerToClientMessage =
   | SidechatClosedMessage
   | ScheduleChangedMessage
   | ScheduleConfirmationMessage
+  | InboxChangedMessage
+  | InboxInvalidatedMessage
+  | RemoteEnvironmentsMessage
   | ErrorMessage;
+
+/** One Inbox row changed. `item.generation` is the only generation a client may mark read. */
+export interface InboxChangedMessage {
+  type: 'inbox:changed';
+  inbox_revision: number;
+  item: import('./inbox.js').InboxItemPublic;
+}
+
+/** The pending set changed in bulk. Clients refetch; this frame carries no row bodies. */
+export interface InboxInvalidatedMessage {
+  type: 'inbox:invalidated';
+  inbox_revision: number;
+}
 
 /** Coarse invalidation for Schedule list/detail/run-log pages. Carries only
  *  identities and the reason; clients re-fetch via the schedules REST API. */
@@ -345,6 +363,26 @@ export interface ScheduleChangedMessage {
 export interface ScheduleConfirmationMessage {
   type: 'schedule:confirmation';
   confirmation: import('./schedule.js').ScheduleConfirmation;
+}
+
+/** One Remote Controller environment's connectivity snapshot — the exact
+ *  shape of the hub's listEnvironments() / GET /api/remote/environments. */
+export interface RemoteEnvironmentStatus {
+  id: string;
+  name: string;
+  host_id: string;
+  server_origin: string;
+  pending: boolean;
+  connected: boolean;
+}
+
+/** Full Remote Controller environment snapshot, pushed when any
+ *  environment's connectivity flips (dedup'd Host-side). Clients apply it
+ *  directly; the lazy REST fetch + state_sync re-fetch cover hydration and
+ *  missed frames. */
+export interface RemoteEnvironmentsMessage {
+  type: 'remote:environments';
+  environments: RemoteEnvironmentStatus[];
 }
 
 export interface SessionCreateMessage {

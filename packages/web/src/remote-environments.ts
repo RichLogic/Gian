@@ -1,6 +1,5 @@
 import type { ConfigOption, ConfigValue, ProxyCatalog, UserAgentStatus, Workspace } from '@gian/shared';
-import { remoteRequest } from './operations/remote-transport.js';
-export { remoteRequest, RemoteRequestError } from './operations/remote-transport.js';
+import { loadRemoteEnvironmentResponse } from './api.js';
 
 export interface RemoteEnvironment {
   id: string; name: string; host_id: string; server_origin: string; pending: boolean; connected: boolean;
@@ -18,6 +17,16 @@ export interface RemoteSessionChoice {
 export interface RemoteAgentCatalog extends Omit<ProxyCatalog, 'slashCommands'> {
   resolveSupported: boolean;
   resolvedDefaults?: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> };
+}
+
+export class RemoteRequestError extends Error {
+  constructor(readonly status: number) {
+    super('Remote request failed (' + status + ')');
+  }
+}
+
+export function remoteRequest<T>(path: string, body?: unknown): Promise<T> {
+  return loadRemoteEnvironmentResponse(path, body);
 }
 
 export function remoteAgentIdentity(agentId?: string | null): { environmentId: string; agentId: string } | null {

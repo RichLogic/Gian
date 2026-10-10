@@ -24,7 +24,7 @@ import {
   assertNoLeak,
   capRemoteTranscriptItems,
   remoteActionId,
-  remoteInteractionId,
+  remoteInteractionResourceId,
   remoteStableUuid,
 } from '../src/remote/projection.js';
 import { hostServiceTier } from '../src/remote/command-adapter.js';
@@ -714,14 +714,15 @@ test('interaction.respond rejects unissued action ids and snapshot lists pending
     const snapshot = await context.runtime.commands.execute(device, command('state.refresh', {}));
     const interactions = (snapshot.data as { interactions: Array<{ id: string; presentation: { actions: Array<{ id: string }> } }> }).interactions;
     assert.equal(interactions.length, 1);
+    const resourceId = interactions[0]!.id;
     const forged = await context.runtime.commands.execute(device, command('interaction.respond', {
-      interaction_id: pending[0]!.id,
+      interaction_id: resourceId,
       interaction_revision: '0',
       action_id: randomUUID(),
     }));
     assert.equal(forged.ok, false);
     assert.equal(forged.error?.code, 'REMOTE_CAPABILITY_DENIED');
-    const allow = remoteActionId(pending[0]!.id, 'allow_once');
+    const allow = remoteActionId(resourceId, 'allow_once');
     assert.equal(interactions[0]?.presentation.actions.some((action) => action.id === allow), true);
   } finally {
     teardownRemoteHarness(context);
@@ -758,10 +759,11 @@ for (const [label, approvalId] of [
       const snapshot = remoteStateSnapshotSchema.parse(initial.data);
       const card = snapshot.interactions[0]!;
       assert.equal(card.kind, 'native_choice');
-      assert.equal(card.id, remoteInteractionId(approvalId));
-      if (label === 'UUID') assert.equal(card.id, approvalId);
-      else assert.notEqual(card.id, approvalId);
-      assert.equal(card.presentation.actions[0]!.id, remoteActionId(approvalId, 'native:allow-system-events'));
+      // Wire identity is scoped to the host session and turn; the Provider id
+      // stays on the record and is what respondInteraction receives below.
+      assert.equal(card.id, remoteInteractionResourceId(session.id, 'provider-turn-computer-use', approvalId));
+      assert.notEqual(card.id, approvalId);
+      assert.equal(card.presentation.actions[0]!.id, remoteActionId(card.id, 'native:allow-system-events'));
       const reconnected = remoteStateSnapshotSchema.parse((await refresh()).data);
       assert.equal(reconnected.interactions[0]!.id, card.id);
 
@@ -1113,8 +1115,8 @@ test('interaction.respond translates wire answer keys back to original question 
     };
     const respond = await context.runtime.commands.execute(device, command('interaction.respond', {
       interaction_id: interactions[0]!.id,
-      interaction_revision: interactions[0]!.revision,
-      action_id: remoteActionId(pending[0]!.id, 'submit_answers'),
+      interaction_revision: '0',
+      action_id: remoteActionId(interactions[0]!.id, 'submit_answers'),
       values: { [wireInputId]: 'Blue-green' },
     }));
     assert.equal(respond.ok, true, respond.error?.message);
@@ -1171,9 +1173,9 @@ test('exit_plan_mode respond maps plan decisions to wire action ids and runs the
     assert.equal(interactions[0]!.presentation.actions[2]!.tone, 'danger');
 
     const declined = await context.runtime.commands.execute(device, command('interaction.respond', {
-      interaction_id: keepPlanning.id,
+      interaction_id: interactions[0]!.id,
       interaction_revision: '0',
-      action_id: remoteActionId(keepPlanning.id, 'keep_planning'),
+      action_id: remoteActionId(interactions[0]!.id, 'keep_planning'),
     }));
     assert.equal(declined.ok, true, declined.error?.message);
     assert.equal(responses.at(-1)?.actionId, 'reject_once');
@@ -1184,10 +1186,11 @@ test('exit_plan_mode respond maps plan decisions to wire action ids and runs the
     void requestPlanExit();
     await new Promise((resolve) => setTimeout(resolve, 20));
     const acceptAuto = context.approvals.listPending().find((record) => record.id !== keepPlanning.id)!;
+    const acceptResourceId = remoteInteractionResourceId(sessionId, acceptAuto.turnId, acceptAuto.id);
     const accepted = await context.runtime.commands.execute(device, command('interaction.respond', {
-      interaction_id: acceptAuto.id,
+      interaction_id: acceptResourceId,
       interaction_revision: '0',
-      action_id: remoteActionId(acceptAuto.id, 'accept_with_auto'),
+      action_id: remoteActionId(acceptResourceId, 'accept_with_auto'),
     }));
     assert.equal(accepted.ok, true, accepted.error?.message);
     assert.equal(responses.at(-1)?.actionId, 'allow_once');

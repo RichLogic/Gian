@@ -274,13 +274,12 @@ export class DshV2Adapter {
           ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
         });
       case 'session.native.delete':
-        // Verified absence in @deepseek-ai/dsh@0.1.5-rc.3: the persistence
-        // contract has no delete (create/open/flush/stat/list only), so there
-        // is no durable-history deletion to expose.
+        // Re-checked in @deepseek-ai/dsh@0.2.0-rc.2: persistence is still
+        // create/open/flush/stat/list, so there is no durable-history deletion.
         throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.native.delete is not advertised for DSH.');
       case 'session.rename':
-        // Verified absence in @deepseek-ai/dsh@0.1.5-rc.3: SessionHeader has
-        // no title field and no rename surface exists in the runtime.
+        // SessionHeader still has no title. SessionTitleService.rename exists
+        // in 0.2.0-rc.2 and is not connected in this migration.
         throw new ServiceError('CAPABILITY_NOT_SUPPORTED', 'session.rename is not advertised for DSH.');
       case 'session.fork':
         if (this.capabilities['session.fork'] === undefined) {
@@ -397,13 +396,13 @@ export class DshV2Adapter {
         for (const name of gianNames) runtimeCapabilities[name] = 1;
       }
       // Structured native projections (todo/write → plan.updated,
-      // tool/result meta → diff.updated) exist on the DSH session format 3
-      // event vocabulary; older format bridges stay unadvertised.
+      // tool/result meta → diff.updated) exist on DSH session format 4.
+      // Older formats, including 3, stay unadvertised.
       const bridgeRuntime = bridgeInitialized.runtime !== null
         && typeof bridgeInitialized.runtime === 'object'
         ? bridgeInitialized.runtime as { sessionFormatVersion?: unknown }
         : {};
-      const structuredEvents = bridgeRuntime.sessionFormatVersion === 3
+      const structuredEvents = bridgeRuntime.sessionFormatVersion === 4
         ? { 'event.plan': 1, 'event.diff': 1 }
         : {};
       this.capabilities = {
@@ -484,11 +483,12 @@ export class DshV2Adapter {
         const requestedModel = visibleModels.some(model => model.id === selectedModel)
           ? selectedModel
           : undefined;
-        const defaultModel = requestedModel
-          ?? (defaults.provider === effectiveProvider && typeof defaults.model === 'string'
-            ? defaults.model
-            : undefined)
-          ?? visibleModels[0]?.id;
+        const advertisedDefault = defaults.provider === effectiveProvider
+          && typeof defaults.model === 'string'
+          && visibleModels.some(model => model.id === defaults.model)
+          ? defaults.model
+          : undefined;
+        const defaultModel = requestedModel ?? advertisedDefault ?? visibleModels[0]?.id;
         const index = base.indexOf(modelOption);
         base[index] = {
           ...modelOption,
@@ -518,8 +518,11 @@ export class DshV2Adapter {
             ? { description: effort.description }
             : {}),
         }));
-        const defaultEffort = typeof reasoning?.defaultEffort === 'string'
+        const configuredEffort = typeof reasoning?.defaultEffort === 'string'
           ? reasoning.defaultEffort
+          : undefined;
+        const defaultEffort = effortOption.choices.some(choice => choice.value === configuredEffort)
+          ? configuredEffort
           : effortOption.choices[0]?.value;
         if (defaultEffort !== undefined) effortOption.defaultValue = defaultEffort;
       }
@@ -848,8 +851,16 @@ export class DshV2Adapter {
       typeof config.model === 'string' ? config.model : undefined,
       typeof config.provider === 'string' ? config.provider : undefined,
     );
-    this.validateConfigSnapshot(config, 'turn', resolvedOptions);
+    const retired = this.retiredTurnConfig(config, resolvedOptions);
+    this.validateConfigSnapshot(retired.config, 'turn', resolvedOptions);
     session.acceptedTurns.set(turnId, turnFingerprint);
+    if (retired.retiredModel !== null && retired.fallbackModel !== null) {
+      session.pendingModelReselect = {
+        turnId,
+        retiredModel: retired.retiredModel,
+        fallbackModel: retired.fallbackModel,
+      };
+    }
 
     this.notify('session.updated', {
       eventId: hashIdLocal(['session-updated', session.id, session.sequence + 1]),
@@ -868,7 +879,7 @@ export class DshV2Adapter {
         sessionId,
         turnId,
         input: coerceInput(input),
-        config,
+        config: retired.config,
       });
       return { accepted: true, turnId, ...(bridgeTurn && typeof bridgeTurn === 'object' ? {} : {}) };
     } catch (error) {
@@ -878,6 +889,7 @@ export class DshV2Adapter {
       if ([...session.turnState.values()].some(turn => turn.gianTurnId === turnId && turn.terminal)) {
         return { accepted: true, turnId };
       }
+      if (session.pendingModelReselect?.turnId === turnId) session.pendingModelReselect = null;
       session.acceptedTurns.delete(turnId);
       const pendingIndex = session.pendingGianTurns.lastIndexOf(turnId);
       if (pendingIndex >= 0) session.pendingGianTurns.splice(pendingIndex, 1);
@@ -1366,7 +1378,7 @@ export class DshV2Adapter {
    * contentId / planId / diffId recipes and the same eventId hash inputs, so
    * a Host can reconcile live and replayed facts without duplicates. Native
    * events with no durable surface (assistant chunks are transient in
-   * 0.1.5; agent/inbox bookkeeping; the fork cut marker) are skipped rather
+   * 0.2.0-rc.2; agent/inbox bookkeeping; the fork cut marker) are skipped rather
    * than fabricated.
    */
   private replayEventsFor(
@@ -1646,8 +1658,8 @@ export class DshV2Adapter {
         }];
       }
       case 'assistant/chunk':
-        // Transient in DSH 0.1.5: chunks live only on the assistant stream,
-        // never in the durable log — replay must not fabricate them.
+        // Transient in DSH 0.2.0-rc.2: chunks live only on the assistant stream,
+        // never in the durable log. Replay must not fabricate them.
         return [];
       case 'approval/asked': {
         const askedId = typeof data.id === 'string' ? data.id : `asked-${event.seq}`;
@@ -1762,6 +1774,39 @@ export class DshV2Adapter {
     };
   }
 
+  /**
+   * A model id removed by the runtime, and an effort that is not one of that
+   * model's advertised choices, fall back to the advertised default. Other
+   * invalid selects, including an unknown provider, still fail.
+   * turn.start's result stays `{ accepted, turnId }`; the reselect prompt is
+   * a turn notice emitted once the native turn starts.
+   */
+  private retiredTurnConfig(
+    config: Record<string, ConfigValue>,
+    options: ConfigOption[],
+  ): { config: Record<string, ConfigValue>; retiredModel: string | null; fallbackModel: string | null } {
+    const next: Record<string, ConfigValue> = { ...config };
+    const model = options.find(option => option.id === 'model' && option.binding === 'turn');
+    let retiredModel: string | null = null;
+    let fallbackModel: string | null = null;
+    if (model && next.model !== undefined && !selectChoiceIncludes(model, next.model)) {
+      if (!selectChoiceIncludes(model, model.defaultValue)) {
+        throw new ServiceError('CONFIG_VALUE_INVALID', 'Option model value was not advertised.');
+      }
+      retiredModel = String(next.model);
+      fallbackModel = String(model.defaultValue);
+      next.model = model.defaultValue;
+    }
+    const effort = options.find(option => option.id === 'effort' && option.binding === 'turn');
+    if (effort && next.effort !== undefined && !selectChoiceIncludes(effort, next.effort)) {
+      if (!selectChoiceIncludes(effort, effort.defaultValue)) {
+        throw new ServiceError('CONFIG_VALUE_INVALID', 'Option effort value was not advertised.');
+      }
+      next.effort = effort.defaultValue;
+    }
+    return { config: next, retiredModel, fallbackModel };
+  }
+
   private validateConfigSnapshot(
     values: Record<string, ConfigValue>,
     binding: 'session' | 'turn',
@@ -1835,6 +1880,10 @@ function nativeIdFromBridge(remote: unknown): string | null {
   if (session === null || typeof session !== 'object') return null;
   const nativeId = (session as { nativeId?: unknown }).nativeId;
   return typeof nativeId === 'string' && nativeId.length > 0 ? nativeId : null;
+}
+
+function selectChoiceIncludes(option: ConfigOption, value: ConfigValue): boolean {
+  return option.choices?.some(choice => Object.is(choice.value, value)) === true;
 }
 
 /** Bridge cwd values may be empty on resume paths; fall back to the parent's. */

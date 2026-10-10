@@ -26,6 +26,7 @@ export {
   remoteStableUuid,
   remoteActionId,
   remoteInteractionId,
+  remoteInteractionResourceId,
   resolveRemoteAction,
   projectRemoteInteraction,
 } from './projection.js';

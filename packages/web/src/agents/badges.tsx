@@ -7,12 +7,16 @@ const BADGE_CLASS: Record<CatalogBadge, string> = {
   'update-required': 'st run',
   'installed': 'st ok',
   'not-installed': 'st muted',
+  'runtime-setup': 'st muted',
+  'runtime-invalid': 'st run',
 };
 
 const BADGE_KEY: Record<CatalogBadge, string> = {
   'update-required': 'agents.catalog.badge.update',
   'installed': 'agents.catalog.badge.installed',
   'not-installed': 'agents.catalog.badge.notInstalled',
+  'runtime-setup': 'agents.catalog.badge.runtimeSetup',
+  'runtime-invalid': 'agents.catalog.badge.runtimeInvalid',
 };
 
 /** Exactly one user-facing installation state per Integration. */

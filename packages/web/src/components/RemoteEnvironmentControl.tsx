@@ -4,6 +4,8 @@ import { authorizeRemoteAccount } from '../auth/github-authorization.js';
 import { useT } from '../i18n/index.js';
 import { remoteRequest, type RemoteEnvironment, type RemoteSessionChoice } from '../remote-environments.js';
 import { useUpDrop } from './composer/option-drops.js';
+import { useOperationDispatchOptional } from '../operations/use-operations.js';
+import { dispatchRemoteEnvironment } from '../operations/remote-environments.js';
 import '../styles/remote-environments.css';
 
 export function RemoteEnvironmentControl({ value, onChange, onTakeover, disabled = false, children }: {
@@ -13,6 +15,7 @@ export function RemoteEnvironmentControl({ value, onChange, onTakeover, disabled
 }) {
   const t = useT();
   const drop = useUpDrop(352);
+  const dispatch = useOperationDispatchOptional();
   const popupId = useId();
   const [environments, setEnvironments] = useState<RemoteEnvironment[]>([]);
   const [adding, setAdding] = useState(false);
@@ -103,8 +106,8 @@ export function RemoteEnvironmentControl({ value, onChange, onTakeover, disabled
           await authorizeRemoteAccount(origin.trim(), 'controller', { signal });
           if (signal.aborted) return;
           const serverUrl = new URL(origin.trim()).origin;
-          const result = await remoteRequest<{ environment: RemoteEnvironment }>('/environments',
-            { server_url: serverUrl, name: name.trim(), code: code.trim() });
+          const result = await dispatchRemoteEnvironment(dispatch, { connection:
+            { server_url: serverUrl, name: name.trim(), code: code.trim() } }) as { environment: RemoteEnvironment };
           if (signal.aborted) return;
           setCode(''); setOrigin(serverUrl); await refresh();
           if (!signal.aborted) choose(result.environment.id);

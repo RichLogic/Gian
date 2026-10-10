@@ -20,7 +20,7 @@ interface FakeBridge {
   calls?: Array<{ method: string; params: Record<string, unknown> }>;
 }
 
-const FORMAT3_CAPS = {
+const BRIDGE_CAPS = {
   'session.events.read': 1,
   'session.fork': 1,
   'session.native.list': 1,
@@ -87,10 +87,10 @@ function fakeBridge(options: {
             runtime: {
               id: 'deepseek-harness',
               package: '@deepseek-ai/dsh',
-              version: '0.1.5-rc.3',
-              sessionFormatVersion: options.formatVersion ?? 3,
+              version: '0.2.0-rc.2',
+              sessionFormatVersion: options.formatVersion ?? 4,
             },
-            capabilities: options.capabilities ?? FORMAT3_CAPS,
+            capabilities: options.capabilities ?? BRIDGE_CAPS,
           };
         case 'catalog.list':
         case 'catalog.resolve':
@@ -140,7 +140,7 @@ function fakeBridge(options: {
             nextCursor: null,
           };
         case 'session.events.read':
-          return { sessionId: params.sessionId, formatVersion: 3, events: [], cursor: null };
+          return { sessionId: params.sessionId, formatVersion: 4, events: [], cursor: null };
         case 'turn.start': {
           const state = sessions.get(String(params.sessionId));
           assert.ok(state);
@@ -238,15 +238,17 @@ test('capabilities narrow to exactly what the connected bridge verified', async 
 });
 
 test('older session formats keep structured plan/diff unadvertised', async () => {
-  const adapter = new DshV2Adapter(fakeBridge({ formatVersion: 0 }) as never, { pluginVersion: '0.3.2' });
-  adapter.setEmitSink(() => undefined);
-  const init = await adapter.dispatch({
-    id: 'i', method: 'initialize',
-    params: { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'Gian', version: '1' } },
-  });
-  const caps = (init.result as { capabilities: Record<string, number> }).capabilities;
-  assert.equal(caps['event.plan'], undefined);
-  assert.equal(caps['event.diff'], undefined);
+  for (const formatVersion of [0, 3]) {
+    const adapter = new DshV2Adapter(fakeBridge({ formatVersion }) as never, { pluginVersion: '0.3.2' });
+    adapter.setEmitSink(() => undefined);
+    const init = await adapter.dispatch({
+      id: 'i', method: 'initialize',
+      params: { protocol: { name: 'gian.proxy', versions: ['2.1'] }, host: { name: 'Gian', version: '1' } },
+    });
+    const caps = (init.result as { capabilities: Record<string, number> }).capabilities;
+    assert.equal(caps['event.plan'], undefined, `format ${formatVersion}`);
+    assert.equal(caps['event.diff'], undefined, `format ${formatVersion}`);
+  }
 });
 
 /* -------------------------------- Steering -------------------------------- */
@@ -500,7 +502,7 @@ test('replay projects durable events with live-identical content and usage ident
   }).request = async (method, params) => {
     if (method === 'session.events.read') {
       return {
-        sessionId: params.sessionId, formatVersion: 3,
+        sessionId: params.sessionId, formatVersion: 4,
         events: [
           { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } },
           { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } },

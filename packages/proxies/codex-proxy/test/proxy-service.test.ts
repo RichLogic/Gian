@@ -827,6 +827,93 @@ test('runtimeStopped emits one session-scoped turn.failed before clearing an act
   }
 });
 
+test('runtime notification handler failure retains its originating session', async () => {
+  const harness = await createHarness();
+  try {
+    const source = await harness.service.createSession({ cwd: '/tmp/source' });
+    const survivor = await harness.service.createSession({ cwd: '/tmp/survivor' });
+    const sourceTurn = await harness.service.startTurn({
+      sessionId: source.session.id,
+      input: [{ type: 'text', text: 'finish source' }],
+    }, 74);
+    const survivorTurn = await harness.service.startTurn({
+      sessionId: survivor.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    }, 75);
+    harness.service.setEventSink((method, params) => {
+      if (method === 'turn.completed' && params.sessionId === source.session.id) {
+        throw new Error('fixture notification projection failure');
+      }
+      harness.events.push({ method, params });
+    });
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: {
+        threadId: source.session.threadId,
+        turn: harness.runtime.setCompletedTurn(source.session.threadId, sourceTurn.turn.id),
+      },
+    });
+    await waitFor(() => harness.events.some(event => event.method === 'runtime.error'));
+    const failures = harness.events.filter(event => event.method === 'runtime.error');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.params.sessionId, source.session.id);
+    assert.deepEqual(failures[0]?.params.data, {
+      code: 'NOTIFICATION_HANDLER_FAILED',
+      message: 'fixture notification projection failure',
+    });
+    const current = harness.service.getSession({ sessionId: survivor.session.id }).session;
+    assert.equal(current.status, 'running');
+    const steered = await harness.service.steerTurn({ sessionId: survivor.session.id,
+      input: [{ type: 'text', text: 'continue after the isolated notification failure' }] });
+    assert.equal(steered.turnId, survivorTurn.turn.id);
+    assert.equal(harness.runtime.steerCalls.at(-1)?.turnId, survivorTurn.turn.id);
+    assert.equal(current.lastError, null);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test('runtime server request handler failure stays scoped and answers the native request', async () => {
+  const harness = await createHarness();
+  try {
+    const source = await harness.service.createSession({ cwd: '/tmp/source' });
+    const survivor = await harness.service.createSession({ cwd: '/tmp/survivor' });
+    const sourceTurn = await harness.service.startTurn({
+      sessionId: source.session.id,
+      input: [{ type: 'text', text: 'run a command' }],
+    }, 76);
+    const survivorTurn = await harness.service.startTurn({
+      sessionId: survivor.session.id,
+      input: [{ type: 'text', text: 'keep working' }],
+    }, 77);
+    harness.service.setEventSink((method, params) => {
+      if (method === 'approval.requested') throw new Error('fixture approval projection failure');
+      harness.events.push({ method, params });
+    });
+    harness.runtime.emitServerRequest({
+      id: 91,
+      method: 'item/commandExecution/requestApproval',
+      params: { threadId: source.session.threadId, turnId: sourceTurn.turn.id, command: 'pwd' },
+    });
+    await waitFor(() => harness.events.some(event => event.method === 'runtime.error'));
+    const failure = harness.events.find(event => event.method === 'runtime.error');
+    assert.equal(failure?.params.sessionId, source.session.id);
+    assert.deepEqual(failure?.params.data, {
+      code: 'SERVER_REQUEST_HANDLER_FAILED', message: 'fixture approval projection failure',
+    });
+    assert.equal(harness.runtime.responses.filter(response => response.id === 91).length, 1);
+    const current = harness.service.getSession({ sessionId: survivor.session.id }).session;
+    assert.equal(current.status, 'running');
+    const steered = await harness.service.steerTurn({ sessionId: survivor.session.id,
+      input: [{ type: 'text', text: 'continue after the isolated approval failure' }] });
+    assert.equal(steered.turnId, survivorTurn.turn.id);
+    assert.equal(harness.runtime.steerCalls.at(-1)?.turnId, survivorTurn.turn.id);
+    assert.equal(current.lastError, null);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test('idle sessions reattach before the first turn after app-server replacement', async () => {
   const harness = await createHarness();
   try {
@@ -2878,6 +2965,147 @@ test('Codex Fork replays a 64+ MiB source and cleans up a child whose history ca
     assert.equal(resultSchemas['session.get'].parse(await adapter.handle(v2Request('source-get', 'session.get', { sessionId: 'parent-large' }))).session.state, 'idle');
   } finally {
     await adapter.close(); await harness.cleanup();
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    if (previousData === undefined) delete process.env.GIAN_PLUGIN_DATA_DIR; else process.env.GIAN_PLUGIN_DATA_DIR = previousData;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('history refresh failure preserves completion and unrelated active sessions', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-codex-history-failure-'));
+  const previousHome = process.env.CODEX_HOME;
+  const previousData = process.env.GIAN_PLUGIN_DATA_DIR;
+  process.env.CODEX_HOME = home;
+  process.env.GIAN_PLUGIN_DATA_DIR = join(home, 'plugin-data');
+  const harness = await createHarness();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = new CodexProtocolV2Adapter(harness.service, 'fixture', (method, params) => {
+    notifications.push({ method, params });
+  });
+  try {
+    const dir = join(home, 'sessions');
+    await mkdir(dir);
+    const path = join(dir, 'rollout-thread-source.jsonl');
+    const line = (value: unknown) => `${JSON.stringify(value)}\n`;
+    await writeFile(path, line({ type: 'session_meta', payload: { id: 'thread-source', cwd: '/tmp/work' } }));
+    harness.runtime.threads.set('thread-source', { id: 'thread-source', cwd: '/tmp/work', turns: [] });
+    await adapter.handle(v2Request('init', 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.3'] } }));
+    const source = resultSchemas['session.create'].parse(await adapter.handle(v2Request('source', 'session.create', {
+      sessionId: 'history-source', workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] }, config: {},
+      nativeSession: { id: 'thread-source', history: 'none' },
+    })));
+    const survivor = resultSchemas['session.create'].parse(await adapter.handle(v2Request('survivor', 'session.create', {
+      sessionId: 'history-survivor', workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] }, config: {},
+    })));
+    const start = (id: string, streamId: string, turnId: string) => adapter.handle(v2Request(turnId, 'turn.start', {
+      sessionId: id, streamId, turnId, input: [{ type: 'text', text: turnId }], config: {},
+    }));
+    await start('history-source', source.session.streamId, 'host-source-turn');
+    await start('history-survivor', survivor.session.streamId, 'host-survivor-turn');
+    await writeFile(path, 'not-json\n', { flag: 'a' });
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: { threadId: 'thread-source', turn: harness.runtime.setCompletedTurn('thread-source', 'turn-1') },
+    });
+    await waitFor(() => notifications.some(event => (
+      event.method === 'session.updated'
+      && event.params.sessionId === 'history-source'
+      && String((event.params.data as { lastError?: string }).lastError).includes('Malformed Codex history record')
+    )), 2_000);
+    assert.equal(notifications.filter(event => event.method === 'turn.completed'
+      && event.params.turnId === 'host-source-turn').length, 1);
+    assert.equal(notifications.some(event => event.method === 'runtime.error' || event.method === 'turn.failed'), false);
+    assert.equal(resultSchemas['session.get'].parse(await adapter.handle(v2Request('source-get', 'session.get', {
+      sessionId: 'history-source',
+    }))).session.state, 'idle');
+    assert.equal(resultSchemas['session.get'].parse(await adapter.handle(v2Request('survivor-get', 'session.get', {
+      sessionId: 'history-survivor',
+    }))).session.state, 'running');
+    assert.equal(harness.runtime.startTurnCalls[1]?.threadId, 'thread-1');
+    await start('history-source', source.session.streamId, 'host-source-next-turn');
+    assert.equal(harness.runtime.startTurnCalls.length, 3);
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: harness.runtime.setCompletedTurn('thread-1', 'turn-2') },
+    });
+    await waitFor(() => notifications.some(event => event.method === 'turn.completed'
+      && event.params.turnId === 'host-survivor-turn'));
+    for (const event of notifications) proxyNotificationSchema.parse({ jsonrpc: '2.0', ...event });
+  } finally {
+    await adapter.close();
+    await harness.cleanup();
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    if (previousData === undefined) delete process.env.GIAN_PLUGIN_DATA_DIR; else process.env.GIAN_PLUGIN_DATA_DIR = previousData;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('late history failure cannot notify a replacement attachment generation', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-codex-history-generation-'));
+  const previousHome = process.env.CODEX_HOME;
+  const previousData = process.env.GIAN_PLUGIN_DATA_DIR;
+  process.env.CODEX_HOME = home;
+  process.env.GIAN_PLUGIN_DATA_DIR = join(home, 'plugin-data');
+  const harness = await createHarness();
+  const notifications: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let serviceSink: Parameters<CodexProxyService['setEventSink']>[0] | undefined;
+  let serviceSessionId: string | undefined;
+  const setEventSink = harness.service.setEventSink.bind(harness.service);
+  harness.service.setEventSink = handler => {
+    serviceSink = handler;
+    setEventSink((method, params) => {
+      if (method === 'turn.started') serviceSessionId = String(params.sessionId);
+      handler(method, params);
+    });
+  };
+  const adapter = new CodexProtocolV2Adapter(harness.service, 'fixture', (method, params) => {
+    notifications.push({ method, params });
+  });
+  try {
+    await adapter.handle(v2Request('init', 'initialize', { protocol: { name: 'gian.proxy', versions: ['2.3'] } }));
+    const params = {
+      sessionId: 'history-replaced', workspace: { cwd: '/tmp/work', roots: ['/tmp/work'] }, config: {},
+    };
+    const source = resultSchemas['session.create'].parse(await adapter.handle(v2Request('source', 'session.create', params)));
+    await adapter.handle(v2Request('start', 'turn.start', {
+      sessionId: source.session.id, streamId: source.session.streamId, turnId: 'host-source-turn',
+      input: [{ type: 'text', text: 'finish before replacing attachment' }], config: {},
+    }));
+    // Hold only the completion refresh so close/reattach can win the race.
+    const indexes = (adapter as unknown as {
+      historyIndexes: Map<string, { refresh(): Promise<unknown> }>;
+    }).historyIndexes;
+    const index = indexes.get(source.session.id);
+    assert.ok(index);
+    let rejectRefresh: ((error: Error) => void) | undefined;
+    index.refresh = () => new Promise((_resolve, reject) => { rejectRefresh = reject; });
+    harness.runtime.emitNotification({
+      method: 'turn/completed',
+      params: { threadId: 'thread-1', turn: harness.runtime.setCompletedTurn('thread-1', 'turn-1') },
+    });
+    await waitFor(() => rejectRefresh !== undefined);
+    await adapter.handle(v2Request('close', 'session.close', {
+      sessionId: source.session.id, streamId: source.session.streamId,
+    }));
+    const replacement = resultSchemas['session.create'].parse(await adapter.handle(v2Request('replacement', 'session.create', params)));
+    assert.notEqual(replacement.session.streamId, source.session.streamId);
+    const beforeFailure = notifications.length;
+    rejectRefresh!(new Error('obsolete history failure'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(serviceSessionId);
+    serviceSink!('runtime.error', {
+      sessionId: serviceSessionId,
+      data: { code: 'NOTIFICATION_HANDLER_FAILED', message: 'obsolete runtime handler failure' },
+    });
+    assert.equal(notifications.length, beforeFailure);
+    const current = resultSchemas['session.get'].parse(await adapter.handle(v2Request('get', 'session.get', {
+      sessionId: replacement.session.id,
+    }))).session;
+    assert.equal(current.state, 'idle');
+    assert.equal(current.lastError, null);
+  } finally {
+    await adapter.close();
+    await harness.cleanup();
     if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
     if (previousData === undefined) delete process.env.GIAN_PLUGIN_DATA_DIR; else process.env.GIAN_PLUGIN_DATA_DIR = previousData;
     await rm(home, { recursive: true, force: true });

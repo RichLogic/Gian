@@ -26,11 +26,17 @@ export function localizeCatalogItem(item: ProxyCatalogItem, locale: 'en' | 'zh-C
 export type CatalogBadge =
   | 'update-required'
   | 'installed'
+  | 'runtime-setup'
+  | 'runtime-invalid'
   | 'not-installed';
 
 export function catalogBadges(item: ProxyCatalogItem): CatalogBadge[] {
   if (item.compatibility.state !== 'compatible') return ['update-required'];
   if (item.installation.state === 'not_installed') return ['not-installed'];
+  if (item.installation.source === 'giandev' && item.installation.state === 'installed'
+    && item.runtime.state !== 'ready' && item.runtime.state !== 'not_required') {
+    return [item.runtime.state === 'invalid' ? 'runtime-invalid' : 'runtime-setup'];
+  }
   // Proxy + CLI Runtime are one Integration. Untrusted historical Proxy bytes
   // or a partial install are still Not installed until one complete generation
   // is active; Update required is reserved for an already usable Integration.

@@ -7,7 +7,7 @@ the `gian` profile with `@gian/dsh-bridge`.
 ## Layout
 
 - `manifest.json` — Manifest v4 (`id: ai.deepseek.harness`, `process.scope:
-  shared`, protocol range `>=2.2 <3.0`, verified runtime `0.1.5-rc.3`).
+  shared`, protocol range `>=2.2 <3.0`, verified runtime `0.2.0-rc.2`).
 - `src/core/service.ts` — session/turn projection, stable `sourceTurnId` /
   `stepId` / `eventId` identity, terminal-state enforcement, runtime-exit
   terminalization.
@@ -20,9 +20,9 @@ the `gian` profile with `@gian/dsh-bridge`.
 
 ## Runtime baseline
 
-The production Bridge targets `@deepseek-ai/dsh@0.1.5-rc.3` (npm `latest`,
-upstream tag `dsh-v0.1.5-rc.3`, commit
-`a4c74a91e06b00fe0b0937bde982170c526cc842`, session format 3). Capabilities
+The production Bridge targets `@deepseek-ai/dsh@0.2.0-rc.2` (npm `latest`,
+upstream tag `dsh-v0.2.0-rc.2`, commit
+`639ed015397290b3745d163aafe02ffee4aa3f84`, session format 4). Capabilities
 are advertised only when the connected Bridge reports the corresponding native
 boundary; everything else fails closed with `CAPABILITY_NOT_SUPPORTED`.
 
@@ -41,7 +41,7 @@ boundary; everything else fails closed with `CAPABILITY_NOT_SUPPORTED`.
 | `interaction` | supported | approvals + structured user questions (select/multi/text/plan-review), `responseId` idempotency with `CONFLICT` on changed answers, `turn_ended`/`runtime_ended` settlement |
 | subagent activity | partial | `subagent/start`/`end` and attributed child tool activity project to agent activities with native runIds; child events are not in the parent durable log, so replay does not re-project them |
 | `event.reasoning` / `usage` / `step` / `request` | supported | durable `assistant/message` blocks, per-step usage, step boundaries, request headers |
-| `session.rename` | unsupported | no title field in `SessionHeader`, no rename surface in 0.1.5-rc.3 |
+| `session.rename` | unsupported | `SessionHeader` has no title; `SessionTitleService.rename` exists in 0.2.0-rc.2 and is not connected |
 | `session.native.delete` | unsupported | `SessionPersistence` contract exposes create/open/flush/stat/list only — no delete |
 | `sidechat` | supported at idle turn boundaries | a native fork creates a transient child with an opaque sealed resume reference; `resume` reattaches it, while `close` detaches and tombstones the reference without claiming Provider data deletion. Active-input anchors remain unavailable. |
 | `integration.mcp.streamableHttp` | unsupported | MCP servers are static profile plugin instances with no session isolation boundary; Host MCP injection fails loud (`hostServices` rejected) |
@@ -49,7 +49,7 @@ boundary; everything else fails closed with `CAPABILITY_NOT_SUPPORTED`.
 | Agent Presets vs approval mode | distinct | Agent Presets stay session-bound (`agent_preset`); approval maps to real `ctx.permissionPresets` presets (`permission_preset`) |
 
 Catalog Provider, model, and reasoning selections are applied through DSH's
-per-Agent request waterfalls (still the 0.1.5 mechanism); per-model reasoning
+per-Agent request waterfalls (still the 0.2.0-rc.2 mechanism); per-model reasoning
 choices regenerate on model switch and a stale inherited effort is cleared.
 Catalog input descriptors mirror the runtime-truth attachment/skill surfaces.
 
@@ -59,7 +59,7 @@ Catalog input descriptors mirror the runtime-truth attachment/skill surfaces.
 and `diffId` derivations are identical in live projection and replay, and
 replay `eventId`s reuse the live hash inputs over the durable native seq — a
 Host can reconcile both streams without duplicates. Transient assistant chunks
-(live-only in DSH 0.1.5) carry attempt/index identity and are never replayed
+(live-only in DSH 0.2.0-rc.2) carry attempt/index identity and are never replayed
 or fabricated. Approval audit events (`approval/asked`/`decided`) project to
 interactions on replay only; live interaction ids come from the answerer
 waterfall, which upstream does not correlate with the durable audit id — the

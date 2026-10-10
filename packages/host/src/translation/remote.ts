@@ -18,14 +18,13 @@ export function translatedRemoteInput(input: ControllerTranslationInput, record:
     || input.items?.some(item => item.type === 'skill')) {
     throw new Error('Translated remote sending requires one user text input.');
   }
-  const instruction = `\n\nPlease respond in ${record.targetLanguage}. Keep code, identifiers, file paths and quoted source material unchanged.`;
-  const text = record.text + instruction;
+  const text = record.text;
   const document = record.translatedDocument;
   return {
     text,
     ...(input.items ? { items: input.items.map(item => item.type === 'text' ? { ...item, text } : item) } : {}),
     ...(input.context_items ? { context_items: input.context_items } : {}),
-    ...(document ? { composer_document: { version: 1, segments: [...document.segments, { type: 'text', text: instruction }] } as ComposerDocument } : {}),
+    ...(document ? { composer_document: document } : {}),
   };
 }
 

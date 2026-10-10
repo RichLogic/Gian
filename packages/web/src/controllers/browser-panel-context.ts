@@ -32,9 +32,7 @@ import {
   type GianBrowserPageSnapshotCapture,
   type PastedTextContextItem,
 } from '@gian/shared';
-import type { UploadedAttachment } from '../api.js';
-import { dispatchAttachmentUpload } from '../operations/message.js';
-import type { OperationDispatcher } from '../operations/dispatcher.js';
+import type { uploadAttachment, UploadedAttachment } from '../api.js';
 import {
   injectComposerAttachment,
   injectComposerContextItems,
@@ -135,8 +133,7 @@ export async function attachBrowserPageSnapshot(
 export type BrowserScreenshotAttachResult = 'attached' | 'capture-failed' | 'upload-failed';
 
 export interface BrowserScreenshotAttachDeps {
-  upload?: (sessionId: string, blob: Blob, filename: string) => Promise<UploadedAttachment>;
-  dispatch?: OperationDispatcher['dispatch'];
+  upload?: typeof uploadAttachment;
   inject?: (sessionId: string, attachment: UploadedAttachment) => void;
   now?: () => Date;
 }
@@ -174,13 +171,12 @@ export async function attachBrowserPageScreenshot(
   const filename = browserScreenshotFilename((deps.now ?? (() => new Date()))());
   let uploaded: UploadedAttachment;
   try {
-    const blob = new Blob([bytes.slice().buffer], { type: capture.mimeType });
-    if (deps.upload) {
-      uploaded = await deps.upload(sessionId, blob, filename);
-    } else {
-      if (!deps.dispatch) throw new Error('Attachment upload requires the operation dispatcher.');
-      uploaded = await dispatchAttachmentUpload(deps.dispatch, { sessionId, blob, filename });
-    }
+    if (!deps.upload) throw new Error('Screenshot upload requires the message operation dispatcher.');
+    uploaded = await deps.upload(
+      sessionId,
+      new Blob([bytes.slice().buffer], { type: capture.mimeType }),
+      filename,
+    );
   } catch {
     return 'upload-failed';
   }

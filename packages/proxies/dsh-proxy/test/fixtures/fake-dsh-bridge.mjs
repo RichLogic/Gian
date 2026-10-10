@@ -159,7 +159,7 @@ function startTurn(params) {
     contextWindow: 128000,
   });
   // Transient stream chunk: emitted on the live wire but NOT appended to the
-  // durable event log, matching DSH 0.1.5 behavior. The attempt/index pair is
+  // durable event log, matching DSH 0.2.0-rc.2 behavior. The attempt/index pair is
   // the transient identity the proxy hashes for chunk deltas.
   notify('session.event', {
     sessionId: params.sessionId,
@@ -224,8 +224,8 @@ async function handle(method, params) {
         runtime: {
           id: 'deepseek-harness',
           package: '@deepseek-ai/dsh',
-          version: '0.1.5-rc.3',
-          sessionFormatVersion: 3,
+          version: '0.2.0-rc.2',
+          sessionFormatVersion: 4,
         },
         capabilities: {
           'session.events.read': 1,
@@ -342,7 +342,7 @@ async function handle(method, params) {
       const events = state.events.slice(cursor, cursor + limit);
       return {
         sessionId: params.sessionId,
-        formatVersion: 0,
+        formatVersion: 4,
         events,
         cursor: cursor + events.length < state.events.length
           ? String(cursor + events.length)

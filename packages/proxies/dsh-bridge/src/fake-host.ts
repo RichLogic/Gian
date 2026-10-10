@@ -14,6 +14,7 @@
  */
 
 import { DSH_SESSION_FORMAT_VERSION, type BridgeJsonValue } from './schema.js';
+import { BRIDGE_PACKAGE_VERSION } from './package-version.js';
 import { verifyHostBinding } from './host-binding.js';
 import type {
   BridgeCustomizationDetailParams,
@@ -93,8 +94,8 @@ export class FakeDshRuntime implements BridgeHost {
   private early: BridgeHostEvent[] = [];
 
   constructor(private readonly options: FakeHostOptions = {}) {
-    this.bridgeVersion = options.bridgeVersion ?? '0.1.5';
-    this.dshVersion = options.dshVersion ?? '0.1.5-rc.3';
+    this.bridgeVersion = options.bridgeVersion ?? BRIDGE_PACKAGE_VERSION;
+    this.dshVersion = options.dshVersion ?? '0.2.0-rc.2';
   }
 
   attachSink(sink: (event: BridgeHostEvent) => void): void {
@@ -364,7 +365,8 @@ export class FakeDshRuntime implements BridgeHost {
   }
 
   async sessionRename(): Promise<Record<string, unknown>> {
-    throw new Error('CAPABILITY_NOT_SUPPORTED: DSH exposes no native session title/rename API');
+    // SessionTitleService.rename exists in 0.2.0-rc.2 and is not wired.
+    throw new Error('CAPABILITY_NOT_SUPPORTED: DSH session rename is not connected in this bridge');
   }
 
   async sessionFork(params: BridgeSessionForkParams): Promise<Record<string, unknown>> {

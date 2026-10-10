@@ -1,10 +1,11 @@
-import { remoteAgentIdentity, loadRemoteAgentCatalog, optionModels, remoteRequest } from './remote-environments.js';
+import { remoteAgentIdentity, loadRemoteAgentCatalog, optionModels, remoteRequest, RemoteRequestError } from './remote-environments.js';
 import type {
   AgentInstallResult,
   AgentProxyDefaults,
   AgentProxyUpdateCheck,
   EventEnvelope,
   Executor,
+  LegacyExecutorId,
   ProductExecutor,
   ProxyCatalogEntry,
   ProxyCatalogList,
@@ -32,6 +33,34 @@ export interface TreeEntry {
   name: string;
   type: 'dir' | 'file';
   path: string;
+}
+
+export async function loadLinkPreviewResponse(url: string, signal?: AbortSignal): Promise<Response> {
+  return fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal });
+}
+
+async function remoteHttp<T>(path: string, body?: unknown, method?: 'DELETE'): Promise<T> {
+  const response = await fetch('/api/remote' + path, { credentials: 'same-origin', cache: 'no-store',
+    ...(method === 'DELETE' ? { method: 'DELETE' } : {}),
+    ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
+  if (!response.ok) throw new RemoteRequestError(response.status);
+  return response.json() as Promise<T>;
+}
+
+export function loadRemoteEnvironmentResponse<T>(path: string, body?: unknown): Promise<T> {
+  if (body !== undefined && !/^\/environments\/[^/]+\/agents\/[^/]+\/catalog$/.test(path)) {
+    throw new Error('Remote query transport does not accept mutations.');
+  }
+  return remoteHttp(path, body);
+}
+
+export function connectRemoteEnvironment(input: { server_url: string; code: string; name: string }, signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
+  return remoteHttp('/environments', input);
+}
+
+export function removeRemoteEnvironment(id: string): Promise<unknown> {
+  return remoteHttp(`/environments/${encodeURIComponent(id)}`, undefined, 'DELETE');
 }
 
 export function makeWsUrl(): string {
@@ -885,7 +914,7 @@ export interface AgentDraftDefaults {
 
 /** Prefill for a new draft card: numbered name and the kind's existing path. */
 export async function loadAgentDraftDefaults(
-  proxy: ProductExecutor,
+  proxy: LegacyExecutorId,
 ): Promise<AgentDraftDefaults> {
   const response = await fetch(`/api/proxies/${proxy}/draft-defaults`);
   return agentResponse<AgentDraftDefaults>(response);
@@ -896,7 +925,7 @@ export interface CreateAgentInput {
   pluginId?: string;
   proxy?: ProductExecutor;
   home?: { kind: 'managed' } | { kind: 'custom'; path: string };
-  /** ADR-0094: per-Agent Runtime binding; 'custom' pins a user-provided
+  /** ADR-0102: per-Agent Runtime binding; 'custom' pins a user-provided
    *  Runtime path probed by the Host before the Agent is persisted. */
   runtime?: { kind: 'managed' } | { kind: 'custom'; path: string };
   cliPath?: string | null;
@@ -938,7 +967,7 @@ export async function pickAgentHome(agentId?: string): Promise<string | null> {
   return body.path ?? null;
 }
 
-/** Open the native file picker for a Custom Agent's Runtime path (ADR-0094).
+/** Open the native file picker for a Custom Agent's Runtime path (ADR-0102).
  *  Picks a file (executable or launch script), unlike the HOME folder picker. */
 export async function pickAgentRuntime(): Promise<string | null> {
   const response = await fetch('/api/agents/pick-runtime', { method: 'POST' });

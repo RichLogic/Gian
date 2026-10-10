@@ -66,6 +66,7 @@ import {
   DESKTOP_TOKEN_HEADER,
   resolveManagedHostPaths,
   resolveUnpackedAppPath,
+  shouldProvisionPackagedDevRuntimes,
   startManagedHost,
 } from './managed-host.js';
 import {
@@ -390,6 +391,7 @@ function startProductionHost(): void {
     hostEntry: resolveUnpackedAppPath(require.resolve('@gian/host')),
     resourcesPath: process.resourcesPath,
     dataDir: dataDirectory(),
+    sourceFirstDev: devArtifact && !productionDataSelected,
   });
   const child = startManagedHost({
     electronExecutable: join(process.resourcesPath, 'runtime', 'node'),
@@ -401,10 +403,20 @@ function startProductionHost(): void {
     githubBrokerSocket: githubReleaseBrokerSocketPath(),
     remoteBrokerSocket: remoteIdentityBrokerSocketPath(),
     browserBrokerSocket: browserUseBrokerSocketPath(),
+    sourceFirstDev: devArtifact && !productionDataSelected,
     env: {
       ...process.env,
       GIAN_RELEASE_VERSION: app.getVersion(),
       GIAN_RELEASE_REPOSITORY: releaseRepository(),
+      ...(shouldProvisionPackagedDevRuntimes({
+        devArtifact,
+        productionDataSelected,
+        smoke: process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1',
+        dataDir: dataDirectory(),
+        devDataDir: environmentSettings('dev', homedir()).dataDir,
+      }) ? { GIAN_PROVISION_DEV_RUNTIMES: '1' } : {}),
+      ...(devArtifact && process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] === '1'
+        ? { GIAN_DEV_RUNTIME_PROVISION_MODE: 'isolated' } : {}),
     },
   });
   managedHost = child;

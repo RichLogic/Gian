@@ -5,9 +5,12 @@ import { useOperationDispatchOptional } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
 
 export interface ReadingTranslation { pending: boolean; record?: TranslationRecord; error?: string }
+/** Resolved once a translated send may dispatch: the TranslationRecord whose
+ *  id the Host expects, or 'original' when the user chose to skip translation. */
+export type SendOutcome = TranslationRecord | 'original';
 interface SendRequest {
   text: string; document?: ComposerDocument;
-  resolve: (id: string) => void; reject: (error: Error) => void;
+  resolve: (outcome: SendOutcome) => void; reject: (error: Error) => void;
 }
 
 export function useTranslation(sessionId: string) {
@@ -18,6 +21,13 @@ export function useTranslation(sessionId: string) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState<Record<string, ReadingTranslation>>({});
+  /** Ephemeral per-message override of the reading toggle (文A): page-level
+   *  only, deliberately NOT persisted. The DEFAULT follows the session's
+   *  auto-translate switch — with it on, a reply's translation renders
+   *  expanded on arrival (2026-10-09 owner: the toggle used to start collapsed
+   *  even for auto-translated replies); a manual click overrides in either
+   *  direction until the session remounts. */
+  const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({});
   const [sending, setSending] = useState<{ pending: boolean; error?: string } | null>(null);
   const sendRef = useRef<SendRequest | null>(null);
   const requests = useRef(new Map<string, AbortController>());
@@ -36,6 +46,10 @@ export function useTranslation(sessionId: string) {
   }, [sessionId, t]);
   useEffect(() => {
     alive.current = true;
+    // Turn-keyed expand/collapse overrides are per-session (turn:1 exists in
+    // every session) and ephemeral by design — a fresh mount returns to the
+    // auto-translate default.
+    setExpandOverride({});
     void refresh();
     window.addEventListener('gian:translation-settings', refresh);
     window.addEventListener('focus', refresh);
@@ -87,19 +101,26 @@ export function useTranslation(sessionId: string) {
     try {
       const record = await request(current.text, 'send', undefined, current.document);
       if (!alive.current || sendRef.current !== current) return;
-      sendRef.current = null; setSending(null); current.resolve(record.id);
+      sendRef.current = null; setSending(null); current.resolve(record);
     } catch (error) {
       if (alive.current && sendRef.current === current) setSending({ pending: false, error: String(error) });
     }
   }
-  function prepareSend(text: string, document?: ComposerDocument): Promise<string> {
-    if (!ready) return Promise.reject(new Error('Translation settings are still loading.'));
+  /**
+   * Gate + start of a translated send. Returns null synchronously when the
+   * send cannot start at all (state still loading, translation unconfigured,
+   * another translated send in flight) so the caller can keep the composer's
+   * blocking contract (draft retained, no optimistic echo). Otherwise the
+   * returned promise settles with the SendOutcome: the caller dispatches only
+   * then, while its already-appended echo shows the inline progress row.
+   */
+  function prepareSend(text: string, document?: ComposerDocument): Promise<SendOutcome> | null {
+    if (!ready) return null;
     if (!isTranslationConfigured(state.preferences)) {
-      const message = t('translation.configureFirst');
-      setError(message);
-      return Promise.reject(new Error(message));
+      setError(t('translation.configureFirst'));
+      return null;
     }
-    if (sendRef.current) return Promise.reject(new Error('Translation is already running.'));
+    if (sendRef.current) return null;
     return new Promise((resolve, reject) => {
       sendRef.current = { text, document, resolve, reject };
       void retrySend();
@@ -134,6 +155,19 @@ export function useTranslation(sessionId: string) {
       ? { pending: false, record }
       : local ?? { ...state.automatic[sourceId], pending: state.automatic[sourceId]?.pending ?? false, record };
   }
+  function isReadExpanded(sourceId: string): boolean {
+    return expandOverride[sourceId] ?? state.enabled;
+  }
+  /** 文A toggle: expand shows the cached record instantly or kicks off the
+   *  translation (unless one is already pending/errored for this source);
+   *  collapse only hides the block — the translated record stays cached. */
+  function toggleRead(text: string, sourceId: string): void {
+    const next = !isReadExpanded(sourceId);
+    setExpandOverride(previous => ({ ...previous, [sourceId]: next }));
+    if (!next) return;
+    const current = result(sourceId, text);
+    if (!current.pending && !current.record && !current.error) void read(text, sourceId);
+  }
   function select(text: string) {
     const requestId = crypto.randomUUID();
     const controller = new AbortController();
@@ -144,7 +178,7 @@ export function useTranslation(sessionId: string) {
       controller.abort(); void cancelTranslation(sessionId, requestId, dispatch).catch(() => undefined);
     } };
   }
-  return { state, ready, error, saving, toggle, sending, prepareSend, retrySend, finishSend, read, result, refresh, select };
+  return { state, ready, error, saving, toggle, sending, prepareSend, retrySend, finishSend, read, result, isReadExpanded, toggleRead, refresh, select };
 }
 
 export type TranslationController = ReturnType<typeof useTranslation>;

@@ -5,6 +5,7 @@ import {
   buildManagedHostEnv,
   resolveManagedHostPaths,
   resolveUnpackedAppPath,
+  shouldProvisionPackagedDevRuntimes,
 } from '../src/managed-host.js';
 
 test('managed host paths keep mutable data outside the application bundle', () => {
@@ -59,6 +60,51 @@ test('managed host environment configures the bundled Node runtime boundary', ()
     GIAN_PARENT_MANAGED: '1',
     GIAN_MANAGED_PLUGINS: '1',
   });
+});
+
+test('packaged Dev selects its bundled source Proxies while production strips inherited Dev controls', () => {
+  const paths = resolveManagedHostPaths({ hostEntry: '/app/host.js', resourcesPath: '/app/resources',
+    dataDir: '/home/user/.gian-dev', sourceFirstDev: true });
+  const input = { paths, host: '127.0.0.1', port: 8991, desktopToken: 'test-only', instanceId: 'dev',
+    githubBrokerSocket: '/tmp/github.sock', remoteBrokerSocket: '/tmp/remote.sock',
+    browserBrokerSocket: '/tmp/browser.sock',
+    env: { PATH: '/usr/bin', GIAN_PROVISION_DEV_RUNTIMES: '1', GIAN_DEV_PROXY_PACKAGES_DIR: '/wrong' } };
+  const dev = buildManagedHostEnv({ ...input, sourceFirstDev: true });
+  assert.equal(dev.GIAN_MANAGED_PLUGINS, '0');
+  assert.equal(dev.GIAN_DEV_PROXY_PACKAGES_DIR, '/app/resources/giandev/proxies');
+  assert.equal(dev.GIAN_DEV_RUNTIME_ASSETS_DIR, '/app/resources/giandev/runtime-assets');
+  assert.equal(dev.GIAN_PROVISION_DEV_RUNTIMES, '1');
+  const prod = buildManagedHostEnv(input);
+  assert.equal(prod.GIAN_MANAGED_PLUGINS, '1');
+  assert.equal(prod.GIAN_DEV_PROXY_PACKAGES_DIR, undefined);
+  assert.equal(prod.GIAN_PROVISION_DEV_RUNTIMES, undefined);
+});
+
+test('packaged GianDev provisions runtimes only for the Dev data directory', () => {
+  const devDataDir = '/Users/richlogic/.gian-dev';
+  assert.equal(shouldProvisionPackagedDevRuntimes({
+    devArtifact: true,
+    productionDataSelected: false,
+    smoke: false,
+    dataDir: devDataDir,
+    devDataDir,
+  }), true);
+  assert.equal(shouldProvisionPackagedDevRuntimes({
+    devArtifact: true,
+    productionDataSelected: true,
+    smoke: false,
+    dataDir: '/Users/richlogic/.gian',
+    devDataDir,
+  }), false);
+  assert.equal(shouldProvisionPackagedDevRuntimes({
+    devArtifact: true,
+    productionDataSelected: false,
+    smoke: true,
+    dataDir: devDataDir,
+    devDataDir,
+  }), false);
+  assert.equal(shouldProvisionPackagedDevRuntimes({ devArtifact: true, productionDataSelected: false,
+    smoke: true, dataDir: '/tmp/dev-smoke/data', devDataDir }), true);
 });
 
 test('bundled host entry resolves to the unpacked dependency tree for Node', () => {

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -210,6 +213,54 @@ test('fails startup promptly when the managed binary does not exist', async () =
       && error.code === 'ENOENT'
     ),
   );
+});
+
+test('force-stop reaps an inspection child without the EOF and SIGTERM grace periods', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'grok-inspection-stop-'));
+  const client = new GrokAcpClient({
+    binaryPath: resolve('test/fixtures/fake-grok-cli.mjs'),
+    cwd: home,
+    env: {
+      HOME: home,
+      GIAN_AGENT_HOME: home,
+      GROK_TEST_IGNORE_SHUTDOWN: '1',
+    },
+  });
+  t.after(async () => {
+    await client.stop({ force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+  const stopped = deferred<{ expected: boolean; signal: NodeJS.Signals | null }>();
+  client.on('runtimeStopped', event => { stopped.resolve(event); });
+  await client.ensureStarted();
+  const started = performance.now();
+  await client.stop({ force: true });
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 2_000, `inspection stop waited ${elapsed}ms for graceful shutdown`);
+  assert.deepEqual(await stopped.promise, { code: null, signal: 'SIGKILL', expected: true });
+  assert.equal(client.negotiated, null);
+});
+
+test('ordinary process stop preserves the graceful EOF shutdown path', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'grok-graceful-stop-'));
+  const client = new GrokAcpClient({
+    binaryPath: resolve('test/fixtures/fake-grok-cli.mjs'),
+    cwd: home,
+    env: {
+      HOME: home,
+      GIAN_AGENT_HOME: home,
+      GROK_TEST_IGNORE_SHUTDOWN: '0',
+    },
+  });
+  t.after(async () => {
+    await client.stop({ force: true });
+    await rm(home, { recursive: true, force: true });
+  });
+  const stopped = deferred<{ expected: boolean; signal: NodeJS.Signals | null }>();
+  client.on('runtimeStopped', event => { stopped.resolve(event); });
+  await client.ensureStarted();
+  await client.stop();
+  assert.deepEqual(await stopped.promise, { code: 0, signal: null, expected: true });
 });
 
 test('negotiates ACP v1 without filesystem or terminal reverse capabilities', async () => {

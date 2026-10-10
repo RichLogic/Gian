@@ -30,7 +30,7 @@ import { createRemoteSettingsController } from '../src/remote-settings/productio
 import { renderWithOperations } from './operation-test-utils.js';
 
 function renderRemote(fixture: RemoteSettingsController | null) {
-  return render(
+  return renderWithOperations(
     <>
       <SettingsRemotePage controller={fixture} />
       <GitHubAuthorizationHost login="RichLogic" />

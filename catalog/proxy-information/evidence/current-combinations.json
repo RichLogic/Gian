@@ -1,6 +1,6 @@
 {
-  "catalog": "https://github.com/RichLogic/Gian-Proxies/releases/tag/catalog-v1.19.0",
-  "sequence": 19,
+  "catalog": "https://github.com/RichLogic/Gian-Proxies/releases/tag/catalog-v1.21.0",
+  "sequence": 21,
   "sourceId": "gian-official",
   "plugins": [
     {
@@ -60,16 +60,16 @@
     {
       "id": "kimi",
       "displayName": "Kimi Code",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "protocolRange": ">=2.2 <3.0",
       "processScope": "shared",
       "combination": {
         "certificate": {
-          "id": "proxies-36c1d9944ef6bcdd0a486ea4618462d203a13b94-36691189212-1",
-          "sha256": "b924c29ab3613bc3ce1c27d4ac14b4740ba70824376260e0ed5c6455a209e005"
+          "id": "proxies-244a9d2a94454e0fa207f5370756afd70b9c916d-37584330679-1",
+          "sha256": "8c4a9fa66fb0e91bd1dc4828525f512858daedae3f4be2e83347ce6b5ebb4e34"
         },
         "companions": [],
-        "generationId": "kimi-0.4.4-runtime-2.1.1",
+        "generationId": "kimi-0.4.5-runtime-2.1.1",
         "runtime": {
           "kind": "native-binary",
           "runtimeId": "kimi",
@@ -141,27 +141,27 @@
     {
       "id": "grok",
       "displayName": "Grok Build",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "protocolRange": ">=2.2 <3.0",
       "processScope": "session",
       "combination": {
         "certificate": {
-          "id": "proxies-f95e24516d8778f6f5b3afb3d8b294ab2881af21-36130726741-1",
-          "sha256": "28dd05bed679790540d578bd699c3e2fd2d43acf65dc346fab6a23ae132da21d"
+          "id": "proxies-244a9d2a94454e0fa207f5370756afd70b9c916d-37584330679-1",
+          "sha256": "8c4a9fa66fb0e91bd1dc4828525f512858daedae3f4be2e83347ce6b5ebb4e34"
         },
         "companions": [],
-        "generationId": "grok-0.3.6-runtime-1.0.41",
+        "generationId": "grok-0.3.7-runtime-1.0.41",
         "runtime": {
-          "asset": {
-            "sha256": "9c844eb13365180787d9ad22b2b3748a024be8e1ed845253cc114781b31c591d",
-            "size": 145657952,
-            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.6/grok-1.0.41-darwin-arm64"
-          },
-          "entryRelativePath": "bin/grok",
-          "format": "raw",
           "kind": "native-binary",
           "runtimeId": "grok",
-          "version": "1.0.41"
+          "version": "1.0.41",
+          "asset": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.7/grok-1.0.41-darwin-arm64",
+            "sha256": "9c844eb13365180787d9ad22b2b3748a024be8e1ed845253cc114781b31c591d",
+            "size": 145657952
+          },
+          "format": "raw",
+          "entryRelativePath": "bin/grok"
         }
       }
     }

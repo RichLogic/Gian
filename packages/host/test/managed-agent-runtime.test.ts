@@ -130,6 +130,68 @@ test('managed Agents share one certified Runtime while native and isolated HOMEs
   assert.deepEqual(persisted.agents.map(item => item.home), [first.home, second.home]);
 });
 
+test('a provisioned GianDev CLI is ready when no certified generation is active', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'gian-provisioned-runtime-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const proxyEntry = join(dataDir, 'plugins', 'claude', '0.3.2', 'proxy.mjs');
+  const cliEntry = join(dataDir, 'runtimes', 'claude', '2.1.280', 'e'.repeat(64), 'bin', 'claude');
+  const certifiedEntry = join(dataDir, 'runtimes', 'claude', '2.1.159', 'c'.repeat(64), 'bin', 'claude');
+  await executable(proxyEntry);
+  await executable(cliEntry);
+  await executable(certifiedEntry);
+  const generations = new ManagedRuntimeGenerationStore(dataDir);
+  await generations.initialize();
+  const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir,
+    releaseVersion: '0.6.6',
+    managedProxies: true,
+    generationStore: generations,
+    homeDir: join(dataDir, 'user-home'),
+    pathEnv: '/usr/local/bin:/usr/bin',
+    pluginStore: {
+      currentLaunch: async () => ({
+        pluginId: parseProxyPluginId('claude'),
+        pluginVersion: '0.3.2',
+        manifestSha256: 'a'.repeat(64),
+        protocolRange: '>=2.2 <3.0',
+        entryPath: proxyEntry,
+        processScope: 'session' as const,
+        schemaVersion: 4 as const,
+        runtime: {
+          kind: 'external' as const,
+          id: 'claude',
+          displayName: 'Claude Code',
+          verifiedVersions: ['2.1.280'],
+        },
+      }),
+    } as never,
+  });
+  manager.setProvisionedRuntimes([{
+    pluginId: 'claude',
+    runtimeId: 'claude',
+    version: '2.1.280',
+    entryPath: cliEntry,
+    artifactSha256: 'e'.repeat(64),
+  }]);
+  const agent = await manager.createAgent({ name: 'Claude Dev', pluginId: 'claude' });
+  assert.equal(manager.agentRuntimePath(agent.id).cliPath, cliEntry);
+  const status = await manager.agentStatus(agent.id);
+  assert.equal(status.ready, true);
+  assert.equal(status.cli.path, cliEntry);
+  assert.equal(status.cli.version, '2.1.280');
+  assert.equal(status.cli.source, 'managed');
+  assert.equal(status.runtimeProfile?.path, cliEntry);
+
+  const candidate = generation(dataDir, proxyEntry, certifiedEntry);
+  await generations.stage(candidate);
+  await generations.activate('claude', candidate.generationId);
+  manager.managedRuntimeActivated('claude');
+  const certified = await manager.agentStatus(agent.id, true);
+  assert.equal(certified.cli.path, certifiedEntry);
+  assert.equal(manager.agentRuntimePath(agent.id).cliPath, certifiedEntry);
+});
+
 test('ZCode readiness is projected from its active certified generation with the selected HOME', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gian-managed-zcode-agent-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

@@ -854,13 +854,16 @@ export function TasksSidebar({
 
   return (
     <aside className="sidebar tasks-rail">
-      {/* 2026-08-31 redesign: nav rows scroll away with the list. 2026-09-08:
-          the sticky [Tasks|Repos] segmented switch became the list-switch
-          dropdown nav row under Timer — the ROW still sticks to the scroll
-          top (New stays on the section headers' hover "+", 2026-09-07). */}
-      <div className="sb-scroll">
+      {/* 2026-10-08: the nav rows + list-switch row are pinned chrome ABOVE
+          the scroll area (`.sb-pin`), so scrolling list rows are hard-clipped
+          at the scroll container's top edge — nothing can render behind the
+          switch row (supersedes the 2026-09-08 sticky + 2026-09-23
+          transparent-backdrop arrangement, which let rows bleed through). */}
+      <div className="sb-pin">
         <SidebarNavRows mode={mode} onSetMode={onSetMode} />
         <SidebarListSwitch listMode={listMode} onSetListMode={onSetListMode} />
+      </div>
+      <div className="sb-scroll">
         {creating && (
           <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}

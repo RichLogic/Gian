@@ -139,6 +139,24 @@ describe('persistent primary sidebar', () => {
     expect(badge.nextElementSibling?.classList.contains('ri-title')).toBe(true);
   });
 
+  it('marks MCP-delegated child sessions with a row-start compass badge', async () => {
+    // 2026-10-08 (owner): a session whose created_by_session_id is set was
+    // spawned by another Gian session via the Gian MCP session.create tool;
+    // the rail marks it with the lucide compass glyph (same gutter as the
+    // remote/schedule badges). Plain sessions get no badge.
+    const child = { ...session, id: 'session-child', name: 'Delegated chat', created_by_session_id: session.id } as Session;
+    const plain = { ...session, id: 'session-2', name: 'Plain chat' } as Session;
+    renderPage({ sessions: [child, plain] });
+
+    const badge = await screen.findByTestId('session-delegated-session-child');
+    expect(badge).toHaveClass('ri-delegate-badge');
+    expect(badge.querySelector('svg')).not.toBeNull();
+    expect(screen.queryByTestId('session-delegated-session-2')).toBeNull();
+    // Placement: inside .ri-row1, immediately before the title.
+    expect(badge.parentElement?.classList.contains('ri-row1')).toBe(true);
+    expect(badge.nextElementSibling?.classList.contains('ri-title')).toBe(true);
+  });
+
   it('renders nav pages (Agents / Custom / Timer) and the list-switch dropdown row above the list', () => {
     const handlers = renderPage();
     const nav = screen.getByTestId('sb-nav-agents');
@@ -400,37 +418,39 @@ describe('persistent primary sidebar', () => {
     expect(acts).not.toMatch(/background:/);
   });
 
-  it('drops the segmented switch; the list-switch row is a sticky nav row with a trailing caret', () => {
+  it('pins the nav rows and list-switch above the scroll area so list rows hard-clip at its top edge', () => {
     // 2026-09-08 (owner): the [Tasks|Repos] segmented switch and its
     // `.sb-toprow` are gone; the list switch is a dropdown `.sb-navrow` under
-    // Timer whose caret trails in the quiet text color — and the ROW sticks
-    // to the scroll top while the nav rows scroll away.
+    // Timer whose caret trails in the quiet text color.
+    // 2026-10-08 (owner): the sticky + transparent switch let scrolled rows
+    // bleed through it ("Doing" showing behind "Tasks ▾"). The nav rows and
+    // the switch now live in a pinned `.sb-pin` container ABOVE `.sb-scroll`;
+    // the scroll container's own top edge is the clipping boundary, so
+    // nothing can render behind the switch.
     renderPage();
-    expect(screen.getByTestId('sb-list-switch')).toHaveClass('sb-navrow');
+    const switchRow = screen.getByTestId('sb-list-switch');
+    expect(switchRow).toHaveClass('sb-navrow');
+    expect(switchRow.closest('.sb-pin')).not.toBeNull();
+    expect(switchRow.closest('.sb-scroll')).toBeNull();
     expect(document.querySelector('.sb-toprow')).toBeNull();
     expect(document.querySelector('.sb-switch')).toBeNull();
     expect(document.querySelector('.sb-toprow-spacer')).toBeNull();
     const nav = readFileSync('src/styles/sidebar-navigation.css', 'utf8');
     expect(nav).not.toMatch(/\.sb-toprow/);
     expect(nav).not.toMatch(/\.sb-switch\b/);
+    // No sticky/backdrop rules for the switch survive — it is plain pinned
+    // chrome and needs no background of its own.
+    expect(nav).not.toMatch(/\.sb-scroll\s*>\s*\.sb-listswitch/);
     expect(nav.match(/\.sb-listswitch \.sb-row-caret\s*\{([^}]*)\}/)?.[1] ?? '')
       .toMatch(/var\(--text-3\)/);
     // 2026-09-09 (owner): the caret hugs the label, never pushed to the row end.
     expect(nav.match(/\.sb-listswitch \.sb-row-caret\s*\{([^}]*)\}/)?.[1] ?? '')
       .not.toMatch(/margin-left/);
-    const sticky = nav.match(/\.sb-scroll > \.sb-listswitch\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(sticky).toMatch(/position:\s*sticky/);
-    // Tasks/Repos is a transparent text control, including while hovered or
-    // expanded. Backdrop blur would still create a visible rectangular tile.
-    expect(sticky).toMatch(/background:\s*transparent/);
-    expect(sticky).toMatch(/backdrop-filter:\s*none/);
-    expect(sticky).toMatch(/-webkit-backdrop-filter:\s*none/);
-    expect(sticky).toMatch(/box-shadow:\s*none/);
-    const states = nav.match(/\.sb-scroll > \.sb-listswitch:hover,\s*\.sb-scroll > \.sb-listswitch:active,\s*\.sb-scroll > \.sb-listswitch\[aria-expanded="true"\]\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(states).toMatch(/background:\s*transparent/);
-    expect(states).toMatch(/box-shadow:\s*none/);
     const gianV2 = readFileSync('src/styles/gian-v2.css', 'utf8');
     expect(gianV2).not.toMatch(/\.sb-toprow/);
+    // The pinned chrome never scrolls; the scroll container keeps its clip.
+    expect(gianV2.match(/\.sb-pin\s*\{([^}]*)\}/)?.[1] ?? '').toMatch(/flex:\s*none/);
+    expect(gianV2.match(/\.sb-scroll\s*\{([^}]*)\}/)?.[1] ?? '').toMatch(/overflow-y:\s*auto/);
   });
 
   it('keeps the airy rail type scale (2026-09-07 owner call)', () => {
@@ -459,6 +479,19 @@ describe('persistent primary sidebar', () => {
     // padding, 2026-09-10).
     expect(nav.match(/\.sb-showmore\s*\{([^}]*)\}/)?.[1] ?? '')
       .toMatch(/padding:\s*4px 8px 4px 35px/);
+  });
+
+  it('never opens a horizontal scroll axis in the rail (2026-10-08)', () => {
+    // `.sb-section` was `width: 100%` with 2px side margins — the margin box
+    // overflowed the scroll container by 4px and put a horizontal scrollbar
+    // at the rail bottom. Fix: drop the width (auto fills minus margins,
+    // like .sb-group) and pin overflow-x on the scroll container as a guard.
+    const gianV2 = readFileSync('src/styles/gian-v2.css', 'utf8');
+    const scroll = gianV2.match(/\.sb-scroll\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(scroll).toMatch(/overflow-x:\s*(hidden|clip)/);
+    const section = gianV2.match(/\.sb-section\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(section).toMatch(/margin:\s*12px 2px 2px/);
+    expect(section).not.toMatch(/width:\s*100%/);
   });
 
   it('shows the delayed hover card (logo + name + time + repo) and renames inline', async () => {

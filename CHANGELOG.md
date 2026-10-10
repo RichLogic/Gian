@@ -7,6 +7,35 @@ not listed.
 Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 0.6.0 establishes the Developer ID signed and Apple-notarized stable channel.
 
+## [0.6.6] - 2026-10-10
+
+### Added
+
+- A host-local Inbox collects turn completions, approvals, and errors across sessions, with unified navigation back to the source conversation.
+- Remote sessions show globe icons and live disconnect state; sessions created through Gian MCP delegation carry a compass badge.
+
+### Changed
+
+- Unified the translation experience: optimistic translated sends with echo adoption, a 文A auto-translate toggle, and consistent translating-state feedback on replies and first messages.
+- Pinned the Agent CLI Runtimes: Claude Code 2.1.285, Codex 0.161.0, Grok 1.0.46, and DeepSeek Harness 0.2.0-rc.2.
+- Refreshed Grok branding with its default mode label, and updated the Agents navigation icons.
+- Markdown table text now scales with the chat font setting.
+
+### Fixed
+
+- Claude Code sessions resume correctly after interrupts, report CLI exits, discover the model catalog reliably, and keep the Default label with its effort.
+- Kimi preserves turns across disconnects and shows assistant text outside the working basket.
+- Codex disk-pages long histories so large sessions stay responsive, with replay failures isolated.
+- Grok avoids Catalog inspection shutdown delays and offers its default HOME during Agent creation.
+- DeepSeek Harness reads 0.2.0 session logs and falls back from retired model choices.
+- The composer parses its document as one Markdown source, new-session Catalog mode choices are preserved, and sidebar chrome stays pinned above the scrolling session list.
+- Refresh vulnerable transitive dependency pins before stable packaging.
+
+### Notes
+
+- Proxy capabilities depend on separately published certified Proxy and Catalog versions; installing this App does not publish or replace those assets.
+- GianDev development packages now build from the source Proxies with their pinned CLI Runtime assets included.
+
 ## [0.6.5] - 2026-10-07
 
 ### Added

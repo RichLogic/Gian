@@ -28,7 +28,7 @@ import { randomUUID } from 'node:crypto';
 import type { ApprovalManager } from '../approval/index.js';
 import type { Db } from '../storage/db.js';
 import { loadConfig } from '../storage/config.js';
-import { purgeSessionAttachments } from '../storage/attachments.js';
+
 import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import type { GianSessionHostServiceIdentity } from '../tool/session-host-services.js';
 import { mergeBranchAsync } from '../workspace/git.js';
@@ -89,6 +89,7 @@ interface LifecycleRuntime {
   teardownProxy(sessionId: string): Promise<void>;
   forgetConversationUsage(sessionId: string): void;
   activateHostServices(sessionId: string): void;
+  purgeAttachments(sessionId: string): Promise<void> | void;
 }
 
 function initialTurnConfigFromCreate(
@@ -606,7 +607,7 @@ export class SessionLifecycleService {
       this.sessions.forget(sessionId);
       this.approvals.clearSession(sessionId);
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
-      await purgeSessionAttachments(sessionId);
+      await this.runtime.purgeAttachments(sessionId);
       this.broadcaster.broadcast({ type: 'session:deleted', session_id: sessionId });
       if (session.branch && session.workspace_id != null) {
         this.broadcastWorkspaceGitUpdated(session.workspace_id, 'session-deleted');

@@ -4,8 +4,8 @@
  * Compiles without the DSH packages being declared as dependencies: the bridge
  * is mounted *inside* a composed DSH profile, where `ctx` already carries the
  * services below. Every DSH surface this file touches was verified against the
- * shipped type definitions of `@deepseek-ai/dsh@0.1.5-rc.3`
- * (upstream tag `dsh-v0.1.5-rc.3`, commit `a4c74a91e06b00fe0b0937bde982170c526cc842`):
+ * shipped type definitions of `@deepseek-ai/dsh@0.2.0-rc.2`
+ * (upstream tag `dsh-v0.2.0-rc.2`, commit `639ed015397290b3745d163aafe02ffee4aa3f84`):
  *
  * - `ctx.agents` (AgentRegistry): `create/resume/get/list/roots/isOwnedBy`;
  *   `CreateAgentOptions.meta.parentSession/isSeeded` + `seed` +
@@ -20,7 +20,8 @@
  *   turn/step and a committed/abandoned end outcome),
  *   `subagent/start` + `subagent/end` (`@deepseek-ai/dsh-subagent`:
  *   SubagentRunInfo / SubagentRunEndInfo with runId, child session id,
- *   stopReason).
+ *   stopReason). Public `session.events` is gone; durable reads use
+ *   `snapshotEvents()`.
  * - `ctx.approval` (`approval/request` waterfall, `setPolicy`), and
  *   `ctx.userQuestions` (`user-questions/request` waterfall, AskUserQuestion*
  *   shapes incl. `plan-review` intent and multiSelect) — `@deepseek-ai/dsh-user-approval`,
@@ -32,10 +33,12 @@
  *   `renderSkillContent`; `SkillInvocationSource` is the native
  *   user-explicit-invocation source — `@deepseek-ai/dsh-skill`).
  * - `ctx.permissionPresets`, `ctx.agentPresets`, `ctx.llm`.
- * - `ctx.sessionPersistence.list/stat/open/read`
- *   (`SessionPersistenceSnapshot`: header + revision + eventCount; there is
- *   no delete and no title anywhere in the storage contract, which is what
- *   keeps native delete/rename unsupported).
+ * - `ctx.sessionPersistence` is `create/open/flush/stat/list`
+ *   (`@deepseek-ai/dsh-session-persistence`). This host calls `list()`.
+ *   There is no `read` and no `delete`. `SessionHeader` still has no title.
+ *   `SessionTitleService.rename` (`@deepseek-ai/dsh-session-title`) exists
+ *   and is not connected in this migration, which keeps native delete and
+ *   rename unsupported.
  *
  * Messages and content blocks are built with the plain shapes documented by
  * `@deepseek-ai/dsh-llm` (`createUserMessage` equivalents) so no DSH module
@@ -50,6 +53,7 @@ import { dirname, join } from 'node:path';
 import { BridgeProtocolError, BridgeWriter } from './jsonrpc.js';
 import { BridgeServer } from './server.js';
 import { DSH_SESSION_FORMAT_VERSION, type BridgeJsonValue } from './schema.js';
+import { BRIDGE_PACKAGE_VERSION } from './package-version.js';
 import { verifyHostBinding } from './host-binding.js';
 import type {
   BridgeCustomizationDetailParams,
@@ -100,8 +104,20 @@ export function dshVersionFromEntrypoint(entrypoint: string | undefined): string
 interface CordisSession {
   id: string;
   header?: { createdAt?: number; agentPreset?: string };
+  /** Test doubles still expose this array. Real 0.2.0 sessions do not. */
   events?: readonly CordisSessionEvent[];
+  /** Preferred durable log. Deprecated upstream for new callers, still the read API. */
+  snapshotEvents?: () => readonly CordisSessionEvent[];
   inheritedEventCount?: number;
+}
+
+/** Prefer `snapshotEvents()`. Fall back to a test-double `events` array. */
+function sessionLog(session: CordisSession): readonly CordisSessionEvent[] | null {
+  if (typeof session.snapshotEvents === 'function') {
+    const snapshot = session.snapshotEvents();
+    return Array.isArray(snapshot) ? snapshot : null;
+  }
+  return Array.isArray(session.events) ? session.events : null;
 }
 
 interface CordisAgent {
@@ -324,7 +340,7 @@ export function mountBridge(options: CordisHostOptions): () => Promise<void> {
   const writer = new BridgeWriter(options.stdout ?? process.stdout);
   const host = new CordisDshHost(
     options.ctx,
-    options.bridgeVersion ?? '0.1.5',
+    options.bridgeVersion ?? BRIDGE_PACKAGE_VERSION,
     process.env.GIAN_HOST_BINDING_KEY,
   );
   const server = new BridgeServer({ host, writer });
@@ -419,7 +435,7 @@ function titleCaseKebab(value: string): string {
 }
 
 function sessionAgentPreset(session: CordisSession): string | undefined {
-  const events = Array.isArray(session.events) ? session.events : [];
+  const events = sessionLog(session) ?? [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event?.type === 'agent-preset/selected'
@@ -688,9 +704,8 @@ export class CordisDshHost implements BridgeHost {
     // immediately before dispatching the answerer waterfall; the log tail is
     // therefore the ask's native seq and anchors the interaction identity for
     // both live projection and replay.
-    const askedSeq = (Array.isArray(record.handle.agent.session.events)
-      ? record.handle.agent.session.events.length
-      : 1) - 1;
+    const logged = sessionLog(record.handle.agent.session);
+    const askedSeq = (logged === null ? 1 : logged.length) - 1;
     return new Promise<CordisApprovalOutcome>((resolveApproval) => {
       let settled = false;
       const onAbort = () => settle('cancelled');
@@ -766,9 +781,8 @@ export class CordisDshHost implements BridgeHost {
     const hasMulti = request.questions.some(q => q.multiSelect === true);
     return new Promise<CordisUserQuestionAnswer>((resolveAnswer, rejectAnswer) => {
       let settled = false;
-      const askedSeq = (Array.isArray(record.handle.agent.session.events)
-        ? record.handle.agent.session.events.length
-        : 1) - 1;
+      const logged = sessionLog(record.handle.agent.session);
+      const askedSeq = (logged === null ? 1 : logged.length) - 1;
       const onAbort = () => settleCancelled();
       const settleCancelled = () => {
         if (settled) return;
@@ -1580,12 +1594,11 @@ export class CordisDshHost implements BridgeHost {
   }
 
   async sessionRename(): Promise<Record<string, unknown>> {
-    // Verified absence in @deepseek-ai/dsh@0.1.5-rc.3: SessionHeader carries no
-    // title, SessionPersistenceSnapshot has no displayName, and neither the
-    // storage contract nor the session surface exposes a rename operation.
+    // SessionHeader still has no title. SessionTitleService.rename exists in
+    // @deepseek-ai/dsh@0.2.0-rc.2 and is intentionally not wired here.
     throw new BridgeProtocolError(
       -32000,
-      'RUNTIME_UNAVAILABLE: DSH exposes no native session title/rename API',
+      'RUNTIME_UNAVAILABLE: DSH session rename is not connected in this bridge',
       'CAPABILITY_NOT_SUPPORTED',
     );
   }
@@ -1596,9 +1609,7 @@ export class CordisDshHost implements BridgeHost {
     limit?: number;
   }): Promise<Record<string, unknown>> {
     const record = this.session(params.sessionId);
-    const events = Array.isArray(record.handle.agent.session.events)
-      ? record.handle.agent.session.events
-      : [];
+    const events = sessionLog(record.handle.agent.session) ?? [];
     const cursor = params.cursor === null || params.cursor === undefined
       ? 0
       : Number(params.cursor);
@@ -1771,7 +1782,8 @@ export class CordisDshHost implements BridgeHost {
     }
     const record = this.session(params.sessionId);
     const source = record.handle.agent.session;
-    const events = Array.isArray(source.events) ? [...source.events] : [];
+    const logged = sessionLog(source);
+    const events = logged === null ? [] : [...logged];
 
     let boundary: number;
     if (params.anchor.kind === 'head') {
@@ -1898,7 +1910,7 @@ export class CordisDshHost implements BridgeHost {
 
   async customizationList(params: BridgeCustomizationListParams): Promise<Record<string, unknown>> {
     if (params.kind !== 'skill') {
-      // Verified absence in 0.1.5-rc.3: MCP servers are static profile plugin
+      // Re-checked in 0.2.0-rc.2: MCP servers are static profile plugin
       // instances (`@deepseek-ai/dsh-mcp-client` config), and the hooks
       // packages expose no enumeration registry — there is no runtime API to
       // inventory them read-only.
@@ -2129,8 +2141,8 @@ export class CordisDshHost implements BridgeHost {
     stream.revision = frame.revision as number;
     const chunk = frame.chunk as Record<string, unknown>;
     if ((chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') || typeof chunk.text !== 'string') return;
-    // DSH 0.1.5 moved chunks off the durable session/event bus. Preserve their
-    // attempt/index identity rather than inventing a durable native sequence.
+    // DSH 0.2.0-rc.2 still keeps chunks off the durable session log. Preserve
+    // their attempt/index identity rather than inventing a durable native sequence.
     this.emit({ method: 'session.event', params: {
       sessionId: record.id, type: 'assistant/chunk',
       data: {

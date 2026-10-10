@@ -25,6 +25,8 @@ export const INDEPENDENT_MANIFESTS = [
 ];
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const INDEPENDENT_VERSION_RE = /^\d+\.\d+\.\d+$/;
+const DEV_PROXY_VERSION_RE = /^\d+\.\d+\.\d+(?:-Dev)?$/;
+const PROXY_MANIFESTS = new Set(proxyDefinitions.map(definition => `packages/proxies/${definition.directory}/package.json`));
 const HOTFIX_PROTECTED_PREFIXES = [
   'packages/proxies/',
   'packages/proxy-protocol/',
@@ -47,7 +49,8 @@ export function validateVersionConsistency({
     }
   }
   for (const path of INDEPENDENT_MANIFESTS) {
-    if (!INDEPENDENT_VERSION_RE.test(manifests[path] ?? '')) {
+    const pattern = PROXY_MANIFESTS.has(path) ? DEV_PROXY_VERSION_RE : INDEPENDENT_VERSION_RE;
+    if (!pattern.test(manifests[path] ?? '')) {
       errors.push(`${path} has invalid independent version ${manifests[path] ?? '<missing>'}`);
     }
   }

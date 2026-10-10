@@ -73,6 +73,9 @@ import { ScheduleCommandLedger } from '../schedule/command-ledger.js';
 import { ScheduleRunDispatcher } from '../schedule/dispatcher.js';
 import { ScheduleOrchestrator } from '../schedule/orchestrator.js';
 import { registerScheduleRoutes } from './routes/schedules.js';
+import { InboxService } from '../inbox/service.js';
+import { SessionInboxAdapter } from '../inbox/session-adapter.js';
+import { registerInboxRoutes } from './routes/inbox.js';
 import type { BrowserToolClient } from '../tool/browser-broker.js';
 
 export interface AppContext {
@@ -119,6 +122,7 @@ export interface AppHandle {
   remote: RemoteRuntime;
   scheduleService: ScheduleService;
   scheduleOrchestrator: ScheduleOrchestrator;
+  inbox: InboxService;
 }
 
 export function createApp(ctx: AppContext): AppHandle {
@@ -126,6 +130,9 @@ export function createApp(ctx: AppContext): AppHandle {
   const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
 
   const broadcaster = new WsBroadcaster();
+  const inbox = new InboxService(ctx.db, {
+    broadcast: message => broadcaster.broadcast(message),
+  });
   const sessionBindingPlanner = ctx.agentManager
       ? new SessionBindingPlanner({
         resolveCurrent: pluginId => ctx.agentManager!.trustedLaunch(pluginId),
@@ -411,6 +418,7 @@ export function createApp(ctx: AppContext): AppHandle {
   // here after both objects exist.
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getApprovalModeForActiveTurn(sid));
+  sessions.setSessionInbox(new SessionInboxAdapter(ctx.db, inbox));
 
   // Pre-warm proxy capabilities so model controls are ready before the first
   // session opens. Async, non-blocking; failures are tolerated.
@@ -421,9 +429,9 @@ export function createApp(ctx: AppContext): AppHandle {
   // harness without spawning a real cc-proxy / codex-proxy child.
   if (process.env['GIAN_SKIP_PROXY_WARMUP'] !== '1' && ctx.agentManager) {
     const agentManager = ctx.agentManager;
-    const warm = (agentId: string, proxy: 'claude' | 'codex') => {
+    const warm = (agentId: string, proxy: 'claude' | 'codex', configHome: string | null) => {
       const cliPath = agentManager.agentRuntimePath(agentId).cliPath;
-      const run = () => sessions.warmCapabilities(proxy, cliPath).catch(err => {
+      const run = () => sessions.warmCapabilities(proxy, cliPath, configHome).catch(err => {
         console.warn(`[proxy] warmCapabilities(${proxy}) failed:`, err instanceof Error ? err.message : err);
       });
       return agentManager.agentStatus(agentId).then(status => (
@@ -433,11 +441,24 @@ export function createApp(ctx: AppContext): AppHandle {
     void Promise.all(
       agentManager.listAgents()
         .filter(agent => agent.proxy === 'claude' || agent.proxy === 'codex')
-        .map(agent => warm(agent.id, agent.proxy as 'claude' | 'codex')),
+        .map(agent => warm(
+          agent.id,
+          agent.proxy as 'claude' | 'codex',
+          agent.home?.path ?? null,
+        )),
     );
   }
 
-  const handlers = makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db: ctx.db, remoteController });
+  const handlers = makeWsHandlers({
+    sessions,
+    tasks,
+    broadcaster,
+    approvals,
+    term,
+    db: ctx.db,
+    remoteController,
+    inbox,
+  });
 
   // The MCP capability token is its own local credential boundary. Register
   // this endpoint before Desktop/Web auth middleware so Provider runtimes do
@@ -491,6 +512,7 @@ export function createApp(ctx: AppContext): AppHandle {
   );
   registerSessionRoutes(app, ctx.db, sessions);
   registerScheduleRoutes(app, { service: scheduleService, ledger: scheduleLedger });
+  registerInboxRoutes(app, inbox);
   registerNativeSessionRoutes(app, {
     db: ctx.db,
     sessions,
@@ -603,7 +625,9 @@ export function createApp(ctx: AppContext): AppHandle {
     remote,
     scheduleService,
     scheduleOrchestrator,
+    inbox,
     shutdown: async () => {
+      sessions.setSessionInbox(null);
       await translations.shutdown();
       await scheduleOrchestrator.stop();
       sessionHostServices?.revokeAll();
@@ -613,7 +637,14 @@ export function createApp(ctx: AppContext): AppHandle {
       watcher.stopAll();
       await term.closeAll();
       await runtimeGuardian?.stop();
-      await proxy.closeAll();
+      try {
+        await proxy.closeAll();
+      } catch (error) {
+        console.error(
+          '[proxy] shutdown closeAll failed:',
+          error instanceof Error ? error.message : error,
+        );
+      }
     },
   };
 }

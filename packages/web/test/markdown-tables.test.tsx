@@ -5,6 +5,7 @@
 // the render-level tests prove a real <table> comes out.
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { render } from '@testing-library/react';
 import { LocaleProvider } from '../src/i18n/index.js';
 import { normalizeGfmTables } from '../src/markdown-tables.js';
@@ -97,5 +98,26 @@ describe('MarkdownText table repair (render level)', () => {
     const { container } = renderMd('| a | b | c |\n| --- | --- |\n| 1 | 2 | 3 |');
     expect(container.querySelector('table')).toBeTruthy();
     expect(container.querySelectorAll('th').length).toBe(3);
+  });
+});
+
+// Regression (2026-10-08): the chat font-size setting scales transcript text
+// through --zone-scale, but markdown tables hardcoded `font-size: 12px` and
+// never responded. Table rules must ride the zone scale like the --fz-* tokens.
+describe('markdown table typography', () => {
+  const css = readFileSync('../chat-ui/styles/chat-ui.css', 'utf8');
+
+  it('transcript and translation tables scale with the chat font-size setting', () => {
+    const rule = css.match(/\.msg-text\.md table,\s*\.translation-bubble\.md table\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toContain('var(--zone-scale');
+    expect(rule![1]).not.toMatch(/font-size:\s*[\d.]+px/);
+  });
+
+  it('plan-approval tables scale with the chat font-size setting', () => {
+    const rule = css.match(/\.approval-plan-md table\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toContain('var(--zone-scale');
+    expect(rule![1]).not.toMatch(/font-size:\s*[\d.]+px/);
   });
 });

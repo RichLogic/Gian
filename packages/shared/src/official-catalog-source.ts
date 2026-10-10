@@ -18,6 +18,7 @@ export const OFFICIAL_RUNTIME_ASSET_PREFIXES = [
   'https://github.com/MoonshotAI/kimi-cli/releases/download/',
   'https://github.com/RichLogic/Gian-Proxies/releases/download/',
   'https://github.com/RichLogic/Gian/releases/download/',
+  'https://x.ai/cli/',
 ] as const;
 export const OFFICIAL_CATALOG_KEY_ID = 'gian-official-catalog-2026-09' as const;
 

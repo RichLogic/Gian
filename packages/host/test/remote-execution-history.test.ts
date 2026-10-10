@@ -5,7 +5,7 @@ import type { EventEnvelope } from '@gian/shared';
 import { RemoteExecutionBindings } from '../src/remote/execution-bindings.js';
 import { RemoteExecutionJournal, RemoteExecutionReplicas } from '../src/remote/execution-journal.js';
 import { remoteHistoryEvent } from '../src/remote/controller-hub.js';
-import { remoteInteractionId, remoteStableUuid } from '../src/remote/projection.js';
+import { remoteInteractionResourceId, remoteStableUuid } from '../src/remote/projection.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 
 test('exported executions belong to Repos, not remote Tasks, and another same-account device can resume history', async () => {
@@ -62,7 +62,11 @@ test('replicas persist contiguous history, real interaction resolution, and reje
     const remote = await f.sessions.createSession({ workspace_id: f.workspaceId, agent_id: 'agent-claude-review' });
     f.runtime.executions.register(remote.id, device);
     const approvalId = 'interaction_b229_history';
-    const wireId = remoteInteractionId(approvalId);
+    const wireId = remoteInteractionResourceId(remote.id, 'provider-turn-history', approvalId);
+    // History projection resolves a card's turn through the turns table; the
+    // row makes the recorded host turn id authoritative here as in production.
+    f.db.prepare('INSERT INTO turns (id, session_id, turn_number) VALUES (?, ?, ?)')
+      .run('provider-turn-history', remote.id, 1);
     const asking = f.approvals.request({ sessionId: remote.id, turnId: 'provider-turn-history', turnNumber: 1,
       category: 'command', description: 'Write result.txt', risk: 'high', payload: { approvalId } });
     void asking.catch(() => undefined);

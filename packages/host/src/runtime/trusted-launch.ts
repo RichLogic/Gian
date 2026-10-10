@@ -255,6 +255,26 @@ export async function loadDevelopmentTrustedLaunch(
   });
 }
 
+export async function readDevelopmentProxyLogo(
+  launch: TrustedLaunch,
+  variant: 'light' | 'dark',
+): Promise<{ bytes: Buffer; mediaType: 'image/png' | 'image/webp'; sha256: string } | null> {
+  if (launch.source !== 'official-development') return null;
+  const directory = await packageDirectoryFromEntry(launch.entryPath);
+  const manifest = manifestSchema.parse(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')));
+  if (manifest.schemaVersion === 2) return null;
+  const asset = manifest.branding.logo[variant] ?? manifest.branding.logo.light;
+  await assertContainedHashedAsset({
+    directory,
+    relativePath: asset.path,
+    sha256: asset.sha256,
+    maxBytes: MAX_STATIC_LOGO_BYTES,
+    mediaType: asset.mediaType,
+  });
+  const path = await assertContainedRegularFile(directory, asset.path);
+  return { bytes: await readFile(path), mediaType: asset.mediaType, sha256: asset.sha256 };
+}
+
 export async function packageDirectoryFromEntry(entryPath: string): Promise<string> {
   let dir = dirname(entryPath);
   for (let i = 0; i < 8; i += 1) {

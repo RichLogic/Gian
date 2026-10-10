@@ -18,7 +18,7 @@ Proxy 按 Session 启动 Runtime，并强制 workspace sandbox。不同 Agent �
 
 ## 4. 安装与依赖
 
-从 Agent Integrations 安装。Gian 根据 signed Catalog 下载 Proxy 0.3.6 和官方 Grok CLI 1.0.41，校验 URL、大小、SHA-256、版本、Manifest 和安装收据后才激活。
+从 Agent Integrations 安装。Gian 根据 signed Catalog 下载 Proxy 0.3.7 和官方 Grok CLI 1.0.41，校验 URL、大小、SHA-256、版本、Manifest 和安装收据后才激活。
 
 ## 5. 第一次使用
 

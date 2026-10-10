@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ClientToServerMessage, StateSyncMessage } from '@gian/shared';
+import type { ClientToServerMessage, InboxSyncSnapshot, StateSyncMessage } from '@gian/shared';
 import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
@@ -33,6 +33,7 @@ export interface WsHandlerDeps {
   approvals?: ApprovalManager;
   term?: WorkbenchTerminalManager;
   db?: Db;
+  inbox?: { syncSnapshot(): InboxSyncSnapshot };
 }
 
 interface ClientState {
@@ -41,7 +42,7 @@ interface ClientState {
   mode: 'full' | 'attention';
 }
 
-export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db, remoteController }: WsHandlerDeps) {
+export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, db, remoteController, inbox }: WsHandlerDeps) {
   const states = new WeakMap<WSContext, ClientState>();
 
   async function sendStateSync(ws: WSContext): Promise<void> {
@@ -79,6 +80,7 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
         ...(r.nativeOptions ? { native_options: r.nativeOptions } : {}),
       })),
       config,
+      ...(inbox ? { inbox: inbox.syncSnapshot() } : {}),
     };
     broadcaster.send(ws, sync);
   }

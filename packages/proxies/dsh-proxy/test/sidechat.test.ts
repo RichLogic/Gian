@@ -76,8 +76,8 @@ function fakeBridge(options: {
             runtime: {
               id: 'deepseek-harness',
               package: '@deepseek-ai/dsh',
-              version: '0.1.5-rc.3',
-              sessionFormatVersion: 3,
+              version: '0.2.0-rc.2',
+              sessionFormatVersion: 4,
             },
             capabilities: options.capabilities ?? FORK_CAPS,
           };
@@ -134,7 +134,7 @@ function fakeBridge(options: {
           };
         }
         case 'session.events.read':
-          return { sessionId: params.sessionId, formatVersion: 3, events: [], cursor: null };
+          return { sessionId: params.sessionId, formatVersion: 4, events: [], cursor: null };
         case 'turn.start': {
           const state = sessions.get(String(params.sessionId));
           assert.ok(state);

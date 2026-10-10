@@ -964,13 +964,18 @@ export class GianToolService {
     }
     this.assertInteractionRevision(params.session_id, params.interaction_id, params.expected_interaction_revision);
     this.deps.sessions.getSession(params.session_id);
+    const record = this.deps.approvals.getPending(params.interaction_id, params.session_id);
     const persisted = this.deps.db.prepare(
-      'SELECT 1 FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
-    ).get(params.session_id, params.interaction_id);
-    if (persisted && !request.recovered) {
+      'SELECT turn_id FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(params.session_id, params.interaction_id) as { turn_id: string | null } | undefined;
+    // The stored response is scoped to its Host turn occurrence. A pending
+    // record on a new turn with the same provider id is a new occurrence, not
+    // an already-resolved interaction.
+    const persistedCurrent = persisted !== undefined
+      && (record === undefined || persisted.turn_id === record.turnId);
+    if (persistedCurrent && !request.recovered) {
       fail('INTERACTION_ALREADY_RESOLVED', `interaction already has a response: ${params.interaction_id}`);
     }
-    const record = this.deps.approvals.getPending(params.interaction_id);
     if (!record && persisted && request.recovered) {
       // The Host may have stopped after persisting the response identity but
       // before recording the Tool result. Re-submit the same response id;
@@ -1187,8 +1192,9 @@ export class GianToolService {
     const path = session.agent_id && this.deps.agents
       ? this.deps.agents.agentRuntimePath(session.agent_id).cliPath
       : undefined;
-    const catalog = this.deps.sessions.getCapabilities(session.executor, path)
-      ?? await this.deps.sessions.warmCapabilities(session.executor, path);
+    const configHome = session.runtime_profile?.configHome ?? null;
+    const catalog = this.deps.sessions.getCapabilities(session.executor, path, configHome)
+      ?? await this.deps.sessions.warmCapabilities(session.executor, path, configHome);
     const byId = new Map(catalog.configOptions.map(option => [option.id, option]));
     for (const option of session.turn_config_options ?? []) byId.set(option.id, option);
     return [...byId.values()];

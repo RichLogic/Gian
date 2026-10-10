@@ -8,7 +8,7 @@ import {
 import type { EventEnvelope } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import type { SessionManager } from '../session/manager.js';
-import { RemoteProjector, projectRemoteInteraction, remoteInteractionId, remoteStableUuid } from './projection.js';
+import { RemoteProjector, projectRemoteInteraction, remoteInteractionResourceId, remoteStableUuid } from './projection.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import { RemoteExecutionBindings, type RemoteExecutionBinding } from './execution-bindings.js';
 
@@ -112,9 +112,12 @@ export class RemoteExecutionJournal {
       const resolution = event.display?.type === 'interaction.resolved' ? event.display.data : null;
       const requested = event.display?.type === 'interaction.approval' || event.display?.type === 'interaction.question'
         ? event.display.data : null;
+      // History cards carry the same turn-bound resource id the live card had,
+      // so a resolution entry references the exact occurrence it closed.
+      const turnId = this.hostTurnId(event.session_id, event.turn);
       const interaction = requested ? projectRemoteInteraction({
         id: requested.approvalId, sessionId: event.session_id,
-        turnId: remoteStableUuid('remote-turn', `${event.session_id}:${event.turn}`), turnNumber: event.turn,
+        turnId, turnNumber: event.turn,
         status: 'pending', createdAt: event.ts, category: requested.category, risk: requested.risk,
         description: requested.description, subject: requested.subject, nativeOptions: requested.nativeOptions,
         payload: { ...requested },
@@ -122,7 +125,8 @@ export class RemoteExecutionJournal {
       if (!item && !resolution && !interaction) throw new RemoteProtocolError('INVALID_FRAME', 'execution event cannot be projected');
       const entry = parseClosed(executionHistoryEntrySchema, interaction
         ? { sequence: row.sequence, interaction, turn: event.turn } : resolution
-        ? { sequence: row.sequence, resolution: { interaction_id: remoteInteractionId(resolution.approvalId),
+        ? { sequence: row.sequence, resolution: {
+          interaction_id: remoteInteractionResourceId(event.session_id, turnId, resolution.approvalId),
           decision: resolution.decision, auto: resolution.auto, turn: event.turn, ts: event.ts,
           ...(resolution.answers ? { answers: resolution.answers } : {}) } }
         : { sequence: row.sequence, item });
@@ -147,6 +151,14 @@ export class RemoteExecutionJournal {
   private account(device: RemoteDeviceRecord): string {
     if (!device.accountId || device.revokedAt) throw new RemoteProtocolError('AUTH_REQUIRED', 'verified account required');
     return device.accountId;
+  }
+
+  /** Authoritative Host turn id for an event; legacy rows keep the synthetic id. */
+  private hostTurnId(sessionId: string, turnNumber: number): string {
+    const row = this.db.prepare(
+      'SELECT id FROM turns WHERE session_id = ? AND turn_number = ?',
+    ).get(sessionId, turnNumber) as { id: string } | undefined;
+    return row?.id ?? remoteStableUuid('remote-turn', `${sessionId}:${turnNumber}`);
   }
 }
 

@@ -50,6 +50,141 @@ async function waitFor(harness: Harness, method: string, timeoutMs = 10_000): Pr
   return harness.waitNotificationFor((line) => line.method === method, timeoutMs);
 }
 
+function assertStreamSequence(harness: Harness, streamId: string): void {
+  const sequences = harness.notifications
+    .map((line) => line.payload.params as { streamId: string; sequence: number })
+    .filter((params) => params.streamId === streamId)
+    .map((params) => params.sequence);
+  assert.ok(sequences.length > 0, 'the stream delivered notifications');
+  assert.deepEqual(sequences, Array.from({ length: sequences.length }, (_, index) => index + 1));
+}
+
+test('rebind and close/re-adopt reset only the new stream sequence before the next turn', async () => {
+  const harness = startHarness({
+    models: [{ model: 'kimi', display_name: 'Kimi', max_context_size: 256000, support_efforts: ['high'], default_effort: 'high' }],
+    default_model: 'kimi',
+    sessions: [{ info: { id: 'session_peer' } }],
+    turn: SHORT_TURN,
+    turns: {
+      session_peer: {
+        delayBefore: 20,
+        events: [
+          { type: 'turn.started' },
+          { type: 'assistant.delta', payload: { delta: 'peer before' } },
+        ],
+      },
+    },
+  }, { validateProtocol: true });
+  try {
+    await initialize(harness);
+    const catalog = await harness.request('catalog.list', {});
+    assert.equal(catalog.kind, 'result', JSON.stringify(catalog.payload));
+    const original = await createSession(harness, 's_rebind');
+    const snapshot = await harness.request('session.get', { sessionId: 's_rebind' });
+    const nativeId = (snapshot.payload as { result: { session: { nativeSession: { id: string } } } }).result.session.nativeSession.id;
+    const start = async (sessionId: string, streamId: string, turnId: string) => {
+      const response = await harness.request('turn.start', {
+        sessionId, streamId, turnId, input: [{ type: 'text', text: turnId }],
+        config: { model: 'kimi', thinking: 'high', approval_mode: 'manual' },
+      });
+      assert.equal(response.kind, 'result', JSON.stringify(response.payload));
+    };
+    const terminal = (turnId: string) => harness.waitNotificationFor((line) =>
+      line.method === 'turn.completed' && (line.payload.params as { turnId?: string }).turnId === turnId);
+    const attach = async (sessionId: string, nativeSessionId: string) => {
+      const response = await harness.request('session.create', {
+        sessionId, workspace: { cwd: harness.workspace, roots: [harness.workspace] }, config: {},
+        nativeSession: { id: nativeSessionId, history: 'none' },
+      });
+      assert.equal(response.kind, 'result', JSON.stringify(response.payload));
+      return (response.payload as { result: { session: { streamId: string } } }).result.session.streamId;
+    };
+
+    await start('s_rebind', original, 't_original');
+    await terminal('t_original');
+    const peer = await attach('s_peer', 'session_peer');
+    await start('s_peer', peer, 't_peer');
+    await harness.waitNotificationFor((line) => line.method === 'content.delta'
+      && (line.payload.params as { sessionId: string }).sessionId === 's_peer');
+
+    const rebound = await attach('s_rebind', nativeId);
+    assert.notEqual(rebound, original);
+    await start('s_rebind', rebound, 't_rebound');
+    await terminal('t_rebound');
+    const interrupted = await harness.request('turn.interrupt', { sessionId: 's_peer', streamId: peer, turnId: 't_peer' });
+    assert.equal(interrupted.kind, 'result', JSON.stringify(interrupted.payload));
+    await terminal('t_peer');
+    assertStreamSequence(harness, original);
+    assertStreamSequence(harness, rebound);
+    assertStreamSequence(harness, peer);
+
+    const closed = await harness.request('session.close', { sessionId: 's_rebind', streamId: rebound });
+    assert.equal(closed.kind, 'result', JSON.stringify(closed.payload));
+    const adopted = await attach('s_rebind', nativeId);
+    assert.notEqual(adopted, rebound);
+    await start('s_rebind', adopted, 't_adopted');
+    await terminal('t_adopted');
+    assertStreamSequence(harness, adopted);
+    assert.deepEqual(harness.protocolErrors, [], 'the real Host validator accepts every request, response and event');
+  } finally {
+    await harness.close();
+  }
+});
+
+test('a disconnect during a turn replays missed events without failing or cancelling the native prompt', async () => {
+  const harness = startHarness({
+    models: [{ model: 'kimi', display_name: 'Kimi', max_context_size: 256000, support_efforts: ['high'], default_effort: 'high' }],
+    default_model: 'kimi',
+    turn: {
+      delayBefore: 20,
+      events: [
+        { type: 'turn.started' },
+        { type: 'assistant.delta', payload: { delta: 'before ' } },
+        { op: 'wait', ms: 40 },
+        { op: 'disconnect' },
+        { op: 'wait', ms: 20 },
+        { type: 'assistant.delta', payload: { delta: 'during ' } },
+        { op: 'wait', ms: 20 },
+        { type: 'assistant.delta', payload: { delta: 'after' } },
+        { type: 'turn.ended', payload: { reason: 'completed' } },
+        { type: 'prompt.completed', payload: { reason: 'completed' } },
+      ],
+    },
+  }, { validateProtocol: true });
+  try {
+    await initialize(harness);
+    const catalog = await harness.request('catalog.list', {});
+    assert.equal(catalog.kind, 'result', JSON.stringify(catalog.payload));
+    const streamId = await createSession(harness, 's_reconnect');
+    const started = await harness.request('turn.start', {
+      sessionId: 's_reconnect', streamId, turnId: 't_reconnect',
+      input: [{ type: 'text', text: 'continue through event-channel loss' }],
+      config: { model: 'kimi', thinking: 'high', approval_mode: 'manual' },
+    });
+    assert.equal(started.kind, 'result', JSON.stringify(started.payload));
+    const terminal = await harness.waitNotificationFor((line) =>
+      line.method === 'turn.completed' || line.method === 'turn.failed');
+    assert.equal(terminal.method, 'turn.completed', 'a recoverable disconnect does not terminate the turn');
+    const deltas = harness.notifications.filter((line) => line.method === 'content.delta')
+      .map((line) => (line.payload.params as { data: { delta: string } }).data.delta);
+    assert.deepEqual(deltas, ['before ', 'during ', 'after'], 'missed content is replayed exactly once');
+    assert.equal(harness.notifications.some((line) => line.method === 'runtime.error'), false);
+    const log = harness.fakeLog();
+    assert.ok(log.some((entry) => entry.kind === 'ws-disconnect'));
+    const resumed = log.filter((entry) => entry.kind === 'ws-in' && entry.type === 'subscribe')
+      .map((entry) => entry.payload as { cursors?: Record<string, { seq: number; epoch?: string }> })
+      .find((payload) => Object.values(payload.cursors ?? {}).some((cursor) => cursor.seq === 2 && cursor.epoch !== undefined));
+    assert.ok(resumed, 'reconnect resumes from the last delivered durable frame, with its epoch');
+    assert.equal(log.some((entry) => String(entry.path).endsWith(':abort')), false);
+    assert.equal(log.filter((entry) => entry.method === 'POST' && entry.path === '/api/v1/sessions').length, 1);
+    assert.equal(new Set(log.map((entry) => entry.pid)).size, 1, 'the server process was never restarted');
+    assertStreamSequence(harness, streamId);
+    assert.deepEqual(harness.protocolErrors, []);
+  } finally {
+    await harness.close();
+  }
+});
+
 test('initialize declares the server-api capability set', async () => {
   const harness = startHarness({ models: [{ model: 'kimi', display_name: 'Kimi', max_context_size: 256000, support_efforts: ['low', 'high'], default_effort: 'high' }] });
   try {
@@ -420,7 +555,8 @@ test('turn lifecycle: prompt payload, event projection, single terminal, barrier
     const beforeActions = ((before.payload as { result: { session: { availableActions: Record<string, { enabled: boolean }> } } }).result.session.availableActions);
     assert.equal(beforeActions['session.fork']?.enabled, false, 'fork stays off before a completed turn');
     assert.equal(beforeActions['sidechat.create']?.enabled, false, 'side chat stays off before a completed turn');
-    assert.equal(beforeActions['session.fork.atTurn'], undefined, 'unsupported actions are omitted');
+    assert.equal(Object.hasOwn(beforeActions, 'session.fork.atTurn'), false,
+      'runtime actions omit unsupported catalog capabilities');
 
     const accepted = await harness.request('turn.start', {
       sessionId: 's_1', streamId, turnId: 't_1',
@@ -478,7 +614,8 @@ test('turn lifecycle: prompt payload, event projection, single terminal, barrier
     assert.equal(sessionUpdates[1]?.state, 'idle');
     assert.equal(sessionUpdates[1]?.availableActions['session.fork']?.enabled, true);
     assert.equal(sessionUpdates[1]?.availableActions['sidechat.create']?.enabled, true);
-    assert.equal(sessionUpdates[1]?.availableActions['session.fork.atTurn'], undefined, 'unsupported actions are omitted');
+    assert.equal(Object.hasOwn(sessionUpdates[1]!.availableActions, 'session.fork.atTurn'), false,
+      'live runtime gates never advertise unsupported fork boundaries');
 
     // usage from agent.status.updated usage.total
     const usage = notifications.find((line) => line.method === 'usage.updated');
@@ -1650,8 +1787,16 @@ test('Side Chat send refuses a rejected reconnect subscription before submitting
     });
     assert.equal(created.kind, 'result', JSON.stringify(created.payload));
     const child = (created.payload as { result: { sidechat: { streamId: string } } }).result.sidechat;
-    await harness.waitNotificationFor((line) => line.method === 'runtime.error'
-      && (line.payload.params as { sessionId: string }).sessionId === 'sc_rejected');
+    // A socket loss is recoverable and stays silent (no runtime.error); the
+    // reconnect's re-subscriptions are rejected, and the send-time
+    // subscription barrier is what refuses the prompt.
+    {
+      const deadline = Date.now() + 10_000;
+      while (!harness.fakeLog().some((entry) => entry.kind === 'ws-disconnected')) {
+        if (Date.now() > deadline) throw new Error('timed out waiting for the scripted socket disconnect');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
     const params = {
       sessionId: 'sc_rejected', streamId: child.streamId, turnId: 't_rejected',
       input: [{ type: 'text', text: 'must not run without events' }], config: {},
@@ -1673,7 +1818,7 @@ test('server exit marks sessions stale with a retryable runtime error; rebind re
   const harness = startHarness({
     behavior: { selfDestructMs: 1500 },
     turn: {
-      delayBefore: 800,
+      delayBefore: 2000,
       events: [{ type: 'turn.ended', payload: { turnId: 1, reason: 'completed' } }],
     },
   });
@@ -1683,11 +1828,20 @@ test('server exit marks sessions stale with a retryable runtime error; rebind re
     const snapshot = await harness.request('session.get', { sessionId: 's_exit' });
     const nativeId = (((snapshot.payload as { result: { session: Record<string, unknown> } }).result.session).nativeSession as { id: string }).id;
 
+    const started = await harness.request('turn.start', {
+      sessionId: 's_exit', streamId, turnId: 't_exit',
+      input: [{ type: 'text', text: 'wait for the actual server exit' }], config: {},
+    });
+    assert.equal(started.kind, 'result', JSON.stringify(started.payload));
+
     // The fake self-destructs; the proxy must notice and report.
     const runtimeError = await harness.waitNotificationFor((line) => line.method === 'runtime.error', 15_000);
     const errorData = (runtimeError.payload.params as { data: { retryable: boolean; domainCode: string } }).data;
     assert.equal(errorData.retryable, true);
     assert.equal(errorData.domainCode, 'RUNTIME_ERROR');
+    await waitFor(harness, 'turn.failed');
+    assert.equal(harness.notifications.filter((line) => line.method === 'runtime.error').length, 1,
+      'child exit plus socket close produce only one runtime-down notification');
 
     // Rebind: same native id, no second native session is created.
     const rebound = await harness.request('session.create', {

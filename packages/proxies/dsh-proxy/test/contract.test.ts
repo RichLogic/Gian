@@ -12,6 +12,7 @@ import {
   signNativeSessionHostBinding,
   type ProxyNotification,
 } from '@gian/proxy-protocol';
+import { proxyNotificationSchema } from '@gian/proxy-protocol/schemas';
 
 import { DshV2Adapter } from '../src/protocol/v2-adapter.js';
 import { DshProxyService } from '../src/core/service.js';
@@ -591,6 +592,101 @@ test('catalog.resolve rebuilds effort choices for the selected latest DSH model'
     effort: 'max',
     permission_preset: 'workspace-write',
   });
+});
+
+test('turn.start falls back a retired model to the advertised default and asks for a reselect', async () => {
+  const startedConfigs: Array<Record<string, unknown>> = [];
+  const base = fakeBridge();
+  let turnStarts = 0;
+  const bridge: FakeBridge = {
+    ...base,
+    request: async (method, params) => {
+      if (method === 'turn.start') {
+        turnStarts += 1;
+        startedConfigs.push((params.config ?? {}) as Record<string, unknown>);
+      }
+      return base.request(method, params);
+    },
+  };
+  const { adapter } = adapterWith(bridge);
+  await call(adapter, 'initialize', {
+    protocol: { name: 'gian.proxy', versions: ['2.1'] },
+    host: { name: 'Gian', version: '0.5.0' },
+  });
+  await call(adapter, 'catalog.list', {});
+  const created = await call(adapter, 'session.create', {
+    sessionId: 's_retired',
+    workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
+    config: {},
+  });
+  const streamId = (created.result as { session: { streamId: string } }).session.streamId;
+  const retiredParams = {
+    sessionId: 's_retired',
+    streamId,
+    turnId: 't_retired',
+    input: [{ type: 'text', text: 'hello' }],
+    config: { model: 'deepseek-v4-flash', effort: 'max' },
+  };
+  const started = await call(adapter, 'turn.start', retiredParams);
+  assert.equal(started.error, null);
+  assert.deepEqual(started.result, { accepted: true, turnId: 't_retired' });
+  assert.deepEqual(startedConfigs[0], { model: 'deepseek-chat', effort: 'high' });
+  const methods = started.notifications.map(notification => notification.method);
+  const startedAt = methods.indexOf('turn.started');
+  const noticeAt = started.notifications.findIndex(notification => {
+    const data = notification.params.data as { presentation?: { type?: string } } | undefined;
+    return notification.method === 'activity.updated' && data?.presentation?.type === 'notice';
+  });
+  assert.ok(startedAt >= 0 && noticeAt > startedAt, 'reselect notice follows turn.started');
+  const notice = started.notifications[noticeAt]?.params.data as {
+    presentation: { type: string; tone?: string; data: { message: string } };
+  };
+  assert.equal(notice.presentation.tone, 'warning');
+  assert.match(notice.presentation.data.message, /deepseek-v4-flash/);
+  assert.match(notice.presentation.data.message, /deepseek-chat/);
+  assert.match(notice.presentation.data.message, /Reselect a model/);
+  for (const notification of started.notifications) {
+    const parsed = proxyNotificationSchema.safeParse({
+      jsonrpc: '2.0',
+      method: notification.method,
+      params: notification.params,
+    });
+    assert.equal(parsed.success, true, parsed.success ? '' : parsed.error.message);
+  }
+  const replay = await call(adapter, 'turn.start', retiredParams);
+  assert.equal(replay.error, null);
+  assert.equal(turnStarts, 1, 'an identical retry must not start the bridge turn again');
+  assert.equal(replay.notifications.length, 0);
+
+  const currentCreated = await call(adapter, 'session.create', {
+    sessionId: 's_current',
+    workspace: { cwd: '/tmp/p', roots: ['/tmp/p'] },
+    config: {},
+  });
+  const currentStreamId = (currentCreated.result as { session: { streamId: string } }).session.streamId;
+  const current = await call(adapter, 'turn.start', {
+    sessionId: 's_current',
+    streamId: currentStreamId,
+    turnId: 't_current',
+    input: [{ type: 'text', text: 'again' }],
+    config: { model: 'deepseek-reasoner', effort: 'max' },
+  });
+  assert.equal(current.error, null);
+  assert.deepEqual(startedConfigs[1], { model: 'deepseek-reasoner', effort: 'max' });
+  assert.equal(current.notifications.some(notification => {
+    const data = notification.params.data as { presentation?: { type?: string } } | undefined;
+    return notification.method === 'activity.updated' && data?.presentation?.type === 'notice';
+  }), false);
+
+  const unknownProvider = await call(adapter, 'turn.start', {
+    sessionId: 's_current',
+    streamId: currentStreamId,
+    turnId: 't_provider',
+    input: [{ type: 'text', text: 'nope' }],
+    config: { provider: 'not-a-provider', model: 'deepseek-chat' },
+  });
+  assert.equal(unknownProvider.error?.data?.domainCode, 'CONFIG_VALUE_INVALID');
+  assert.equal(turnStarts, 2);
 });
 
 test('catalog.list refreshes the revision after a late DSH Provider change', async () => {

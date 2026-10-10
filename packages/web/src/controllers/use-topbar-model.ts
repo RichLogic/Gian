@@ -79,7 +79,12 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
   } = input;
 
   const pathSegments = useMemo<PathSegment[]>(() => {
-    if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId)) {
+    const standaloneTaskSession = mode === 'tasks'
+      && activeSubtaskId == null
+      && activeTaskId == null
+      && activeSession != null
+      && (activeSession.task_id ?? null) == null;
+    if (mode === 'sessions' || (mode === 'tasks' && activeSubtaskId) || standaloneTaskSession) {
       if (!activeSession) return [];
       // A completed conversation (completed_at set) is read-only in the
       // breadcrumb: no session menu anchor (no caret, click copies the name)
@@ -89,7 +94,11 @@ export function useTopbarModel(input: TopbarModelInput): TopbarModel {
       // view no longer prepends the task name — the task is already the
       // selected row in the sidebar, and its menu lives on the rail row.
       const segments: PathSegment[] = [];
-      segments.push({ kind: 'environment', label: activeSession.remote_execution?.environment_name ?? t('remote.local') });
+      segments.push({
+        kind: 'environment',
+        label: activeSession.remote_execution?.environment_name ?? t('remote.local'),
+        ...(activeSession.remote_execution ? { remote: true } : {}),
+      });
       segments.push({
         kind: 'workspace',
         label: activeSession.remote_execution?.repository_name ?? activeWorkspace?.name ?? activeSession.workspace_id ?? t('coding.sidebar.section.unfiled'),

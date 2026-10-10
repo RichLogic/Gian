@@ -31,7 +31,8 @@ import { UnderbarPanelGroup } from '../components/UnderbarPanelGroup.js';
 import { useT } from '../i18n/index.js';
 import { toast } from '../feedback.js';
 import { useTranslation } from '../translation/use-translation.js';
-import { AutoTranslationChip, TranslationSendStatus, languageName } from '../translation/TranslationControls.js';
+import { AutoTranslationChip, languageName } from '../translation/TranslationControls.js';
+import { beginTranslationEcho, removeTranslationEcho } from '../operations/message.js';
 import '../translation/translation.css';
 import { ChatPanelOpenContext } from '../presentation/chat-panel.js';
 import {
@@ -76,6 +77,10 @@ export interface SessionMainProps {
     options?: {
       oneShotBypass?: boolean;
       translationId?: string;
+      /** Translated sends adopt the pre-dispatch echo this id points at. */
+      echoId?: string;
+      /** Display-only translation record for the adopted echo. */
+      translation?: import('@gian/shared').TranslationRecord;
       attachments?: Array<{ path: string; name: string; mime: string; previewUrl: string }>;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
@@ -484,19 +489,55 @@ export function SessionMain({
               sessionId={session.id}
               onShowLastTurn={onShowLastTurnChanges}
             />
-            <AutoTranslationChip controller={translation} />
+            <AutoTranslationChip
+              on={translation.state.enabled}
+              title={t('translation.auto')}
+              disabled={!translation.ready || translation.saving || !!translation.sending}
+              onClick={() => void translation.toggle(!translation.state.enabled)}
+            />
             <TranscriptNavigation items={items} />
           </UnderbarPanelGroup>
           {translation.error && <div className="translation-error" role="alert">{translation.error}</div>}
-          <TranslationSendStatus controller={translation} />
           <Composer
             session={session}
             onSend={(text, options) => {
-              if (translation.state.enabled && text.trim()) {
-                return translation.prepareSend(text, options?.composerDocument)
-                  .then(translationId => { onSend(text, { ...options, translationId }); });
+              if (!translation.state.enabled || !text.trim()) {
+                onSend(text, options);
+                return;
               }
-              onSend(text, options);
+              const prepared = translation.prepareSend(text, options?.composerDocument);
+              if (!prepared) {
+                // Settings still loading / unconfigured / another translated
+                // send in flight: keep the composer's blocking contract so it
+                // retains the draft instead of showing a half-sent bubble.
+                return Promise.reject(new Error('Translation is not ready.'));
+              }
+              // Optimistic up-screen: the bubble renders now with an inline
+              // Translating row and the composer clears immediately (the
+              // handler returns undefined); the wire dispatch still waits for
+              // the translation (the Host validates translationId against the
+              // original text). 'original' = the user skipped translation.
+              const echo = beginTranslationEcho({
+                sessionId: session.id,
+                text,
+                exec: session.executor,
+                ...(options?.attachments ? { attachments: options.attachments } : {}),
+                ...(options?.contextItems ? { contextItems: options.contextItems } : {}),
+                ...(options?.composerDocument ? { composerDocument: options.composerDocument } : {}),
+              });
+              void prepared.then(outcome => {
+                onSend(text, {
+                  ...options,
+                  translationId: outcome === 'original' ? 'original' : outcome.id,
+                  ...(echo ? { echoId: echo.id } : {}),
+                  ...(outcome !== 'original' ? { translation: outcome } : {}),
+                });
+              }).catch(() => {
+                // Abandoned before dispatch (unmount / session switch): the
+                // never-sent bubble must not linger.
+                if (echo) removeTranslationEcho(session.id, echo.id);
+              });
+              return;
             }}
             onSendSkill={onSendSkill}
             onStop={onStop}

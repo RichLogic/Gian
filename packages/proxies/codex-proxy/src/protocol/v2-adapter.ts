@@ -1643,7 +1643,7 @@ export class CodexProtocolV2Adapter {
   }
 
   private reportHistoryError(session: AttachedSession, error: unknown): void {
-    if (!this.sessions.has(session.id)) return;
+    if (this.sessions.get(session.id) !== session) return;
     console.warn(`[codex-history] session=${session.id}: ${String(error)}`);
     this.emitSessionEvent('session.updated', session, { lastError: `Native history unavailable: ${String(error)}` });
   }
@@ -2097,7 +2097,7 @@ export class CodexProtocolV2Adapter {
   private translateEvent(method: string, params: Record<string, unknown>): void {
     const session = this.sessionByServiceId.get(String(params.sessionId ?? ''));
     if (!session) {
-      if (method === 'runtime.error') {
+      if (method === 'runtime.error' && !nonEmptyString(params.sessionId)) {
         const data = record(params.data ?? params);
         this.emitEvent('runtime.error', {
           eventId: randomUUID(),

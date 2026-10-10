@@ -93,6 +93,14 @@ test('flags a mutation API import in a component but not a query import', async 
   assert.equal(imports[0].file, 'packages/web/src/components/Panel.tsx');
 });
 
+test('mutation import checks ignore erased type-only references but still flag executable imports', async t => {
+  const root = await makeFixtureRoot(t, { webFiles: {
+    'controllers/Types.ts': "import type { saveSettings } from '../api.js';\nexport type Save = typeof saveSettings;\n",
+    'controllers/Mixed.ts': "import { type saveSettings, loadSettings } from '../api.js';\nexport type Save = typeof saveSettings;\n",
+  } });
+  assert.deepEqual(runChecks(root).violations.filter(item => item.rule === 'mutation-import'), []);
+});
+
 test('flags a mutating WS type missing from WS_TYPE_POLICIES', async t => {
   const root = await makeFixtureRoot(t, { policyKeys: [] });
 
@@ -176,6 +184,9 @@ test('flags dead bridge surface calls even inside operations/**', async t => {
 });
 
 test('the current tree has no unallowlisted violations in warn mode', () => {
+  assert.deepEqual(REST_MUTATION_TO_OPERATION.uninstallIntegration, ['catalog.uninstallProxy']);
+  assert.deepEqual(REST_MUTATION_TO_OPERATION.connectRemoteEnvironment, ['remote.connectEnvironment']);
+  assert.deepEqual(REST_MUTATION_TO_OPERATION.removeRemoteEnvironment, ['remote.removeEnvironment']);
   const { violations, suppressed } = runChecks(rootDir);
   assert.deepEqual(violations, []);
   assert.ok(suppressed.length > 0, 'current migration bypasses must be allowlisted with reasons');

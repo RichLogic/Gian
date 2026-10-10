@@ -13,7 +13,8 @@ import {
   verifiedCliVersionsFromManifest,
 } from '../src/agents/manager.js';
 import { RuntimeResolver, RuntimeResolverError } from '../src/runtime/resolver.js';
-import { developmentEntries, testResolver } from './runtime-test-harness.js';
+import { developmentEntries, fakeOfficialProxy, testResolver } from './runtime-test-harness.js';
+import { provisionDevRuntimes } from '../src/runtime/dev-runtime-provision.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1643,6 +1644,63 @@ test('proxies catalog is static product metadata without Grok', async t => {
     assert.ok(entry.tagline.length > 0);
     assert.ok(entry.officialInstallUrl.length > 0);
   }
+});
+
+test('Dev source launch takes precedence over installed Proxy packages and preserves exact binding checks', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-source-first-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = await fakeOfficialProxy(root, 'codex', 'Codex CLI', '0.3.4-Dev');
+  const manager = await AgentManager.create({
+    allowCreateWithoutCatalog: true,
+    dataDir: join(root, 'data'),
+    releaseVersion: '0.6.6',
+    managedProxies: false,
+    developmentProxyEntries: { codex: entry },
+    runtimeResolver: testResolver(root),
+    homeDir: join(root, 'home'),
+    pathEnv: '',
+  });
+  manager.setPluginStore({
+    currentLaunch: async () => { throw new Error('Dev must not resolve installed packages'); },
+    inspect: async () => { throw new Error('Dev must not inspect installed packages'); },
+    resolveExactLaunch: async () => { throw new Error('Dev must not use installed exact launches'); },
+  } as never);
+  const launch = await manager.trustedLaunch('codex');
+  assert.equal(launch?.source, 'official-development');
+  assert.equal(launch?.pluginVersion, '0.3.4-Dev');
+  assert.equal(await manager.trustedLaunch('io.gian.missing'), null);
+  assert.equal(await manager.trustedLaunchVersion('codex', '0.3.3'), null);
+  assert.equal((await manager.trustedLaunchVersion('codex', '0.3.4-Dev'))?.entryPath, await realpath(entry));
+  assert.deepEqual((await manager.developmentLaunches()).map(item => item.pluginVersion), ['0.3.4-Dev']);
+  assert.equal((await manager.resolveExactTrustedLaunch({
+    pluginId: 'codex', pluginVersion: '0.3.4-Dev', expectedManifestSha256: launch!.manifestSha256,
+  })).entryPath, await realpath(entry));
+  await assert.rejects(manager.resolveExactTrustedLaunch({
+    pluginId: 'codex', pluginVersion: '0.3.4-Dev', expectedManifestSha256: 'f'.repeat(64),
+  }), /current in-tree Manifest generation/);
+});
+
+test('provisioned Dev readiness works with zero Agents and rejects modified CLI files', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-agent-dev-provisioned-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entry = await fakeOfficialProxy(root, 'codex', 'Codex CLI', '0.3.4-Dev');
+  const dataDir = join(root, 'data');
+  const manager = await AgentManager.create({ allowCreateWithoutCatalog: true, dataDir,
+    releaseVersion: '0.6.6', managedProxies: false, developmentProxyEntries: { codex: entry },
+    runtimeResolver: testResolver(root), homeDir: join(root, 'home'), pathEnv: '' });
+  assert.equal(manager.listAgents().length, 0);
+  const bytes = Buffer.from('#!/bin/sh\necho codex-cli 0.146.0\n');
+  const installed = await provisionDevRuntimes({ dataDir, homeDir: root, mode: 'isolated',
+    declarations: [{ pluginId: 'codex', runtimeId: 'codex', versions: ['0.146.0'] }],
+    coordinates: [{ pluginId: 'codex', runtimeId: 'codex', version: '0.146.0', format: 'raw',
+      entryRelativePath: 'bin/codex', asset: { url: 'https://example.invalid/codex', size: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex') } }],
+    download: async () => bytes, probe: async () => '0.146.0' });
+  manager.setProvisionedRuntimes(installed);
+  assert.equal((await manager.provisionedRuntimeStatus('codex'))?.state, 'ready');
+  assert.equal(await manager.scannedCliPath('codex'), installed[0]!.entryPath);
+  await writeFile(installed[0]!.entryPath, 'modified CLI\n');
+  assert.equal((await manager.provisionedRuntimeStatus('codex'))?.state, 'invalid');
 });
 
 test('development proxy status reports the vendored plugin package version', async t => {

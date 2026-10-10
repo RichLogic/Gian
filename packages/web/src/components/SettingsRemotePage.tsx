@@ -25,6 +25,8 @@ import { confirm } from '../feedback.js';
 import { useT } from '../i18n/index.js';
 import { remoteRequest, type RemoteEnvironment } from '../remote-environments.js';
 import { authorizeRemoteAccount } from '../auth/github-authorization.js';
+import { useOperationDispatchOptional } from '../operations/use-operations.js';
+import { dispatchRemoteEnvironment } from '../operations/remote-environments.js';
 import type {
   RemoteDeviceInfo,
   RemoteEnrollmentInfo,
@@ -706,6 +708,7 @@ function EnvironmentsBlock({ state }: {
 }) {
   const t = useT();
   const [environments, setEnvironments] = useState<RemoteEnvironment[] | null>(null);
+  const dispatch = useOperationDispatchOptional();
   const [loadFailed, setLoadFailed] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const enrolledUrl = state.enrollment.kind === 'connected' || state.enrollment.kind === 'disconnected'
@@ -728,7 +731,7 @@ function EnvironmentsBlock({ state }: {
       danger: true,
     }).then(ok => {
       if (!ok) return;
-      void remoteRequest(`/environments/${environment.id}`, undefined, 'DELETE')
+      void dispatchRemoteEnvironment(dispatch, { id: environment.id })
         .then(refresh)
         .catch(refresh);
     });
@@ -783,6 +786,7 @@ function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
 }) {
   const t = useT();
   const [serverUrl, setServerUrl] = useState(defaultServerUrl);
+  const dispatch = useOperationDispatchOptional();
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -800,9 +804,9 @@ function EnvironmentDialog({ defaultServerUrl, onClose, onPaired }: {
     try {
       await authorizeRemoteAccount(origin, 'controller', { signal: abort.signal });
       if (abort.signal.aborted) return;
-      await remoteRequest<{ environment: RemoteEnvironment }>('/environments', {
+      await dispatchRemoteEnvironment(dispatch, { connection: {
         server_url: new URL(origin).origin, code: code.trim(), name: name.trim() || origin,
-      });
+      } });
       if (!abort.signal.aborted) onPaired();
     } catch (cause) {
       if (!abort.signal.aborted && !(cause instanceof Error && cause.message === 'cancelled')) setError('failed');

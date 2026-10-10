@@ -104,7 +104,8 @@ async function qualify() {
     command('pnpm', ['--filter', '@gian/proxy-catalog-contract', 'test']);
   });
   await step('runtime-artifacts', async () => {
-    command(process.execPath, ['scripts/build-managed-runtime-candidates.mjs', '--output', 'artifacts/runtimes']);
+    command(process.execPath, ['scripts/build-managed-runtime-candidates.mjs', '--output', 'artifacts/runtimes',
+      ...shipping.flatMap(definition => ['--provider', definition.id])]);
     command(process.execPath, ['scripts/verify-managed-runtime-candidates.mjs']);
   });
   rmSync(output, { recursive: true, force: true }); mkdirSync(output, { recursive: true });

@@ -62,6 +62,7 @@ export class KimiServerRuntime {
   /** Desired subscriptions; cursors track the last durable seq we delivered. */
   private readonly subscriptions = new Map<string, SessionCursor | undefined>();
   private reconnectAttempts = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private nextRequestId = 1;
   private readonly pendingSubscriptions = new Map<string, {
     sessionId: string;
@@ -90,17 +91,26 @@ export class KimiServerRuntime {
   }
 
   async start(): Promise<void> {
+    if (this.stopped) throw new Error('Kimi server runtime is stopped.');
     if (this.restClient !== null) return;
     const supervisor = await new KimiServerSupervisor({
       kimiBin: this.options.kimiBin,
       ...(this.options.endpoint !== undefined ? { endpoint: this.options.endpoint } : {}),
     }).start();
+    if (this.stopped) {
+      await supervisor.stop();
+      throw new Error('Kimi server runtime is stopped.');
+    }
     this.supervisor = supervisor;
     this.restClient = new KimiServerRestClient(supervisor.endpoint);
     supervisor.exit.then(() => {
-      if (this.stopped) return;
+      if (this.stopped || this.supervisor !== supervisor) return;
+      const socket = this.socket;
       this.socket = null;
+      this.supervisor = null;
       this.restClient = null;
+      this.clearReconnectTimer();
+      try { socket?.close(); } catch { /* already gone */ }
       this.events.emit('down');
     });
   }
@@ -116,7 +126,8 @@ export class KimiServerRuntime {
 
   forgetSession(sessionId: string): void {
     this.subscriptions.delete(sessionId);
-    void this.sendWhenOpen({ type: 'unsubscribe', id: this.nextId(), payload: { session_ids: [sessionId] } });
+    void this.sendWhenOpen({ type: 'unsubscribe', id: this.nextId(), payload: { session_ids: [sessionId] } })
+      .catch(() => undefined);
   }
 
   /** Subscribe (or refresh cursors for) one session. Safe before the socket
@@ -156,12 +167,19 @@ export class KimiServerRuntime {
 
   private async sendWhenOpen(frame: Record<string, unknown>): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      let socket: WsSocket | null = null;
       try {
         await this.ensureConnected();
-        this.socket!.sendText(JSON.stringify(frame));
+        socket = this.socket;
+        if (socket === null) throw new Error('Kimi event socket is unavailable.');
+        socket.sendText(JSON.stringify(frame));
         return;
       } catch {
-        this.socket = null;
+        if (socket !== null && this.socket === socket) {
+          this.socket = null;
+          try { socket.close(); } catch { /* already gone */ }
+        }
+        if (this.stopped) throw new Error('Kimi server runtime is stopped.');
         if (attempt === 2) throw new Error('Kimi event socket is unavailable.');
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 200 * (attempt + 1)));
       }
@@ -169,6 +187,7 @@ export class KimiServerRuntime {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.stopped) throw new Error('Kimi server runtime is stopped.');
     if (this.socket !== null && this.socket.status === 'open') return;
     if (this.connecting !== null) return this.connecting;
     this.connecting = this.connect().finally(() => { this.connecting = null; });
@@ -177,46 +196,68 @@ export class KimiServerRuntime {
 
   private async connect(): Promise<void> {
     if (this.restClient === null) throw new Error('Kimi server runtime is not started.');
-    const endpoint = this.supervisor?.endpoint;
+    const supervisor = this.supervisor;
+    const endpoint = supervisor?.endpoint;
     if (endpoint === undefined) throw new Error('Kimi server endpoint is unknown.');
     const socket = await WsSocket.connect({
       url: `${endpoint.baseUrl.replace(/^http/, 'ws')}/api/v1/ws`,
       headers: { Authorization: `Bearer ${endpoint.token}` },
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
     });
-    socket.on('message', (raw: string) => this.handleMessage(raw));
+    if (this.stopped || this.supervisor !== supervisor) {
+      try { socket.close(); } catch { /* already gone */ }
+      throw new Error('Kimi server changed while the event socket was connecting.');
+    }
+    socket.on('message', (raw: string) => {
+      if (this.socket === socket && !this.stopped) this.handleMessage(raw);
+    });
     socket.on('close', () => {
+      if (this.socket !== socket) return;
       this.socket = null;
       for (const pending of this.pendingSubscriptions.values()) pending.reject(new Error('Kimi event socket closed before subscription was acknowledged.'));
       if (this.stopped) return;
-      this.events.emit('down');
+      // Losing the event channel is recoverable; only child exit emits down.
       this.scheduleReconnect();
     });
     this.socket = socket;
+    this.clearReconnectTimer();
     this.reconnectAttempts = 0;
     // Resubscribe everything we owe, with cursors where we have them.
     if (this.subscriptions.size > 0) {
-      socket.sendText(JSON.stringify({
-        type: 'subscribe',
-        id: this.nextId(),
-        payload: {
-          session_ids: [...this.subscriptions.keys()],
-          ...(SubscriptionCursors(this.subscriptions).size > 0
-            ? { cursors: Object.fromEntries(SubscriptionCursors(this.subscriptions)) }
-            : {}),
-        },
-      }));
+      try {
+        socket.sendText(JSON.stringify({
+          type: 'subscribe',
+          id: this.nextId(),
+          payload: {
+            session_ids: [...this.subscriptions.keys()],
+            ...(SubscriptionCursors(this.subscriptions).size > 0
+              ? { cursors: Object.fromEntries(SubscriptionCursors(this.subscriptions)) }
+              : {}),
+          },
+        }));
+      } catch (error) {
+        if (this.socket === socket) this.socket = null;
+        try { socket.close(); } catch { /* already gone */ }
+        throw error;
+      }
     }
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || this.restClient === null) return;
+    if (this.stopped || this.restClient === null || this.reconnectTimer !== null) return;
     const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** this.reconnectAttempts);
     this.reconnectAttempts += 1;
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (this.stopped || this.socket !== null) return;
       this.ensureConnected().catch(() => this.scheduleReconnect());
-    }, delay).unref();
+    }, delay);
+    this.reconnectTimer.unref();
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private handleMessage(raw: string): void {
@@ -283,9 +324,11 @@ export class KimiServerRuntime {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.clearReconnectTimer();
     for (const pending of this.pendingSubscriptions.values()) pending.reject(new Error('Kimi event runtime stopped before subscription was acknowledged.'));
-    try { this.socket?.close(); } catch { /* already gone */ }
+    const socket = this.socket;
     this.socket = null;
+    try { socket?.close(); } catch { /* already gone */ }
     await this.supervisor?.stop();
     this.supervisor = null;
     this.restClient = null;

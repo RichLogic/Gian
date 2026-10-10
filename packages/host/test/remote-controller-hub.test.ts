@@ -114,3 +114,87 @@ test('removeEnvironment closes the client and deletes the row', () => {
     assert.equal(remaining.count, 0);
   } finally { hub.close(); teardownRemoteHarness(f); }
 });
+
+test('broadcastEnvironments pushes the connectivity snapshot only when it flips', () => {
+  const f = setupRemoteHarness();
+  const sent: Array<{ type: string; environments: Array<{ id: string; connected: boolean }> }> = [];
+  const hub = new RemoteControllerHub(
+    f.db,
+    { broadcast(message: unknown) { sent.push(message as never); } } as unknown as WsBroadcaster,
+    f.identity,
+  );
+  try {
+    const environment: RemoteControllerEnvironment = {
+      id: generateCanonicalId(), name: 'Remote test', server_origin: 'https://remote.test', server_identity_fingerprint: 'a'.repeat(64),
+      host_id: generateCanonicalId(), browser_id: generateCanonicalId(), device_id: null,
+      crypto_connection_id: generateCanonicalId(), host_public_key_json: null, pairing_id: null, created_at: Date.now(),
+    };
+    f.db.prepare(`INSERT INTO remote_controller_environments
+      (id, name, server_origin, server_identity_fingerprint, host_id, browser_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(environment.id, environment.name, environment.server_origin, environment.server_identity_fingerprint,
+        environment.host_id, environment.browser_id, environment.created_at);
+
+    hub.broadcastEnvironments();
+    hub.broadcastEnvironments();
+    assert.equal(sent.length, 1, 'an unchanged snapshot is deduped');
+    assert.deepEqual(sent[0], { type: 'remote:environments', environments: [{
+      id: environment.id, name: environment.name, host_id: environment.host_id,
+      server_origin: environment.server_origin, pending: false, connected: false,
+    }] });
+
+    // Connectivity flip → exactly one new push per direction.
+    const client = hub.client(environment.id);
+    const relaySlot = client as unknown as { relay: { isOpen: boolean; close(): void } | null };
+    relaySlot.relay = { isOpen: true, close() { this.isOpen = false; } };
+    hub.broadcastEnvironments();
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]!.environments[0]!.connected, true);
+    relaySlot.relay = null;
+    hub.broadcastEnvironments();
+    assert.equal(sent.length, 3);
+    assert.equal(sent[2]!.environments[0]!.connected, false);
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});
+
+test('sync failure path broadcasts the environments snapshot (deduped on repeat)', async t => {
+  const f = setupRemoteHarness();
+  const sent: Array<{ type: string }> = [];
+  const hub = new RemoteControllerHub(
+    f.db,
+    { broadcast(message: unknown) { sent.push(message as never); } } as unknown as WsBroadcaster,
+    f.identity,
+  );
+  try {
+    const environment: RemoteControllerEnvironment = {
+      id: generateCanonicalId(), name: 'Remote test', server_origin: 'https://remote.test', server_identity_fingerprint: 'a'.repeat(64),
+      host_id: generateCanonicalId(), browser_id: generateCanonicalId(), device_id: null,
+      crypto_connection_id: generateCanonicalId(), host_public_key_json: null, pairing_id: null, created_at: Date.now(),
+    };
+    f.db.prepare(`INSERT INTO remote_controller_environments
+      (id, name, server_origin, server_identity_fingerprint, host_id, browser_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(environment.id, environment.name, environment.server_origin, environment.server_identity_fingerprint,
+        environment.host_id, environment.browser_id, environment.created_at);
+    const localId = generateCanonicalId();
+    f.db.prepare(`INSERT INTO sessions
+      (id, executor, native_session_id, remote_environment_id, remote_repository_id, remote_repository_name)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(localId, 'claude', generateCanonicalId(), environment.id, generateCanonicalId(), 'Remote test');
+    hub.bindings.bind({ local_session_id: localId, target: { server_origin: environment.server_origin,
+      server_identity_fingerprint: environment.server_identity_fingerprint, account_id: '42',
+      host_id: environment.host_id, remote_session_id: generateCanonicalId() } });
+    await f.identity.setAccountSession(environment.server_origin, { role: 'controller', serverOrigin: environment.server_origin,
+      serverFingerprint: environment.server_identity_fingerprint, installationId: generateCanonicalId(), accountId: '42',
+      accountLogin: 'owner', token: 'fixture-only', expiresAt: Date.now() + 60_000 }, 'controller');
+    t.mock.method(hub, 'client', () => ({ environment, connected: false,
+      async request() { throw new RemoteProtocolError('HOST_OFFLINE', 'remote connection lost'); },
+    }) as unknown as RemoteControllerClient);
+
+    await assert.rejects(hub.sync(localId), /remote connection lost/);
+    const pushes = sent.filter(message => message.type === 'remote:environments');
+    assert.equal(pushes.length, 1, 'the sync failure path pushes the connectivity snapshot');
+
+    await assert.rejects(hub.sync(localId), /remote connection lost/);
+    assert.equal(sent.filter(message => message.type === 'remote:environments').length, 1,
+      'a repeated failure with unchanged connectivity does not re-broadcast');
+  } finally { hub.close(); teardownRemoteHarness(f); }
+});

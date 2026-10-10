@@ -11,7 +11,7 @@ import { proxyNotificationSchema, replayEventSchemaUnion, resultSchemas } from '
 import { GrokProxyService } from '../src/core/service.js';
 import { NativeTurnIdentityStore } from '../src/protocol/replay-identity.js';
 import { GrokProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
-import type { GrokAcpClient } from '../src/runtime/grok-acp-client.js';
+import type { GrokAcpClient, GrokAcpStopOptions } from '../src/runtime/grok-acp-client.js';
 
 function v2Request(id: string, method: string, params: Record<string, unknown>): WireRequest {
   return { id, method, params };
@@ -123,6 +123,151 @@ test('catalog comes from initialize metadata and never creates a session', async
   assert.equal(catalog.sessionOptions.find(option => option.id === 'permission_mode')?.category, 'mode');
   assert.ok(!runtime.calls.includes('session/new'));
   assert.ok(runtime.calls.includes('stop'));
+});
+
+test('catalog inspection force-stops its temporary runtime and waits for cleanup', async () => {
+  let beginStop!: () => void;
+  const stopping = new Promise<void>(resolve => { beginStop = resolve; });
+  let finishStop!: () => void;
+  const cleanup = new Promise<void>(resolve => { finishStop = resolve; });
+  let stopOptions: GrokAcpStopOptions | undefined;
+  const runtime = fakeRuntime({
+    async stop(options?: GrokAcpStopOptions) {
+      stopOptions = options;
+      beginStop();
+      await cleanup;
+    },
+  });
+  const service = new GrokProxyService({ binaryPath: '/managed/grok', createRuntime: () => runtime });
+  let settled = false;
+  const pending = service.listCapabilities().then(value => { settled = true; return value; });
+  await stopping;
+  try {
+    assert.deepEqual(stopOptions, { force: true });
+    assert.equal(settled, false, 'the owned inspection child must be reaped before returning');
+    assert.deepEqual(runtime.calls, ['initialize']);
+  } finally {
+    finishStop();
+    await pending;
+  }
+});
+
+test('concurrent and repeated catalog queries share one process-local inspection', async () => {
+  let releaseInitialize!: () => void;
+  const ready = new Promise<void>(resolve => { releaseInitialize = resolve; });
+  const runtime = fakeRuntime({
+    async ensureStarted() {
+      runtime.calls.push('initialize');
+      await ready;
+      return initializeMeta();
+    },
+  });
+  let created = 0;
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => { created += 1; return runtime; },
+  });
+  const first = service.listCapabilities();
+  const second = service.listCapabilities();
+  releaseInitialize();
+  const [a, b] = await Promise.all([first, second]);
+  service.setPermissionMode('always_approve');
+  const c = await service.listCapabilities();
+  assert.deepEqual(a.models, b.models);
+  assert.deepEqual(a.models, c.models);
+  assert.equal(created, 1);
+  assert.deepEqual(runtime.calls, ['initialize', 'stop']);
+  assert.equal(c.sessionOptions.find(option => option.id === 'permission_mode')?.currentValue, 'always_approve');
+});
+
+test('failed catalog inspections clean up and remain retryable', async () => {
+  const stopOptions: Array<GrokAcpStopOptions | undefined> = [];
+  const failing = fakeRuntime({
+    async ensureStarted() { throw new Error('AUTH_REQUIRED: please login'); },
+    async stop(options?: GrokAcpStopOptions) { stopOptions.push(options); },
+  });
+  const healthy = fakeRuntime({
+    async stop(options?: GrokAcpStopOptions) { stopOptions.push(options); },
+  });
+  let created = 0;
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => ++created === 1 ? failing : healthy,
+  });
+  await assert.rejects(service.listCapabilities(), /Workbench Terminal/);
+  assert.equal((await service.listCapabilities()).models[0]?.id, 'grok-4.6');
+  assert.equal(created, 2);
+  assert.deepEqual(stopOptions, [{ force: true }, { force: true }]);
+});
+
+test('a catalog cleanup failure does not poison later inspections', async () => {
+  const failing = fakeRuntime({ async stop() { throw new Error('inspection cleanup failed'); } });
+  const healthy = fakeRuntime();
+  let created = 0;
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => ++created === 1 ? failing : healthy,
+  });
+  await assert.rejects(service.listCapabilities(), /inspection cleanup failed/);
+  assert.equal((await service.listCapabilities()).models[0]?.id, 'grok-4.6');
+  assert.equal(created, 2);
+});
+
+test('empty model metadata remains refreshable instead of becoming a sticky catalog', async () => {
+  const empty = fakeRuntime({
+    async ensureStarted() {
+      return { ...initializeMeta(), _meta: { modelState: { availableModels: [] } } };
+    },
+  });
+  const healthy = fakeRuntime();
+  let created = 0;
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => ++created === 1 ? empty : healthy,
+  });
+  assert.deepEqual((await service.listCapabilities()).models, []);
+  assert.equal((await service.listCapabilities()).models[0]?.id, 'grok-4.6');
+  assert.equal(created, 2);
+});
+
+test('catalog metadata is not shared between service instances', async () => {
+  const a = new GrokProxyService({ binaryPath: '/managed/grok', createRuntime: () => fakeRuntime() });
+  const b = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => fakeRuntime({
+      async ensureStarted() {
+        return { ...initializeMeta(), _meta: { modelState: {
+          currentModelId: 'grok-other',
+          availableModels: [{ modelId: 'grok-other', name: 'Other profile model' }],
+        } } };
+      },
+    }),
+  });
+  assert.equal((await a.listCapabilities()).models[0]?.id, 'grok-4.6');
+  assert.equal((await b.listCapabilities()).models[0]?.id, 'grok-other');
+  assert.equal((await a.listCapabilities()).models[0]?.id, 'grok-4.6');
+});
+
+test('catalog fast cleanup does not change live session shutdown', async () => {
+  const inspectionStops: Array<GrokAcpStopOptions | undefined> = [];
+  const sessionStops: Array<GrokAcpStopOptions | undefined> = [];
+  const inspection = fakeRuntime({
+    async stop(options?: GrokAcpStopOptions) { inspectionStops.push(options); },
+  });
+  const session = fakeRuntime({
+    async stop(options?: GrokAcpStopOptions) { sessionStops.push(options); },
+  });
+  let created = 0;
+  const service = new GrokProxyService({
+    binaryPath: '/managed/grok',
+    createRuntime: () => ++created === 1 ? inspection : session,
+  });
+  await service.listCapabilities();
+  const attached = await service.createSession({ cwd: '/workspace' });
+  await service.closeSession({ sessionId: attached.session.id });
+  assert.deepEqual(inspectionStops, [{ force: true }]);
+  assert.deepEqual(sessionStops, [undefined]);
+  assert.ok(session.calls.includes('session/close'));
 });
 
 test('rejects a second attached session and non-empty MCP', async () => {

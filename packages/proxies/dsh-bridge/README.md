@@ -7,12 +7,14 @@ one-shot runner, and it keeps stdout exclusively for bridge JSON-RPC.
 
 ## Runtime baseline
 
-The production baseline is `@deepseek-ai/dsh@0.1.5-rc.3` (npm dist-tag
+The production baseline is `@deepseek-ai/dsh@0.2.0-rc.2` (npm dist-tag
 `latest`, integrity
-`sha512-c0W6Xqc4ChjFcCJkbzPeIxZQdnbKqe+QAcJzWGtogg0ZzsnZRcw3vopMyZ5oZU6E2fmyqGcyDR1sBeiCH4yHcg==`,
-upstream tag `dsh-v0.1.5-rc.3`, commit
-`a4c74a91e06b00fe0b0937bde982170c526cc842`). The session format version the
-bridge reports and keys its identity with is DSH `SESSION_FORMAT_VERSION = 3`.
+`sha512-EAJ3gPNcVt/uv8X19PMm9NkVhWgT7xXNMk0UKCVm+IQ5rpSQOcsMUa0HWlnYYVybKMsccjcRB21vVVsaXQ6IdA==`,
+upstream tag `dsh-v0.2.0-rc.2`, commit
+`639ed015397290b3745d163aafe02ffee4aa3f84`). The session format version the
+bridge reports and keys its identity with is DSH `SESSION_FORMAT_VERSION = 4`.
+The bridge `peerDependencies` range is `^0.2.0-rc.2`. Handshake defaults read
+the bridge package version (`0.1.6`) instead of a second hardcoded value.
 Every native surface below was checked against the shipped `.d.ts` contracts
 of that build before the bridge advertises it; the real Cordis host probes the
 mounted services at `initialize` and reports only what is present.
@@ -70,10 +72,14 @@ mounted services at `initialize` and reports only what is present.
   selected model does not advertise is cleared instead of guessed. Catalog
   input descriptors advertise exactly the attachment/skill surfaces the
   runtime exposes.
-- **Unsupported with evidence** — `session.rename` (no title field in
-  `SessionHeader`, no rename surface) and native history deletion (no delete
-  in the `SessionPersistence` contract) remain unsupported; the bridge never
-  writes user-global config or storage directly.
+- **Unsupported with evidence** — `session.rename` (`SessionHeader` still has
+  no title; `SessionTitleService.rename` exists and is not connected in this
+  migration) and native history deletion (no delete in the
+  `SessionPersistence` contract: `create/open/flush/stat/list`) remain
+  unsupported; the bridge never writes user-global config or storage directly.
+  Durable logs are read with `snapshotEvents()`. DSH imports
+  `$DSH_HOME/settings.yaml` once and renames it `settings.yaml.imported`;
+  the Gian profile installer does not write that file.
 
 ## Test
 

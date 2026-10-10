@@ -21,6 +21,14 @@ test('version gate keeps app manifests aligned while allowing independent Proxy 
   }), []);
 });
 
+test('version gate accepts exact Dev Proxy suffixes without accepting prerelease protocol versions', () => {
+  const values = manifests();
+  values['packages/proxies/grok-proxy/package.json'] = '0.3.8-Dev';
+  assert.deepEqual(validateVersionConsistency({ manifests: values, changelog: '## [1.2.3]\n' }), []);
+  values['packages/proxy-protocol/package.json'] = '2.0.0-Dev';
+  assert.match(validateVersionConsistency({ manifests: values, changelog: '## [1.2.3]\n' }).join('\n'), /invalid independent version/);
+});
+
 test('version gate rejects manifest, changelog, and release-ref drift', () => {
   const values = manifests();
   values['packages/web/package.json'] = '1.2.2';

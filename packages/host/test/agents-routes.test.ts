@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
@@ -463,8 +463,39 @@ test('GET /api/proxies/:id/draft-defaults numbers names and exposes HOME plus re
     cliPath: null,
   });
 
-  const unknown = await app.request('/api/proxies/grok/draft-defaults');
+  const grok = await app.request('/api/proxies/grok/draft-defaults');
+  assert.equal(grok.status, 200);
+  assert.deepEqual(await grok.json(), {
+    name: 'Grok Build',
+    home: { kind: 'default', path: join(root, 'home', '.grok') },
+    cliPath: null,
+  });
+  const unknown = await app.request('/api/proxies/io.acme.unknown/draft-defaults');
   assert.equal(unknown.status, 404);
+});
+
+test('Grok default HOME creation and subsequent drafts use pluginId without a product alias', async t => {
+  const { app, root } = await makeApp(t);
+  const grok = join(root, 'bin', 'grok');
+  await executable(grok, 'grok 1.0.4');
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Grok Build', pluginId: 'grok', cliPath: grok }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  assert.equal(agent.proxy, null);
+  assert.deepEqual(agent.home, {
+    kind: 'custom', path: await realpath(join(root, 'home', '.grok')),
+  });
+  const draft = await app.request('/api/proxies/grok/draft-defaults');
+  assert.equal(draft.status, 200);
+  assert.deepEqual(await draft.json(), {
+    name: 'Grok Build 2',
+    home: { kind: 'default', path: join(root, 'home', '.grok') },
+    cliPath: grok,
+  });
 });
 
 test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t => {
@@ -756,7 +787,7 @@ test('GET agent status keeps a null proxy alias readable without gating readines
   assert.match(status.proxyName, /io\.gian\.fixture|Fixture/);
 });
 
-test('POST /api/agents accepts a custom Runtime binding (ADR-0094)', async t => {
+test('POST /api/agents accepts a custom Runtime binding (ADR-0102)', async t => {
   const { app, bins } = await makeApp(t);
   const response = await app.request('/api/agents', {
     method: 'POST',

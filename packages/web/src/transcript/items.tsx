@@ -16,6 +16,7 @@
  */
 import type { ApprovalItem, MsgItem } from '../types.js';
 import type { OnApprove } from '@gian/chat-ui';
+import type { ReactNode } from 'react';
 import {
   ApprovalCard as ChatApprovalCard,
   UserMessage as ChatUserMessage,
@@ -66,7 +67,7 @@ export {
 export type { LinkBehavior, PlanOpenPayload } from '@gian/chat-ui';
 
 /** User bubble with the web send-echo lifecycle wired in. */
-export function UserMessage({ item }: { item: MsgItem }) {
+export function UserMessage({ item, sendStatus }: { item: MsgItem; sendStatus?: ReactNode }) {
   const dispatch = useOperationDispatchOptional();
   const sendRun = useOperationRun(item.sendRunId);
   // Echo lifecycle (proposal §9): `pending` until the server emits its
@@ -79,6 +80,7 @@ export function UserMessage({ item }: { item: MsgItem }) {
     <ChatUserMessage
       item={item}
       sendUnknown={sendUnknown}
+      sendStatus={sendStatus}
       onRetrySend={item.failed && item.sendRetry && dispatch
         ? () => dispatchMessageSend(dispatch, item.sendRetry!)
         : undefined}

@@ -57,6 +57,20 @@
 See [ADR-0088](docs/adr/0088-version-branch-development-and-ci.md) and
 [App Delivery](docs/operations/app-delivery.md) for delivery and rollout details.
 
+## GianDev Proxy constraints
+
+[ADR-0094](docs/adr/0094-source-first-giandev-proxies.md) is authoritative for
+source-first Proxy selection in source previews and GianDev test artifacts,
+including Catalog independence and accurate development-version display.
+Version numbers for modified Dev Proxies follow
+[ADR-0095](docs/adr/0095-development-proxy-versions.md).
+GianDev packaging also provisions those Proxies' declared Runtime CLIs into
+`~/.gian-dev/runtimes`, following
+[ADR-0096](docs/adr/0096-provision-giandev-runtime-clis.md).
+Complete packaged inputs, offline Runtime installation and plugin-level
+readiness follow [ADR-0098](docs/adr/0098-complete-source-first-giandev-packages.md),
+which supersedes the partial-success rules in ADR-0096.
+
 ## Verification and acceptance
 
 Before executing, state exact scope, environment and approximate budget. Prefer

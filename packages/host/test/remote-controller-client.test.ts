@@ -32,7 +32,7 @@ async function until(check: () => boolean) {
   }
 }
 
-async function fixture() {
+async function fixture(onConnectionChange?: (connected: boolean) => void) {
   const server = await makeRemoteTestApp();
   const host = await enrollHost(server.fetch);
   const device = await pairDevice(server.fetch, host.accessToken, host.hostId);
@@ -51,7 +51,7 @@ async function fixture() {
     server_identity_fingerprint: fingerprint, host_id: host.hostId, browser_id: device.browserId,
     device_id: device.deviceId, crypto_connection_id: device.cryptoConnectionId,
     host_public_key_json: null, pairing_id: null, created_at: Date.now() }, identity, () => {}, fetchImpl,
-  options => { const relay = new Relay(options); relays.push(relay); return relay; });
+  options => { const relay = new Relay(options); relays.push(relay); return relay; }, onConnectionChange);
   return { client, relays, close() { client.close(); server.handle.shutdown(); } };
 }
 
@@ -98,5 +98,26 @@ test('Host online replacement also invalidates the prior handshake without requi
     await f.client.connect();
     assert.equal(f.relays.length, 2);
     assert.equal(f.client.connected, true);
+  } finally { f.close(); }
+});
+
+test('onConnectionChange reports each connectivity transition exactly once', async () => {
+  const events: boolean[] = [];
+  const f = await fixture(connected => events.push(connected));
+  try {
+    // Closing a never-connected client is not a transition.
+    f.client.close();
+    assert.deepEqual(events, []);
+
+    await f.client.connect();
+    assert.deepEqual(events, [true]);
+
+    // A connected close reports the loss…
+    f.relays[0]!.close();
+    assert.deepEqual(events, [true, false]);
+
+    // …and reconnecting reports the recovery.
+    await f.client.connect();
+    assert.deepEqual(events, [true, false, true]);
   } finally { f.close(); }
 });

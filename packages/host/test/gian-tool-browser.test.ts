@@ -45,7 +45,7 @@ test('local Browser capture approvals can be resolved only by Gian Web UI', asyn
     manager as never,
     'session-1', 'approval-1', 'allow_once', undefined, undefined, 'web',
   );
-  assert.deepEqual(resolved, [['approval-1', 'allow_once', 'web']]);
+  assert.deepEqual(resolved, [['approval-1', 'allow_once', 'web', 'session-1']]);
 });
 
 function actor(kind: 'internal_session' | 'external_controller'): GianToolActor {

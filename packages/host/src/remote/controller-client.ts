@@ -29,6 +29,11 @@ export class RemoteControllerClient {
   private connecting: Promise<void> | null = null;
   private accountPeerId: string | null = null;
   private epoch = 0;
+  /** Whether connected was reported through onConnectionChange and not yet
+   *  balanced by a disconnect report — closing a never-connected client is
+   *  not a transition. The relay's own isOpen cannot serve here: it is
+   *  already false by the time a socket-initiated close reaches us. */
+  private reportedConnected = false;
   private readonly requests = new Map<string, { method: RemoteMethod; params: string; promise: Promise<unknown> }>();
   private readonly pending = new Map<string, { method: RemoteMethod; resolve(value: unknown): void; reject(error: Error): void;
     timer: ReturnType<typeof setTimeout> }>();
@@ -40,6 +45,9 @@ export class RemoteControllerClient {
     private readonly save: (environment: RemoteControllerEnvironment) => void,
     private readonly fetchImpl: typeof fetch = globalThis.fetch,
     private readonly createRelay: (options: DeviceRelayClientOptions) => ControllerRelay = options => new DeviceRelayClient(options),
+    /** Connectivity notification: fires once per transition — after a relay
+     *  connect succeeds, and from close() when connected had been reported. */
+    private readonly onConnectionChange?: (connected: boolean) => void,
   ) {}
 
   get connected(): boolean { return this.relay?.isOpen === true; }
@@ -128,6 +136,10 @@ export class RemoteControllerClient {
     this.relay = null;
     relay?.close('closed');
     this.rejectPending();
+    if (this.reportedConnected) {
+      this.reportedConnected = false;
+      this.onConnectionChange?.(false);
+    }
   }
 
   private rejectPending(): void {
@@ -216,6 +228,10 @@ export class RemoteControllerClient {
     this.relay = relay;
     try { await relay.connect(); this.assertEpoch(epoch); }
     catch (error) { if (this.epoch === epoch) this.close(); else relay.close('superseded'); throw error; }
+    if (!this.reportedConnected) {
+      this.reportedConnected = true;
+      this.onConnectionChange?.(true);
+    }
   }
 
   private assertEpoch(epoch: number): void {

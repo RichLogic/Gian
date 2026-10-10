@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ProxyNotification, ServerToClientMessage, UserAgent, UserAgentStatus } from '@gian/shared';
+import { parseProxyPluginId } from '@gian/shared';
 import { generateUuidV7, type CommandRequest, type RemoteMethod } from '@gian/remote-protocol';
 import { ApprovalManager } from '../../src/approval/index.js';
 import type { AgentManager } from '../../src/agents/manager.js';
@@ -24,7 +25,7 @@ import { defaultRemoteDeviceGrants } from '../../src/remote/grants.js';
 export const HARNESS_AGENT: UserAgent = {
   id: 'agent-claude-review',
   name: 'Claude Review',
-  pluginId: 'claude',
+  pluginId: parseProxyPluginId('claude'),
   proxy: 'claude',
   cliPath: null,
   defaults: { model: 'sonnet', thinking: 'high', mode: 'ask' },
@@ -242,7 +243,7 @@ export function setupRemoteHarness() {
       return { bytes: HARNESS_PROXY_LOGO.bytes, mediaType: HARNESS_PROXY_LOGO.mediaType, sha256 };
     },
   });
-  return { dir, db, workspaceId, taskId, proxy, sessions, tasks, tool, access, runtime, identity, approvals, previousDataDir, clock };
+  return { dir, db, workspaceId, taskId, proxy, sessions, tasks, tool, access, runtime, identity, approvals, broadcaster, previousDataDir, clock };
 }
 
 export function teardownRemoteHarness(context: ReturnType<typeof setupRemoteHarness>): void {

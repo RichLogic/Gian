@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  executorIdForPluginId,
   productExecutorForPluginId,
   type ProxyCatalogItem,
   type UserAgentStatus,
@@ -14,12 +15,12 @@ export interface CreateAgentDialogInput {
   pluginId: string;
   name: string;
   home?: { kind: 'managed' } | { kind: 'custom'; path: string };
-  /** ADR-0094: present only for Custom integrations; the Host probes the path
+  /** ADR-0102: present only for Custom integrations; the Host probes the path
    *  before persisting the Agent. */
   runtime?: { kind: 'custom'; path: string };
 }
 
-/** Sentinel value of the Integration <select> for the Custom mode (ADR-0094):
+/** Sentinel value of the Integration <select> for the Custom mode (ADR-0102):
  *  the user supplies the Runtime and HOME; the Proxy stays an installed
  *  Integration. Never a real pluginId. */
 export const CUSTOM_INTEGRATION = '__custom__';
@@ -76,7 +77,7 @@ export function AgentDialog({
   const [defaultHome, setDefaultHome] = useState('');
   const [homeSupported, setHomeSupported] = useState(true);
   const [checkingHome, setCheckingHome] = useState(false);
-  // Custom mode (ADR-0094): the Proxy is one of the installed Integrations;
+  // Custom mode (ADR-0102): the Proxy is one of the installed Integrations;
   // Runtime/HOME are user-provided paths. Typed paths survive a Proxy switch
   // (owner design 2026-09-30) — they are re-validated on submit instead.
   const [customProxyId, setCustomProxyId] = useState(customIntegrations[0]?.pluginId ?? '');
@@ -109,7 +110,7 @@ export function AgentDialog({
     setHomeMode('managed');
     setCustomHome('');
     setDefaultHome('');
-    const executor = productExecutorForPluginId(pluginId);
+    const executor = executorIdForPluginId(pluginId);
     if (!executor) {
       setHomeSupported(true);
       setCheckingHome(false);

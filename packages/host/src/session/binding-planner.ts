@@ -56,7 +56,7 @@ export interface SessionBindingPlannerOptions {
     expectedManifestSha256: string;
   }) => Promise<TrustedLaunch>;
   runtimeResolver?: RuntimeResolver;
-  /** ADR-0094: whether the Agent owning a Runtime profile binds a custom
+  /** ADR-0102: whether the Agent owning a Runtime profile binds a custom
    *  Runtime path. Custom paths always re-probe the session's stored path on
    *  resume — they never adopt the active managed generation. `undefined`
    *  means the owning Agent was deleted; preserve its stored path. */
@@ -264,7 +264,7 @@ export class SessionBindingPlanner {
         'Unknown plugins require a Manifest v4 package.',
       );
     }
-    // ADR-0094: a custom-Runtime session re-probes its stored path and fails
+    // ADR-0102: a custom-Runtime session re-probes its stored path and fails
     // loudly; adopting the active managed generation would be a silent
     // fallback away from the user-provided Runtime.
     const selectedPath = customRuntime

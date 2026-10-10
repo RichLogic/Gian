@@ -23,7 +23,7 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -177,8 +177,11 @@ async function installRuntime(
 }
 
 test('PROXY-004: initialize opts into the experimental API required by runtimeWorkspaceRoots', () => {
+  const pkg = JSON.parse(
+    readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+  ) as { version: string };
   assert.deepEqual(buildInitializeParams(), {
-    clientInfo: { name: 'codex-proxy', version: '0.3.1' },
+    clientInfo: { name: 'codex-proxy', version: pkg.version },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,

@@ -79,7 +79,7 @@ test('remote execution receives English only; local live and reloaded history re
   try {
     await f.send('你好，请检查代码');
     const send = f.requests.find(request => request.method === 'session.send')!;
-    assert.equal(send.params.text, 'Hello in English\n\nPlease respond in en. Keep code, identifiers, file paths and quoted source material unchanged.');
+    assert.equal(send.params.text, 'Hello in English');
     assert.doesNotMatch(JSON.stringify(send.params), /你好|local-translator|luna|translation_id|sourceText/);
     assert.equal(f.calls.length, 1, 'execution machine must not start another translator');
     assert.equal(f.calls[0]?.preferences.agent_id, 'local-translator');
@@ -170,7 +170,7 @@ test('translated remote queue insertion and editing keep the original local and 
     assert.equal(f.hub.queue(f.localId)[0]?.text, '修改后的中文');
     const update = f.requests.find(request => request.method === 'queue.update')!;
     assert.doesNotMatch(JSON.stringify(update.params), /修改后的中文|luna|sourceText/);
-    assert.match(String(update.params.text), /Please respond in en/);
+    assert.equal(String(update.params.text), 'Hello in English');
     assert.equal(f.calls.length, 3);
   } finally { await f.cleanup(); }
 });

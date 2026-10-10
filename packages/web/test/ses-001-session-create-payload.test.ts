@@ -10,7 +10,9 @@
 //   of the session.create wire payload.
 
 import { describe, it, expect } from 'vitest';
+import type { ConfigOption } from '@gian/shared';
 import { buildSessionCreatePayload, type SessionCreateFormState } from '../src/views/CodingView.js';
+import { overlayExplicitCatalogChoices } from '../src/views/new-session-view.js';
 
 function formState(overrides: Partial<SessionCreateFormState> = {}): SessionCreateFormState {
   return {
@@ -134,5 +136,52 @@ describe('SES-001: minimal session payload from form state', () => {
     }));
     expect(payload.approvalMode).toBeUndefined();
     expect(payload.sessionConfig).toEqual({ mode: 'yolo' });
+  });
+
+  it.each([
+    { executor: 'grok', binding: 'turn', initial: 'default' },
+    { executor: 'grok', binding: 'session', initial: 'default' },
+    { executor: 'kimi', binding: 'turn', initial: 'manual' },
+    { executor: 'codex', binding: 'turn', initial: 'ask' },
+    { executor: 'claude', binding: 'session', initial: 'ask' },
+  ] as const)('replaces a resolved $executor $binding mode without losing Sandbox or Thinking', ({ executor, binding, initial }) => {
+    const options: ConfigOption[] = [{
+      id: 'mode_choice', displayName: 'Mode', binding, role: 'approval_mode',
+      control: 'select', required: false, defaultValue: initial,
+      choices: [{ value: initial, displayName: initial }, { value: 'auto', displayName: 'Auto' }],
+    }, {
+      id: 'sandbox_profile', displayName: 'Sandbox', binding: 'session',
+      control: 'select', required: false, defaultValue: 'workspace',
+      choices: [{ value: 'workspace', displayName: 'Workspace' }, { value: 'off', displayName: 'Off' }],
+    }, {
+      id: 'reasoning_effort', displayName: 'Thinking', binding: 'turn', role: 'effort',
+      control: 'select', required: false, defaultValue: 'high',
+      choices: [{ value: 'low', displayName: 'Low' }, { value: 'high', displayName: 'High' }],
+    }];
+    const values = { mode_choice: initial, sandbox_profile: 'off', reasoning_effort: 'low' };
+    const next = overlayExplicitCatalogChoices(options, values, {
+      mode: 'auto',
+      configuredOptions: { sandbox_profile: 'workspace' },
+    });
+    expect(next).toEqual({ ...values, mode_choice: 'auto' });
+    expect(values.mode_choice).toBe(initial);
+    const payload = buildSessionCreatePayload(formState({ executor, catalogOptions: options, catalogValues: next }));
+    expect((binding === 'turn' ? payload.turnConfig : payload.sessionConfig)?.mode_choice).toBe('auto');
+    expect(payload.sessionConfig?.sandbox_profile).toBe('off');
+    expect(payload.turnConfig?.reasoning_effort).toBe('low');
+    expect(payload.thinkingEffort).toBe('low');
+    expect(payload.approvalMode).toBe(executor === 'grok' || executor === 'kimi' ? undefined : 'auto');
+  });
+
+  it('does not replace an advertised mode with an invalid remembered chip value', () => {
+    const options: ConfigOption[] = [{
+      id: 'permission_mode', displayName: 'Mode', binding: 'turn', role: 'approval_mode',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: [{ value: 'default', displayName: 'Default' }, { value: 'auto', displayName: 'Auto' }],
+    }];
+    const values = { permission_mode: 'default' };
+    expect(overlayExplicitCatalogChoices(options, values, { mode: 'full-access' })).toEqual(values);
+    expect(overlayExplicitCatalogChoices(options, {}, { mode: 'full-access' })).toEqual({});
+    expect(overlayExplicitCatalogChoices(options, values, { mode: null })).toEqual(values);
   });
 });

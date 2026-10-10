@@ -275,6 +275,10 @@ test('unknown external and runtime:none follow the same cold-restart and invalid
     ['1.2.3'],
     join(root, 'none-probes'),
   );
+  const noneManifestPath = join(dirname(noneEntry), '../../../manifest.json');
+  const noneManifest = JSON.parse(await readFile(noneManifestPath, 'utf8'));
+  noneManifest.runtime = { kind: 'none' };
+  await writeFile(noneManifestPath, JSON.stringify(noneManifest));
   const pluginStore = {
     currentLaunch: async (pluginId: string) => {
       if (pluginId === 'io.gian.fixture') {
@@ -313,7 +317,8 @@ test('unknown external and runtime:none follow the same cold-restart and invalid
     dataDir: join(root, 'data'),
     releaseVersion: '0.1.0',
     managedProxies: false as const,
-    developmentProxyEntries: await developmentEntries(root),
+    developmentProxyEntries: { ...await developmentEntries(root),
+      'io.gian.fixture': entry, 'io.gian.none': noneEntry },
     runtimeResolver: testResolver(root),
     pluginStore: pluginStore as never,
     homeDir: join(root, 'home'),
@@ -406,7 +411,7 @@ test('createAgent bypasses are rejected without a partial agents.json row', asyn
     dataDir,
     releaseVersion: '0.1.0',
     managedProxies: false,
-    developmentProxyEntries: await developmentEntries(root),
+    developmentProxyEntries: { ...await developmentEntries(root), 'io.gian.fixture': fixtureEntry },
     runtimeResolver: testResolver(root),
     homeDir: join(root, 'home'),
     pathEnv: '',

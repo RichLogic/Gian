@@ -35,6 +35,7 @@ import {
 import type { Session, SystemConfig, Task, Workspace } from '@gian/shared';
 
 import type { OperationDispatcher } from './dispatcher.js';
+import './remote-environments.js';
 import { QUEUE_OVERLAY_FIELD } from './queue.js';
 import { applySettingsOverlays, SETTINGS_ENTITY_KEY } from './settings.js';
 import { entityFieldKey, type OperationStore } from './store.js';

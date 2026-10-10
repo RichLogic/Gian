@@ -10,10 +10,12 @@
 import { BridgeServer } from './server.js';
 import { BridgeWriter, runBridgeInput } from './jsonrpc.js';
 import { FakeDshRuntime } from './fake-host.js';
+import { BRIDGE_PACKAGE_VERSION } from './package-version.js';
 
 const runtime = new FakeDshRuntime({
-  bridgeVersion: '0.1.3',
-  dshVersion: process.env.DSH_FAKE_VERSION ?? '0.1.1-rc.2',
+  bridgeVersion: BRIDGE_PACKAGE_VERSION,
+  // Format 4 belongs to the pinned 0.2.0 runtime. 0.1.1-rc.2 never wrote it.
+  dshVersion: process.env.DSH_FAKE_VERSION ?? '0.2.0-rc.2',
   ...(process.env.GIAN_HOST_BINDING_KEY
     ? { hostBindingKey: process.env.GIAN_HOST_BINDING_KEY }
     : {}),

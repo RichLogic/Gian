@@ -29,6 +29,14 @@ const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> =
   // web client consumes it in use-app-socket (renderer fallback delivery).
   // Keep entries here only for types genuinely never consumed by the web
   // client, each with a justification.
+  {
+    type: 'inbox:changed',
+    reason: 'P5 has not mounted an Inbox consumer. The Host emits one changed row for a later client.',
+  },
+  {
+    type: 'inbox:invalidated',
+    reason: 'P5 has not mounted an Inbox consumer. Bulk reconcile emits this frame so a later client refetches.',
+  },
 ];
 
 // ---------------------------------------------------------------------------

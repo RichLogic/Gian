@@ -23,6 +23,7 @@ import { moveById, useDragReorder } from '../dnd-reorder.js';
 import type { DropPlace, RowDragProps } from '../dnd-reorder.js';
 import { relTime, statusGlyphShown, StatusIcon } from '../views/session-list-status.js';
 import { useScheduledSessionIds } from '../controllers/use-schedules.js';
+import { useRemoteEnvironmentConnected } from '../controllers/use-remote-environments.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
 function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
@@ -40,6 +41,15 @@ const ICON = {
   plus:   'M12 5v14 M5 12h14',
   // lucide "timer" — session owns at least one live Schedule (row-end badge)
   timer:  'M10 2h4 M12 14l3-3 M20 14a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
+  // lucide "globe-code" — session runs on a connected remote environment
+  globeCode: 'M15.5 10 13 7.5 15.5 5 M15.861 14A14.5 14.5 0 0 1 12 22a14.48 14.48 0 0 1 0-20 10 10 0 1 0 9.888 11.5 M19.5 5 22 7.5 19.5 10 M2 12h8.5',
+  // lucide "globe-x" — the session's remote environment is disconnected
+  globeX: 'm16 3 5 5 M2 12h20A10 10 0 1 1 12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 4-10 m21 3-5 5',
+  // lucide "globe" — neutral remote marker (hover-card repo row, breadcrumb)
+  globe: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20 M2 12h20',
+  // lucide "compass" — session was created by another Gian session through
+  // the Gian MCP child-delegation tool (circle converted to path arcs)
+  compass: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z M16.24 7.76l-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
   // pushpin — pin / unpin rows (same glyph as the task pin in PathBreadcrumb)
@@ -213,9 +223,13 @@ export function SessionsSidebar({
 
   return (
     <aside className="sidebar">
-      <div className="sb-scroll">
+      {/* Pinned chrome above the scroll area — see TasksView for why the nav
+          rows + list switch live outside `.sb-scroll` (2026-10-08). */}
+      <div className="sb-pin">
         <SidebarNavRows mode={mode} onSetMode={onSetMode} />
         <SidebarListSwitch listMode={listMode} onSetListMode={onSetListMode} />
+      </div>
+      <div className="sb-scroll">
         {/* Section labels only appear once something is pinned — with no
             pinned content the rail looks exactly like before. */}
         {sections.hasPinned && (
@@ -503,6 +517,7 @@ export function SessionHoverCard({
         <span className="shc-time">{relTime(session.updated_at)}</span>
       </div>
       <div className="shc-repo">
+        {session.remote_execution && <SvgIcon d={ICON.globe} size={12} />}
         <SvgIcon d={ICON.folder} size={12} />
         <span>{workspaceName ?? '—'}</span>
       </div>
@@ -535,6 +550,12 @@ export function SessionRow({
   // Row-end timer glyph (2026-09-15 owner): the session owns at least one
   // live (active/paused) Schedule.
   const hasSchedule = useScheduledSessionIds().has(session.id);
+  // Remote Control glyph: the session executes on a paired remote
+  // environment. `undefined` (unhydrated/unknown) reads as connected — the
+  // disconnected glyph never shows on a guess.
+  const remoteEnvironmentId = session.remote_execution?.environment_id;
+  const remoteConnected = useRemoteEnvironmentConnected(remoteEnvironmentId);
+  const remoteDisconnected = remoteEnvironmentId !== undefined && remoteConnected === false;
   // Destructive-delete rule (proposal §5): the row stays visible with a
   // pending affordance until the canonical session:deleted removes it.
   const deleting = useSessionOperationPending(session.id, 'session.delete');
@@ -554,6 +575,34 @@ export function SessionRow({
     >
       <div className="ri-body">
         <div className="ri-row1">
+          {/* Remote glyph hangs in the row's icon gutter, ahead of the timer
+              glyph: globe-code while its environment is connected, globe-x
+              once the Host reports the disconnect. */}
+          {session.remote_execution && (
+            <span
+              className={`ri-remote-badge${remoteDisconnected ? ' disconnected' : ''}`}
+              title={t(remoteDisconnected ? 'coding.session.remoteDisconnected' : 'coding.session.remoteSession')}
+              aria-label={t(remoteDisconnected ? 'coding.session.remoteDisconnected' : 'coding.session.remoteSession')}
+              data-testid={`session-remote-${session.id}`}
+            >
+              <SvgIcon d={remoteDisconnected ? ICON.globeX : ICON.globeCode} size={13} />
+            </span>
+          )}
+          {/* Delegation glyph (2026-10-08 owner): this session was created by
+              another Gian session via the Gian MCP child-delegation tool —
+              created_by_session_id is the parent session's FK, set once at
+              insert and carried on every Session payload. Same icon gutter as
+              the remote/schedule badges. */}
+          {session.created_by_session_id && (
+            <span
+              className="ri-delegate-badge"
+              title={t('coding.session.delegatedChild')}
+              aria-label={t('coding.session.delegatedChild')}
+              data-testid={`session-delegated-${session.id}`}
+            >
+              <SvgIcon d={ICON.compass} size={13} />
+            </span>
+          )}
           {/* Timer glyph hangs in the row's icon gutter (2026-09-15 owner):
               the empty column left of the shared 43px title column, aligned
               with the group-header icons — the title never moves. */}

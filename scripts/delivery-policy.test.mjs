@@ -118,6 +118,15 @@ test('Dev packaging overrides production identity, signatures and feeds without 
   assert.throws(() => devPackageConfiguration({}, 'a'.repeat(40), '/tmp/icon.icns'));
 });
 
+test('complete Dev package prepares source Proxies and CLI assets before building and issuing its receipt', () => {
+  const builder = readFileSync(new URL('./build-dev-package.mjs', import.meta.url), 'utf8');
+  const signAndBuild = builder.indexOf("run('pnpm', ['exec', 'electron-builder'");
+  assert.ok(builder.indexOf('await prepareDevProxyPackages(') < signAndBuild);
+  assert.ok(builder.indexOf('scripts/prepare-dev-runtimes.mjs') < signAndBuild);
+  assert.ok(builder.indexOf("'SHA256SUMS'") > builder.indexOf("'--assets', assets"));
+  assert.match(builder, /proxies: devInventory.proxies, runtimes: runtimeInventory.runtimes/);
+});
+
 test('ad-hoc Dev signing uses a Dev-only library-validation exception for the app and helpers', () => {
   const base = { mac: { hardenedRuntime: true, entitlements: 'resources/entitlements.mac.plist', entitlementsInherit: 'resources/entitlements.mac.inherit.plist' } };
   const config = devPackageConfiguration(base, 'a'.repeat(40), '/tmp/icon.icns', '0.6.0-beta3');

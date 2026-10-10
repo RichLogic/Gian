@@ -339,6 +339,28 @@ function isClaudeAuthError(message: string): boolean {
     .test(message);
 }
 
+export function readTurnFailure(data: Record<string, unknown>): {
+  message: string;
+  retryable: boolean;
+  details: Record<string, unknown>;
+} {
+  const error = data.error;
+  if (isRecordValue(error)) {
+    const message = typeof error.message === 'string' && error.message.trim()
+      ? error.message
+      : 'Claude turn failed.';
+    const sanitized = isRecordValue(error.details) ? jsonValue(error.details) : {};
+    const details = isRecordValue(sanitized) ? sanitized : {};
+    return { message, retryable: error.retryable === true, details };
+  }
+  const message = typeof error === 'string' && error.trim()
+    ? error
+    : typeof data.message === 'string' && data.message.trim()
+      ? data.message
+      : 'Claude turn failed.';
+  return { message, retryable: false, details: {} };
+}
+
 function jsonValue(value: unknown): unknown {
   if (value === undefined) return null;
   try {
@@ -557,6 +579,7 @@ export class ClaudeProtocolV2Adapter {
   private readonly activeTurnStateBySession = new Map<string, ActiveTurnState>();
   private readonly startedTurns = new Set<string>();
   private readonly pendingUsageByTurn = new Map<string, Record<string, unknown>>();
+  private readonly closedTurnKeys = new Set<string>();
   private readonly acceptedInterruptTurns = new Set<string>();
   private readonly interactions = new Map<string, InteractionRef>();
   private readonly interactionResponses = new Map<string, {
@@ -656,8 +679,10 @@ export class ClaudeProtocolV2Adapter {
    *  calls this only after the Response line has been written, preserving
    *  the protocol's Response-before-Notification invariant. */
   flushDeferredNotifications(): void {
-    const queued = this.deferredNotifications.splice(0);
-    for (const item of queued) this.emitEvent(item.method, item.params);
+    while (this.deferredNotifications.length > 0) {
+      const queued = this.deferredNotifications.splice(0);
+      for (const item of queued) this.emitEvent(item.method, item.params);
+    }
   }
 
   private initialize(params: Record<string, unknown>) {
@@ -1582,6 +1607,7 @@ export class ClaudeProtocolV2Adapter {
     this.resolveInteractionsForTurn(session, turnId, 'cancelled');
     this.closeOpenWork(session, turnId, 'cancelled');
     this.updateSession(session, { state: 'idle', lastError: null });
+    this.markTurnClosed(session.id, turnId);
     this.emitTurnEvent('turn.completed', session, turnId, {
       stopReason: 'interrupted',
     }, turnCompletedEventId(this.activeTurnStateBySession.get(session.id)?.sourceTurnId ?? turnId));
@@ -1752,6 +1778,7 @@ export class ClaudeProtocolV2Adapter {
     if (activeTurn) {
       this.resolveInteractionsForTurn(session, activeTurn, 'turn_ended');
       this.closeOpenWork(session, activeTurn, 'cancelled');
+      this.markTurnClosed(session.id, activeTurn);
       this.emitTurnEvent('turn.completed', session, activeTurn, {
         stopReason: 'cancelled',
       }, turnCompletedEventId(this.activeTurnStateBySession.get(session.id)?.sourceTurnId ?? activeTurn));
@@ -1770,6 +1797,7 @@ export class ClaudeProtocolV2Adapter {
     this.replayTrackers.delete(session.id);
     this.replayPager.close(session.id);
     this.terminalOrderBySession.delete(session.id);
+    this.forgetClosedTurns(session.id);
     if (rememberClosed) {
       this.closedAttaches.set(session.id, { streamId, closedAt: new Date().toISOString() });
     }
@@ -1821,6 +1849,18 @@ export class ClaudeProtocolV2Adapter {
   }
 
   private translateEvent(method: string, params: Record<string, unknown>): void {
+    if (method === 'catalog.refresh') {
+      this.catalogModelsLoaded = false;
+      this.enqueueNotification('catalog.changed', {
+        eventId: randomUUID(),
+        emittedAt: new Date().toISOString(),
+        data: {
+          reason: 'default-model',
+          ...(this.catalogRevision ? { revision: this.catalogRevision } : {}),
+        },
+      });
+      return;
+    }
     if (method === 'debug') return;
     const session = this.sessionByServiceId.get(String(params.sessionId ?? ''));
     if (!session) return;
@@ -1972,10 +2012,10 @@ export class ClaudeProtocolV2Adapter {
         if (conversation.mode === 'delta' && !turnId) return;
         if (turnId) {
           const key = this.turnKey(session.id, turnId);
+          if (this.closedTurnKeys.has(key)) return;
           if (!this.startedTurns.has(key)) this.pendingUsageByTurn.set(key, usage);
           else this.emitTurnEvent('usage.updated', session, turnId, usage);
         }
-        else this.emitSessionEvent('usage.updated', session, usage);
         return;
       }
       case 'approval.requested': {
@@ -2072,14 +2112,11 @@ export class ClaudeProtocolV2Adapter {
       case 'turn.completed':
         this.completeTurn(session, turnId, false, 'completed');
         return;
-      case 'turn.failed':
-        this.completeTurn(
-          session,
-          turnId,
-          true,
-          String(data.error ?? data.message ?? 'Claude turn failed.'),
-        );
+      case 'turn.failed': {
+        const failure = readTurnFailure(data);
+        this.completeTurn(session, turnId, true, failure.message, failure);
         return;
+      }
       case 'claude.unknown_event':
       case 'unknown_event': {
         const event = record(data.event);
@@ -2164,6 +2201,7 @@ export class ClaudeProtocolV2Adapter {
     turnId: string,
     failed: boolean,
     detail: string,
+    failure?: { retryable?: boolean; details?: Record<string, unknown> },
   ): void {
     if (this.activeTurnBySession.get(session.id) !== turnId) return;
     const sourceTurnId = this.activeTurnStateBySession.get(session.id)?.sourceTurnId ?? turnId;
@@ -2174,14 +2212,16 @@ export class ClaudeProtocolV2Adapter {
     this.terminalOrderBySession.set(session.id, terminalOrder);
     this.resolveInteractionsForTurn(session, turnId, failed ? 'runtime_ended' : 'turn_ended');
     this.closeOpenWork(session, turnId, failed ? 'failed' : 'succeeded');
+    this.markTurnClosed(session.id, turnId);
     if (failed) {
       this.updateSession(session, { state: 'error', lastError: detail });
+      const auth = isClaudeAuthError(detail);
       this.emitTurnEvent('turn.failed', session, turnId, {
         error: {
-          domainCode: isClaudeAuthError(detail) ? 'RUNTIME_AUTH_REQUIRED' : 'RUNTIME_ERROR',
+          domainCode: auth ? 'RUNTIME_AUTH_REQUIRED' : 'RUNTIME_ERROR',
           message: detail,
-          retryable: false,
-          details: {},
+          retryable: !auth && failure?.retryable === true,
+          details: failure?.details ?? {},
         },
       }, turnFailedEventId(sourceTurnId));
     } else {
@@ -2306,11 +2346,25 @@ export class ClaudeProtocolV2Adapter {
   }
 
   private enqueueNotification(method: string, params: Record<string, unknown>): void {
-    if (this.deferDepth > 0) {
+    // A notification that arrives after handle() returns, but before the CLI
+    // flushes, must stay behind the unflushed response queue. Otherwise the
+    // Host sees a later sequence before turn.started and then reports a gap.
+    if (this.deferDepth > 0 || this.deferredNotifications.length > 0) {
       this.deferredNotifications.push({ method, params });
       return;
     }
     this.emitEvent(method, params);
+  }
+
+  private markTurnClosed(sessionId: string, turnId: string): void {
+    this.closedTurnKeys.add(this.turnKey(sessionId, turnId));
+  }
+
+  private forgetClosedTurns(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of this.closedTurnKeys) {
+      if (key.startsWith(prefix)) this.closedTurnKeys.delete(key);
+    }
   }
 
   private clearTurn(sessionId: string, turnId: string): void {
@@ -2348,9 +2402,10 @@ export class ClaudeProtocolV2Adapter {
       const capabilities = await this.service.listCapabilities();
       this.rememberCatalogModels(capabilities.models);
     }
-    return this.runtimeModelByCatalogId.has(modelId)
-      ? this.runtimeModelByCatalogId.get(modelId)!
-      : modelId;
+    if (!this.runtimeModelByCatalogId.has(modelId)) {
+      throw new ClaudeProtocolError('CONFIG_VALUE_INVALID', `Unknown model "${modelId}".`);
+    }
+    return this.runtimeModelByCatalogId.get(modelId)!;
   }
 
   private updateSession(session: AttachedSession, patch: Partial<AttachedSession>): void {

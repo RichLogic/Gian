@@ -16,6 +16,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
+import { verifiedRuntimeReuse } from '../runtime/artifact-reuse.js';
 import {
   HostProtocolValidator,
   PROTOCOL_NAME,
@@ -41,6 +42,7 @@ import type {
   Executor,
   ProductExecutor,
   ProxyCatalogEntry,
+  ProxyCatalogItem,
   OpenRuntimeProfile,
   UserAgent,
   UserAgentStatus,
@@ -65,6 +67,10 @@ import { openRuntimeIdentity, RuntimeResolver, RuntimeResolverError } from '../r
 import type { PluginStore } from '../plugin-store/store.js';
 import { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
 import { ManagedRuntimeGenerationStore, ManagedRuntimeStoreError } from '../runtime/generation-store.js';
+import {
+  preferProvisionedRuntime,
+  type ProvisionedDevRuntime,
+} from '../runtime/dev-runtime-provision.js';
 import { assertSavedAbsoluteRuntimePath } from '../runtime/saved-path.js';
 import {
   launchFromPluginStore,
@@ -916,6 +922,7 @@ export class AgentManager {
   }>();
   private readonly agentStatusGenerations = new Map<string, number>();
   private readonly lastOpenRuntimeProfiles = new Map<string, OpenRuntimeProfile>();
+  private provisionedRuntimes = new Map<string, ProvisionedDevRuntime>();
   private configMutationTail: Promise<void> = Promise.resolve();
   private config: AgentConfigFile = emptyConfig();
 
@@ -1110,6 +1117,7 @@ export class AgentManager {
   }
 
   async trustedLaunch(pluginId: string): Promise<TrustedLaunch | null> {
+    if (!this.options.managedProxies) return this.developmentLaunch(pluginId);
     const installed = await this.options.pluginStore?.currentLaunch(pluginId);
     if (installed) return launchFromPluginStore(installed);
     const official = productExecutorForPluginId(pluginId) ?? (
@@ -1121,6 +1129,28 @@ export class AgentManager {
     return this.trustedOfficialLaunch(official);
   }
 
+  private async developmentLaunch(pluginId: string): Promise<TrustedLaunch | null> {
+    const official = productExecutorForPluginId(pluginId)
+      ?? (isProductExecutor(pluginId) ? pluginId : null);
+    const expectedId = official ? pluginIdForExecutorId(official) : pluginId;
+    const entry = this.options.developmentProxyEntries?.[expectedId]
+      ?? (official ? this.options.developmentProxyEntries?.[official] : undefined);
+    return entry ? loadDevelopmentTrustedLaunch(entry, expectedId) : null;
+  }
+
+  async developmentLaunches(): Promise<TrustedLaunch[]> {
+    if (this.options.managedProxies) return [];
+    const launches: TrustedLaunch[] = [];
+    const seen = new Set<string>();
+    for (const entry of Object.values(this.options.developmentProxyEntries ?? {})) {
+      const launch = await loadDevelopmentTrustedLaunch(entry);
+      if (seen.has(launch.pluginId)) continue;
+      seen.add(launch.pluginId);
+      launches.push(launch);
+    }
+    return launches;
+  }
+
   /** Resolve a version named only by pre-binding Session data. New exact
    * Sessions use resolveExactTrustedLaunch with a required Manifest digest. */
   async trustedLaunchVersion(
@@ -1128,6 +1158,10 @@ export class AgentManager {
     pluginVersion: string | null,
   ): Promise<TrustedLaunch | null> {
     if (!pluginVersion) return this.trustedLaunch(pluginId);
+    if (!this.options.managedProxies) {
+      const current = await this.developmentLaunch(pluginId);
+      return current?.pluginVersion === pluginVersion ? current : null;
+    }
     const installed = await this.options.pluginStore?.inspect(pluginId);
     const receipt = installed?.versions.find(item => (
       item.version === pluginVersion && item.state === 'valid'
@@ -1165,6 +1199,17 @@ export class AgentManager {
     pluginVersion: string;
     expectedManifestSha256: string;
   }): Promise<TrustedLaunch> {
+    if (!this.options.managedProxies) {
+      const current = await this.developmentLaunch(input.pluginId);
+      if (!current || current.pluginVersion !== input.pluginVersion
+        || current.manifestSha256 !== input.expectedManifestSha256) {
+        throw new TrustedLaunchError(
+          'DEVELOPMENT_BINDING_UNAVAILABLE',
+          'GianDev can only reattach the current in-tree Manifest generation.',
+        );
+      }
+      return current;
+    }
     const official = productExecutorForPluginId(input.pluginId) ?? (
       isProductExecutor(input.pluginId) ? input.pluginId : null
     );
@@ -1467,8 +1512,49 @@ export class AgentManager {
     return { ...this.getAgent(id).defaults };
   }
 
+  /** Verified branch-declared CLIs. Source-first Dev prefers these paths;
+   * production retains its certified-generation priority. */
+  setProvisionedRuntimes(runtimes: readonly ProvisionedDevRuntime[]): void {
+    this.provisionedRuntimes = new Map(runtimes.map(runtime => [runtime.pluginId, runtime]));
+    this.agentStatusCache.clear();
+  }
+
+  async provisionedRuntimeStatus(pluginId: string): Promise<ProxyCatalogItem['runtime'] | null> {
+    const installed = this.provisionedRuntimes.get(pluginId);
+    if (!installed) return null;
+    const launch = await this.trustedLaunch(pluginId);
+    const displayName = launch?.runtime.displayName ?? null;
+    const validVersion = launch?.runtime.kind === 'external'
+      && launch.runtime.id === installed.runtimeId
+      && launch.runtime.verifiedVersions?.includes(installed.version);
+    let validEntry = false;
+    try {
+      const info = await lstat(installed.entryPath);
+      validEntry = info.isFile() && !info.isSymbolicLink() && Boolean(info.mode & 0o111);
+      if (validEntry && installed.entryRelativePath) {
+        const root = join(this.options.dataDir, 'runtimes');
+        const directory = join(root, installed.runtimeId, installed.version, installed.artifactSha256);
+        validEntry = installed.entryPath === join(directory, installed.entryRelativePath)
+          && await verifiedRuntimeReuse(root, directory, installed.artifactSha256, installed.entryRelativePath);
+      } else {
+        validEntry = false;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    return validVersion && validEntry
+      ? { state: 'ready', displayName, path: installed.entryPath, version: installed.version }
+      : { state: 'invalid', displayName, path: installed.entryPath, version: installed.version,
+        readinessIssue: { code: 'DEV_RUNTIME_MISMATCH',
+          message: 'The provisioned Runtime is missing or does not match this source Proxy.', repairable: true } };
+  }
+
+  private provisionedRuntimePaths(): ReadonlyMap<string, string> {
+    return new Map([...this.provisionedRuntimes].map(([pluginId, runtime]) => [pluginId, runtime.entryPath]));
+  }
+
   /** Resolved runtime CLI path for one saved Agent. A custom Runtime binding
-   *  (ADR-0094) wins everywhere; otherwise production reads only the globally
+   *  (ADR-0102) wins everywhere; otherwise production reads only the globally
    *  active certified generation, and GianDev retains the legacy path seam
    *  for isolated fixtures and migration verification. */
   agentRuntimePath(id: string): {
@@ -1477,15 +1563,17 @@ export class AgentManager {
     cliPath: string | null;
   } {
     const agent = this.getAgent(id);
+    const development = !this.options.managedProxies ? this.provisionedRuntimes.get(agent.pluginId) : undefined;
+    const certified = this.options.managedProxies
+      ? this.options.generationStore?.activeCached(agent.pluginId)?.runtime?.entryPath ?? null
+      : agent.cliPath
+        ?? (agent.proxy ? this.options.environmentCliPaths?.[agent.proxy] ?? null : null);
     return {
       pluginId: agent.pluginId,
       proxy: agent.proxy,
       cliPath: agent.runtime?.kind === 'custom'
         ? agent.runtime.path
-        : this.options.managedProxies
-          ? this.options.generationStore?.activeCached(agent.pluginId)?.runtime?.entryPath ?? null
-          : agent.cliPath
-            ?? (agent.proxy ? this.options.environmentCliPaths?.[agent.proxy] ?? null : null),
+        : development?.entryPath ?? preferProvisionedRuntime(certified, agent.pluginId, this.provisionedRuntimePaths()),
     };
   }
 
@@ -1537,7 +1625,7 @@ export class AgentManager {
     if (legacy) this.invalidateStatus(legacy);
   }
 
-  defaultAgentHomePath(kind: ProductExecutor): string | null {
+  defaultAgentHomePath(kind: LegacyExecutorId): string | null {
     return this.agentHomes.defaultPath(pluginIdForExecutorId(kind));
   }
 
@@ -1593,7 +1681,9 @@ export class AgentManager {
 
   /** Draft prefill only: a saved Agent path, readiness-cache path, or
    *  environment override. Never PATH-scans or runs `--version`. */
-  async scannedCliPath(id: ProductExecutor): Promise<string | null> {
+  async scannedCliPath(id: LegacyExecutorId): Promise<string | null> {
+    const provisioned = !this.options.managedProxies ? this.provisionedRuntimes.get(pluginIdForExecutorId(id)) : undefined;
+    if (provisioned) return provisioned.entryPath;
     if (this.options.managedProxies) {
       return this.options.generationStore?.activeCached(pluginIdForExecutorId(id))?.runtime?.entryPath ?? null;
     }
@@ -1613,10 +1703,17 @@ export class AgentManager {
   /** The kind's default runtime path — its first saved Agent's resolved
    *  path, or the environment override when the kind has no Agent. */
   firstAgentPath(id: Executor): string | null {
+    const pluginId = resolvePluginIdInput(id);
+    const provisioned = !this.options.managedProxies && pluginId ? this.provisionedRuntimes.get(pluginId) : undefined;
+    if (provisioned) return provisioned.entryPath;
     if (this.options.managedProxies) {
       const pluginId = resolvePluginIdInput(id);
       return pluginId
-        ? this.options.generationStore?.activeCached(pluginId)?.runtime?.entryPath ?? null
+        ? preferProvisionedRuntime(
+          this.options.generationStore?.activeCached(pluginId)?.runtime?.entryPath ?? null,
+          pluginId,
+          this.provisionedRuntimePaths(),
+        )
         : null;
     }
     const legacy = isExecutorId(id) ? id : productExecutorForPluginId(id);
@@ -1677,7 +1774,7 @@ export class AgentManager {
 
   /** Default name for a new draft Agent of the kind: the Proxy display name,
    *  or "<name> N" when the plain name is already taken. */
-  nextAgentName(proxy: ProductExecutor): string {
+  nextAgentName(proxy: LegacyExecutorId): string {
     const base = AGENTS[proxy].name;
     const taken = new Set(this.config.agents.map(agent => agent.name.toLowerCase()));
     if (!taken.has(base.toLowerCase())) return base;
@@ -1693,7 +1790,7 @@ export class AgentManager {
     proxy?: ProductExecutor;
     cliPath?: string | null;
     home?: { kind: 'managed' } | { kind: 'custom'; path: string };
-    /** Per-Agent Runtime binding (ADR-0094). Absent/'managed' uses the
+    /** Per-Agent Runtime binding (ADR-0102). Absent/'managed' uses the
      *  certified generation; 'custom' pins a user-provided Runtime path that
      *  is probed before the Agent is persisted. */
     runtime?: { kind: 'managed' } | { kind: 'custom'; path: string } | null;
@@ -1850,7 +1947,7 @@ export class AgentManager {
       if (generic && launch?.runtime.kind === 'none') {
         await this.publishNoneRuntime(pluginId, launch, agentId);
       } else if (runtime?.kind === 'custom') {
-        // Custom Runtime (ADR-0094): probe the user-provided path before the
+        // Custom Runtime (ADR-0102): probe the user-provided path before the
         // Agent is persisted. A failed probe aborts the create — there is no
         // fallback to the managed generation.
         try {
@@ -1900,7 +1997,7 @@ export class AgentManager {
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
     enabled?: boolean;
-    /** ADR-0094 phase 1: the Runtime binding is create-only. */
+    /** ADR-0102 phase 1: the Runtime binding is create-only. */
     runtime?: unknown;
   }): Promise<UserAgent> {
     const existing = this.getAgent(id);
@@ -2032,6 +2129,12 @@ export class AgentManager {
     if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
     const pending = this.agentStatusProbes.get(id);
     if (!refresh && pending?.generation === generation) return pending.promise;
+    if (!this.options.managedProxies && this.provisionedRuntimes.has(agent.pluginId)
+      && (await this.provisionedRuntimeStatus(agent.pluginId))?.state === 'ready') {
+      const value = await this.managedGenerationAgentStatus(agent, true);
+      this.agentStatusCache.set(id, { value, expiresAt: Date.now() + STATUS_CACHE_TTL_MS });
+      return value;
+    }
     if (this.options.managedProxies) {
       const value = agent.runtime?.kind === 'custom'
         ? await this.customRuntimeAgentStatus(agent)
@@ -2118,7 +2221,7 @@ export class AgentManager {
     return probe;
   }
 
-  /** ADR-0094: a custom-Runtime Agent never reports the managed generation's
+  /** ADR-0102: a custom-Runtime Agent never reports the managed generation's
    *  certified version. Its Runtime status comes from the user-provided path
    *  plus the latest probe of exactly that path; without a successful probe
    *  the Runtime is unverified, and a missing path is an explicit error. */
@@ -2206,8 +2309,8 @@ export class AgentManager {
     };
   }
 
-  private async managedGenerationAgentStatus(agent: UserAgent): Promise<UserAgentStatus> {
-    const active = this.options.generationStore?.activeCached(agent.pluginId) ?? null;
+  private async managedGenerationAgentStatus(agent: UserAgent, sourceRuntime = false): Promise<UserAgentStatus> {
+    const active = sourceRuntime ? null : this.options.generationStore?.activeCached(agent.pluginId) ?? null;
     const trusted = await this.trustedLaunch(agent.pluginId);
     const fallbackPlugin: Omit<AgentProxyStatus, 'defaults'> = trusted
       ? {
@@ -2224,6 +2327,48 @@ export class AgentManager {
         source: null,
       };
     if (!active) {
+      const provisioned = this.provisionedRuntimes.get(agent.pluginId);
+      const runtimeReady = provisioned !== undefined && await existsReadable(provisioned.entryPath);
+      if (provisioned && runtimeReady) {
+        const proxyReady = fallbackPlugin.state === 'ready'
+          && typeof fallbackPlugin.path === 'string'
+          && await existsReadable(fallbackPlugin.path);
+        const home = agent.home ?? null;
+        const profile: OpenRuntimeProfile = {
+          id: createHash('sha256').update(JSON.stringify([
+            'giandev-provisioned',
+            provisioned.entryPath,
+            home?.path ?? null,
+          ])).digest('hex'),
+          agentId: agent.id,
+          pluginId: agent.pluginId,
+          runtimeId: provisioned.runtimeId,
+          path: provisioned.entryPath,
+          version: provisioned.version,
+          configHome: home?.path ?? null,
+          contentFingerprint: provisioned.artifactSha256,
+          verifiedVersions: [provisioned.version],
+          verification: 'verified',
+        };
+        return {
+          ...agent,
+          cliPath: null,
+          proxyName: agent.proxy ? AGENTS[agent.proxy].name : agent.pluginId,
+          ready: proxyReady,
+          cli: {
+            state: 'ready',
+            path: provisioned.entryPath,
+            version: provisioned.version,
+            verifiedVersions: [provisioned.version],
+            contentFingerprint: provisioned.artifactSha256,
+            source: 'managed',
+          },
+          plugin: { ...fallbackPlugin, defaults: copyProxyDefaults(agent.defaults) },
+          runtimeProfile: profile,
+          skill: null,
+          officialInstallUrl: agent.proxy ? AGENTS[agent.proxy].installerUrl : '',
+        };
+      }
       return {
         ...agent,
         cliPath: null,

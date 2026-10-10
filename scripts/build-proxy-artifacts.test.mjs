@@ -14,6 +14,7 @@ import {
   proxyDefinitions,
   shippingProxyIds,
 } from './build-proxy-artifacts.mjs';
+import { prepareDevProxyPackages } from './prepare-dev-package-inputs.mjs';
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,6 +22,29 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 test('the default release set follows all six self-describing shipping Proxies', () => {
   assert.deepEqual([...shippingProxyIds].sort(), ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode']);
   assert.equal(proxyDefinitions.find(item => item.id === 'grok')?.shipping, true);
+});
+
+test('Dev input packages include every source identity, referenced asset and declared companion', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'gian-dev-proxy-inputs-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await execFileAsync('pnpm', ['--filter', '@gian/dsh-bridge', 'build'], { cwd: repoRoot });
+  const inventory = await prepareDevProxyPackages(directory, 'a'.repeat(40), {
+    sourceEntry: definition => join(repoRoot, 'packages/proxies', definition.directory, 'src/cli/spawn.ts'),
+  });
+  assert.equal(inventory.proxies.length, proxyDefinitions.length);
+  for (const definition of proxyDefinitions) {
+    const pkg = JSON.parse(await readFile(join(directory, definition.directory, 'package.json'), 'utf8'));
+    const manifest = JSON.parse(await readFile(join(directory, definition.directory, 'manifest.json'), 'utf8'));
+    assert.equal(pkg.main, './proxy.mjs');
+    assert.equal(pkg.version, definition.pluginVersion);
+    assert.equal(manifest.pluginVersion, pkg.version);
+    for (const reference of [...Object.values(manifest.branding?.logo ?? {}), ...(manifest.skills ?? [])].filter(Boolean)) {
+      assert.ok((await readFile(join(directory, definition.directory, reference.path))).length > 0);
+    }
+    for (const companion of definition.bundlePackages) {
+      assert.ok((await readFile(join(directory, definition.directory, companion.path, 'package.json'))).length > 0);
+    }
+  }
 });
 
 test('a new self-describing Proxy package needs no release registry edit', async (t) => {

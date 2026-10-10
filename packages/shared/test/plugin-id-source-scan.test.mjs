@@ -106,9 +106,8 @@ const BASELINE = {
   },
   "packages/host/src/web/routes/agents.ts": {
     "\\bisProductExecutor\\b": {
-      "count": 6,
+      "count": 5,
       "snippets": [
-        "isProductExecutor",
         "isProductExecutor",
         "isProductExecutor",
         "isProductExecutor",

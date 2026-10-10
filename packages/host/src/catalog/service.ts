@@ -30,7 +30,7 @@ import type { PluginStore } from '../plugin-store/store.js';
 import type { InstalledPackageView, PluginCurrentLaunch, PluginInstallCoordinate } from '../plugin-store/types.js';
 import { PluginStoreError } from '../plugin-store/errors.js';
 import type { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
-import type { OfficialPresence } from '../runtime/trusted-launch.js';
+import { readDevelopmentProxyLogo, type OfficialPresence, type TrustedLaunch } from '../runtime/trusted-launch.js';
 import type { RuntimeKind } from '../runtime/resolver.js';
 
 export type OfficialBundledLaunch = OfficialPresence;
@@ -48,6 +48,18 @@ export class CatalogService {
     return this.localizedContent?.plugins.find(plugin => plugin.pluginId === pluginId)?.locales;
   }
 
+  private projectedLocalizations(pluginId: string, snapshot: CatalogSnapshot): ProxyCatalogItem['localizations'] {
+    const translations = this.localizedEntry(pluginId, snapshot);
+    return translations ? Object.fromEntries(
+      Object.entries(translations).map(([locale, translation]) => [locale, {
+        displayName: translation.displayName,
+        tagline: translation.tagline,
+        documentation: Object.fromEntries(CATALOG_DOCUMENT_KEYS.map(key => [key,
+          `/api/proxies/${pluginId}/docs/${key}?locale=${locale}`])) as ProxyCatalogItem['documentation'],
+      }]),
+    ) : undefined;
+  }
+
   constructor(
     private readonly options: {
       store: CatalogStore;
@@ -59,11 +71,14 @@ export class CatalogService {
       readinessCache?: RuntimeReadinessCache;
       managedRuntimeStatus?: (pluginId: string) => Promise<import('@gian/shared').ManagedRuntimeStatus>;
       officialPresence?: (pluginId: string) => Promise<OfficialBundledLaunch | null>;
+      developmentProxies?: () => Promise<readonly TrustedLaunch[]>;
+      developmentRuntime?: (pluginId: string) => Promise<ProxyCatalogItem['runtime'] | null>;
       onPluginGenerationChanged?: (pluginId: string) => void;
     },
   ) {}
 
   async list(): Promise<ProxyCatalogList> {
+    if (this.options.developmentProxies) return this.listDevelopment();
     const snapshot = this.options.store.snapshot();
     const installed = await this.options.plugins.listInstalled();
     const installedById = new Map(installed.map((item) => [item.pluginId, item]));
@@ -90,6 +105,7 @@ export class CatalogService {
   }
 
   async sync(): Promise<ProxyCatalogList> {
+    if (this.options.developmentProxies) return this.listDevelopment();
     if (!this.options.sourceClient) {
       throw new PluginStoreError('CATALOG_SYNC_UNAVAILABLE', 'Catalog source client is not configured.');
     }
@@ -98,6 +114,7 @@ export class CatalogService {
   }
 
   async install(pluginId: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
     const view = await this.captureView();
     const item = await this.requireProjectedFrom(view, pluginId);
     const replaceUntrusted = item.installation.state === 'quarantined'
@@ -120,6 +137,7 @@ export class CatalogService {
   }
 
   async update(pluginId: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
     const view = await this.captureView();
     const item = await this.requireProjectedFrom(view, pluginId);
     const installed = item.installation.installedVersion;
@@ -142,6 +160,7 @@ export class CatalogService {
   }
 
   async rollback(pluginId: string, pluginVersion?: string): Promise<PluginInstallReceipt> {
+    this.assertReleaseProxyOperations();
     const id = parseProxyPluginId(pluginId);
     const receipt = await this.options.plugins.rollback(id, pluginVersion);
     this.retirePluginGeneration(id);
@@ -248,6 +267,10 @@ export class CatalogService {
     variant: 'light' | 'dark',
   ): Promise<{ bytes: Buffer; mediaType: 'image/png' | 'image/webp'; sha256: string } | null> {
     const id = parseProxyPluginId(pluginId);
+    if (this.options.developmentProxies) {
+      const launch = (await this.options.developmentProxies()).find(item => item.pluginId === id);
+      return launch ? readDevelopmentProxyLogo(launch, variant) : null;
+    }
     const entry = this.catalogEntry(id);
     if (!entry) return null;
     const ref = entry.branding[variant];
@@ -327,6 +350,61 @@ export class CatalogService {
     return bytes;
   }
 
+  private assertReleaseProxyOperations(): void {
+    if (this.options.developmentProxies) {
+      throw new PluginStoreError('DEVELOPMENT_PROXY_SOURCE', 'GianDev uses source Proxies, not release package installation.');
+    }
+  }
+
+  private async listDevelopment(): Promise<ProxyCatalogList> {
+    const launches = await this.options.developmentProxies!();
+    const snapshot = this.options.store.snapshot();
+    const hostVersions = [...(this.options.hostVersions ?? hostProtocolVersions())];
+    const items: ProxyCatalogItem[] = [];
+    for (const launch of launches) {
+      const published = snapshot.index?.plugins.find(entry => entry.pluginId === launch.pluginId);
+      const compatibility = classifyCatalogCompatibility(launch.protocolRange, hostVersions);
+      const runtime = await this.projectRuntime(launch.pluginId, launch.runtime, launch, 'installed');
+      items.push({
+        localizations: this.projectedLocalizations(launch.pluginId, snapshot),
+        pluginId: launch.pluginId,
+        displayName: launch.displayName ?? launch.pluginId,
+        tagline: published?.tagline ?? '',
+        logo: {
+          light: `/api/proxies/${launch.pluginId}/logo/light`,
+          dark: `/api/proxies/${launch.pluginId}/logo/dark`,
+        },
+        documentation: {
+          overview: `/api/proxies/${launch.pluginId}/docs/overview`,
+          setup: `/api/proxies/${launch.pluginId}/docs/setup`,
+          usage: `/api/proxies/${launch.pluginId}/docs/usage`,
+          troubleshooting: `/api/proxies/${launch.pluginId}/docs/troubleshooting`,
+        },
+        compatibility: { state: compatibility.state, hostVersions,
+          protocolRange: launch.protocolRange, reason: compatibility.reason },
+        installation: {
+          state: 'installed',
+          installedVersion: launch.pluginVersion,
+          latestVersion: launch.pluginVersion,
+          updateAvailable: false,
+          source: 'giandev',
+        },
+        runtime,
+        availableActions: catalogProxyActions({
+          compatibility: compatibility.state,
+          installation: 'installed',
+          updateAvailable: false,
+          runtime: runtime.state,
+          runtimeRepairable: runtime.readinessIssue?.repairable,
+          canRollback: false,
+          installable: false,
+          runtimeInstallable: false,
+        }),
+      });
+    }
+    return { source: { id: 'giandev', sequence: null, state: 'ready', error: null }, items };
+  }
+
   private async project(
     entry: CompiledCatalogEntryV1,
     installed: InstalledPackageView | null,
@@ -376,15 +454,7 @@ export class CatalogService {
       currentLaunch,
       effectiveInstallation,
     );
-    const translations = this.localizedEntry(entry.pluginId, snapshot);
-    const localizations: ProxyCatalogItem['localizations'] = translations ? Object.fromEntries(
-      Object.entries(translations).map(([locale, translation]) => [locale, {
-        displayName: translation.displayName,
-        tagline: translation.tagline,
-        documentation: Object.fromEntries(CATALOG_DOCUMENT_KEYS.map(key => [key,
-          `/api/proxies/${entry.pluginId}/docs/${key}?locale=${locale}`])) as ProxyCatalogItem['documentation'],
-      }]),
-    ) : undefined;
+    const localizations = this.projectedLocalizations(entry.pluginId, snapshot);
     return {
       ...(localizations ? { localizations } : {}),
       pluginId: entry.pluginId,
@@ -501,7 +571,12 @@ export class CatalogService {
     launch: PluginCurrentLaunch | OfficialBundledLaunch | null | undefined,
     installation: ProxyCatalogItem['installation']['state'],
   ): Promise<ProxyCatalogItem['runtime']> {
-    const managed = await this.options.managedRuntimeStatus?.(pluginId);
+    if (this.options.developmentProxies) {
+      const provisioned = await this.options.developmentRuntime?.(pluginId);
+      if (provisioned) return provisioned;
+    }
+    const managed = this.options.developmentProxies
+      ? undefined : await this.options.managedRuntimeStatus?.(pluginId);
     if (managed?.active) {
       return managed.active.runtime
         ? {

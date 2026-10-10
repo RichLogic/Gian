@@ -879,6 +879,14 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
         `/api/sessions/${created.id}/translation/state`,
         expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ enabled: true }) }),
       ));
+      // 2026-10-09: the pending bubble goes up BEFORE the translation
+      // round-trip (the same progressive feedback composer sends get), and
+      // the later dispatch adopts it — never a duplicate bubble.
+      await waitFor(() => {
+        const echoItems = snapshot().itemsBySession[created.id] ?? [];
+        expect(echoItems).toHaveLength(1);
+        expect(echoItems[0]).toMatchObject({ kind: 'user', pending: true });
+      });
       expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
       await act(async () => {
         finishPatch(new Response(JSON.stringify({ enabled: true }), {
@@ -892,7 +900,11 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
       ));
       expect(socket.parsedSent<ClientToServerMessage>().some(frame => frame.type === 'message:send')).toBe(false);
       await act(async () => {
-        finishTranslation(new Response(JSON.stringify({ id: 'first-translation' }), {
+        finishTranslation(new Response(JSON.stringify({
+          id: 'first-translation', sessionId: created.id,
+          sourceText: 'first remote message', text: 'translated first message',
+          targetLanguage: 'en', agentId: 'agent', model: 'luna', purpose: 'send',
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         }));
         await translated;
@@ -901,6 +913,12 @@ describe('WS-003: Host dispatch failure through the real Web client chain', () =
         expect.objectContaining({ type: 'message:send', session_id: created.id,
           text: 'first remote message', translation_id: 'first-translation' }),
       ));
+      // The dispatch adopted the pre-translation echo in place.
+      await waitFor(() => {
+        const items = snapshot().itemsBySession[created.id] ?? [];
+        expect(items).toHaveLength(1);
+        expect(items[0]?.sendRunId).toBeTruthy();
+      });
     } finally {
       fetchSpy.mockRestore();
       view.unmount();

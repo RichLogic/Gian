@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
@@ -27,6 +28,12 @@ import { RuntimeControlPlane } from './runtime/control-plane.js';
 import { ManagedRuntimeInstaller } from './runtime/installer.js';
 import { downloadManagedRuntimeAsset } from './runtime/download.js';
 import { discoverDevelopmentProxyEntries } from './runtime/development-proxy-source.js';
+import {
+  declarationsFromProxyEntries,
+  provisionDevRuntimes,
+  shouldProvisionDevRuntimes,
+} from './runtime/dev-runtime-provision.js';
+import { downloadDevRuntimeAsset, readBundledDevRuntimeAsset } from './runtime/dev-runtime-assets.js';
 import { AgentManager } from './agents/manager.js';
 import { legacyAgentBootstrap } from './agents/legacy-bootstrap.js';
 import { resolveLegacyLaunch as resolveLegacySessionLaunch } from './proxy/legacy-launch.js';
@@ -101,7 +108,7 @@ async function main(): Promise<void> {
   }
 
   const developmentProxyEntries = await discoverDevelopmentProxyEntries({
-    proxiesDir: join(PACKAGES_DIR, 'proxies'),
+    proxiesDir: process.env.GIAN_DEV_PROXY_PACKAGES_DIR ?? join(PACKAGES_DIR, 'proxies'),
     overridesJson: process.env.GIAN_DEV_PROXY_ENTRIES,
     overridesOnly: process.env.GIAN_DEV_PROXY_OVERRIDES_ONLY === '1',
   });
@@ -205,6 +212,9 @@ async function main(): Promise<void> {
     readinessCache,
     managedRuntimeStatus: pluginId => agentManager.managedRuntimeStatus(pluginId),
     officialPresence: async (pluginId) => agentManager.officialPresence(pluginId),
+    ...(process.env.GIAN_MANAGED_PLUGINS !== '1'
+      ? { developmentProxies: () => agentManager.developmentLaunches() } : {}),
+    developmentRuntime: pluginId => agentManager.provisionedRuntimeStatus(pluginId),
     onPluginGenerationChanged: (pluginId) => {
       readinessCache.invalidate(pluginId);
       runtimeResolver.invalidate(parseProxyPluginId(pluginId));
@@ -247,7 +257,7 @@ async function main(): Promise<void> {
     },
   });
   const catalogRefresh = new CatalogRefreshController({
-    sourceClient: catalogSourceClient,
+    sourceClient: process.env.GIAN_MANAGED_PLUGINS === '1' ? catalogSourceClient : undefined,
   });
   catalogRefresh.start();
 
@@ -287,6 +297,31 @@ async function main(): Promise<void> {
       ? { browser: new DesktopBrowserBrokerClient(browserBrokerSocketPath) }
       : {}),
   });
+  if (shouldProvisionDevRuntimes(process.env)) {
+    try {
+      const declarations = Object.keys(developmentProxyEntries).length > 0
+        ? await declarationsFromProxyEntries(developmentProxyEntries)
+        : undefined;
+      const provisioned = await provisionDevRuntimes({
+        dataDir,
+        homeDir: homedir(),
+        mode: process.env.GIAN_DESKTOP_SMOKE_MANAGE_HOST === '1'
+          && process.env.GIAN_DEV_RUNTIME_PROVISION_MODE === 'isolated' ? 'isolated' : 'giandev',
+        ...(declarations ? { declarations } : {}),
+        download: asset => process.env.GIAN_DEV_RUNTIME_ASSETS_DIR
+          ? readBundledDevRuntimeAsset(process.env.GIAN_DEV_RUNTIME_ASSETS_DIR, asset)
+          : downloadDevRuntimeAsset(asset),
+      });
+      agentManager.setProvisionedRuntimes(provisioned);
+    } catch (error) {
+      console.error(
+        '[gian] Dev Runtime provisioning failed:',
+        error instanceof Error ? error.message : error,
+      );
+      throw error;
+    }
+  }
+
   const toolRpc = await startGianToolRpc({ dataDir, service: handle.toolService });
 
   const server = serve({ fetch: handle.app.fetch, hostname: config.host, port: config.port }, info => {

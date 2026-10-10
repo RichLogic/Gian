@@ -8,6 +8,7 @@ import {
   type ReplayEvent,
 } from '@gian/proxy-protocol';
 import { SessionEventCoordinator } from '../src/session/event-coordinator.js';
+import { ApprovalManager } from '../src/approval/manager.js';
 import { SessionHistoryStore } from '../src/session/history-store.js';
 import { SessionRepository } from '../src/session/repository.js';
 import { openDatabase } from '../src/storage/db.js';
@@ -288,7 +289,7 @@ test('incremental replay tracks skipped requested events for resolved mapping (F
       new SessionHistoryStore(db),
       {} as never,
       {} as never,
-      {} as never,
+      new ApprovalManager({ broadcast: () => undefined } as never),
       {} as never,
       null,
       {} as never,

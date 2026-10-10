@@ -46,6 +46,14 @@ export type {
 export interface MessageSendPayload {
   sendId?: string;
   translationId?: string;
+  /** Id of the already-appended pending echo a translated send started with
+   *  (`beginTranslationEcho`): the dispatch adopts that echo instead of
+   *  appending a second one. */
+  echoId?: string;
+  /** Display-only copy of the confirmed translation, attached to the adopted
+   *  echo so the bubble shows the sent text before the canonical
+   *  `user_message` (which carries the same record) arrives. */
+  translation?: import('@gian/shared').TranslationRecord;
   sessionId: string;
   text: string;
   exec: import('@gian/shared').Executor;
@@ -74,6 +82,11 @@ export interface MsgItem extends ChatMsgItem {
   sendCanonical?: boolean;
   /** Re-dispatch payload for the failed echo's retry affordance. */
   sendRetry?: MessageSendPayload;
+  /** Marks the optimistic echo of a translated send that is still awaiting
+   *  its translation: the transcript renders the inline Translating row under
+   *  the bubble instead of dispatching anything. Cleared when the real send
+   *  dispatch adopts the echo. */
+  sendTranslation?: boolean;
 }
 
 export type TranscriptItem =

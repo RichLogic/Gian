@@ -11,7 +11,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { BridgeNotification } from '../runtime/bridge-client.js';
 
 export const PLUGIN_ID = 'ai.deepseek.harness';
-export const PLUGIN_VERSION = '0.3.4';
+export const PLUGIN_VERSION = '0.3.5-Dev';
 export const PLUGIN_NAME = 'DeepSeek Harness';
 
 export type ConfigValue = string | boolean | number | null;
@@ -37,6 +37,12 @@ export interface AttachedSession {
   createFingerprint: string;
   externalUserMessages: Array<{ seq: number; data: Record<string, unknown> }>;
   pendingGianTurns: string[];
+  /** Set by the adapter when this turn's saved model is no longer advertised. */
+  pendingModelReselect: {
+    turnId: string;
+    retiredModel: string;
+    fallbackModel: string;
+  } | null;
 }
 
 export interface TurnState {
@@ -224,6 +230,7 @@ export class DshProxyService {
       createFingerprint: params.createFingerprint,
       externalUserMessages: [],
       pendingGianTurns: [],
+      pendingModelReselect: null,
     };
     this.sessions.set(params.sessionId, session);
     return session;
@@ -386,6 +393,10 @@ export class DshProxyService {
     const nativeSeq = typeof notification.params.nativeSeq === 'number'
       ? notification.params.nativeSeq
       : session.sequence;
+    // Re-checked against @deepseek-ai/dsh@0.2.0-rc.2 KNOWN_SESSION_EVENT_TYPES.
+    // tool/result.meta stays opaque JSON; FsDiffMeta is still { diffs, operation? }.
+    // session/title and team/* stay on the generic path. This migration does
+    // not adopt Team mode or SessionTitleService.rename.
     switch (type) {
       case 'turn/start':
         this.onTurnStart(session, data, nativeSeq);
@@ -491,6 +502,47 @@ export class DshProxyService {
       sourceTurnId: turn.sourceTurnId,
       emittedAt: nowIso(),
       data: {},
+    });
+    this.emitRetiredModelNotice(session, turn, nativeSeq);
+  }
+
+  /**
+   * A saved model id that pi-ai no longer advertises is replaced before the
+   * bridge call. Tell the user on this turn so the fallback is not silent.
+   * The activity is already terminal, so turn completion does not cancel it.
+   */
+  private emitRetiredModelNotice(session: AttachedSession, turn: TurnState, nativeSeq: number): void {
+    const pending = session.pendingModelReselect;
+    if (pending === null || pending.turnId !== turn.gianTurnId) return;
+    session.pendingModelReselect = null;
+    const activityId = `model-reselect-${turn.gianTurnId}`;
+    turn.activities.set(activityId, {
+      id: activityId,
+      status: 'succeeded',
+      enteredRunning: true,
+    });
+    session.sequence += 1;
+    this.emit('activity.updated', {
+      eventId: this.nextEventId(session, 'model-reselect', nativeSeq, activityId),
+      sessionId: session.id,
+      streamId: session.streamId,
+      sequence: session.sequence,
+      turnId: turn.gianTurnId,
+      sourceTurnId: turn.sourceTurnId,
+      emittedAt: nowIso(),
+      data: {
+        activityId,
+        kind: 'model-reselect',
+        title: 'Reselect model',
+        status: 'succeeded',
+        presentation: {
+          type: 'notice',
+          tone: 'warning',
+          data: {
+            message: `Saved model "${pending.retiredModel}" is no longer available. This turn uses "${pending.fallbackModel}". Reselect a model for later turns.`,
+          },
+        },
+      },
     });
   }
 

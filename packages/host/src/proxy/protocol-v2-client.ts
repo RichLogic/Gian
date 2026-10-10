@@ -55,9 +55,17 @@ export function proxyChildEnvironment(
   inherited: NodeJS.ProcessEnv,
   override: Readonly<Record<string, string>> | undefined,
 ): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { ...inherited, ...override };
+  const result: NodeJS.ProcessEnv = { ...inherited };
   for (const key of Object.keys(result)) {
-    if (key.startsWith('GIAN_TOOL_')) delete result[key];
+    if (key.startsWith('GIAN_TOOL_') || key === 'CLAUDE_CONFIG_DIR' || key.startsWith('ANTHROPIC_')) {
+      delete result[key];
+    }
+  }
+  if (override) {
+    for (const [key, value] of Object.entries(override)) {
+      if (key.startsWith('GIAN_TOOL_')) continue;
+      result[key] = value;
+    }
   }
   return result;
 }

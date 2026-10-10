@@ -9,6 +9,8 @@ interface UseSessionSelectionInput {
   activeSubtaskId: string | null;
   activeSessionId: string | null;
   sessionsRef: RefObject<Session[]>;
+  /** Visible sessions, including task overlays. Effect 2 uses this ahead of the canonical ref. */
+  effectiveSessionsRef?: RefObject<readonly Session[] | null>;
   activeSessionIdRef: RefObject<string | null>;
   setActiveSessionId: Dispatch<SetStateAction<string | null>>;
   restoreChatPanelForSession: (sessionId: string | null) => void;
@@ -20,6 +22,7 @@ export function useSessionSelection({
   activeSubtaskId,
   activeSessionId,
   sessionsRef,
+  effectiveSessionsRef,
   activeSessionIdRef,
   setActiveSessionId,
   restoreChatPanelForSession,
@@ -51,10 +54,16 @@ export function useSessionSelection({
   useEffect(() => {
     if (mode !== 'tasks' || activeSubtaskId) return;
     const current = activeSessionIdRef.current;
-    if (current && sessionsRef.current?.find(session => session.id === current)?.type === 'subtask') {
-      setActiveSessionId(null);
-    }
-  }, [activeSessionIdRef, activeSubtaskId, mode, sessionsRef, setActiveSessionId]);
+    if (!current) return;
+    // A pending assign overlay changes type before the canonical row does.
+    // The bare ref would still say subtask and clear the session just chosen
+    // from 未分配.
+    const effectiveList = effectiveSessionsRef?.current;
+    const session = effectiveList
+      ? effectiveList.find(item => item.id === current)
+      : sessionsRef.current?.find(item => item.id === current);
+    if (session?.type === 'subtask') setActiveSessionId(null);
+  }, [activeSessionIdRef, activeSubtaskId, effectiveSessionsRef, mode, sessionsRef, setActiveSessionId]);
 
   return selectSession;
 }

@@ -36,6 +36,14 @@
     "test": "pnpm run build && node --test 'dist/test/**/*.test.js'",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^24.12.2",
     "typescript": "^5.9.3"

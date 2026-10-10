@@ -56,6 +56,7 @@ import {
   optionEnabled,
   optionVisible,
   supportedEfforts,
+  HOST_INTERNAL_CATALOG_OPTIONS,
 } from '../components/composer/capabilities.js';
 import type { ComposerCatalog } from '../components/composer/capabilities.js';
 import type { ProxyModel } from '../components/composer/capabilities.js';
@@ -103,6 +104,7 @@ import {
 } from '../screenshot-drafts.js';
 import { publishScreenshotTarget, startScreenshotCapture } from '../screenshot-target.js';
 import { ImageZoomContext } from '../transcript/items.js';
+import { AutoTranslationChip } from '../translation/TranslationControls.js';
 import '../translation/translation.css';
 
 export { newSessionDraftStorageKey } from '../screenshot-drafts.js';
@@ -185,8 +187,8 @@ export function buildSessionCreatePayload(
 }
 
 /** Merge explicit chip state onto catalog values. Turn-bound model and
- *  effort replace a value catalog resolve already filled; the other roles
- *  only fill gaps. */
+ *  effort replace resolved defaults. The mode chip owns either binding;
+ *  other roles only fill gaps. */
 export function overlayExplicitCatalogChoices(
   options: ConfigOption[],
   values: Record<string, ConfigValue>,
@@ -210,7 +212,11 @@ export function overlayExplicitCatalogChoices(
       && option.choices?.some(choice => Object.is(choice.value, explicit.effort))
     ) {
       next[option.id] = explicit.effort;
-    } else if (option.role === 'approval_mode' && explicit.mode && next[option.id] === undefined) {
+    } else if (
+      option.role === 'approval_mode'
+      && explicit.mode
+      && (!option.choices || option.choices.some(choice => Object.is(choice.value, explicit.mode)))
+    ) {
       next[option.id] = explicit.mode;
     } else if (option.role === 'fast' && next[option.id] === undefined) {
       next[option.id] = explicit.serviceTier === 'fast';
@@ -1049,6 +1055,9 @@ function SessionCreateForm({
   const sessionExtras = catalog.configOptions.filter((option) => (
     option.binding === 'session'
     && option.id !== catalogApproval?.id
+    // Host-internal capability markers (the isolated translation session,
+    // ADR-0091) are not end-user controls.
+    && !HOST_INTERNAL_CATALOG_OPTIONS.has(option.id)
     && optionVisible(option, catalogViewValues)
   ));
   const turnExtras = catalog.configOptions.filter((option) => (
@@ -1625,17 +1634,13 @@ function SessionCreateForm({
               </div>
             )}
 
-          <button
-            type="button"
-            className={`translation-auto${autoTranslate ? ' on' : ''}`}
-            data-testid="ns-auto-translation"
+          <AutoTranslationChip
+            on={autoTranslate}
             title={t('translation.auto')}
-            aria-pressed={autoTranslate}
+            testId="ns-auto-translation"
             disabled={creating || createUnknown || checkingTranslation}
             onClick={() => { void toggleAutoTranslate(); }}
-          >
-            {t('translation.auto')}
-          </button>
+          />
           </div>
         {agentDrop.open && agentDrop.pos && agents && createPortal(
           <div
@@ -2039,7 +2044,16 @@ function SessionCreateForm({
                             key={opt.key}
                             type="button"
                             className={`mp-row${active ? ' active' : ''}`}
-                            onClick={() => { setMode(opt.mode); modeDrop.setOpen(false); }}
+                            onClick={() => {
+                              setMode(opt.mode);
+                              if (catalogApproval) {
+                                setCatalogValues(current => ({
+                                  ...current,
+                                  [catalogApproval.id]: opt.mode,
+                                }));
+                              }
+                              modeDrop.setOpen(false);
+                            }}
                           >
                             <span className="mp-check">{active ? '✓' : ''}</span>
                             <span className="mp-row-body">

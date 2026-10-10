@@ -64,6 +64,8 @@ export interface ProxyCatalogItem {
   runtime: {
     state: CatalogRuntimeState;
     displayName: string | null;
+    path?: string | null;
+    version?: string | null;
     readinessIssue?: { code: string; message: string; repairable: boolean };
   };
   availableActions: CatalogProxyAction[];

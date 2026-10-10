@@ -16,10 +16,10 @@
 
 这是 2026-09-20 Catalog 1.7.0 的目标，不是本机安装状态：Proxy **0.3.1**，Runtime **0.1.1-rc.2**。新仓库的该分发自带 Bridge 0.1.3，Bridge 由整个 Proxy 归档摘要覆盖；这项依赖在教程说明，不扩展 Basic 的三行。
 
-目标位置样例：
+路径形状样例（当前源码钉的 Runtime 0.2.0-rc.2；`<artifact-sha256>` 来自该版本的签名制品）：
 
 ```text
-<dataDir>/runtimes/deepseek-harness/0.1.1-rc.2/<artifact-sha256>/node_modules/@deepseek-ai/dsh/lib/bin.js
+<dataDir>/runtimes/deepseek-harness/0.2.0-rc.2/<artifact-sha256>/node_modules/@deepseek-ai/dsh/lib/bin.js
 ```
 
 `<dataDir>` 由当前运行环境确定；`<artifact-sha256>` 来自当前签名组合。实际界面应消费 Host 安装计划，不由 Web 自己拼路径。完整坐标在 ../evidence/current-combinations.json。

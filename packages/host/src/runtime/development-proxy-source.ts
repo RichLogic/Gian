@@ -63,18 +63,21 @@ export async function discoverDevelopmentProxyEntries(input: {
   }
   for (const child of children.sort()) {
     const directory = join(input.proxiesDir, child);
+    let manifestFound = false;
     try {
       const directoryInfo = await lstat(directory);
       if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) continue;
       const manifestPath = join(directory, 'manifest.json');
       const manifestInfo = await lstat(manifestPath);
       if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()) continue;
+      manifestFound = true;
       const parsed = manifestSchema.safeParse(JSON.parse(await readFile(manifestPath, 'utf8')));
       if (!parsed.success) {
         throw new DevelopmentProxySourceError(`${child} has an invalid Proxy Manifest.`);
       }
       const packageJson = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8')) as {
         name?: unknown;
+        version?: unknown;
         main?: unknown;
       };
       if (
@@ -85,11 +88,19 @@ export async function discoverDevelopmentProxyEntries(input: {
       ) {
         throw new DevelopmentProxySourceError(`${child} has invalid Proxy package metadata.`);
       }
+      if (packageJson.version !== parsed.data.pluginVersion) {
+        throw new DevelopmentProxySourceError(`${child} package and Manifest versions must agree.`);
+      }
       const entry = join(directory, packageJson.main);
       const trusted = await loadDevelopmentTrustedLaunch(entry, parsed.data.id);
       entries[trusted.pluginId] = trusted.entryPath;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (manifestFound) {
+          throw new DevelopmentProxySourceError(`${child} development output is missing; rebuild the Proxy.`);
+        }
+        continue;
+      }
       throw error;
     }
   }

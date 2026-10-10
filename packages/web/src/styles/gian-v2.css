@@ -262,7 +262,20 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Guard (2026-10-08): no in-flow rail content may ever open a horizontal
+     scroll axis — without this, a child a few px too wide (e.g. a width:100%
+     box with side margins) puts a horizontal scrollbar at the rail bottom. */
+  overflow-x: hidden;
   padding: 0 6px 10px;
+}
+/* Pinned chrome above the scroll area (2026-10-08): the nav rows + the
+   list-switch row live here instead of inside `.sb-scroll`, so scrolling
+   rows are hard-clipped at the container's top edge and can never render
+   behind the switch. Same horizontal padding as `.sb-scroll` keeps the row
+   text aligned across the boundary. */
+.sb-pin {
+  flex: none;
+  padding: 0 6px;
 }
 /* Section label — Codex-style 置顶 / Repos / 进行中 / 完成 headers. A plain
    grey label at rest; hover reveals the caret (collapse toggle) and, on the
@@ -271,7 +284,10 @@
 .sb-section {
   position: relative;
   display: flex; align-items: center; gap: 4px;
-  width: 100%;
+  /* No explicit 100% width here — with the 2px side margins that made the
+     box 4px wider than the scroll container and opened a horizontal
+     scrollbar (fixed 2026-10-08); as a block-level flex row, auto width
+     already fills the rail minus the margins, exactly like .sb-group. */
   margin: 12px 2px 2px;
   /* Left edge matches the nav rows' text (2px margin + 10px padding) —
      2026-09-08 owner call: the label sat 2px left of the rest of the rail. */
@@ -444,6 +460,45 @@
   pointer-events: none;
 }
 .ri-schedule-badge svg { width: 1em; height: 1em; }
+/* Row-start remote glyph: the session executes on a paired Remote Control
+   environment — globe-code while connected, globe-x once the Host reports
+   the disconnect. Same gutter geometry as .ri-schedule-badge; when both
+   badges show, the second flows inline instead of re-hanging the gutter. */
+.ri-remote-badge {
+  flex: none;
+  width: 1em;
+  margin-left: -25px;
+  margin-right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  opacity: 0.8;
+  pointer-events: none;
+}
+.ri-remote-badge svg { width: 1em; height: 1em; }
+.ri-remote-badge.disconnected { color: var(--danger); opacity: 1; }
+/* Row-start delegation glyph (2026-10-08 owner): the session was created by
+   another Gian session via the Gian MCP child-delegation tool
+   (created_by_session_id). Same gutter geometry as the remote/schedule
+   badges; whichever badge follows another flows inline instead of
+   re-hanging the gutter. */
+.ri-delegate-badge {
+  flex: none;
+  width: 1em;
+  margin-left: -25px;
+  margin-right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  opacity: 0.8;
+  pointer-events: none;
+}
+.ri-delegate-badge svg { width: 1em; height: 1em; }
+.ri-remote-badge + .ri-delegate-badge,
+.ri-delegate-badge + .ri-schedule-badge,
+.ri-remote-badge + .ri-schedule-badge { margin-left: 0; }
 .ri-dot-sep { color: var(--text-3); opacity: 0.5; }
 .ri-age {
   position: absolute;

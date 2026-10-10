@@ -16,7 +16,7 @@ export interface AgentHomeBinding {
 /** Per-Agent Runtime binding. Absent/`managed` means the globally active
  *  certified generation; `custom` pins a user-provided executable/launch
  *  script that Gian never installs, updates, replaces, or silently falls
- *  back from (ADR-0094). */
+ *  back from (ADR-0102). */
 export type AgentRuntimeBinding =
   | { kind: 'managed' }
   | { kind: 'custom'; path: string };

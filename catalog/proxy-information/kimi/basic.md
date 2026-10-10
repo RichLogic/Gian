@@ -14,12 +14,12 @@
 
 ## 当前发布目标快照
 
-这是 2026-09-20 Catalog 1.7.0 的目标，不是本机安装状态：Proxy **0.3.2**，Runtime **2.0.0**。当前 Manifest 声明兼容 0.41.0 和 2.0.0，但此 Catalog 具体选定的是 2.0.0，不能把兼容列表显示成已安装版本。
+这是 Catalog 21 的发布目标，不是本机安装状态：Proxy **0.4.5**，Runtime **2.1.1**。实际坐标和认证证据来自 ../evidence/current-combinations.json；用户机器的当前版本仍以 Host 收据为准。
 
 目标位置样例：
 
 ```text
-<dataDir>/runtimes/kimi/2.0.0/<artifact-sha256>/kimi
+<dataDir>/runtimes/kimi/2.1.1/<artifact-sha256>/kimi
 ```
 
 `<dataDir>` 由当前运行环境确定；`<artifact-sha256>` 来自当前签名组合。实际界面应消费 Host 安装计划，不由 Web 自己拼路径。完整坐标在 ../evidence/current-combinations.json。
@@ -29,7 +29,7 @@
 | 状态 | Runtime 路径 | Runtime 版本 | Proxy 版本 | 操作/说明 |
 | --- | --- | --- | --- | --- |
 | 完全未准备 | 安装位置：Host 返回的计划位置 | 未安装 | 未安装 | 安装完整 Integration |
-| 有源码 Proxy，无 Runtime | 安装位置：Host 返回的计划位置 | 未安装 | 0.3.2，标明开发来源 | 不把源码存在当成认证组合已激活 |
+| 有源码 Proxy，无 Runtime | 安装位置：Host 返回的计划位置 | 未安装 | Host 当前源码版本，标明开发来源 | 不把源码存在当成认证组合已激活 |
 | 已准备，用户配置未完成 | Host 已核对路径 | Host 当前值 | Host 当前值 | 配置/登录是另一检查点，不假报 Ready |
 | 正在更新 | 保留旧激活路径 | 保留旧当前版本 | 保留旧当前版本 | 目标变化与进度在操作区显示 |
 | 校验失败 | 已知路径可用于诊断，但不能标可执行 | 不冒充兼容 | 当前已知值 | 明确失败原因，禁止用 latest 覆盖当前状态 |

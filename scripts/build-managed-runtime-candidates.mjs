@@ -30,20 +30,20 @@ export const ZCODE_RUNTIME_ASSET_NAME = 'zcode.tar.gz';
 
 export const upstreamRuntimeCandidates = Object.freeze({
   claude: Object.freeze({
-    version: '2.1.280',
+    version: '2.1.285',
     format: 'raw',
     entryRelativePath: 'bin/claude',
-    url: 'https://downloads.claude.ai/claude-code-releases/2.1.280/darwin-arm64/claude',
-    sha256: '387a5c5dcdbb815085edf0baf79591f9d8894efe922bceaf3d75b1b08055229d',
-    size: 217254576,
+    url: 'https://downloads.claude.ai/claude-code-releases/2.1.285/darwin-arm64/claude',
+    sha256: '51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4',
+    size: 223821616,
   }),
   codex: Object.freeze({
-    version: '0.159.2',
+    version: '0.161.0',
     format: 'tar.gz',
     entryRelativePath: 'bin/codex',
-    url: 'https://github.com/openai/codex/releases/download/rust-v0.159.2/codex-package-aarch64-apple-darwin.tar.gz',
-    sha256: '38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101',
-    size: 129522674,
+    url: 'https://github.com/openai/codex/releases/download/rust-v0.161.0/codex-package-aarch64-apple-darwin.tar.gz',
+    sha256: 'f0feee8537daf8dd6b4e0a36e764549ad14afdbb419d8775aeab9feb20182313',
+    size: 131714490,
   }),
   kimi: Object.freeze({
     version: '2.1.1',
@@ -52,6 +52,15 @@ export const upstreamRuntimeCandidates = Object.freeze({
     url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.1.1/kimi-code-darwin-arm64.tar.gz',
     sha256: '8c3bad99571b16abd113ab5d511a98a36b852c0d5493991842a67b8c2bc4ecd0',
     size: 62296524,
+  }),
+  grok: Object.freeze({
+    version: '1.0.46',
+    format: 'raw',
+    entryRelativePath: 'bin/grok',
+    url: 'https://x.ai/cli/grok-1.0.46-macos-aarch64',
+    sha256: 'e8daa302364c9c3b6a5546d511cfbd1ab5e5d407a9b04282f660665ea405f9f3',
+    size: 150374256,
+    publish: true,
   }),
 });
 
@@ -112,6 +121,9 @@ async function buildUpstream(provider, candidate, outputDir, workDir) {
     CLAUDE_CONFIG_DIR: join(workDir, 'claude-home'),
     CODEX_HOME: join(workDir, 'codex-home'),
     DISABLE_AUTOUPDATER: '1',
+    GROK_HOME: join(workDir, 'grok-home'),
+    GROK_DISABLE_AUTOUPDATER: '1',
+    GROK_SANDBOX: 'workspace',
   };
   await mkdir(environment.HOME, { recursive: true, mode: 0o700 });
   const entry = await inspectEntry(provider, entryPath, candidate.version, environment);
@@ -124,10 +136,12 @@ async function buildUpstream(provider, candidate, outputDir, workDir) {
     asset: {
       name: basename(assetPath),
       path: assetPath,
-      url: candidate.url,
+      url: candidate.publish
+        ? `https://github.com/RichLogic/Gian/releases/download/${proxyReleaseMetadata(provider).tag}/${assetName}`
+        : candidate.url,
       sha256: candidate.sha256,
       size: candidate.size,
-      publish: false,
+      publish: candidate.publish === true,
     },
     candidateBin: entryPath,
   };
@@ -199,7 +213,7 @@ async function buildZcode(outputDir, workDir) {
   };
 }
 
-async function buildDsh(outputDir, workDir) {
+export async function buildDshRuntimeCandidate(outputDir, workDir) {
   const metadata = proxyReleaseMetadata('dsh');
   const lockedSource = resolve(rootDir, 'runtimes/deepseek-harness');
   const runtimeRoot = join(workDir, 'dsh-runtime');
@@ -280,8 +294,20 @@ export function validateRuntimeCandidateDefinitions() {
   return true;
 }
 
-export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = null }) {
+export function selectRuntimeProviders(providers = null) {
+  const supported = [...Object.keys(upstreamRuntimeCandidates), 'dsh', 'zcode'];
+  if (providers === null) return supported;
+  if (!Array.isArray(providers) || providers.length === 0
+    || new Set(providers).size !== providers.length
+    || providers.some(provider => !supported.includes(provider))) {
+    throw new Error('Invalid explicit Runtime provider selection.');
+  }
+  return [...providers];
+}
+
+export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = null, providers = null }) {
   validateRuntimeCandidateDefinitions();
+  const selected = selectRuntimeProviders(providers);
   const target = resolve(outputDir);
   await rm(target, { recursive: true, force: true });
   await mkdir(target, { recursive: true, mode: 0o700 });
@@ -289,11 +315,11 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   await rm(workDir, { recursive: true, force: true });
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   const candidates = [];
-  for (const [provider, definition] of Object.entries(upstreamRuntimeCandidates)) {
-    candidates.push(await buildUpstream(provider, definition, target, workDir));
+  for (const provider of selected) {
+    if (provider === 'dsh') candidates.push(await buildDshRuntimeCandidate(target, workDir));
+    else if (provider === 'zcode') candidates.push(await buildZcode(target, workDir));
+    else candidates.push(await buildUpstream(provider, upstreamRuntimeCandidates[provider], target, workDir));
   }
-  candidates.push(await buildDsh(target, workDir));
-  candidates.push(await buildZcode(target, workDir));
   const manifest = {
     schemaVersion: 1,
     platform: 'darwin-arm64',
@@ -304,7 +330,7 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   };
   await writeFile(join(target, 'runtime-candidates.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   if (githubEnv) {
-    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', dsh: 'DSH_BIN', zcode: 'ZCODE_BIN' };
+    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', grok: 'GROK_BIN', dsh: 'DSH_BIN', zcode: 'ZCODE_BIN' };
     const body = candidates.map(candidate => `${envNames[candidate.provider]}=${candidate.candidateBin}`).join('\n');
     await writeFile(resolve(githubEnv), `${body}\n`, { flag: 'a' });
   }
@@ -312,11 +338,15 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
 }
 
 function parseArgs(argv) {
-  const options = { outputDir: 'artifacts/runtimes', githubEnv: null };
+  const options = { outputDir: 'artifacts/runtimes', githubEnv: null, providers: null };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--output') options.outputDir = argv[++index];
     else if (arg === '--github-env') options.githubEnv = argv[++index];
+    else if (arg === '--provider') {
+      options.providers ??= [];
+      options.providers.push(argv[++index]);
+    }
     else throw new Error(`Unknown Runtime candidate argument ${arg}.`);
   }
   if (!options.outputDir) throw new Error('--output requires a path.');

@@ -25,6 +25,11 @@ export interface SessionCommands {
     opts?: {
       translationId?: string;
       oneShotBypass?: boolean;
+      /** Translated sends adopt the pre-dispatch echo this id points at
+       *  (`beginTranslationEcho`) instead of appending a duplicate bubble. */
+      echoId?: string;
+      /** Display-only translation record for the adopted echo. */
+      translation?: import('@gian/shared').TranslationRecord;
       attachments?: Array<ComposerAttachmentPayload & { previewUrl: string }>;
       contextItems?: MessageContextItem[];
       composerDocument?: ComposerDocument;
@@ -102,6 +107,8 @@ export function useSessionCommands({
           text,
           exec: executorOf(sessionId),
           ...(opts?.translationId ? { translationId: opts.translationId } : {}),
+          ...(opts?.echoId ? { echoId: opts.echoId } : {}),
+          ...(opts?.translation ? { translation: opts.translation } : {}),
           ...(opts?.oneShotBypass ? { oneShotBypass: true } : {}),
           ...(opts?.attachments && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
           ...(opts?.contextItems && opts.contextItems.length > 0 ? { contextItems: opts.contextItems } : {}),

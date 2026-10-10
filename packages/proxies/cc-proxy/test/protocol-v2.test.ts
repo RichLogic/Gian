@@ -8,10 +8,11 @@ import test from 'node:test';
 import { catalogResultSchema, proxyNotificationSchema, resultSchemas, sessionSchema } from '@gian/proxy-protocol';
 import { CcProxyService } from '../src/core/service.js';
 import { ClaudeProtocolError, jsonRpcError, parseRequestLine } from '../src/transport/protocol.js';
-import { ClaudeProtocolV2Adapter, type WireRequest } from '../src/protocol/v2-adapter.js';
+import { ClaudeProtocolV2Adapter, readTurnFailure, type WireRequest } from '../src/protocol/v2-adapter.js';
 import type { ModelCapabilities } from '../src/core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from '../src/runtime/types.js';
 import { claudeHistoryProjectDir } from '../src/protocol/native-history.js';
+import { labelDefaultModel } from '../src/runtime/claude-mcp-runtime.js';
 
 class FakeRuntime extends EventEmitter<ClaudeRuntimeEvents> implements ClaudeRuntime {
   readonly messages: Array<{
@@ -156,6 +157,23 @@ async function setup(permissionModes?: string[]) {
     nativeSessionId: created.session.nativeSession.id,
   };
 }
+
+test('readTurnFailure serializes details before they reach the turn.failed event', () => {
+  assert.deepEqual(readTurnFailure({
+    error: { message: 'boom', retryable: true, details: { exitCode: 2, signal: null } },
+  }), {
+    message: 'boom',
+    retryable: true,
+    details: { exitCode: 2, signal: null },
+  });
+  const details: Record<string, unknown> = { exitCode: 1 };
+  details.self = details;
+  const failure = readTurnFailure({
+    error: { message: 'boom', retryable: true, details },
+  });
+  assert.doesNotThrow(() => JSON.stringify(failure));
+  assert.deepEqual(failure.details, {});
+});
 
 test('Claude gian.proxy/2 initializes once and exposes catalog.resolve capability', async () => {
   const { service, adapter } = await setup();
@@ -350,6 +368,55 @@ test('Claude gian.proxy/2 emits compact turn.started before its turn-scoped usag
   }
 });
 
+test('Claude gian.proxy/2 keeps usage behind an unflushed turn.started and drops it after the turn ends', async () => {
+  const { runtime, service, adapter, notifications, streamId } = await setup();
+  try {
+    await adapter.handle(request('3', 'turn.start', {
+      sessionId: 'host-session',
+      streamId,
+      turnId: 'host-reorder-turn',
+      input: [{ type: 'text', text: 'hello' }],
+      config: {},
+    }));
+    const serviceSessionId = runtime.messages[0]!.sessionId;
+    runtime.emit('tokenUsage', serviceSessionId, { context: { used: 10, window: 100 } });
+    adapter.flushDeferredNotifications();
+
+    assert.deepEqual(
+      notifications.map(item => item.method),
+      ['turn.started', 'usage.updated'],
+    );
+    assert.deepEqual(
+      notifications.map(item => item.params.sequence),
+      [1, 2],
+    );
+    for (const item of notifications) {
+      proxyNotificationSchema.parse({ jsonrpc: '2.0', method: item.method, params: item.params });
+    }
+
+    let armClosedTurnUsage = true;
+    const originalPush = notifications.push.bind(notifications);
+    notifications.push = (...items) => {
+      const result = originalPush(...items);
+      const completed = items.find(item => item.method === 'turn.completed');
+      if (armClosedTurnUsage && completed) {
+        armClosedTurnUsage = false;
+        runtime.emit('tokenUsage', serviceSessionId, { context: { used: 11, window: 100 } });
+      }
+      return result;
+    };
+    runtime.emit('channelReply', serviceSessionId, '');
+    runtime.emit('tokenUsage', serviceSessionId, { context: { used: 12, window: 100 } });
+    adapter.flushDeferredNotifications();
+
+    assert.equal(notifications.filter(item => item.method === 'usage.updated').length, 1);
+    const sequences = notifications.map(item => item.params.sequence);
+    assert.deepEqual(sequences, sequences.map((_, index) => index + 1));
+  } finally {
+    await service.close();
+  }
+});
+
 test('Claude gian.proxy/2 lazily resolves model ids and applies turn-bound effort', async () => {
   const { runtime, service, adapter } = await setup();
   try {
@@ -401,6 +468,65 @@ test('Claude gian.proxy/2 lazily resolves model ids and applies turn-bound effor
   }
 });
 
+test('Claude gian.proxy/2 rejects a catalog model id the current menu no longer lists', async () => {
+  const { runtime, service, adapter, streamId } = await setup();
+  try {
+    const catalog = await adapter.handle(request('3', 'catalog.list', {})) as {
+      catalogRevision: string;
+    };
+    const models = runtime.getModels();
+    const opus = models.findIndex((model) => model.id === 'claude-alias-opus');
+    assert.ok(opus >= 0);
+    models.splice(opus, 1);
+    await adapter.handle(request('4', 'catalog.resolve', {
+      catalogRevision: catalog.catalogRevision,
+      sessionConfig: {},
+      turnConfig: {},
+    }));
+    await assert.rejects(
+      adapter.handle(request('5', 'turn.start', {
+        sessionId: 'host-session',
+        streamId,
+        turnId: 'missing-model-turn',
+        input: [{ type: 'text', text: 'hello' }],
+        config: { model: 'claude-alias-opus' },
+      })),
+      (error: unknown) => error instanceof ClaudeProtocolError
+        && error.domainCode === 'CONFIG_VALUE_INVALID',
+    );
+    assert.equal(runtime.messages.length, 0);
+  } finally {
+    await service.close();
+  }
+});
+
+test('labeling Default publishes catalog.changed with the init model', async () => {
+  const { runtime, service, adapter, notifications } = await setup();
+  try {
+    assert.equal(labelDefaultModel(runtime.getModels(), 'glm-5.3'), true);
+    runtime.emit('defaultModelLabeled', 'glm-5.3');
+    adapter.flushDeferredNotifications();
+    const changed = notifications.find((item) => (
+      item.method === 'catalog.changed'
+      && (item.params.data as { reason?: string }).reason === 'default-model'
+    ));
+    assert.ok(changed);
+    assert.doesNotThrow(() => proxyNotificationSchema.parse({
+      jsonrpc: '2.0',
+      method: changed.method,
+      params: changed.params,
+    }));
+    const catalog = await adapter.handle(request('3', 'catalog.list', {})) as {
+      configOptions: Array<{ id: string; choices?: Array<{ value: unknown; displayName?: string }> }>;
+    };
+    const model = catalog.configOptions.find((option) => option.id === 'model');
+    const fallback = model?.choices?.find((choice) => choice.value === 'claude-default');
+    assert.equal(fallback?.displayName, 'Default · glm-5.3');
+  } finally {
+    await service.close();
+  }
+});
+
 test('Claude gian.proxy/2 closes sessions idempotently and resolves pending interactions first', async () => {
   const { runtime, service, adapter, notifications, streamId } = await setup();
   try {
@@ -411,6 +537,7 @@ test('Claude gian.proxy/2 closes sessions idempotently and resolves pending inte
       input: [{ type: 'text', text: 'run' }],
       config: {},
     }));
+    adapter.flushDeferredNotifications();
     const serviceSessionId = runtime.messages[0]!.sessionId;
     runtime.emit('permissionRequest', serviceSessionId, 'native-approval', 'Bash', 'Run command', 'pwd');
     const requested = notifications.find((item) => item.method === 'interaction.requested');
@@ -584,6 +711,7 @@ test('Claude gian.proxy/2 rejects and cancels AskUserQuestion through advertised
       input: [{ type: 'text', text: 'run' }],
       config: {},
     }));
+    adapter.flushDeferredNotifications();
     const serviceSessionId = runtime.messages[0]!.sessionId;
     const questions = [{
       question: 'Pick one',
@@ -658,6 +786,7 @@ test('Claude gian.proxy/2 degrades unknown visible Claude events to generic acti
       input: [{ type: 'text', text: 'run' }],
       config: {},
     }));
+    adapter.flushDeferredNotifications();
     const serviceSessionId = runtime.messages[0]!.sessionId;
     runtime.emit('unknownClaudeEvent', serviceSessionId, { type: 'web_search', query: 'docs' });
     const activity = notifications.filter((item) => item.method === 'activity.updated').at(-1);
@@ -798,10 +927,14 @@ test('Claude gian.proxy/2 implements billing-safe Side Chat and exact JSONL Fork
   await mkdir(configDir, { recursive: true });
   await writeFile(join(configDir, 'settings.json'), '{}');
   const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  const previousPluginDataDir = process.env.GIAN_PLUGIN_DATA_DIR;
   process.env.CLAUDE_CONFIG_DIR = configDir;
+  process.env.GIAN_PLUGIN_DATA_DIR = join(root, 'plugin-data');
   t.after(async () => {
     if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    if (previousPluginDataDir === undefined) delete process.env.GIAN_PLUGIN_DATA_DIR;
+    else process.env.GIAN_PLUGIN_DATA_DIR = previousPluginDataDir;
     await rm(root, { recursive: true, force: true });
   });
 

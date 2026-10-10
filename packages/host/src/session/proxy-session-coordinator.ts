@@ -1,5 +1,7 @@
 import {
   isSessionProxyBinding,
+  parseProxyPluginId,
+  resolvePluginIdInput,
   sessionAllowsLegacyRuntimeFallback,
   sessionBoundRuntimeCliPath,
   sessionExactBindingError,
@@ -17,6 +19,7 @@ import {
   type SessionAvailableActions,
   type SlashListResult,
 } from '@gian/shared';
+import { providerHomeEnvironment } from '../agents/home.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { ProxyManager } from '../proxy/manager.js';
 import type { ProxyClient, ProxyReplayResult } from '../proxy/types.js';
@@ -46,6 +49,9 @@ export interface BringUpProxySessionInput {
   /** The owning Agent's resolved CLI path; null resolves through the
    *  provider default (environment override / PATH / official install). */
   cliPath?: string | null;
+  /** Agent config directory. Catalog entries for the same CLI stay separate
+   *  per home, matching the env attached to the next session. */
+  configHome?: string | null;
   /** Current trusted Proxy version when no prepared launch is supplied. */
   proxyVersion?: string | null;
   nativeSessionId?: string | null;
@@ -110,11 +116,59 @@ function nativeOptionsFromCatalog(
   }));
 }
 
-/** Catalog/runtime caches are keyed by (kind, resolved CLI path): two Agents
- *  on one Proxy kind with different CLI paths never share a cached catalog
- *  or a capabilities probe process. */
-function catalogKey(executor: Executor | string, cliPath?: string | null): string {
-  return `${executor}${cliPath ?? ''}`;
+/** Catalog caches include the Agent config home. The no-home key stays
+ *  `executor + cliPath` so existing kind-level probes keep their identity.
+ *  A home is joined with NUL, which cannot appear in a CLI path. */
+function catalogKey(
+  executor: Executor | string,
+  cliPath?: string | null,
+  configHome?: string | null,
+): string {
+  const base = `${executor}${cliPath ?? ''}`;
+  return configHome ? `${base}\u0000${configHome}` : base;
+}
+
+export function catalogProbeEnv(
+  executor: Executor,
+  configHome?: string | null,
+): Readonly<Record<string, string>> | undefined {
+  if (!configHome) return undefined;
+  const pluginId = resolvePluginIdInput(executor) ?? parseProxyPluginId(executor);
+  return providerHomeEnvironment(pluginId, configHome);
+}
+
+/** Keep a stored value when the option has no choices or the value is one of them. */
+export function supportedCatalogChoice<T>(
+  choices: ReadonlyArray<{ value: unknown }> | undefined,
+  value: T,
+): T | undefined {
+  if (value === undefined || value === null || value === '') return value;
+  if (!choices || choices.some((choice) => Object.is(choice.value, value))) return value;
+  return undefined;
+}
+
+/** The first candidate that is not a catalog choice and was not kept. */
+export function droppedCatalogChoice(
+  choices: ReadonlyArray<{ value: unknown }> | undefined,
+  candidates: readonly unknown[],
+  used: unknown,
+): unknown {
+  if (!choices) return undefined;
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || candidate === '') continue;
+    const listed = choices.some((choice) => Object.is(choice.value, candidate));
+    if (!listed && !Object.is(candidate, used)) return candidate;
+  }
+  return undefined;
+}
+
+export function catalogChoiceDowngradeWarning(
+  sessionId: string,
+  optionId: string,
+  dropped: unknown,
+  used: unknown,
+): string {
+  return `[session] ${sessionId} catalog option ${optionId} dropped ${JSON.stringify(dropped)}; using ${JSON.stringify(used)}.`;
 }
 
 export class ProxySessionCoordinator {
@@ -176,7 +230,11 @@ export class ProxySessionCoordinator {
       ? this.resolveCliPath?.(session.executor, session) ?? null
       : null;
     this.catalogByExecutor.set(
-      catalogKey(client.executor ?? session?.executor ?? client.pluginId ?? 'unknown', cliPath),
+      catalogKey(
+        client.executor ?? session?.executor ?? client.pluginId ?? 'unknown',
+        cliPath,
+        session?.runtime_profile?.configHome ?? null,
+      ),
       catalog,
     );
   }
@@ -267,6 +325,7 @@ export class ProxySessionCoordinator {
           ? this.resolveCliPath?.(session.executor, session) ?? null
           : null),
       proxyVersion: preparedLaunch?.sessionBinding.pluginVersion ?? null,
+      configHome: session.runtime_profile?.configHome ?? null,
       nativeSessionId: session.native_session_id,
       forkBoundaries: persistedForkBoundaries(this.db, session.id),
       executorConfig: session.executor_config,
@@ -342,6 +401,10 @@ export class ProxySessionCoordinator {
 
   async bringUp(args: BringUpProxySessionInput): Promise<BringUpProxySessionResult> {
     const cliPath = args.cliPath ?? null;
+    const configHome = args.preparedLaunch?.sessionBinding.runtimeProfile?.configHome
+      ?? args.configHome
+      ?? null;
+    const cacheKey = catalogKey(args.executor, cliPath, configHome);
     let client: ProxyClient;
     if (args.preparedLaunch) {
       try {
@@ -375,9 +438,11 @@ export class ProxySessionCoordinator {
         throw error;
       }
     } else {
+      const env = catalogProbeEnv(args.executor, configHome);
       client = await this.proxy.getOrCreate(args.sessionId, args.executor, {
         cliPath,
         proxyVersion: args.proxyVersion ?? null,
+        ...(env ? { env } : {}),
       });
     }
     // Replace any stale callbacks before the new facade starts initialization.
@@ -388,9 +453,9 @@ export class ProxySessionCoordinator {
     if (args.preparedLaunch) {
       assertHandshakeMatchesBinding(initialized, args.preparedLaunch.sessionBinding);
     }
-    this.rememberProtocolCapabilities(catalogKey(args.executor, cliPath), initialized);
+    this.rememberProtocolCapabilities(cacheKey, initialized);
     const catalog = await client.catalog();
-    this.catalogByExecutor.set(catalogKey(args.executor, cliPath), catalog);
+    this.catalogByExecutor.set(cacheKey, catalog);
 
     const adoptParams: {
       nativeSessionId?: string;
@@ -407,10 +472,11 @@ export class ProxySessionCoordinator {
     const sessionConfig: Record<string, string | boolean | number | null> = {};
     for (const option of catalog.configOptions) {
       if (option.binding !== 'session') continue;
-      const persisted = args.executorConfig?.values[option.id]
+      const rawPersisted = args.executorConfig?.values[option.id]
         ?? (option.role === 'effort'
           ? args.executorConfig?.values.thought_level
           : undefined);
+      const persisted = supportedCatalogChoice(option.choices, rawPersisted);
       const byRole = option.role === 'model'
         ? args.model
         : option.role === 'effort'
@@ -437,6 +503,14 @@ export class ProxySessionCoordinator {
         ?? supportedRoleValue
         ?? supportedAgentValue
         ?? option.defaultValue;
+      const dropped = droppedCatalogChoice(
+        option.choices,
+        [args.sessionConfig?.[option.id], rawPersisted, byRole, byAgentOption],
+        value,
+      );
+      if (dropped !== undefined) {
+        console.warn(catalogChoiceDowngradeWarning(args.sessionId, option.id, dropped, value));
+      }
       if (value !== undefined && value !== '') sessionConfig[option.id] = value;
     }
     const attachmentDir = await ensureSessionAttachmentDir(args.sessionId, this.dataDir);
@@ -571,16 +645,28 @@ export class ProxySessionCoordinator {
     binding.offFault();
   }
 
-  getCapabilities(executor: string, cliPath?: string | null): ProxyCatalog | null {
-    return this.catalogByExecutor.get(catalogKey(executor, cliPath)) ?? null;
+  getCapabilities(
+    executor: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): ProxyCatalog | null {
+    return this.catalogByExecutor.get(catalogKey(executor, cliPath, configHome)) ?? null;
   }
 
-  getProtocolCapabilities(executor: string, cliPath?: string | null): Record<string, unknown> | null {
-    return this.protocolCapabilitiesByExecutor.get(catalogKey(executor, cliPath)) ?? null;
+  getProtocolCapabilities(
+    executor: string,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Record<string, unknown> | null {
+    return this.protocolCapabilitiesByExecutor.get(catalogKey(executor, cliPath, configHome)) ?? null;
   }
 
-  async warmCapabilities(executor: Executor, cliPath?: string | null): Promise<ProxyCatalog> {
-    const key = catalogKey(executor, cliPath);
+  async warmCapabilities(
+    executor: Executor,
+    cliPath?: string | null,
+    configHome?: string | null,
+  ): Promise<ProxyCatalog> {
+    const key = catalogKey(executor, cliPath, configHome);
     const cached = this.catalogByExecutor.get(key);
     if (cached) return cached;
     const tempKey = `__caps__${key}`;
@@ -588,7 +674,11 @@ export class ProxySessionCoordinator {
       this.emptyCatalogKeys.delete(tempKey);
       await this.proxy.dispose(tempKey).catch(() => undefined);
     }
-    const client = await this.proxy.getOrCreate(tempKey, executor, { cliPath: cliPath ?? null });
+    const env = catalogProbeEnv(executor, configHome);
+    const client = await this.proxy.getOrCreate(tempKey, executor, {
+      cliPath: cliPath ?? null,
+      ...(env ? { env } : {}),
+    });
     const initialized = await client.initialize();
     this.rememberProtocolCapabilities(key, initialized);
     const catalog = await client.catalog();
@@ -609,11 +699,16 @@ export class ProxySessionCoordinator {
     },
     sessionId?: string,
     cliPath?: string | null,
+    configHome?: string | null,
   ): Promise<ResolvedProxyCatalog> {
     let client = sessionId ? this.proxy.get(sessionId) : undefined;
     if (!client) {
-      const tempKey = `__caps__${catalogKey(executor, cliPath)}`;
-      client = await this.proxy.getOrCreate(tempKey, executor, { cliPath: cliPath ?? null });
+      const env = catalogProbeEnv(executor, configHome);
+      const tempKey = `__caps__${catalogKey(executor, cliPath, configHome)}`;
+      client = await this.proxy.getOrCreate(tempKey, executor, {
+        cliPath: cliPath ?? null,
+        ...(env ? { env } : {}),
+      });
       await client.initialize();
     }
     if (!client.resolveCatalog) {
@@ -626,9 +721,10 @@ export class ProxySessionCoordinator {
     executor: Executor,
     _cwd?: string,
     cliPath?: string | null,
+    configHome?: string | null,
   ): Promise<SlashListResult> {
-    const catalog = this.catalogByExecutor.get(catalogKey(executor, cliPath))
-      ?? await this.warmCapabilities(executor, cliPath);
+    const catalog = this.catalogByExecutor.get(catalogKey(executor, cliPath, configHome))
+      ?? await this.warmCapabilities(executor, cliPath, configHome);
     return { commands: catalog.slashCommands };
   }
 

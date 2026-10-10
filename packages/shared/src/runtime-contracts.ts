@@ -18,6 +18,7 @@ import { isSessionProxyBinding, isSessionRuntimeProfile } from './session-proxy-
 import { normalizeBrowserElementCapture } from './browser-context.js';
 import { normalizeComposerDocument } from './context.js';
 import type { ListNativeSessionsResponse, NativeSession } from './native.js';
+import { isInboxSyncSnapshot } from './inbox.js';
 import type { RunnerInfo, StateSyncMessage } from './web.js';
 
 type UnknownRecord = Record<string, unknown>;
@@ -388,7 +389,8 @@ export function isStateSyncMessage(value: unknown): value is StateSyncMessage {
     && isArrayOf(value.workspaces, isWorkspace)
     && isArrayOf(value.tasks, isTask)
     && isArrayOf(value.approvals, isApproval)
-    && isSystemConfig(value.config);
+    && isSystemConfig(value.config)
+    && isOptional(value, 'inbox', isInboxSyncSnapshot);
 }
 
 /** Runtime contract for a native CLI session returned by the Host REST API. */

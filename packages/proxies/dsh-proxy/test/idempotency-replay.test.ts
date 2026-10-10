@@ -22,7 +22,7 @@ function fakeBridge(counter: { turns: number } = { turns: 0 }) {
       }
       if (method === 'session.events.read') {
         return {
-          formatVersion: 3,
+          formatVersion: 4,
           events: [
             { type: 'turn/start', seq: 0, data: { turn: 0 } },
             { type: 'user/message', seq: 1, data: { turn: 0, source: 'external', message: { role: 'user', content: [{ type: 'text', text: 'external hello' }] } } },

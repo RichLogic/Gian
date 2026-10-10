@@ -32,7 +32,7 @@ test('DSH runtime version follows the real CLI entry behind an npm launcher syml
   assert.equal(dshVersionFromEntrypoint(join(root, 'missing')), null);
 });
 
-test('DSH 0.1.5 transient assistant streams preserve identity and reject duplicate or foreign frames', async () => {
+test('DSH 0.2.0-rc.2 transient assistant streams preserve identity and reject duplicate or foreign frames', async () => {
   const listeners = new Map<string, (...args: unknown[]) => unknown>();
   const emitted: Array<{ method: string; params: Record<string, unknown> }> = [];
   const agent = {
@@ -669,4 +669,55 @@ test('missing optional Cordis services remain absent when ctx.get rejects uninje
   assert.deepEqual(catalog.permissionPresets, []);
   assert.deepEqual(catalog.agentPresets, []);
   assert.equal(catalog.defaultAgentPreset, undefined);
+});
+
+test('session.events.read prefers snapshotEvents over an empty public events array', async () => {
+  const event = { type: 'user/message', seq: 4, time: 1, data: { text: 'hi' } };
+  const agentContext = {
+    on: (name: string, listener: (...args: unknown[]) => unknown) => {
+      void name;
+      void listener;
+      return () => true;
+    },
+  };
+  const agent = {
+    id: 'native-log',
+    status: 'idle' as const,
+    session: {
+      id: 'native-log',
+      header: { createdAt: Date.now() },
+      events: [] as Array<{ type: string; seq: number; time: number; data: Record<string, unknown> }>,
+      snapshotEvents: () => [event],
+    },
+    ctx: agentContext,
+    cancel: () => undefined,
+    whenIdle: async () => undefined,
+    followup: () => undefined,
+    steer: () => undefined,
+    inject: () => undefined,
+  };
+  const host = new CordisDshHost({
+    agents: {
+      create: async (options: { setup?: (ctx: unknown) => void | Promise<void> }) => {
+        await options.setup?.(agentContext);
+        return { agent, dispose: async () => undefined };
+      },
+    },
+    llm: {
+      listProviders: () => [{ id: 'deepseek-official' }],
+      listModels: async () => [{ id: 'deepseek-chat', provider: 'deepseek-official' }],
+    },
+    on: () => () => true,
+  } as never, '0.1.3');
+  await host.initialize();
+  await host.sessionCreate({
+    sessionId: 'gian-log',
+    cwd: '/tmp',
+    roots: ['/tmp'],
+    config: {},
+  });
+  const page = await host.sessionEventsRead({ sessionId: 'gian-log', cursor: null, limit: 10 }) as {
+    events: Array<{ seq: number }>;
+  };
+  assert.equal(page.events[0]?.seq, 4);
 });

@@ -658,6 +658,34 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(within(panel).queryByText('Installed version')).toBeNull();
   });
 
+  it('source-first Catalog version is not overwritten by a retained managed Runtime Proxy', async () => {
+    const item = structuredClone(READY);
+    item.installation = { state: 'installed', installedVersion: '0.3.8-Dev',
+      latestVersion: '0.3.8-Dev', updateAvailable: false, source: 'giandev' };
+    item.runtime = { state: 'ready', displayName: 'Grok CLI', path: '/dev/bin/runtime', version: '1.0.46' };
+    const catalog = catalogList([item]);
+    catalog.source = { id: 'giandev', sequence: null, state: 'ready', error: null };
+    mockApi([], catalog);
+    vi.mocked(api.loadManagedRuntimeStatus).mockResolvedValue({
+      pluginId: item.pluginId,
+      active: { proxy: { pluginVersion: '0.3.7' },
+        runtime: { entryPath: '/dev/bin/runtime', version: '1.0.41' } } as ManagedRuntimeGeneration,
+      staged: [],
+    });
+    renderAgents();
+    fireEvent.click(within(await screen.findByTestId('catalog-item-io.acme.ready')).getByTestId(/^catalog-open-/));
+    const panel = await screen.findByTestId('proxy-detail-panel');
+    const basic = within(panel).getByTestId('proxy-basic-information');
+    await waitFor(() => expect(basic.textContent).toContain('/dev/bin/runtime'));
+    expect(within(basic).getByLabelText('Proxy version').textContent).toBe('0.3.8-Dev');
+    expect(within(basic).getByLabelText('Runtime version').textContent).toBe('1.0.46');
+    expect(within(basic).getByText('Development source')).toBeTruthy();
+    expect(within(panel).getByText('Development version')).toBeTruthy();
+    expect(within(panel).queryByTestId('proxy-action-update')).toBeNull();
+    expect(within(panel).queryByTestId('proxy-action-uninstall')).toBeNull();
+    expect(api.installCatalogProxy).not.toHaveBeenCalled();
+  });
+
   it('loads Catalog 1.8 history in Version updates without dropping tutorial documents', async () => {
     const catalog = catalogList([READY]);
     catalog.source.sequence = 8;
@@ -872,6 +900,39 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     }));
   });
 
+  it.each([false, true])('offers Grok default HOME and preserves the occupied-HOME guard (occupied=%s)', async (occupied) => {
+    const home = '/Users/test/.grok';
+    const existing = occupied ? [agent({
+      id: 'grok-existing', name: 'Grok Build', pluginId: 'grok', proxy: null,
+      home: { kind: 'custom', path: home },
+    })] : [];
+    mockApi(existing, catalogList([catalogItem({
+      pluginId: 'grok', displayName: 'Grok Build',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      availableActions: ['create_agent'],
+    })]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: occupied ? 'Grok Build 2' : 'Grok Build', cliPath: null,
+      home: { kind: 'default', path: home },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const nativeHome = await within(dialog).findByLabelText(/Use default HOME/);
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledWith('grok');
+    expect(within(dialog).getByText(home)).toBeTruthy();
+    expect(nativeHome).toHaveProperty('checked', !occupied);
+    expect(nativeHome).toHaveProperty('disabled', occupied);
+    if (occupied) {
+      expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+    }
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: occupied ? 'Grok Build 2' : 'Grok Build', pluginId: 'grok',
+      ...(occupied ? { home: { kind: 'managed' } } : {}),
+    }));
+  });
+
   it('opens the login terminal for the selected Agent HOME', async () => {
     mockApi([agent({
       id: 'codex-agent', name: 'Codex', pluginId: 'codex', proxy: 'codex',
@@ -916,7 +977,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     }));
   });
 
-  it('creates a Custom Agent with a user-provided Runtime and HOME (ADR-0094)', async () => {
+  it('creates a Custom Agent with a user-provided Runtime and HOME (ADR-0102)', async () => {
     mockApi([], catalogList([EXTERNAL_READY]));
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));

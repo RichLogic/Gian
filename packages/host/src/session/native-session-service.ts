@@ -202,6 +202,7 @@ export class NativeSessionService {
           ?? this.resolveKindCliPath?.(input.executor)
           ?? null,
         proxyVersion: sessionRuntimeProxyVersion(input.runtimeProfile),
+        configHome: input.runtimeProfile?.configHome ?? null,
         nativeSessionId: input.nativeSessionId,
         resumeMode: 'load',
         ...(preparedLaunch ? { preparedLaunch } : {}),

@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import type { ComposerDocument, MessageContextItem } from '@gian/shared';
+import { useCallback, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import type { ComposerDocument, ComposerReferenceSegment, MessageContextItem } from '@gian/shared';
 import {
   ContextReferencePopover,
   ReferencePopover,
@@ -10,37 +11,7 @@ import {
 import type { ReferenceAnchor } from './reference-popover.js';
 import { formatBytes, isNativeImageMime } from './utils.js';
 import { useChatUiT } from './i18n.js';
-import { MarkdownText } from './markdown.js';
-
-/**
- * One text segment of a composer document. The composer is a markdown editor,
- * so the segment holds literal markdown and renders through the same
- * `MarkdownText` pipeline as assistant messages. Reference chips split
- * segments mid-paragraph, so `.user-md-seg` CSS keeps the segment's
- * paragraphs inline and consecutive segments + chips read as one flow.
- *
- * Markdown swallows the newlines that separated a segment from a neighboring
- * chip (`text\n` + chip, chip + `\n\ntext`), so boundary newlines come back
- * as explicit elements: `.user-md-br` for a soft line break, `.user-md-gap`
- * for a paragraph break.
- */
-function UserMarkdownSegment({ text }: { text: string }) {
-  const leading = /^\n+/.exec(text)?.[0].length ?? 0;
-  const rest = text.slice(leading);
-  const trailing = /\n+$/.exec(rest)?.[0].length ?? 0;
-  const body = rest.slice(0, rest.length - trailing);
-  return (
-    <>
-      {leading > 1 ? <span className="user-md-gap" /> : leading === 1 ? <span className="user-md-br" /> : null}
-      {body.length > 0 && (
-        <span className="user-md-seg">
-          {/^[ \t]+$/.test(body) ? body : <MarkdownText preserveBoundarySpaces>{body}</MarkdownText>}
-        </span>
-      )}
-      {trailing > 1 ? <span className="user-md-gap" /> : trailing === 1 ? <span className="user-md-br" /> : null}
-    </>
-  );
-}
+import { MarkdownText, inlineSlotToken } from './markdown.js';
 
 export interface InlineReferenceAttachment {
   name: string;
@@ -100,10 +71,7 @@ export function InlineReferenceDocument({
     ? contextItems.find(item => item.id === preview.id) ?? null
     : null;
   const attachmentIndexes = new Map<string, number>();
-  return (
-    <span className={className ? `inline-reference-document ${className}` : 'inline-reference-document'}>
-      {document.segments.map((segment, index) => {
-        if (segment.type === 'text') return <UserMarkdownSegment key={index} text={segment.text} />;
+  const renderChip = (segment: ComposerReferenceSegment, index: number): ReactNode => {
         if (segment.referenceType === 'context') {
           const contextItem = contextItems.find(item => item.id === segment.id);
           const referenceGlyph = (kind: 'file' | 'session') => (
@@ -210,7 +178,34 @@ export function InlineReferenceDocument({
             <span className="mir-label">{segment.label}</span>
           </span>
         );
-      })}
+  };
+
+  // The composer document renders as ONE markdown source: reference chips and
+  // whitespace-only runs become inline slot tokens that the pipeline swaps
+  // back for the real chip widgets, so block constructs (lists, headings,
+  // quotes) spanning a chip stay intact (2026-10-09 owner report: a "1. "
+  // before an image chip parsed as an empty list item and wrapped onto its
+  // own line). Pure whitespace runs never touch the parser — leading
+  // spaces/tabs could otherwise read as an indented code block.
+  const slots = new Map<number, ReactNode>();
+  const source = document.segments.map((segment, index) => {
+    if (segment.type === 'text' && !/^[ \t]+$/.test(segment.text)) return segment.text;
+    slots.set(index, segment.type === 'text' ? segment.text : renderChip(segment, index));
+    return inlineSlotToken(index);
+  }).join('');
+  // renderSlot must stay referentially stable (paired with the memoized
+  // components map in MarkdownText): read the latest slots through a ref so
+  // re-renders never change the md-slot component identity.
+  const slotsRef = useRef<Map<number, ReactNode>>(new Map());
+  slotsRef.current = slots;
+  const renderSlot = useCallback((index: number) => slotsRef.current.get(index) ?? null, []);
+  return (
+    <span className={className ? `inline-reference-document ${className}` : 'inline-reference-document'}>
+      <span className="user-md-seg">
+        <MarkdownText preserveBoundarySpaces renderSlot={renderSlot}>
+          {source}
+        </MarkdownText>
+      </span>
       {preview && previewItem && (
         <ContextReferencePopover
           item={previewItem}

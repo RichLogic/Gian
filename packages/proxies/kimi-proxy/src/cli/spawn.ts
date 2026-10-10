@@ -43,7 +43,7 @@ function readPluginVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  return '0.4.4';
+  return '0.4.6-Dev';
 }
 
 const PLUGIN_VERSION = readPluginVersion();

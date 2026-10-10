@@ -87,6 +87,13 @@ function agent(overrides: Partial<UserAgentStatus> & { pluginId: string }): User
 }
 
 describe('catalogBadges', () => {
+  it('does not call a source-ready Dev Proxy uninstalled when its CLI needs setup', () => {
+    const dev = item({ installation: { state: 'installed', source: 'giandev', installedVersion: '0.3.8-Dev' },
+      runtime: { state: 'setup_required', displayName: 'CLI' } });
+    expect(catalogBadges(dev)).toEqual(['runtime-setup']);
+    expect(catalogBadges({ ...dev, runtime: { state: 'invalid', displayName: 'CLI' } })).toEqual(['runtime-invalid']);
+    expect(catalogBadges({ ...dev, runtime: { state: 'ready', displayName: 'CLI' } })).toEqual(['installed']);
+  });
   it('marks a compatible not-installed item', () => {
     expect(catalogBadges(item())).toEqual(['not-installed']);
   });

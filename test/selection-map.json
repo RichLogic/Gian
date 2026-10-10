@@ -432,6 +432,52 @@
       "reason": "Side Chat and Session Fork contracts cross protocol schemas, Host transient persistence, and Fake Proxy subprocess evidence."
     },
     {
+      "id": "host-approval-scope",
+      "patterns": [
+        "packages/host/src/approval/manager.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/tool/service.ts",
+        "packages/host/src/remote/runtime.ts",
+        "packages/host/src/remote/command-adapter.ts",
+        "packages/host/src/remote/projection.ts",
+        "packages/host/src/remote/execution-journal.ts",
+        "packages/host/test/approval-scope.test.ts",
+        "packages/host/test/approval-response-scope.test.ts",
+        "packages/host/test/remote-interaction-scope.test.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Pending approvals, response idempotency ids, and remote interaction cards are isolated by host session id, the authoritative host turn occurrence, and the original approval id."
+    },
+    {
+      "id": "host-session-inbox",
+      "patterns": [
+        "packages/host/src/inbox/session-adapter.ts",
+        "packages/host/src/inbox/projection-facts.ts",
+        "packages/host/src/inbox/signal.ts",
+        "packages/host/src/inbox/service.ts",
+        "packages/host/src/approval/manager.ts",
+        "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/session/manager.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/test/session-inbox-adapter.test.ts"
+      ],
+      "modules": [
+        "host"
+      ],
+      "scopes": [
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Main-session questions and approvals mirror into Inbox only after a real pending registration, and close only after the domain accepts the outcome."
+    },
+    {
       "id": "host-migrations",
       "patterns": [
         "packages/host/migrations/*.sql",
@@ -540,7 +586,11 @@
     {
       "id": "codex-proxy",
       "patterns": [
+        "docs/adr/0099-disk-paged-codex-native-replay.md",
         "packages/proxies/codex-proxy/**"
+      ],
+      "optionalPatterns": [
+        "docs/adr/0099-disk-paged-codex-native-replay.md"
       ],
       "modules": [
         "codex-proxy",

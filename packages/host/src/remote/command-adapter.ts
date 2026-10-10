@@ -40,7 +40,7 @@ import type { RemoteAttachmentService } from './attachment-stream.js';
 import type { RemoteDeviceRecord } from './device-store.js';
 import type { RemoteFileRefService } from './file-ref.js';
 import type { RemoteExecutionJournal } from './execution-journal.js';
-import { RemoteProjector, assertNoLeak, remoteInteractionId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues } from './projection.js';
+import { RemoteProjector, assertNoLeak, remoteInteractionResourceId, remoteStableUuid, resolveRemoteAction, resolveRemoteAnswerValues } from './projection.js';
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -515,19 +515,23 @@ export class RemoteCommandAdapter {
     command: CommandRequest,
     params: Record<string, unknown>,
   ): Promise<unknown> {
-    const wireId = String(params['interaction_id']);
-    // Resolve from pending source records, so reconnects and Host restarts do
-    // not depend on an in-memory alias map. Never forward the wire id to a Proxy.
-    const pending = this.deps.sessions.listPendingApprovals()
-      .find(record => remoteInteractionId(record.id) === wireId);
+    const interactionId = String(params['interaction_id']);
+    const matches = this.deps.sessions.listPendingApprovals().filter(record => (
+      remoteInteractionResourceId(record.sessionId, record.turnId, record.id) === interactionId
+    ));
+    if (matches.length > 1) {
+      throw new RemoteProtocolError('PRECONDITION_FAILED', 'interaction id matches more than one session');
+    }
+    const pending = matches[0];
     if (!pending) {
       throw new RemoteProtocolError('PRECONDITION_FAILED', 'interaction is not pending');
     }
+    const nativeInteractionId = pending.id;
+    const interaction = this.deps.db.prepare(
+      `SELECT session_id, resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?`,
+    ).get(pending.sessionId, nativeInteractionId) as { session_id: string; resource_revision: number } | undefined;
     const sessionId = pending.sessionId;
     this.assertVisibleSession(sessionId, device);
-    const interaction = this.deps.db.prepare(
-      'SELECT resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
-    ).get(sessionId, pending.id) as { resource_revision: number } | undefined;
     const currentRevision = String(interaction?.resource_revision ?? 0);
     if (currentRevision !== String(params['interaction_revision'])) {
       throw precondition('interaction_revision', currentRevision);
@@ -538,7 +542,7 @@ export class RemoteCommandAdapter {
     }
     await this.toolCall(device, command, 'interaction.respond', {
       session_id: sessionId,
-      interaction_id: pending.id,
+      interaction_id: nativeInteractionId,
       expected_interaction_revision: params['interaction_revision'],
       ...(mapped.decision && mapped.decision !== 'submit_answers' ? { decision: mapped.decision } : {}),
       ...(mapped.native_option_id ? { native_option_id: mapped.native_option_id } : {}),
@@ -546,12 +550,12 @@ export class RemoteCommandAdapter {
         ? { answers: resolveRemoteAnswerValues(pending, params['values'] as Record<string, unknown>) }
         : {}),
     });
-    const resolved = this.deps.db.prepare(
+    const stored = this.deps.db.prepare(
       'SELECT resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
-    ).get(sessionId, pending.id) as { resource_revision: number } | undefined;
+    ).get(sessionId, nativeInteractionId) as { resource_revision: number } | undefined;
     return {
-      interaction_id: wireId,
-      revision: String(resolved?.resource_revision ?? 1),
+      interaction_id: interactionId,
+      revision: stored ? String(stored.resource_revision) : '1',
       resolved: true as const,
     };
   }

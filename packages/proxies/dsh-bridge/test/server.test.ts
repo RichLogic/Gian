@@ -6,6 +6,7 @@ import { BridgeServer } from '../src/server.js';
 import { BridgeWriter } from '../src/jsonrpc.js';
 import { FakeDshRuntime } from '../src/fake-host.js';
 import { signHostBinding } from '../src/host-binding.js';
+import { BRIDGE_PACKAGE_VERSION } from '../src/package-version.js';
 
 interface Output {
   notifications: Array<{ method: string; params: Record<string, unknown> }>;
@@ -53,7 +54,7 @@ test('initialize returns frozen bridge identity and capabilities', async () => {
   const result = await request(server, 'initialize', { protocol: { versions: ['1.0'] } });
   const typed = result as {
     protocol: { name: string; version: string };
-    plugin: { id: string; bundle: string };
+    plugin: { id: string; bundle: string; version: string };
     runtime: { package: string; version: string; sessionFormatVersion: number };
     capabilities: Record<string, number>;
   };
@@ -61,9 +62,10 @@ test('initialize returns frozen bridge identity and capabilities', async () => {
   assert.equal(typed.protocol.version, '1.0');
   assert.equal(typed.plugin.id, 'ai.deepseek.harness');
   assert.equal(typed.plugin.bundle, '@gian/dsh-bridge');
+  assert.equal(typed.plugin.version, BRIDGE_PACKAGE_VERSION);
   assert.equal(typed.runtime.package, '@deepseek-ai/dsh');
-  assert.equal(typed.runtime.version, '0.1.5-rc.3');
-  assert.equal(typed.runtime.sessionFormatVersion, 3);
+  assert.equal(typed.runtime.version, '0.2.0-rc.2');
+  assert.equal(typed.runtime.sessionFormatVersion, 4);
   assert.equal(typed.capabilities['session.events.read'], 1);
   assert.equal(typed.capabilities['session.fork'], 1);
   assert.equal(typed.capabilities['session.native.list'], 1);

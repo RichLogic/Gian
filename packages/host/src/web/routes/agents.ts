@@ -6,14 +6,13 @@ import type {
   Executor,
   LegacyExecutorId,
   ManagedRuntimeInstallStreamFrame,
-  ProductExecutor,
   ProxyCatalog,
 } from '@gian/shared';
 import { catalogModeSemantics, executorIdForPluginId, isApprovalMode, isProductExecutor } from '@gian/shared';
 import type { AgentManager } from '../../agents/manager.js';
 import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError, mergeAgentProxyDefaults } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
-import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
+import { isProxyPluginId, parseProxyPluginId, pluginIdForExecutorId, resolvePluginIdInput } from '@gian/shared';
 import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
 import { RuntimeControlError, type RuntimeControlPlane } from '../../runtime/control-plane.js';
 import { ManagedRuntimeDeliveryError, type ManagedRuntimeDeliveryService } from '../../runtime/delivery-service.js';
@@ -452,7 +451,7 @@ export function registerAgentRoutes(
     /** Test seam around the native folder picker; production uses pickPath. */
     pickHome?: () => ReturnType<typeof pickPath>;
     /** Test seam around the native file picker for a custom Runtime path
-     *  (ADR-0094); production uses pickPath('file', …). */
+     *  (ADR-0102); production uses pickPath('file', …). */
     pickRuntime?: () => ReturnType<typeof pickPath>;
     /** Count of in-flight Sessions (running/pending) bound to one Agent;
      *  guards PATCH disable. */
@@ -493,8 +492,7 @@ export function registerAgentRoutes(
     if (variant !== 'light' && variant !== 'dark') {
       return c.json({ error: 'logo not found' }, 404);
     }
-    // Signed Catalog first — the published sequence is the brand source of
-    // truth; the installed Proxy package is only the local fallback.
+    // CatalogService selects source branding in Dev and signed branding in production.
     if (options.catalogService && isProxyPluginId(raw)) {
       const logo = await options.catalogService.logo(raw, variant);
       if (logo) {
@@ -819,7 +817,7 @@ export function registerAgentRoutes(
           code: 'CLI_PATH_MANAGED',
         }, 400);
       }
-      // ADR-0094 phase 1: the Runtime binding is create-only.
+      // ADR-0102 phase 1: the Runtime binding is create-only.
       if (body.runtime !== undefined) {
         return c.json({
           error: 'The Runtime binding is set at Agent creation; delete and recreate the Agent to change it.',
@@ -962,7 +960,7 @@ export function registerAgentRoutes(
     return c.json({ error: outcome.error }, 500);
   });
 
-  // ADR-0094: custom Runtime paths are files (executables or launch scripts),
+  // ADR-0102: custom Runtime paths are files (executables or launch scripts),
   // unlike HOME folders.
   app.post('/api/agents/pick-runtime', async c => {
     if (!options.pickRuntime && process.platform !== 'darwin') {
@@ -1011,10 +1009,10 @@ export function registerAgentRoutes(
   // Kind default draft helpers: name/color/path the client can prefill a
   // draft card with before the Agent exists.
   app.get('/api/proxies/:id/draft-defaults', async c => {
-    const raw = c.req.param('id');
-    if (!isProductExecutor(raw)) return c.json({ error: 'unknown proxy' }, 404);
-    const kind: ProductExecutor = raw;
-    const existing = options.agents.listAgents().filter(agent => agent.proxy === kind);
+    const kind = executor(c.req.param('id'));
+    if (!kind) return c.json({ error: 'unknown proxy' }, 404);
+    const pluginId = pluginIdForExecutorId(kind);
+    const existing = options.agents.listAgents().filter(agent => agent.pluginId === pluginId);
     return c.json({
       name: options.agents.nextAgentName(kind),
       home: {

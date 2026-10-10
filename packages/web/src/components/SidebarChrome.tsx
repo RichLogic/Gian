@@ -25,11 +25,14 @@ function SvgIcon({ d, size = 16, stroke = 1.5 }: { d: string; size?: number; str
 }
 
 const ICON = {
-  // lucide.dev `bot` / `alarm-clock` / `sliders-horizontal` / `message-square`
-  bot: 'M12 8V4H8 M2 14h2 M20 14h2 M15 13v2 M9 13v2 M8 8h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z',
+  // lucide.dev `brain-cog` / `alarm-clock` / `sliders-horizontal` /
+  // `message-square` / `message-square-code` (circle elements converted to
+  // path arcs; leading relative movetos are absolute at path start).
+  brainCog: 'M10.852 14.772l-.383.923 M10.852 9.228l-.383-.923 M13.148 14.772l.382.924 M13.531 8.305l-.383.923 M14.772 10.852l.923-.383 M14.772 13.148l.923.383 M17.598 6.5A3 3 0 1 0 12 5a3 3 0 0 0-5.63-1.446 3 3 0 0 0-.368 1.571 4 4 0 0 0-2.525 5.771 M17.998 5.125a4 4 0 0 1 2.525 5.771 M19.505 10.294a4 4 0 0 1-1.5 7.706 M4.032 17.483A4 4 0 0 0 11.464 20c.18-.311.892-.311 1.072 0a4 4 0 0 0 7.432-2.516 M4.5 10.291A4 4 0 0 0 6 18 M6.002 5.125a3 3 0 0 0 .4 1.375 M9.228 10.852l-.923-.383 M9.228 13.148l-.923.383 M15 12a3 3 0 1 1-6 0 3 3 0 1 1 6 0z',
   alarm: 'M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M12 9v4l2 2 M5 3 2 6 M22 6l-3-3',
   sliders: 'M21 4h-7 M10 4H3 M21 12h-9 M8 12H3 M21 20h-5 M12 20H3 M14 2v4 M8 10v4 M16 18v4',
   msg: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z',
+  msgCode: 'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z M10 8l-3 3 3 3 M14 14l3-3-3-3',
   caretRight: 'M9 6l6 6-6 6',
   caretDown: 'M6 9l6 6 6-6',
   plus: 'M12 5v14 M5 12h14',
@@ -42,13 +45,14 @@ export const GROUP_INITIAL_SHOWN = 5;
 export const GROUP_SHOW_MORE_STEP = 10;
 
 const NAV_PAGES: ReadonlyArray<readonly [NavPage, string, string]> = [
-  ['agents', ICON.bot, 'nav.agents'],
+  ['agents', ICON.brainCog, 'nav.agents'],
   ['custom', ICON.sliders, 'topbar.mode.custom'],
   ['timer', ICON.alarm, 'topbar.mode.timer'],
 ];
 
-/** Agents / Custom / Timer entries — top of `.sb-scroll`; a long list scrolls
- *  them away together with the list-switch row below. */
+/** Agents / Custom / Timer entries — pinned with the list-switch row in the
+ *  `.sb-pin` chrome above `.sb-scroll` (2026-10-08: both moved out of the
+ *  scroll area so list rows hard-clip at its top edge). */
 export function SidebarNavRows({ mode, onSetMode }: { mode: Mode; onSetMode: (mode: Mode) => void }) {
   const t = useT();
   return (
@@ -217,7 +221,7 @@ export function SidebarListSwitch({
         aria-expanded={open}
         onClick={() => setOpen(o => !o)}
       >
-        <span className="sb-group-ico"><SvgIcon d={ICON.msg} size={17} stroke={1.7} /></span>
+        <span className="sb-group-ico"><SvgIcon d={ICON.msgCode} size={17} stroke={1.7} /></span>
         <span>{t(listMode === 'tasks' ? 'topbar.mode.tasks' : 'topbar.mode.project')}</span>
         <span className="sb-row-caret"><SvgIcon d={ICON.caretDown} size={13} /></span>
       </button>

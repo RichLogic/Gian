@@ -38,6 +38,7 @@ function fixtureSource(options: {
     processScope: string;
     protocolVersion: string;
   }>;
+  failShutdown?: boolean;
 } = {}): string {
   const pluginId = options.pluginId ?? 'io.gian.fixture';
   const pluginVersion = options.pluginVersion ?? '1.0.0';
@@ -112,6 +113,7 @@ for await (const line of input) {
       data: { stopReason: 'completed' },
     } }) + '\\n');
   } else if (request.method === 'session.close' || request.method === 'shutdown') {
+    if (${options.failShutdown ? 'true' : 'false'} && request.method === 'shutdown') process.exit(1);
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }) + '\\n');
     if (request.method === 'shutdown') break;
   }
@@ -670,7 +672,7 @@ test('close during create and stale exit stay race-safe', async (t) => {
   assert.equal(manager.get('stable'), second);
 });
 
-test('cleanup retry remains fail-closed on the generic path', async (t) => {
+test('cleanup retry logs the first release failure and retries on the next closeAll', async (t) => {
   const { entry, dataDir } = await writeFixture(t, fixtureSource({ processScope: 'session' }));
   const manager = managerFor(dataDir, entry);
   t.after(() => manager.closeAll());
@@ -693,16 +695,39 @@ test('cleanup retry remains fail-closed on the generic path', async (t) => {
     },
   );
   assert.ok(client);
-  await assert.rejects(
-    () => manager.closeAll(),
-    (error: unknown) => aggregateContains(error, /first release failed/),
-  );
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    logged.push(args.map(item => String(item)).join(' '));
+    originalError(...args);
+  };
+  try {
+    await manager.closeAll();
+  } finally {
+    console.error = originalError;
+  }
+  const closeLog = logged.join('\n');
+  assert.match(closeLog, /\[proxy\] closeAll failed:/);
+  assert.match(closeLog, /first release failed/);
   await manager.closeAll();
   assert.equal(releases >= 2, true);
 });
 
-function aggregateContains(error: unknown, pattern: RegExp): boolean {
-  if (pattern.test(String(error))) return true;
-  return error instanceof AggregateError
-    && error.errors.some((item) => aggregateContains(item, pattern));
-}
+test('closeAll finishes when a Proxy exits during shutdown', async (t) => {
+  const { entry, dataDir } = await writeFixture(t, fixtureSource({
+    processScope: 'session',
+    failShutdown: true,
+  }));
+  const manager = managerFor(dataDir, entry);
+  t.after(() => manager.closeAll());
+  const client = await manager.acquireWithBinding(
+    'dying',
+    binding(entry, { processScope: 'session' }),
+  ) as ProtocolV2SessionClient;
+  assert.equal(client.runtimeHost().isExited(), false);
+  // The shutdown RPC is not acknowledged: the fixture exits. An empty process
+  // tree is a finished close, so closeAll resolves instead of logging a failure.
+  await manager.closeAll();
+  assert.equal(client.runtimeHost().isExited(), true);
+  await manager.closeAll();
+});

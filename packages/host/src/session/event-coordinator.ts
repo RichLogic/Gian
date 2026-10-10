@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
+  ApprovalCategory,
   AttentionMessage,
   ChatEvent,
   ConfigOption,
@@ -23,7 +24,8 @@ import {
   type ProxyNotification as ProtocolNotification,
   type ReplayEvent,
 } from '@gian/proxy-protocol';
-import type { ApprovalManager } from '../approval/index.js';
+import { isInboxUserResolutionSource, type ApprovalManager } from '../approval/index.js';
+import { inboxOccurrenceHasClose, recordInboxProjection } from '../inbox/projection-facts.js';
 import { projectNotification, InteractionKindRegistry } from '../event/index.js';
 import type { NativeJsonlWatcher } from '../native/watcher.js';
 import type { QueueManager } from '../queue/index.js';
@@ -62,6 +64,20 @@ function isReplaceableSnapshot(event: ChatEvent): boolean {
   if (!update || typeof update !== 'object' || Array.isArray(update)) return false;
   const kind = (update as Record<string, unknown>).sessionUpdate;
   return kind === 'tool_call' || kind === 'tool_call_update';
+}
+
+const APPROVAL_CATEGORIES = new Set<ApprovalCategory>([
+  'command',
+  'network',
+  'file_write_outside_ws',
+  'browser_capture',
+  'exit_plan_mode',
+  'question',
+  'other',
+]);
+
+function isApprovalCategory(value: unknown): value is ApprovalCategory {
+  return typeof value === 'string' && APPROVAL_CATEGORIES.has(value as ApprovalCategory);
 }
 
 function notificationProviderTurnId(notification: ProxyNotification): string | null {
@@ -111,7 +127,8 @@ interface EventCoordinatorCallbacks {
     contextItems?: MessageContextItem[],
     composerDocument?: import('@gian/shared').ComposerDocument,
   ) => Promise<unknown>;
-  onInteractionResolved?: (interactionId: string) => void;
+  onInteractionResolved?: (sessionId: string, interactionId: string, turnId: string) => void;
+  onSessionApprovalsCleared?: (sessionId: string) => void;
 }
 
 export class SessionEventCoordinator {
@@ -384,6 +401,7 @@ export class SessionEventCoordinator {
       event: ChatEvent;
       turnId: string;
       attentionEligible: boolean;
+      providerEventId: string;
     }> = [];
     const persist = this.db.transaction(() => this.persistProtocolV1ReplayTransaction(
       sessionId,
@@ -398,6 +416,7 @@ export class SessionEventCoordinator {
         item.event,
         item.turnId,
         item.attentionEligible && !result.rebuilt,
+        item.providerEventId,
       );
     }
     if (broadcast && result.rebuilt) {
@@ -414,6 +433,7 @@ export class SessionEventCoordinator {
       event: ChatEvent;
       turnId: string;
       attentionEligible: boolean;
+      providerEventId: string;
     }> | null,
     replayStreamId?: string,
   ): { turns: number; events: number; rebuilt: boolean } {
@@ -565,6 +585,7 @@ export class SessionEventCoordinator {
             // newly appended tail is live work and may need attention;
             // Gian-owned turns were already notified by their stdio path.
             attentionEligible: turn.replayOwned,
+            providerEventId: notification.params.eventId,
           });
         }
       }
@@ -573,6 +594,14 @@ export class SessionEventCoordinator {
           (session_id, event_id, turn_id, payload_sha256)
          VALUES (?, ?, ?, ?)`,
       ).run(sessionId, notification.params.eventId, turn.id, payloadHash);
+      this.recordPersistedInteraction(
+        sessionId,
+        notification,
+        turn.id,
+        turn.number,
+        projected,
+        'replay',
+      );
     }
 
     for (const turn of turns.values()) this.history.compactTurnStreams(turn.id);
@@ -928,12 +957,20 @@ export class SessionEventCoordinator {
           (session_id, event_id, turn_id, payload_sha256)
          VALUES (?, ?, ?, ?)`,
       ).run(sessionId, eventId, active.id, payloadHash);
+      this.recordPersistedInteraction(
+        sessionId,
+        notification,
+        active.id,
+        active.number,
+        events,
+        'live',
+      );
       // Canonical Trace evidence: idempotent by (session_id, event_id).
       this.traceEvidence.persist(notification);
     });
     persist();
     for (const item of persistedEvents) {
-      this.broadcastChatEvent(item.event, active.id, item.inserted);
+      this.broadcastChatEvent(item.event, active.id, item.inserted, eventId);
     }
     return true;
   }
@@ -1236,10 +1273,15 @@ export class SessionEventCoordinator {
       storedData,
       { replaceSnapshot: isReplaceableSnapshot(e) },
     );
-    this.broadcastChatEvent(e, turnId, result.inserted);
+    this.broadcastChatEvent(e, turnId, result.inserted, null);
   }
 
-  private broadcastChatEvent(e: ChatEvent, turnId: string, attentionEligible: boolean): void {
+  private broadcastChatEvent(
+    e: ChatEvent,
+    turnId: string,
+    attentionEligible: boolean,
+    providerEventId: string | null,
+  ): void {
     this.broadcaster.broadcast({
       type: 'event',
       session_id: e.session_id,
@@ -1266,10 +1308,81 @@ export class SessionEventCoordinator {
     ) {
       this.broadcaster.broadcast(attention);
     }
-    this.afterChatEvent(e, turnId, attention);
+    this.afterChatEvent(e, turnId, attention, providerEventId);
     for (const fn of this.eventSubscribers) {
       try { fn(e); } catch {}
     }
+  }
+
+  /**
+   * Writes the inbox fact in the same transaction as the new protocol event.
+   * userPending is decided here from the projected request. Auto and
+   * unrecognized requests are stored already applied, so recovery cannot
+   * turn them into inbox items. A resolved fact peeks web/im/tool and does
+   * not consume that source.
+   */
+  private recordPersistedInteraction(
+    sessionId: string,
+    notification: ProtocolNotification,
+    turnId: string,
+    turnNumber: number,
+    events: ChatEvent[],
+    origin: 'live' | 'replay',
+  ): void {
+    const method = notification.method;
+    if (method !== 'interaction.requested' && method !== 'interaction.resolved') return;
+    const params = notification.params as { eventId?: unknown; data?: unknown };
+    const eventId = params.eventId;
+    const data = params.data;
+    if (typeof eventId !== 'string' || !eventId) return;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    const raw = data as Record<string, unknown>;
+    const display = events.find((event) => (
+      event.display?.type === 'interaction.approval'
+      || event.display?.type === 'interaction.question'
+      || event.display?.type === 'interaction.resolved'
+    ));
+    const displayType = display?.display?.type ?? null;
+    const displayData = display?.display
+      ? display.display.data as unknown as Record<string, unknown>
+      : null;
+    let userPending = false;
+    if (method === 'interaction.requested' && displayData) {
+      const risk = displayData.risk === 'low' || displayData.risk === 'medium' || displayData.risk === 'high'
+        ? displayData.risk
+        : 'high';
+      const nativeOptions = Array.isArray(displayData.nativeOptions)
+        ? displayData.nativeOptions as NonNullable<
+          Parameters<ApprovalManager['inboxUserPending']>[0]['nativeOptions']
+        >
+        : undefined;
+      if (isApprovalCategory(displayData.category)) {
+        userPending = this.approvals.inboxUserPending({
+          sessionId,
+          category: displayData.category,
+          risk,
+          nativeOptions,
+        });
+      }
+    }
+    const interactionId = typeof raw.interactionId === 'string' ? raw.interactionId : '';
+    const userSource = method === 'interaction.resolved'
+      && isInboxUserResolutionSource(
+        this.approvals.peekResolutionSource(interactionId, sessionId),
+      );
+    recordInboxProjection(this.db, {
+      sessionId,
+      providerEventId: eventId,
+      turnId,
+      turnNumber,
+      origin,
+      method,
+      raw,
+      displayType,
+      displayData,
+      userPending,
+      userSource,
+    });
   }
 
   /**
@@ -1281,17 +1394,32 @@ export class SessionEventCoordinator {
     e: ChatEvent,
     turnId: string,
     attention: AttentionMessage | null,
+    providerEventId: string | null,
   ): void {
     if (e.display?.type === 'interaction.approval' || e.display?.type === 'interaction.question') {
-      this.persistLiveSessionStatus(e.session_id, 'pending');
       const d = e.display.data as import('@gian/shared').ApprovalRequestedData;
+      // This occurrence already has a close. Join a live waiter on the same
+      // host turn. A terminal inbox row is not registered again.
+      if (
+        typeof d.approvalId === 'string'
+        && inboxOccurrenceHasClose(this.db, e.session_id, turnId, d.approvalId)
+      ) {
+        const live = this.approvals.getPending(d.approvalId, e.session_id);
+        if (live?.turnId === turnId) this.approvals.joinPending(live);
+        return;
+      }
+      this.persistLiveSessionStatus(e.session_id, 'pending');
       void this.approvals.request({
         sessionId: e.session_id,
         turnId,
+        turnNumber: e.turn,
         category: d.category,
         risk: d.risk,
         description: d.description,
         subject: d.subject,
+        title: d.title,
+        toolName: interactionToolName(e, d),
+        projected: e.display?.type === 'interaction.question' ? 'question' : 'approval',
         payload: {
           approvalId: d.approvalId,
           scopeOptions: d.scopeOptions,
@@ -1317,7 +1445,7 @@ export class SessionEventCoordinator {
             SET outcome = ?, resolved_at = ?
           WHERE session_id = ? AND interaction_id = ?`,
       ).run(raw.outcome ?? null, now, e.session_id, d.approvalId);
-      const pending = this.approvals.getPending(d.approvalId);
+      const pending = this.approvals.getPending(d.approvalId, e.session_id);
       const selected = d.nativeOptionId
         ? pending?.nativeOptions?.find(option => option.optionId === d.nativeOptionId)
         : undefined;
@@ -1328,12 +1456,25 @@ export class SessionEventCoordinator {
           : selected?.kind === 'allow_once'
             ? 'allow_once'
             : d.decision;
-      this.approvals.resolve(
-        d.approvalId,
+      const consumed = this.approvals.consumeResolutionSource(d.approvalId, e.session_id);
+      const userSource = isInboxUserResolutionSource(consumed);
+      const resolvedBy = consumed ?? (d.auto ? 'auto' : 'web');
+      this.approvals.resolve(d.approvalId, decision, resolvedBy, e.session_id);
+      // The pending record is gone after a restart. The stored inbox row still
+      // closes from this event, at the generation recorded with the provider event.
+      // userSource is only the consumed web/im/tool source. The resolvedBy
+      // fallback above is the approval card's actor and does not mark Inbox read.
+      this.approvals.closePersisted({
+        sessionId: e.session_id,
+        interactionId: d.approvalId,
+        turnId,
+        providerEventId: providerEventId ?? '',
         decision,
-        this.approvals.consumeResolutionSource(d.approvalId) ?? (d.auto ? 'auto' : 'web'),
-      );
-      this.callbacks.onInteractionResolved?.(d.approvalId);
+        outcome: typeof raw.outcome === 'string' ? raw.outcome : null,
+        userSource,
+        by: resolvedBy,
+      });
+      this.callbacks.onInteractionResolved?.(e.session_id, d.approvalId, turnId);
     }
     if (e.display?.type === 'activity.command') {
       const d = e.display.data as import('@gian/shared').CommandExecutionData;
@@ -1462,6 +1603,7 @@ export class SessionEventCoordinator {
     // Pending approvals that were in flight against this proxy will never
     // resolve now — drop them so the UI's approval list stays accurate.
     this.approvals.clearSession(sessionId);
+    this.callbacks.onSessionApprovalsCleared?.(sessionId);
     // Drop the cached proxy session id regardless of turn state. If we skip
     // this when no turn is active (proxy killed externally, idle exit, …),
     // the next sendMessage hits a stale cache → `no proxy for session`.
@@ -1476,6 +1618,7 @@ export class SessionEventCoordinator {
 
   handleSessionFault(sessionId: string, error: Error): void {
     this.approvals.clearSession(sessionId);
+    this.callbacks.onSessionApprovalsCleared?.(sessionId);
     this.proxySessions.forget(sessionId);
     this.watcher?.resume(sessionId);
     this.flushSnapshots(sessionId);
@@ -1505,6 +1648,8 @@ export class SessionEventCoordinator {
     for (const turn of turns) {
       this.ensureTerminalBoundary(sessionId, turn, status, completedAt);
       this.compactTerminalTurn(turn.id);
+      this.approvals.releaseHostTurn(sessionId, turn.id);
+      this.approvals.notifyHostTurnTerminal(sessionId, turn.id);
     }
   }
 
@@ -1549,6 +1694,8 @@ export class SessionEventCoordinator {
     }
     const active = this.turns.finish(sessionId, terminalStatus, now);
     if (!active) return null;
+    this.approvals.releaseHostTurn(sessionId, active.id);
+    this.approvals.notifyHostTurnTerminal(sessionId, active.id);
     this.ensureTerminalBoundary(sessionId, active, terminalStatus, now);
     this.compactTerminalTurn(active.id);
     // 'stopped' (user-initiated interrupt) is logically a clean termination,
@@ -1664,4 +1811,20 @@ export class SessionEventCoordinator {
     });
   }
 
+}
+
+function interactionToolName(
+  event: ChatEvent,
+  display: { toolName?: string },
+): string | undefined {
+  if (typeof display.toolName === 'string' && display.toolName !== '') return display.toolName;
+  if (!event.data || typeof event.data !== 'object') return undefined;
+  const record = event.data as Record<string, unknown>;
+  if (typeof record.toolName === 'string' && record.toolName !== '') return record.toolName;
+  const context = record.context;
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return undefined;
+  const subject = (context as Record<string, unknown>).subject;
+  if (!subject || typeof subject !== 'object' || Array.isArray(subject)) return undefined;
+  const toolName = (subject as Record<string, unknown>).toolName;
+  return typeof toolName === 'string' && toolName !== '' ? toolName : undefined;
 }

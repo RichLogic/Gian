@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { HostProtocolValidator } from '@gian/proxy-protocol';
+
 export interface OutgoingLine {
   kind: 'result' | 'error' | 'notification';
   id?: string;
@@ -22,12 +24,20 @@ export class Harness {
   readonly child: ChildProcessWithoutNullStreams;
   readonly dir: string;
   readonly lines: OutgoingLine[] = [];
+  readonly notifications: OutgoingLine[] = [];
+  readonly protocolErrors: unknown[] = [];
   lastStderr = '';
   private readonly waiters: Array<(line: OutgoingLine) => void> = [];
   private readonly resolvers: Waiter[] = [];
   private readonly logPath: string;
+  private readonly validator: HostProtocolValidator | null;
 
-  constructor(scenario: Record<string, unknown>) {
+  constructor(scenario: Record<string, unknown>, options: { validateProtocol?: boolean } = {}) {
+    this.validator = options.validateProtocol === true ? new HostProtocolValidator({
+      pluginId: 'kimi',
+      pluginVersion: (JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { version: string }).version,
+      processScope: 'shared',
+    }) : null;
     this.dir = mkdtempSync(join(tmpdir(), 'kimi-proxy-test-'));
     const scenarioPath = join(this.dir, 'scenario.json');
     this.logPath = join(this.dir, 'fake-log.jsonl');
@@ -77,6 +87,11 @@ export class Harness {
     } catch {
       return;
     }
+    try {
+      this.validator?.acceptLine(trimmed);
+    } catch (error) {
+      this.protocolErrors.push(error);
+    }
     let parsed: OutgoingLine;
     if (typeof envelope.method === 'string') {
       parsed = { kind: 'notification', method: envelope.method, payload: envelope };
@@ -85,6 +100,7 @@ export class Harness {
     } else {
       parsed = { kind: 'result', id: envelope.id as string, payload: envelope };
     }
+    if (parsed.kind === 'notification') this.notifications.push(parsed);
     for (const waiter of [...this.waiters]) waiter(parsed);
     this.lines.push(parsed);
     this.pump();
@@ -109,6 +125,7 @@ export class Harness {
     params: Record<string, unknown>,
     id = `req-${Math.random().toString(36).slice(2, 8)}`,
   ): Promise<OutgoingLine & { id: string }> {
+    this.validator?.registerRequest({ jsonrpc: '2.0', id, method, params });
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         rejectRequest(new Error(`request ${method} (${id}) timed out`));
@@ -209,8 +226,8 @@ function readLogs(logPath: string): Array<Record<string, unknown>> {
     .map((entry) => JSON.parse(entry) as Record<string, unknown>);
 }
 
-export function startHarness(scenario: Record<string, unknown>): Harness {
-  return new Harness(scenario);
+export function startHarness(scenario: Record<string, unknown>, options: { validateProtocol?: boolean } = {}): Harness {
+  return new Harness(scenario, options);
 }
 
 export async function initialize(harness: Harness, versions: string[] = ['2.3', '2.2', '2.1']): Promise<Record<string, unknown>> {

@@ -39,7 +39,7 @@ import { HostRelaySocket, DeviceRouteTransport } from '../src/remote/host-relay.
 import { devicePublicKeyCanonical } from '../src/remote/device-store.js';
 import { defaultRemoteDeviceGrants } from '../src/remote/grants.js';
 import { RemoteReplayBuffer } from '../src/remote/replay-buffer.js';
-import { remoteInteractionId } from '../src/remote/projection.js';
+import { remoteInteractionResourceId } from '../src/remote/projection.js';
 import { command, seedDevice, setupRemoteHarness, teardownRemoteHarness } from './fixtures/remote-harness.js';
 import { makeTestApp } from './fixtures/test-app.js';
 import { authenticatedRemoteFixture } from './fixtures/remote-account.js';
@@ -2564,9 +2564,10 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
       type: 'subtask',
       name: 'Remote interaction push',
     });
+    const questionTurnId = generateCanonicalId();
     const asking = context.approvals.request({
       sessionId: created.id,
-      turnId: generateCanonicalId(),
+      turnId: questionTurnId,
       turnNumber: 1,
       category: 'question',
       risk: 'low',
@@ -2585,21 +2586,22 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
     const pushed = await waitUntil(
       () => received.find((entry) => entry.type === 'event' && entry.event?.kind === 'interaction.updated') ?? null,
     );
-    assert.equal(pushed.event?.interaction?.id, remoteInteractionId(questionId));
+    assert.equal(pushed.event?.interaction?.id, remoteInteractionResourceId(created.id, questionTurnId, questionId));
     assert.equal(pushed.event?.interaction?.kind, 'question');
     assert.equal(pushed.event?.interaction?.session_id, created.id);
     const patched = await waitUntil(
       () => received.find((entry) => entry.type === 'state.patch'
-        && entry.patch?.interactions?.upsert.some(item => item.id === remoteInteractionId(questionId))) ?? null,
+        && entry.patch?.interactions?.upsert.some(item => item.id === remoteInteractionResourceId(created.id, questionTurnId, questionId))) ?? null,
     );
     assert.ok(patched);
 
     // The Kimi shape: a question riding ACP native permission options — the
     // record carries nativeOptions, so it projects as native_choice, and it
     // must still reach the device.
+    const kimiTurnId = generateCanonicalId();
     const kimiAsking = context.approvals.request({
       sessionId: created.id,
-      turnId: generateCanonicalId(),
+      turnId: kimiTurnId,
       turnNumber: 2,
       category: 'question',
       risk: 'low',
@@ -2617,12 +2619,12 @@ test('approval:created broadcast pushes interaction.updated to the connected dev
         && entry.event?.kind === 'interaction.updated'
         && entry.event.interaction?.kind === 'native_choice') ?? null,
     );
-    assert.equal(kimiPushed.event?.interaction?.id, remoteInteractionId(nativeId));
+    assert.equal(kimiPushed.event?.interaction?.id, remoteInteractionResourceId(created.id, kimiTurnId, nativeId));
     assert.equal(kimiPushed.event?.interaction?.session_id, created.id);
-    for (const id of [questionId, nativeId]) {
+    for (const [id, turnId] of [[questionId, questionTurnId], [nativeId, kimiTurnId]] as const) {
       context.approvals.resolve(id, 'decline', 'tool');
       await waitUntil(() => received.find(entry => entry.type === 'state.patch'
-        && entry.patch?.interactions?.remove_ids.includes(remoteInteractionId(id))) ?? null);
+        && entry.patch?.interactions?.remove_ids.includes(remoteInteractionResourceId(created.id, turnId, id))) ?? null);
     }
     await Promise.all([asking, kimiAsking]);
   } finally {

@@ -70,6 +70,8 @@ export class RemoteControllerHub {
   private closed = false;
   private translations?: TranslationService;
   private onTurnCompleted?: (localId: string, turn: number) => void;
+  /** Last broadcast remote:environments payload — dedups connectivity pushes. */
+  private environmentsSignature: string | null = null;
 
   setTranslationService(service: TranslationService, onTurnCompleted: (localId: string, turn: number) => void): void {
     this.translations = service;
@@ -131,6 +133,19 @@ export class RemoteControllerHub {
       .map(environment => ({ id: environment.id, name: environment.name, host_id: environment.host_id,
         server_origin: environment.server_origin, pending: environment.pairing_id !== null,
         connected: this.clients.get(environment.id)?.connected === true }));
+  }
+
+  /** Push the full environment snapshot to web clients when anything flipped
+   *  (per-environment `connected` or the list itself). Clean disconnects are
+   *  real-time via the client callback; unclean remote death surfaces through
+   *  the sync failure paths below (presence lease, up to ~30s). */
+  broadcastEnvironments(): void {
+    if (this.closed) return;
+    const environments = this.listEnvironments();
+    const signature = canonicalJson(environments);
+    if (signature === this.environmentsSignature) return;
+    this.environmentsSignature = signature;
+    this.broadcaster.broadcast({ type: 'remote:environments', environments });
   }
 
   async startLogin(origin: string): Promise<RemoteSettingsSnapshot['account']> {
@@ -289,10 +304,14 @@ export class RemoteControllerHub {
   sync(localSessionId: string): Promise<void> {
     const current = this.syncing.get(localSessionId);
     if (current) return current;
-    const run = this.syncOnce(localSessionId).then(() => { this.availability.set(localSessionId, 'ready'); }).catch(error => {
+    const run = this.syncOnce(localSessionId).then(() => {
+      this.availability.set(localSessionId, 'ready');
+      this.broadcastEnvironments();
+    }).catch(error => {
       const code = error instanceof RemoteProtocolError ? error.code : '';
       this.availability.set(localSessionId, code === 'AUTH_REQUIRED' ? 'auth_required'
         : code === 'REMOTE_CAPABILITY_DENIED' || code === 'RESOURCE_NOT_FOUND' ? 'unavailable' : 'offline');
+      this.broadcastEnvironments();
       throw error;
     }).finally(() => this.syncing.delete(localSessionId));
     this.syncing.set(localSessionId, run);
@@ -730,7 +749,7 @@ export class RemoteControllerHub {
       this.db.prepare(`UPDATE remote_controller_environments SET device_id = ?, crypto_connection_id = ?,
         host_public_key_json = ?, pairing_id = ? WHERE id = ?`)
         .run(next.device_id, next.crypto_connection_id, next.host_public_key_json, next.pairing_id, next.id);
-    });
+    }, undefined, undefined, () => this.broadcastEnvironments());
     this.clients.set(environmentId, client);
     return client;
   }

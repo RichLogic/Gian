@@ -25,7 +25,7 @@ import type {
   KimiMessage,
   KimiSessionInfo,
 } from './types.js';
-import { KimiServerRuntime, type ResyncNotice, type SessionCursor } from '../runtime/kimi-server.js';
+import { KimiServerRuntime, type KimiServerEventFrame, type ResyncNotice, type SessionCursor } from '../runtime/kimi-server.js';
 import { KimiApiError, KimiTransportError } from '../runtime/rest-client.js';
 import { KimiProtocolError } from '../transport/protocol.js';
 
@@ -186,6 +186,7 @@ export class KimiProxyService {
       projector,
     };
     full.projector.setStreamId(full.streamId);
+    this.sequences.set(record.sessionId, 0);
     this.records.set(record.sessionId, full);
     this.byNative.set(record.nativeSessionId, record.sessionId);
     return full;
@@ -248,14 +249,7 @@ export class KimiProxyService {
 
   // ---- runtime events ----
 
-  private handleFrame(frame: {
-    type: string;
-    seq: number;
-    session_id?: string;
-    volatile?: boolean;
-    offset?: number;
-    payload: Record<string, unknown>;
-  }): void {
+  private handleFrame(frame: KimiServerEventFrame): void {
     const sessionId = typeof frame.session_id === 'string' ? frame.session_id : '';
     const gianId = this.byNative.get(sessionId);
     if (gianId === undefined) return;
@@ -268,6 +262,12 @@ export class KimiProxyService {
       ...(frame.volatile === true ? { volatile: true } : {}),
       ...(typeof frame.offset === 'number' ? { offset: frame.offset } : {}),
     });
+    if (frame.volatile !== true) {
+      this.runtime.advanceCursor(sessionId, {
+        seq: frame.seq,
+        ...(frame.epoch !== undefined ? { epoch: frame.epoch } : {}),
+      });
+    }
     this.reconcileState(record);
   }
 
@@ -333,10 +333,11 @@ export class KimiProxyService {
       const info = await this.runtime.rest.request<KimiSessionInfo>(
         'GET', `/api/v1/sessions/${existing.nativeSessionId}`,
       );
-      if (info.busy === true) {
+      if (info.busy === true || existing.activeTurn !== null) {
         throw new KimiProtocolError('SESSION_BUSY', 'The native session is busy; refusing to rebind.');
       }
       existing.streamId = `stream-${sha32([params.sessionId, nowIso()])}`;
+      this.sequences.set(params.sessionId, 0);
       existing.projector.setStreamId(existing.streamId);
       this.setState(existing, 'idle');
       await this.subscribeNative(existing, { seq: info.last_seq ?? 0 });
@@ -423,6 +424,7 @@ export class KimiProxyService {
 
   private dropRecord(record: SessionRecord): void {
     this.records.delete(record.sessionId);
+    this.sequences.delete(record.sessionId);
     if (this.byNative.get(record.nativeSessionId) === record.sessionId) {
       this.byNative.delete(record.nativeSessionId);
     }

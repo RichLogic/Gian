@@ -18,13 +18,20 @@ const notes = {
   },
   dsh: {
     id: 'ai.deepseek.harness', directory: 'ai.deepseek.harness',
-    zh: '适配 DeepSeek Harness 0.1.5-rc.3 的完整能力面，支持文件与图片输入、Steer、Fork、结构化问题以及计划和 Diff 事件；随包内置 Bridge 0.1.5。',
-    en: 'Adapt the full DeepSeek Harness 0.1.5-rc.3 capability surface: file and image input, steer, fork, structured questions, and plan and diff events, with bundled Bridge 0.1.5.',
+    // Next publish copy. changelog.md's top snapshot stays the published
+    // Proxy 0.3.3 / Runtime 0.1.5-rc.3 projection until this capture runs.
+    zh: '适配 DeepSeek Harness 0.2.0-rc.2：会话日志升到 V4，已删除的模型选择回退到当前默认模型并提示重选；随包内置 Bridge 0.1.6。',
+    en: 'Support DeepSeek Harness 0.2.0-rc.2: session logs move to V4, and a saved model that is no longer advertised falls back to the current default with a prompt to reselect. Bundled Bridge is 0.1.6.',
   },
   kimi: {
     id: 'kimi', directory: 'kimi',
-    zh: '按原生 step 分开投影助手文本和思考，工具结果保持命令、文件和搜索呈现；修复复用 durable seq 的 volatile 帧与 Usage 事件身份。已完成 Turn 后的空闲会话支持 Fork 和 Sidechat，指定 Turn 的 Fork 仍不可用。本版不改变 Proxy 线协议，也不改变 Kimi Code 2.1.1 Runtime。',
-    en: 'Project assistant text and thinking separately for each native step, preserve command, file and search tool-result presentation, and fix volatile frames that reuse the durable sequence and usage event identities. Idle sessions after a completed turn support fork and side chat; forking at a specific turn remains unavailable. The Proxy wire protocol and Kimi Code 2.1.1 Runtime pin are unchanged.',
+    zh: '修复冷启动 Side Chat 的原生子会话订阅与终态、Stop 后继续对话、工具和文件 Diff 投影；原生 Question 取消明确声明可省略答案的动作。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，Kimi Code Runtime 仍为 2.1.1。',
+    en: 'Fix native cold-child Side Chat subscription and terminal handling, continuation after Stop, and tool/file-diff projection. Native Question cancellation explicitly declares the actions that may omit answers. The standalone package uses public Proxy Protocol SDK 1.0.2; the wire protocol range and Kimi Code Runtime 2.1.1 remain unchanged.',
+  },
+  grok: {
+    id: 'grok', directory: 'grok',
+    zh: '修复会话配置与 Turn 配置边界、模型切换、原生事件和交互投影；Question 取消仅按明确声明动作免除必填答案。Fork 只在原生 CLI 确认支持时开放。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，受管 Grok CLI 仍为 1.0.41。',
+    en: 'Fix session/turn configuration boundaries, model changes, native event and interaction projection. Required answers are optional only for explicitly declared Question cancellation actions. Fork is available only after native CLI support is confirmed. The standalone package uses public Proxy Protocol SDK 1.0.2; the wire protocol range and managed Grok CLI 1.0.41 remain unchanged.',
   },
   zcode: {
     id: 'com.zhipu.zcode', directory: 'com.zhipu.zcode',
@@ -138,7 +145,7 @@ function capture(sequence, certificatePath, baseIndexPath, releaseDir, providers
           basis: 'verified-declaration',
         },
         companionDeclarations: provider === 'dsh'
-          ? [{ id: '@gian/dsh-bridge', version: '0.1.5', basis: 'bundled-package-source' }]
+          ? [{ id: '@gian/dsh-bridge', version: '0.1.6', basis: 'bundled-package-source' }]
           : [],
         protocolRange: manifest.protocol.range,
         manifestSchema: manifest.schemaVersion,

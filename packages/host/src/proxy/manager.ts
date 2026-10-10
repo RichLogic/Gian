@@ -36,6 +36,45 @@ export interface InspectionHostOptions {
   cliFingerprint?: string | null;
 }
 
+function logProxyCloseFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[proxy] closeAll failed: ${message}`);
+  if (error instanceof AggregateError) {
+    for (const item of error.errors) logProxyCloseFailure(item);
+  }
+}
+
+function leaseWithExtraEnv(
+  lease: RuntimeLease,
+  extra: Readonly<Record<string, string>>,
+): RuntimeLease {
+  return {
+    binaryPath: lease.binaryPath,
+    version: lease.version,
+    source: lease.source,
+    env: Object.freeze({ ...lease.env, ...extra }),
+    ...(lease.reserveProcessGroup
+      ? { reserveProcessGroup: () => lease.reserveProcessGroup!() }
+      : {}),
+    release: () => lease.release(),
+  };
+}
+
+/** Shared Proxy processes are keyed by the launch binding. Fold the Agent
+ *  home into that identity so a second home does not catalog the first
+ *  process. Session-scoped processes stay one per session either way. */
+function bindingForProbeEnv(
+  binding: ProxyLaunchBinding,
+  env: Readonly<Record<string, string>> | undefined,
+): ProxyLaunchBinding {
+  const home = env?.GIAN_AGENT_HOME;
+  if (!home) return binding;
+  const identity = createHash('sha256')
+    .update(`${binding.runtimeProfile?.identity ?? ''}\u0000${home}`)
+    .digest('hex');
+  return { ...binding, runtimeProfile: { identity } };
+}
+
 export function inspectionProfileIdentity(options: InspectionHostOptions): string | null {
   const { runtimeProfileId, configHome, cliFingerprint } = options;
   if (!runtimeProfileId && !configHome && !cliFingerprint) return null;
@@ -152,7 +191,11 @@ export class ProxyManager {
   async getOrCreate(
     sessionId: string,
     executor: Executor,
-    options?: { cliPath?: string | null; proxyVersion?: string | null },
+    options?: {
+      cliPath?: string | null;
+      proxyVersion?: string | null;
+      env?: Readonly<Record<string, string>>;
+    },
   ): Promise<ProxyClient> {
     const resolveLegacyLaunch = this.cfg.resolveLegacyLaunch;
     if (!resolveLegacyLaunch) {
@@ -166,14 +209,24 @@ export class ProxyManager {
         proxyVersion: options?.proxyVersion ?? null,
       }),
     };
-    return this.acquire(sessionId, claim, async () => ({
-      ...(await resolveLegacyLaunch(executor, {
+    const extraEnv = options?.env;
+    return this.acquire(sessionId, claim, async () => {
+      const resolved = await resolveLegacyLaunch(executor, {
         cliPath: options?.cliPath ?? null,
         proxyVersion: options?.proxyVersion ?? null,
-      })),
-      validateHandshake: false,
-      launchId: claim.launchId,
-    }));
+      });
+      return {
+        ...resolved,
+        binding: bindingForProbeEnv(resolved.binding, extraEnv),
+        acquireLease: async () => {
+          const lease = await resolved.acquireLease();
+          if (!lease || !extraEnv) return lease;
+          return leaseWithExtraEnv(lease, extraEnv);
+        },
+        validateHandshake: false,
+        launchId: claim.launchId,
+      };
+    });
   }
 
   /** Generic supervisor entry: exact binding in, no Provider registry. */
@@ -758,7 +811,10 @@ export class ProxyManager {
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map(result => result.reason);
     if (failures.length > 0) {
-      throw new AggregateError(failures, 'One or more Proxy runtimes could not be closed.');
+      logProxyCloseFailure(new AggregateError(
+        failures,
+        'One or more Proxy runtimes could not be closed.',
+      ));
     }
   }
 

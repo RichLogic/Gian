@@ -10,6 +10,11 @@ import { AgentSideConnection, ndJsonStream, RequestError } from '@agentclientpro
 // default registers the full extension surface.
 const EXT_METHODS_REGISTERED = process.env.GROK_TEST_EXT_METHODS !== 'none';
 
+if (process.env.GROK_TEST_IGNORE_SHUTDOWN === '1') {
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1_000);
+}
+
 function extDispatch(method, handle) {
   if (!EXT_METHODS_REGISTERED) {
     throw RequestError.methodNotFound(method);

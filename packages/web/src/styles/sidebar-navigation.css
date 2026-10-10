@@ -120,26 +120,11 @@
   .session-hover-card { animation: none; }
 }
 
-/* The list-switch row sticks to the top of the scroll area (owner call
-   2026-09-08): the Agents/Custom/Timer nav rows scroll away with a long
-   list; the switch stays. */
-.sb-scroll > .sb-listswitch {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  /* This control is text on the rail, not a separate glass surface. */
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  box-shadow: none;
-}
-
-.sb-scroll > .sb-listswitch:hover,
-.sb-scroll > .sb-listswitch:active,
-.sb-scroll > .sb-listswitch[aria-expanded="true"] {
-  background: transparent;
-  box-shadow: none;
-}
+/* 2026-10-08: the list-switch row is no longer sticky inside `.sb-scroll` —
+   it lives in the pinned `.sb-pin` chrome above the scroll area (see
+   gian-v2.css), so no background/backdrop rules are needed here at all; the
+   scroll container's own top edge hard-clips whatever scrolls past. The old
+   sticky + transparent arrangement let scrolled rows bleed through the row. */
 
 /* List-switch nav row (2026-09-08 owner call): a plain `.sb-navrow` under
    Timer showing the current list (Tasks/Repos); the caret hugs the label in

@@ -12,12 +12,12 @@ function seedSessions(ctx: TestAppCtx): void {
     INSERT INTO workspaces(id, name, path, sort_order, hidden, created_at, updated_at)
     VALUES ('workspace-1', 'Workspace', '/tmp/workspace', 0, 0, datetime('now'), datetime('now'));
     INSERT INTO sessions
-      (id, name, type, workspace_id, executor, agent_id, approval_mode,
+      (id, name, type, workspace_id, executor, proxy_plugin_id, agent_id, approval_mode,
        status, archived, unread, native_session_id, created_at, updated_at)
     VALUES
-      ('session-1', 'One', 'primary', 'workspace-1', 'codex', 'agent-1', 'ask',
+      ('session-1', 'One', 'coding', 'workspace-1', 'codex', 'codex', 'agent-1', 'ask',
        'done', 0, 0, 'native-1', datetime('now'), datetime('now')),
-      ('session-2', 'Two', 'primary', 'workspace-1', 'codex', 'agent-2', 'ask',
+      ('session-2', 'Two', 'coding', 'workspace-1', 'codex', 'codex', 'agent-2', 'ask',
        'done', 0, 0, 'native-2', datetime('now'), datetime('now'));
   `);
 }
@@ -143,7 +143,7 @@ test('Host-listened MCP keeps internal identity while allowing ordinary global r
         name: 'session.get',
         arguments: { session_id: 'session-1' },
       });
-      assert.equal(own.isError, undefined);
+      assert.equal(own.isError, undefined, JSON.stringify(own.structuredContent));
 
       const other = await client.callTool({
         name: 'session.get',
@@ -321,7 +321,7 @@ test('Host-listened MCP bounds concurrent waits', async () => {
       );
       releaseFirst();
       const completed = await pending;
-      assert.equal(completed.isError, undefined);
+      assert.equal(completed.isError, undefined, JSON.stringify(completed.structuredContent));
       assert.equal(
         (completed.structuredContent as { data: { outcome: string } }).data.outcome,
         'idle',

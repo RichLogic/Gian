@@ -188,7 +188,7 @@ export function TranscriptSelectionActions({
       Math.max(12 + Math.min(180, (window.innerWidth - 24) / 2), translated.selection.left)),
       top: Math.max(12, Math.min(window.innerHeight - 180, translated.selection.top)) }}>
     <button type="button" className="translation-close" onClick={closeTranslation} aria-label={t('common.close')} title={t('common.close')}>×</button>
-    <TranslationResult value={translated.value} onRetry={() => translate(translated.selection)} />
+    <TranslationResult value={translated.value} expanded onRetry={() => translate(translated.selection)} />
   </div>, document.body);
   if (!visible) return null;
   const tooLarge = selectedTextByteSize(visible.text) > MAX_PASTED_TEXT_BYTES;

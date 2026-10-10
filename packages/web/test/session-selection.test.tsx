@@ -13,12 +13,16 @@ function useHarness() {
   const [mode, setMode] = useState<Mode>('tasks');
   const [activeSubtaskId, setSubtask] = useState<string | null>('a');
   const [activeSessionId, setSession] = useState<string | null>('a');
-  const sessionsRef = useRef([{ id: 'a', type: 'subtask' }, { id: 'b', type: 'subtask' }] as Session[]);
+  const sessionsRef = useRef([
+    { id: 'a', type: 'subtask' },
+    { id: 'b', type: 'subtask' },
+    { id: 'c', type: 'coding' },
+  ] as Session[]);
   const activeSessionIdRef = useRef(activeSessionId);
   useEffect(() => { activeSessionIdRef.current = activeSessionId; }, [activeSessionId]);
   useSessionSelection({ mode, activeSubtaskId, activeSessionId, sessionsRef, activeSessionIdRef,
     setActiveSessionId: setSession, restoreChatPanelForSession: restore, ops });
-  return { activeSessionId, activeSubtaskId, setSession, setSubtask, setMode };
+  return { mode, activeSessionId, activeSubtaskId, setSession, setSubtask, setMode };
 }
 
 it('reconciles a stale Session update even when the selected Task row did not change', () => {
@@ -26,6 +30,27 @@ it('reconciles a stale Session update even when the selected Task row did not ch
   act(() => result.current.setSession('b'));
   expect(result.current.activeSubtaskId).toBe('a');
   expect(result.current.activeSessionId).toBe('a');
+});
+
+it('keeps a cleared subtask paired with a non-subtask session', () => {
+  const { result } = renderHook(useHarness);
+  act(() => {
+    result.current.setSubtask(null);
+    result.current.setSession('c');
+  });
+  expect(result.current.activeSubtaskId).toBeNull();
+  expect(result.current.activeSessionId).toBe('c');
+});
+
+it('keeps the session chosen while leaving Tasks in the same update', () => {
+  const { result } = renderHook(useHarness);
+  act(() => {
+    result.current.setMode('sessions');
+    result.current.setSubtask(null);
+    result.current.setSession('c');
+  });
+  expect(result.current.mode).toBe('sessions');
+  expect(result.current.activeSessionId).toBe('c');
 });
 
 it('keeps rapid Task selection and restored Session state aligned', () => {

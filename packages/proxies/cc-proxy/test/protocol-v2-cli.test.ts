@@ -130,7 +130,14 @@ test('Claude CLI speaks gian.proxy/2.1 even when GIAN_PROTOCOL_VERSIONS is omitt
 
 test('Claude CLI writes turn.start response before turn.started with a Fake Runtime', async () => {
   const fakeRuntime = resolve('test/fixtures/fake-claude-runtime.mjs');
-  const proxy = startV2Proxy({ GIAN_RUNTIME_BIN: fakeRuntime });
+  const home = mkdtempSync(join(tmpdir(), 'gian-cc-cli-home-'));
+  const workspace = mkdtempSync(join(tmpdir(), 'gian-cc-cli-ws-'));
+  mkdirSync(join(home, '.claude'));
+  const proxy = startV2Proxy({
+    GIAN_RUNTIME_BIN: fakeRuntime,
+    HOME: home,
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+  });
   try {
     proxy.send({
       jsonrpc: '2.0',
@@ -155,7 +162,7 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
       method: 'session.create',
       params: {
         sessionId: 'cli-session',
-        workspace: { cwd: '/tmp', roots: ['/tmp'] },
+        workspace: { cwd: workspace, roots: [workspace] },
         config: {},
       },
     });
@@ -195,8 +202,18 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
       events.push(message);
       if (message.method === 'turn.completed' || message.method === 'turn.failed') terminal = true;
     }
-    const methods = events.map((event) => event.method);
-    assert.deepEqual(methods, [
+    const catalogChanged = events.filter((event) => event.method === 'catalog.changed');
+    assert.equal(catalogChanged.length, 1);
+    assert.equal(
+      (catalogChanged[0]?.params?.data as { reason?: string } | undefined)?.reason,
+      'default-model',
+    );
+    assert.equal(catalogChanged[0]?.params?.sequence, undefined);
+    const firstUsage = events.findIndex((event) => event.method === 'usage.updated');
+    const catalogIndex = events.findIndex((event) => event.method === 'catalog.changed');
+    assert.ok(catalogIndex >= 0 && catalogIndex < firstUsage);
+    const turnEvents = events.filter((event) => event.method !== 'catalog.changed');
+    assert.deepEqual(turnEvents.map((event) => event.method), [
       'turn.started',
       'usage.updated',
       'content.delta',
@@ -207,18 +224,18 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
       'content.completed',
       'turn.completed',
     ]);
-    assert.equal(events[0]?.params?.turnId, 'cli-turn');
-    assert.ok(events[0]?.params?.sourceTurnId);
-    assert.notEqual(events[0]?.params?.sourceTurnId, 'cli-turn');
+    assert.equal(turnEvents[0]?.params?.turnId, 'cli-turn');
+    assert.ok(turnEvents[0]?.params?.sourceTurnId);
+    assert.notEqual(turnEvents[0]?.params?.sourceTurnId, 'cli-turn');
     assert.equal(
-      ((events[2]?.params?.data as { kind?: string }).kind),
+      ((turnEvents[2]?.params?.data as { kind?: string }).kind),
       'reasoning',
     );
     assert.deepEqual(
-      events.map((event) => event.params?.sequence),
+      turnEvents.map((event) => event.params?.sequence),
       [1, 2, 3, 4, 5, 6, 7, 8, 9],
     );
-    const unknown = events.find((event) => event.method === 'activity.updated')!;
+    const unknown = turnEvents.find((event) => event.method === 'activity.updated')!;
     assert.equal(
       ((unknown.params?.data as { presentation?: { type?: string } }).presentation ?? {}).type,
       'generic',
@@ -235,6 +252,8 @@ test('Claude CLI writes turn.start response before turn.started with a Fake Runt
     if (proxy.child.exitCode === null && proxy.child.signalCode === null) {
       proxy.child.kill('SIGTERM');
     }
+    rmSync(home, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
   }
 });
 

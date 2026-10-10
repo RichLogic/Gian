@@ -6,6 +6,12 @@
  * `ensureGianProfile` creates or repairs it before the bridge child spawns so
  * a missing or broken profile can never crash the DSH boot with
  * `@gian/dsh-bridge` unresolvable.
+ *
+ * DSH 0.2.0 imports `$DSH_HOME/settings.yaml` once and renames it
+ * `settings.yaml.imported`. This installer writes only the profile package
+ * manifest and the bridge symlink. Credentials stay at
+ * `$DSH_HOME/.credentials.yaml`; settings are not copied into the profile
+ * directory.
  */
 
 import { lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';

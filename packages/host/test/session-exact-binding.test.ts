@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { gzipSync } from 'node:zlib';
 
@@ -27,6 +27,7 @@ import { ProxyManager } from '../src/proxy/manager.js';
 import { officialRuntimeIdentity } from '../src/proxy/legacy-launch.js';
 import { QueueManager } from '../src/queue/index.js';
 import { RuntimeResolver, RuntimeResolverError } from '../src/runtime/resolver.js';
+import { ManagedRuntimeGenerationStore } from '../src/runtime/generation-store.js';
 import type { RuntimeLease } from '../src/runtime/types.js';
 import { SessionBindingPlanner } from '../src/session/binding-planner.js';
 import { SessionManager, type SessionAgentResolver } from '../src/session/manager.js';
@@ -529,13 +530,45 @@ test('unknown fixture Session follows the current package after Agent deletion a
     updateLockDataDir: join(root, 'locks'),
     hostVersion: '0.1.0',
   });
+  // The create gate (agentRuntimeProfile) requires a ready Agent; in managed
+  // mode readiness comes from the active certified generation. The fixture
+  // package declares runtime kind "none", so the generation carries no
+  // Runtime component and binds no CLI path.
+  const fixtureProxyEntry = join(dataDir, 'plugins', 'io.gian.fixture', '1.0.0', 'proxy.mjs');
+  await mkdir(dirname(fixtureProxyEntry), { recursive: true });
+  await writeFile(fixtureProxyEntry, packageFiles('1.0.0').files.get('proxy.mjs')!);
+  const generations = new ManagedRuntimeGenerationStore(dataDir);
+  await generations.initialize();
+  const fixtureGeneration: ManagedRuntimeGeneration = {
+    schemaVersion: 1,
+    generationId: 'fixture-1.0.0-runtime-none',
+    pluginId: 'io.gian.fixture',
+    platform: 'darwin-arm64',
+    proxy: {
+      pluginVersion: '1.0.0',
+      manifestSha256: v1.receipt.manifestSha256,
+      artifactSha256: v1.receipt.manifestSha256,
+      entryPath: fixtureProxyEntry,
+      processScope: 'session',
+      protocolRange: '^2.2',
+    },
+    runtime: null,
+    companions: [],
+    certificate: { id: 'fixture-cert', sha256: sha256(Buffer.from('fixture-cert')) },
+    state: 'staged',
+    installedAt: '2026-10-10T00:00:00.000Z',
+    activatedAt: null,
+  };
+  await generations.stage(fixtureGeneration);
+  await generations.activate('io.gian.fixture', fixtureGeneration.generationId);
   const agents = await AgentManager.create({
     dataDir,
     releaseVersion: '0.1.0',
-    managedProxies: false,
+    managedProxies: true,
     allowCreateWithoutCatalog: true,
     pluginStore: store,
     runtimeResolver: resolver,
+    generationStore: generations,
     homeDir: join(root, 'home'),
     pathEnv: '',
   });

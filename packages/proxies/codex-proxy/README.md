@@ -10,7 +10,7 @@ The process bridges two newline-delimited JSON protocols:
 
 Codex CLI 0.100.0 is the minimum version with the umbrella
 `codex app-server --listen stdio://` form. Gian's managed Proxy manifest
-verifies 0.159.2. Other CLI versions are not certified by this release.
+verifies 0.161.0. Other CLI versions are not certified by this release.
 
 The entry point may take an absolute managed binary path:
 
@@ -31,6 +31,9 @@ Derived replay files are private, disposable caches under the plugin data
 directory (or private system temporary storage), never replacements for native
 rollouts. Normal attachment/process shutdown removes them; restart rebuilds
 history rather than trusting a cache left by an unclean exit.
+Background history failures report a Session-scoped diagnostic without changing
+its completed Turn or other Sessions. Runtime handler failures also retain the
+originating Session when its native thread identity is known.
 
 ```sh
 pnpm -F @gian/codex-proxy typecheck

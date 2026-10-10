@@ -31,6 +31,7 @@ import {
   browserExternalEntityKey,
 } from '../operations/browser.js';
 import { useOperationDispatch, useOperationPending } from '../operations/use-operations.js';
+import { dispatchAttachmentUpload } from '../operations/message.js';
 import { injectComposerContextItems } from './Composer.js';
 import {
   attachBrowserPageScreenshot,
@@ -541,7 +542,9 @@ export function BrowserPanel({
     if (!browser || !sessionId || attachPending) return;
     setAttachPending('screenshot');
     afterNativeViewRestored(() => {
-      void attachBrowserPageScreenshot(browser, tabId, sessionId, { dispatch })
+      void attachBrowserPageScreenshot(browser, tabId, sessionId, {
+        upload: (sessionId, blob, filename) => dispatchAttachmentUpload(dispatch, { sessionId, blob, filename }),
+      })
         .then(notifyAttachResult)
         .finally(() => setAttachPending(null));
     });

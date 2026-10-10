@@ -628,24 +628,20 @@ export class CodexProxyService {
 
   async initialize() {
     this.runtime.on('notification', (message) => {
+      const sessionId = this.sessionsByThreadId.get(extractThreadId(message.params) ?? '')?.id;
       this.handleRuntimeNotification(message).catch((error) => {
-        this.emitEvent('runtime.error', {
-          code: 'NOTIFICATION_HANDLER_FAILED',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        this.reportRuntimeHandlerFailure(sessionId, 'NOTIFICATION_HANDLER_FAILED', error);
       });
     });
 
     this.runtime.on('serverRequest', (message) => {
+      const sessionId = this.sessionsByThreadId.get(extractThreadId(message.params) ?? '')?.id;
       this.handleRuntimeServerRequest(message).catch((error) => {
         void this.runtime.respond(
           message.id,
           cancelledServerRequestResponse(message.method),
         ).catch(() => undefined);
-        this.emitEvent('runtime.error', {
-          code: 'SERVER_REQUEST_HANDLER_FAILED',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        this.reportRuntimeHandlerFailure(sessionId, 'SERVER_REQUEST_HANDLER_FAILED', error);
       });
     });
 
@@ -1475,6 +1471,16 @@ export class CodexProxyService {
       }
     }
     return session;
+  }
+
+  private reportRuntimeHandlerFailure(sessionId: string | undefined, code: string, error: unknown): void {
+    this.emitEvent('runtime.error', {
+      ...(sessionId ? { sessionId } : {}),
+      data: {
+        code,
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
   }
 
   private async handleRuntimeStopped(cause: Error) {

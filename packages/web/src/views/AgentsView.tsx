@@ -370,7 +370,7 @@ export function AgentsView({ ws, terminalPreferences }: {
         ...(input.runtime ? { runtime: input.runtime } : {}),
       }).id);
       if (settled.phase !== 'confirmed') {
-        // Map Host failure codes to the field that caused them (ADR-0094);
+        // Map Host failure codes to the field that caused them (ADR-0102);
         // anything else stays a dialog-level error.
         const code = settled.errorCode ?? '';
         const message = settled.error ?? 'Agent creation failed';

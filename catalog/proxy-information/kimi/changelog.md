@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.4.4**，Runtime **2.1.1**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.4.5**，Runtime **2.1.1**。这是发布目标，不表示当前机器已安装。
+
+## 0.4.5
+
+首次公开发布：2026-10-07T07:19:00Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.5)：2026-10-07T07:19:00Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 修复冷启动 Side Chat 的原生子会话订阅与终态、Stop 后继续对话、工具和文件 Diff 投影；原生 Question 取消明确声明可省略答案的动作。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，Kimi Code Runtime 仍为 2.1.1。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.5) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.5/packages/proxies/kimi-proxy/README.md)
 
 ## 0.4.4
 

@@ -9,11 +9,16 @@ import type {
   SideChatInfo,
   SystemConfig,
   Task,
+  TranslationRecord,
   Workspace,
 } from '@gian/shared';
 import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
 import { hydrateScheduleConfirmations, upsertScheduleConfirmation } from './schedule-confirmations.js';
 import { notifyScheduleChanged, notifyScheduleResync } from '../presentation/schedule-sync.js';
+import {
+  applyRemoteEnvironmentsSnapshot,
+  refreshRemoteEnvironments,
+} from './use-remote-environments.js';
 import {
   invalidateSlashCacheForWorkspace,
   SLASH_CACHE_INVALIDATED_EVENT,
@@ -21,7 +26,7 @@ import {
 import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
-import { dispatchAttachmentUpload, dispatchMessageSend } from '../operations/message.js';
+import { beginTranslationEcho, dispatchAttachmentUpload, dispatchMessageSend, removeTranslationEcho } from '../operations/message.js';
 import { setAutoTranslation, translateText } from '../operations/translation.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { sidechatEntityKey } from '../operations/sidechat.js';
@@ -30,7 +35,10 @@ import { workspaceEntityKey } from '../operations/workspace.js';
 import { entityFieldKey, type OperationStore } from '../operations/store.js';
 import {
   applySessionUpdate,
+  noteSessionLifecycle,
+  noteSessionSnapshot,
   planCreatedSessionFirstMessage,
+  type SessionCanon,
 } from '../session-routing.js';
 import { sideChatExecutor } from '../presentation/sidechat.js';
 import {
@@ -65,6 +73,7 @@ import { servedAttachmentUrl } from '../attachments.js';
 import {
   consumeAvailableForkNavigation,
   consumeForkNavigation,
+  pendingForkNavigation,
 } from '../presentation/fork-navigation.js';
 
 type Setter<T> = Dispatch<SetStateAction<T>>;
@@ -73,6 +82,10 @@ interface UseAppSocketInput {
   authStatus: AppAuthStatus;
   ws: GianWs;
   sessionsRef: MutableRefObject<Session[]>;
+  /** Canonical snapshot/lifecycle order. A late session-list response must not
+   *  outrank a fact already written here. Optional for socket consumers that
+   *  do not load a missing session over HTTP. */
+  sessionCanonRef?: MutableRefObject<SessionCanon>;
   itemsBySessionRef: MutableRefObject<Record<string, TranscriptItem[]>>;
   activeSessionIdRef: MutableRefObject<string | null>;
   pendingFirstMessageRef: MutableRefObject<PendingFirstMessageValue>;
@@ -120,6 +133,13 @@ interface UseAppSocketInput {
    *  supplies it and owns suppression + delivery, because those need the
    *  current mode/viewState. */
   onAttention?: (message: AttentionMessage) => void;
+  /** Fired after `state_sync` has written the session list into the ref.
+   *  An empty list here is a real catalog, not "still loading". */
+  onSessionSnapshot?: () => void;
+  /** Fork recovery for `state_sync` and `session:created`. The session is
+   *  already in `sessionsRef`. The handler compares the stored fork sequence
+   *  with later user navigation and consumes the stored intent. */
+  onRecoveredForkSession?: (sessionId: string) => void;
 }
 
 async function deliverCreatedSessionFirstMessage(
@@ -127,19 +147,18 @@ async function deliverCreatedSessionFirstMessage(
   session: Session,
   current: Pick<UseAppSocketInput, 'ops' | 'translate'>,
 ): Promise<void> {
-  const prepareTranslation = async (restoreDraft: () => void): Promise<string | null | undefined> => {
+  const prepareTranslation = async (restoreDraft: () => void): Promise<TranslationRecord | null | undefined> => {
     if (!pending.autoTranslate) return undefined;
     try {
       await setAutoTranslation(session.id, true, current.ops.dispatch);
       window.dispatchEvent(new Event('gian:translation-settings'));
       if (!pending.text.trim()) return undefined;
-      const record = await translateText(session.id, {
+      return await translateText(session.id, {
         requestId: crypto.randomUUID(),
         text: pending.text.trim(),
         purpose: 'send',
         ...(pending.composerDocument ? { document: pending.composerDocument } : {}),
       }, new AbortController().signal, current.ops.dispatch);
-      return record.id;
     } catch (error) {
       restoreDraft();
       toast({
@@ -151,7 +170,21 @@ async function deliverCreatedSessionFirstMessage(
     }
   };
   if (pending.attachments.length === 0) {
-    const translationId = await prepareTranslation(() => {
+    // The first message gets the same progressive feedback as composer sends:
+    // the pending bubble (with the inline Translating row) goes up BEFORE the
+    // translation round-trip, and the dispatch adopts it (2026-10-09 owner:
+    // the first message used to pop in bubble+translation card together,
+    // unlike later sends).
+    const echo = pending.autoTranslate && pending.text.trim()
+      ? beginTranslationEcho({
+          sessionId: session.id,
+          text: pending.text.trim(),
+          exec: session.executor,
+          contextItems: pending.contextItems,
+          composerDocument: pending.composerDocument,
+        })
+      : null;
+    const record = await prepareTranslation(() => {
       if (pending.composerDocument) {
         injectComposerDocumentDraft(session.id, pending.composerDocument, [], pending.contextItems ?? []);
       } else {
@@ -159,14 +192,18 @@ async function deliverCreatedSessionFirstMessage(
         injectComposerContextItems(session.id, pending.contextItems ?? []);
       }
     });
-    if (translationId === null) return;
+    if (record === null) {
+      if (echo) removeTranslationEcho(session.id, echo.id);
+      return;
+    }
     const firstMessage = planCreatedSessionFirstMessage(pending.text);
     if (firstMessage.structuredText || (pending.contextItems?.length ?? 0) > 0) {
       dispatchMessageSend(current.ops.dispatch, {
         sessionId: session.id,
         text: firstMessage.structuredText ?? '',
         exec: session.executor,
-        ...(translationId ? { translationId } : {}),
+        ...(record ? { translationId: record.id, translation: record } : {}),
+        ...(echo ? { echoId: echo.id } : {}),
         contextItems: pending.contextItems,
         composerDocument: pending.composerDocument,
       });
@@ -224,7 +261,7 @@ async function deliverCreatedSessionFirstMessage(
     return;
   }
 
-  const translationId = await prepareTranslation(() => {
+  const record = await prepareTranslation(() => {
     if (pending.composerDocument) {
       const restoredAttachments = pending.attachments.map((source, index) => ({
         id: source.id,
@@ -237,13 +274,13 @@ async function deliverCreatedSessionFirstMessage(
       injectComposerContextItems(session.id, pending.contextItems ?? []);
     }
   });
-  if (translationId === null) return;
+  if (record === null) return;
 
   dispatchMessageSend(current.ops.dispatch, {
     sessionId: session.id,
     text: pending.text.trim(),
     exec: session.executor,
-    ...(translationId ? { translationId } : {}),
+    ...(record ? { translationId: record.id } : {}),
     attachments: uploaded.map(attachment => ({
       ...attachment,
       previewUrl: servedAttachmentUrl(session.id, attachment.path),
@@ -414,13 +451,24 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // not the previous render's ref snapshot.
           current.sessionsRef.current = message.sessions;
           current.setSessions(message.sessions);
+          if (current.sessionCanonRef) noteSessionSnapshot(current.sessionCanonRef.current, message.sessions);
+          current.onSessionSnapshot?.();
           // A reconnect can expose the completed Fork before its originating
           // tab receives session:created. The tab-local target makes this
-          // selection precise without yanking other windows.
-          const recoveredForkSessionId = consumeAvailableForkNavigation(
-            message.sessions.map(session => session.id),
-          );
-          if (recoveredForkSessionId) current.setActiveSessionId(recoveredForkSessionId);
+          // selection precise without yanking other windows. Whether it still
+          // wins is the fork sequence versus later user navigation, not
+          // whether a request happens to be pending right now.
+          const pendingFork = pendingForkNavigation();
+          const recoveredForkSessionId = pendingFork
+            && message.sessions.some(session => session.id === pendingFork.sessionId)
+            ? pendingFork.sessionId
+            : null;
+          if (recoveredForkSessionId) {
+            if (current.onRecoveredForkSession) current.onRecoveredForkSession(recoveredForkSessionId);
+            else if (consumeAvailableForkNavigation(message.sessions.map(session => session.id))) {
+              current.setActiveSessionId(recoveredForkSessionId);
+            }
+          }
           // `state_sync` is the reconnect authority for session lifecycle.
           // Reconcile transient pending state too, otherwise a missed terminal
           // frame can leave Composer saying "Turn running" indefinitely. Keep
@@ -468,6 +516,9 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // state_sync is the reconnect authority — schedule views re-pull
           // their REST state even if schedule:changed frames were missed.
           notifyScheduleResync();
+          // Same authority for remote-environment connectivity: a reconnect
+          // may have missed `remote:environments` pushes.
+          void refreshRemoteEnvironments();
           // A reconnect may have missed workspace:git-updated broadcasts.
           // Force a fresh scan whenever the Host sends authoritative state.
           current.refreshWorkingTrees?.();
@@ -550,10 +601,10 @@ export function useAppSocket(input: UseAppSocketInput): void {
           };
           if (sessionFork) {
             // Fork broadcasts are global, but selection is window-local. Only
-            // the tab that minted this exact target id follows the child.
-            if (consumeForkNavigation(message.session.id)) {
-              selectCreatedSession();
-            }
+            // the tab that minted this exact target id follows the child, and
+            // only when that remember is still newer than the user's navigation.
+            if (current.onRecoveredForkSession) current.onRecoveredForkSession(message.session.id);
+            else if (consumeForkNavigation(message.session.id)) selectCreatedSession();
             return;
           }
           selectCreatedSession();
@@ -659,6 +710,23 @@ export function useAppSocket(input: UseAppSocketInput): void {
           }
           current.sessionsRef.current = applySessionUpdate(current.sessionsRef.current, partial);
           current.setSessions(previous => applySessionUpdate(previous, partial));
+          if (current.sessionCanonRef) {
+            const canon = current.sessionCanonRef.current;
+            if (partial.archived === 1) {
+              noteSessionLifecycle(
+                canon,
+                partial.id,
+                'archived',
+                partial.task_id ?? canon.facts.get(partial.id)?.task_id ?? null,
+              );
+            } else {
+              const row = current.sessionsRef.current.find(session => session.id === partial.id);
+              if (row) noteSessionLifecycle(canon, row.id, 'active', row.task_id ?? null);
+              else if (partial.task_id !== undefined) {
+                noteSessionLifecycle(canon, partial.id, 'active', partial.task_id);
+              }
+            }
+          }
           current.operationStore.absorbMatchingOverlays(
             sessionEntityKey(partial.id),
             field => (partial as Record<string, unknown>)[field],
@@ -685,10 +753,18 @@ export function useAppSocket(input: UseAppSocketInput): void {
             detail: { sessionId: message.session_id, commands: message.commands },
           }));
           return;
-        case 'session:deleted':
+        case 'session:deleted': {
+          const deletedTaskId = current.sessionCanonRef?.current.facts.get(message.session_id)?.task_id
+            ?? current.sessionsRef.current.find(session => session.id === message.session_id)?.task_id
+            ?? null;
+          current.sessionsRef.current = current.sessionsRef.current.filter(session => session.id !== message.session_id);
           current.setSessions(previous => previous.filter(session => session.id !== message.session_id));
+          if (current.sessionCanonRef) {
+            noteSessionLifecycle(current.sessionCanonRef.current, message.session_id, 'deleted', deletedTaskId);
+          }
           current.setActiveSessionId(previous => previous === message.session_id ? null : previous);
           return;
+        }
         case 'sidechat:created':
         case 'sidechat:updated':
           // Complete replacement of that one record (proposal §10.5): upsert
@@ -773,6 +849,11 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // Host-enforced create confirmation (contract L) — upsert into the
           // persistent pending store; never routed through proxy approvals.
           upsertScheduleConfirmation(message.confirmation);
+          return;
+        case 'remote:environments':
+          // Full connectivity snapshot (dedup'd Host-side) — the remote
+          // session badges flip globe-code ↔ globe-x from it.
+          applyRemoteEnvironmentsSnapshot(message.environments);
           return;
         case 'approval:created':
           projectLocalBrowserApproval(message.approval);

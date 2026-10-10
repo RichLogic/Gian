@@ -216,12 +216,15 @@ export interface BridgeInitializeResult {
 }
 
 /**
- * DSH session format version verified against `@deepseek-ai/dsh@0.1.5-rc.3`
- * (`SESSION_FORMAT_VERSION` in `@deepseek-ai/dsh-session/types`). It enters
- * the proxy eventId source key and must match the runtime that actually
- * writes the logs; the fake host and real Cordis host share it.
+ * DSH session format version verified against `@deepseek-ai/dsh@0.2.0-rc.2`
+ * (`SESSION_FORMAT_VERSION` in `@deepseek-ai/dsh-session`). Format 4 is the
+ * current log. V3 files are migrated by persistence `open`: a read open does
+ * not publish a successor, and a write open publishes one after a source-file
+ * identity check, leaving the original byte-identical. Structured plan/diff
+ * are advertised only for this format. The fake host and real Cordis host
+ * share the constant.
  */
-export const DSH_SESSION_FORMAT_VERSION = 3;
+export const DSH_SESSION_FORMAT_VERSION = 4;
 
 /**
  * Bridge capabilities this bundle advertises once the corresponding native

@@ -33,6 +33,7 @@ test('official source moves to Gian-Proxies without rotating identity, signing k
     assert.equal(parseGitHubReleaseAssetUrl(url, policy.artifactRepositories)?.repository, repository);
     assert.equal(isApprovedRuntimeAssetUrl(url, policy.runtimeAssetPrefixes!), true);
   }
+  assert.equal(isApprovedRuntimeAssetUrl('https://x.ai/cli/grok-1.0.46-macos-aarch64', policy.runtimeAssetPrefixes!), true);
   assert.equal(parseGitHubReleaseAssetUrl('https://github.com/untrusted/Gian-Proxies/releases/download/proxy-dsh-v0.3.1/runtime.tar.gz', policy.artifactRepositories), null);
 });
 

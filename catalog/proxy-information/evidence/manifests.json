@@ -1518,5 +1518,55 @@
     "process": {
       "scope": "shared"
     }
+  },
+  {
+    "tag": "proxy-kimi-v0.4.5",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.5",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.5/gian-proxy-kimi-0.4.5-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:b7aa2ed2c9e265f3605759c04919dcd460a6aa162e2cc38890a0c80c344646c4",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "kimi",
+    "pluginVersion": "0.4.5",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "kimi",
+      "displayName": "Kimi Code",
+      "verifiedVersions": [
+        "2.1.1"
+      ]
+    },
+    "process": {
+      "scope": "shared"
+    }
+  },
+  {
+    "tag": "proxy-grok-v0.3.7",
+    "url": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.7",
+    "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.7/gian-proxy-grok-0.3.7-darwin-arm64.tar.gz.manifest.json",
+    "digest": "sha256:69720ac628ad824b84ac77b02253ea633c71e0f11578b0a0c4dc703200c2142e",
+    "assetDigestVerified": true,
+    "schemaVersion": 4,
+    "pluginId": "grok",
+    "pluginVersion": "0.3.7",
+    "protocol": {
+      "name": "gian.proxy",
+      "range": ">=2.2 <3.0"
+    },
+    "runtime": {
+      "kind": "external",
+      "id": "grok",
+      "displayName": "Grok CLI",
+      "verifiedVersions": [
+        "1.0.41"
+      ]
+    },
+    "process": {
+      "scope": "session"
+    }
   }
 ]

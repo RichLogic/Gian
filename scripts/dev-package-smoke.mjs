@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { assertExecutionAllowed } from './execution-policy.mjs';
 import { assertDevOAuthConfiguration, assertDevSigningEntitlements, requireDevOAuthClientId } from './dev-package-config.mjs';
+import { proxyDefinitions } from './build-proxy-artifacts.mjs';
 
 assertExecutionAllowed('desktop');
 const expectedClientId = requireDevOAuthClientId(process.env.GIAN_GITHUB_CLIENT_ID);
@@ -28,6 +29,14 @@ try {
   execFileSync('ditto', ['-x', '-k', archive, join(root, 'unpacked')]);
   const appPath = join(root, 'unpacked', 'GianDev.app');
   const bundledNode = join(appPath, 'Contents', 'Resources', 'runtime', 'node');
+  const inventory = JSON.parse(await readFile(join(appPath, 'Contents', 'Resources', 'giandev', 'bundle-receipt.json'), 'utf8'));
+  assert.equal(inventory.proxies.length, proxyDefinitions.length, 'Dev ZIP omitted source Proxies');
+  assert.equal(inventory.runtimes.length, proxyDefinitions.filter(item => item.manifest.runtime.kind === 'external').length,
+    'Dev ZIP omitted complete Runtime assets');
+  if (process.env.GIAN_BUILD_SHA) assert.equal(inventory.sourceSha, process.env.GIAN_BUILD_SHA);
+  assert.equal(JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-', join(appPath, 'Contents/Info.plist')],
+    { encoding: 'utf8' })).CFBundleShortVersionString,
+  JSON.parse(await readFile('packages/desktop/package.json', 'utf8')).version);
   const authConfig = JSON.parse(await readFile(join(appPath, 'Contents', 'Resources', 'runtime', 'github-auth.json'), 'utf8'));
   assertDevOAuthConfiguration(authConfig, expectedClientId);
   logs.push('Verified embedded OAuth client configuration.\n');
@@ -63,7 +72,7 @@ try {
     app.process().stderr?.on('data', data => logs.push(data.toString()));
     try {
       const page = await app.firstWindow();
-      await page.waitForURL(`http://127.0.0.1:${port}/**`, { timeout: 60000 });
+      await page.waitForURL(`http://127.0.0.1:${port}/**`, { timeout: 180000 });
       await page.locator('#root').waitFor();
       await page.waitForFunction(() => (document.querySelector('#root')?.textContent ?? '').trim().length > 0);
       assert.ok((await page.locator('#root').innerText()).trim().length > 0);
@@ -72,6 +81,20 @@ try {
       logs.push(`Packaged OAuth service: ${authState.status}.\n`);
       const health = await fetch(`http://127.0.0.1:${port}/health`, { headers: { 'X-Gian-Desktop-Token': desktopToken }, signal: AbortSignal.timeout(2000) });
       assert.equal(health.status, 200);
+      const catalog = await (await fetch(`http://127.0.0.1:${port}/api/proxies`,
+        { headers: { 'X-Gian-Desktop-Token': desktopToken } })).json();
+      assert.equal(catalog.catalog.source.id, 'giandev');
+      assert.equal(catalog.catalog.items.length, inventory.proxies.length);
+      for (const proxy of inventory.proxies) {
+        const item = catalog.catalog.items.find(item => item.pluginId === proxy.pluginId);
+        const runtime = inventory.runtimes.find(item => item.pluginId === proxy.pluginId);
+        assert.equal(item?.installation.installedVersion, proxy.pluginVersion);
+        assert.equal(item?.installation.source, 'giandev');
+        assert.equal(item?.runtime.state, 'ready');
+        assert.equal(item?.runtime.version, runtime.version);
+        assert.ok(item?.runtime.path?.startsWith(join(root, 'data', 'runtimes') + '/'));
+      }
+      logs.push('Verified all source Proxies and declared CLIs ready with no saved Agents.\n');
     } finally { await app.close(); }
     // A closed shell must not leave its managed Host holding the port.
     let stopped = false;

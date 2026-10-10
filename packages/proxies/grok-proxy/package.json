@@ -1,6 +1,6 @@
 {
   "name": "@gian/grok-proxy",
-  "version": "0.3.7",
+  "version": "0.3.8-Dev",
   "private": true,
   "type": "module",
   "main": "./dist/src/cli/spawn.js",

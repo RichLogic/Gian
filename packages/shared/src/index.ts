@@ -4,6 +4,7 @@ export * from './session-proxy-binding.js';
 export * from './official-catalog-source.js';
 export * from './proxy-catalog-projection.js';
 export * from './model.js';
+export * from './inbox.js';
 export * from './action.js';
 export * from './manager.js';
 export * from './proxy.js';

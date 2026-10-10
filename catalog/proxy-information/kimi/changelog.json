@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "kimi",
-  "currentVersion": "0.4.4",
+  "currentVersion": "0.4.5",
   "entries": [
+    {
+      "version": "0.4.5",
+      "firstPublishedAt": "2026-10-07T07:19:00Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-kimi-v0.4.5",
+          "publishedAt": "2026-10-07T07:19:00Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.5/gian-proxy-kimi-0.4.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "b7aa2ed2c9e265f3605759c04919dcd460a6aa162e2cc38890a0c80c344646c4",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.5/gian-proxy-kimi-0.4.5-darwin-arm64.tar.gz",
+            "sha256": "eb0bb28fbb85e08fa56fea6f2d9f8289de23078021a14f78e608680ec4ae73e3",
+            "size": 160888
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "2.1.1"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "修复冷启动 Side Chat 的原生子会话订阅与终态、Stop 后继续对话、工具和文件 Diff 投影；原生 Question 取消明确声明可省略答案的动作。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，Kimi Code Runtime 仍为 2.1.1。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.5",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.5/packages/proxies/kimi-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.4.4",
       "firstPublishedAt": "2026-09-30T08:50:47Z",

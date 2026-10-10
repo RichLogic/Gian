@@ -1,0 +1,78 @@
+[
+  {
+    "pluginId": "claude",
+    "runtimeId": "claude",
+    "version": "2.1.285",
+    "format": "raw",
+    "entryRelativePath": "bin/claude",
+    "asset": {
+      "sha256": "51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4",
+      "size": 223821616,
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.285/darwin-arm64/claude"
+    }
+  },
+  {
+    "pluginId": "codex",
+    "runtimeId": "codex",
+    "version": "0.161.0",
+    "format": "tar.gz",
+    "entryRelativePath": "bin/codex",
+    "asset": {
+      "sha256": "f0feee8537daf8dd6b4e0a36e764549ad14afdbb419d8775aeab9feb20182313",
+      "size": 131714490,
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.161.0/codex-package-aarch64-apple-darwin.tar.gz"
+    }
+  },
+  {
+    "pluginId": "ai.deepseek.harness",
+    "runtimeId": "deepseek-harness",
+    "version": "0.2.0-rc.2",
+    "format": "tar.gz",
+    "entryRelativePath": "node_modules/@deepseek-ai/dsh/lib/bin.js",
+    "build": {
+      "kind": "dsh-lock",
+      "packageSha256": "3b54a3d100028bf206be0d04e075190944928fcd9637158d6f7ae870974525cc",
+      "lockSha256": "6d4dffe8de5a1addf91cba4e01816aade758b89c33e4f7c22c7782b3c21ea06f"
+    },
+    "asset": {
+      "sha256": "1887689ff14de9e63742233cb657b7b802c4acaa2ef7d46f3177d10cd73e5a72",
+      "size": 136634049
+    }
+  },
+  {
+    "pluginId": "grok",
+    "runtimeId": "grok",
+    "version": "1.0.46",
+    "format": "raw",
+    "entryRelativePath": "bin/grok",
+    "asset": {
+      "sha256": "e8daa302364c9c3b6a5546d511cfbd1ab5e5d407a9b04282f660665ea405f9f3",
+      "size": 150374256,
+      "url": "https://x.ai/cli/grok-1.0.46-macos-aarch64"
+    }
+  },
+  {
+    "pluginId": "kimi",
+    "runtimeId": "kimi",
+    "version": "2.1.1",
+    "format": "tar.gz",
+    "entryRelativePath": "kimi",
+    "asset": {
+      "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.1.1/kimi-code-darwin-arm64.tar.gz",
+      "sha256": "8c3bad99571b16abd113ab5d511a98a36b852c0d5493991842a67b8c2bc4ecd0",
+      "size": 62296524
+    }
+  },
+  {
+    "pluginId": "com.zhipu.zcode",
+    "runtimeId": "zcode",
+    "version": "0.16.9",
+    "format": "tar.gz",
+    "entryRelativePath": "zcode/agent/zcode.cjs",
+    "asset": {
+      "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.4.2/zcode.tar.gz",
+      "sha256": "265f28aa89462a73daf074573b5312863cd75d21a0b89f810ce90d362753dcc1",
+      "size": 80788064
+    }
+  }
+]

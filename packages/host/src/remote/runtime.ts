@@ -24,6 +24,7 @@ import type { ServerToClientMessage, RemoteSettingsSnapshot, RemoteSettingsPairi
 import { PeerCryptoSession } from './crypto-session.js';
 import type { GianToolAccessController } from '../tool/access.js';
 import type { GianToolService } from '../tool/service.js';
+import { ApprovalScopeError } from '../approval/manager.js';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
 import type { Db } from '../storage/db.js';
@@ -43,7 +44,7 @@ import {
   RemoteProjector,
   isRemoteSessionVisible,
   projectRemoteInteraction,
-  remoteInteractionId,
+  remoteInteractionResourceId,
 } from './projection.js';
 import { RemoteReplayBuffer } from './replay-buffer.js';
 import { HttpRemoteServerAuthClient } from './server-client.js';
@@ -119,6 +120,9 @@ export class RemoteRuntime {
   private readonly tasks: TaskManager;
   private readonly db: Db;
   private readonly subscriptions = new Map<string, string>();
+  /** Resource ids this process issued per session+provider id, so a removal
+   *  reaches the exact turn-bound card even after the pending record is gone. */
+  private readonly issuedInteractionIds = new Map<string, Set<string>>();
   private attention: RemoteAttention[] = [];
   private detachHostEvents: (() => void) | null = null;
 
@@ -210,16 +214,22 @@ export class RemoteRuntime {
         await this.connectors.get(deviceId)?.sendControl(part);
       },
       listAgents: deps.listAgents,
-      snapshot: device => this.projector.snapshot({
-        capabilities: effectiveRemoteCapabilities({
-          device,
-          hostOnline: true,
-          wireFeatures: ['wire.snapshot_parts', 'wire.content_resume'],
-        }),
-        attention: this.attention,
-        deviceId: device.id,
-        eventSequence: this.replay.eventSequence,
-      }),
+      snapshot: (device) => {
+        // Cards delivered by a snapshot never passed publishInteraction, so
+        // register their exact turn-bound ids here as well — otherwise a
+        // pending that predates this runtime could never be removed precisely.
+        this.registerIssuedInteractions();
+        return this.projector.snapshot({
+          capabilities: effectiveRemoteCapabilities({
+            device,
+            hostOnline: true,
+            wireFeatures: ['wire.snapshot_parts', 'wire.content_resume'],
+          }),
+          attention: this.attention,
+          deviceId: device.id,
+          eventSequence: this.replay.eventSequence,
+        });
+      },
       onSubscribe: (deviceId, sessionId) => this.subscriptions.set(deviceId, sessionId),
       proxyLogo: deps.proxyLogo,
     });
@@ -911,6 +921,9 @@ export class RemoteRuntime {
         return;
       }
       if (message.type === 'session:deleted') {
+        for (const key of [...this.issuedInteractionIds.keys()]) {
+          if (key.startsWith(`${message.session_id} `)) this.issuedInteractionIds.delete(key);
+        }
         this.publishRemove('sessions', message.session_id);
         return;
       }
@@ -927,7 +940,11 @@ export class RemoteRuntime {
         return;
       }
       if (message.type === 'approval:created' || message.type === 'approval:updated') {
-        this.publishInteraction(message.approval.id, message.type === 'approval:updated');
+        this.publishInteraction(
+          message.approval.id,
+          message.type === 'approval:updated',
+          message.approval.session_id,
+        );
         return;
       }
       if (message.type === 'attention') {
@@ -1042,17 +1059,31 @@ export class RemoteRuntime {
     });
   }
 
-  private publishInteraction(interactionId: string, maybeResolved: boolean): void {
-    const pending = this.sessions.getPendingApproval(interactionId);
+  private publishInteraction(
+    interactionId: string,
+    maybeResolved: boolean,
+    sessionId?: string,
+  ): void {
+    let pending;
+    try {
+      pending = this.sessions.getPendingApproval(interactionId, sessionId);
+    } catch (error) {
+      if (error instanceof ApprovalScopeError) return;
+      throw error;
+    }
     if (!pending) {
-      if (maybeResolved) this.publishRemove('interactions', remoteInteractionId(interactionId));
+      if (!maybeResolved || !sessionId) return;
+      for (const id of this.interactionRemoveIds(sessionId, interactionId)) {
+        this.publishRemove('interactions', id);
+      }
       return;
     }
     if (!this.projector.isSessionIdVisible(pending.sessionId)) return;
     const row = this.db.prepare(
-      'SELECT resource_revision FROM proxy_interactions WHERE interaction_id = ?',
-    ).get(interactionId) as { resource_revision?: number } | undefined;
+      'SELECT resource_revision FROM proxy_interactions WHERE session_id = ? AND interaction_id = ?',
+    ).get(pending.sessionId, interactionId) as { resource_revision?: number } | undefined;
     const projected = projectRemoteInteraction(pending, String(row?.resource_revision ?? 0));
+    this.rememberIssuedInteraction(pending.sessionId, pending.id, projected.id);
     this.publish({
       type: 'event',
       host_generation: this.generation,
@@ -1060,6 +1091,53 @@ export class RemoteRuntime {
       event: { kind: 'interaction.updated', interaction: projected },
     });
     this.publishPatch({ interactions: { upsert: [projected], remove_ids: [] } });
+  }
+
+  /** Record one issued card id under its session+provider occurrence key. */
+  private rememberIssuedInteraction(sessionId: string, interactionId: string, resourceId: string): void {
+    const issuedKey = `${sessionId} ${interactionId}`;
+    const issued = this.issuedInteractionIds.get(issuedKey) ?? new Set<string>();
+    issued.add(resourceId);
+    this.issuedInteractionIds.set(issuedKey, issued);
+  }
+
+  /**
+   * Register every currently pending, remotely visible card. Snapshot and
+   * reconnect delivery meets pendings that never produced a live
+   * approval:created for this process; their exact turn-bound ids must be
+   * removable later without touching another session or turn.
+   */
+  private registerIssuedInteractions(): void {
+    for (const record of this.sessions.listPendingApprovals()) {
+      if (!this.projector.isSessionIdVisible(record.sessionId)) continue;
+      this.rememberIssuedInteraction(
+        record.sessionId,
+        record.id,
+        remoteInteractionResourceId(record.sessionId, record.turnId, record.id),
+      );
+    }
+  }
+
+  /**
+   * Remove this session's card. Every turn-bound resource id this process
+   * issued for the provider id is removed, so a stale earlier-turn card cannot
+   * survive next to a new occurrence. A provider id that an older client
+   * stored as the resource id is removed too, unless that exact UUID is now
+   * the live resource id of another pending card.
+   */
+  private interactionRemoveIds(sessionId: string, interactionId: string): string[] {    const issuedKey = `${sessionId} ${interactionId}`;
+    const issued = this.issuedInteractionIds.get(issuedKey);
+    this.issuedInteractionIds.delete(issuedKey);
+    const ids = [...issued ?? []];
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(interactionId)) {
+      return ids;
+    }
+    if (ids.includes(interactionId)) return ids;
+    const occupied = this.sessions.listPendingApprovals().some(item => (
+      remoteInteractionResourceId(item.sessionId, item.turnId, item.id) === interactionId
+    ));
+    if (!occupied) ids.push(interactionId);
+    return ids;
   }
 
   private publishRemove(collection: 'sessions' | 'tasks' | 'interactions', id: string): void {

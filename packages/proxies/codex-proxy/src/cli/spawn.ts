@@ -1,9 +1,5 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import { isRuntimeBootstrapOffer, serveRuntimeBootstrap } from '@gian/proxy-protocol/node';
 import { planRuntimeInstallation } from '../runtime/install.js';
 import { createTaskQueue } from '../core/task-queue.js';
@@ -11,39 +7,13 @@ import { CodexProxyService } from '../core/service.js';
 import { CodexProtocolV2Adapter } from '../protocol/v2-adapter.js';
 import { CodexAppServerClient } from '../runtime/codex-app-server-client.js';
 import { discoverCodexRuntimes, probeCodexRuntime } from '../runtime/discover.js';
+import { readPluginVersion } from '../plugin-version.js';
 import {
   createProtocolWriter,
   parseRequestLine,
 } from '../transport/protocol.js';
 
 const SELF_TEST_FLAG = '--self-test';
-
-function readPluginVersion(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
-        name?: string;
-        version?: string;
-      };
-      if (
-        typeof pkg.version === 'string'
-        && pkg.version.length > 0
-        && typeof pkg.name === 'string'
-        && pkg.name.startsWith('@gian/')
-        && pkg.name.endsWith('-proxy')
-      ) {
-        return pkg.version;
-      }
-    } catch {
-      /* keep walking */
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return '0.3.1';
-}
 
 const PLUGIN_VERSION = readPluginVersion();
 

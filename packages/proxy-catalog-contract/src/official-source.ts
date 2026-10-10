@@ -32,6 +32,7 @@ const DEFAULT_RUNTIME_ASSET_PREFIXES = [
   'https://github.com/MoonshotAI/kimi-code/releases/download/',
   'https://github.com/MoonshotAI/kimi-cli/releases/download/',
   'https://github.com/RichLogic/Gian/releases/download/',
+  'https://x.ai/cli/',
 ] as const;
 
 export interface OfficialCatalogSourcePlugin {

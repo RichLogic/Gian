@@ -19,6 +19,13 @@ import { loadAllFiles, loadProxyCapabilities, loadProxyModels, loadSlashCommands
 
 export type ProxyModel = CcModelCapabilities | CodexModelCapabilities;
 
+/** Catalog options the Host advertises for its own machinery — never
+ *  end-user controls. `gian.translation` marks a session's isolated
+ *  translation capability (ADR-0091); it drives the translation service, so
+ *  surfaces like the new-session form must filter it out of the user-facing
+ *  option lists. */
+export const HOST_INTERNAL_CATALOG_OPTIONS: ReadonlySet<string> = new Set(['gian.translation']);
+
 /** Capability catalogs differ per (Proxy kind, Agent CLI path) — two Agents
  *  of one kind never share a cached catalog/models/modes entry. The
  *  agent-less key is the kind default (first saved Agent's runtime). */

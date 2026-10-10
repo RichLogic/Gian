@@ -19,3 +19,20 @@ test('GIAN-TOOL-001: Proxy child environment strips all GIAN_TOOL_* values', () 
     CLAUDE_BIN: '/test/claude',
   });
 });
+
+test('Proxy child environment drops inherited Claude discovery variables', () => {
+  const env = proxyChildEnvironment({
+    PATH: '/usr/bin',
+    CLAUDE_CONFIG_DIR: '/inherited/claude',
+    ANTHROPIC_API_KEY: 'inherited-key',
+    ANTHROPIC_BASE_URL: 'https://inherited.example',
+  }, {
+    CLAUDE_CONFIG_DIR: '/agent/claude',
+    ANTHROPIC_AUTH_TOKEN: 'agent-token',
+  });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.CLAUDE_CONFIG_DIR, '/agent/claude');
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'agent-token');
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+});

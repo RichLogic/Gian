@@ -92,6 +92,24 @@ export function remoteActionId(interactionId: string, key: string): string {
 }
 
 /**
+ * Client-addressable id for one host session's interaction occurrence.
+ * `RemoteInteraction.id` and `interaction.respond.interaction_id` are the only
+ * identity the existing protocol gives a card. They are canonical UUIDs and
+ * are not required to equal the provider interaction id. Hashing the host
+ * session, the authoritative Host turn id, and the original id keeps two
+ * sessions that share a provider id on two cards, and keeps an unanswered
+ * card from an earlier turn from acting on a new pending occurrence that
+ * reuses the same provider id. The provider RPC still receives
+ * `ApprovalRecord.id` unchanged.
+ */
+export function remoteInteractionResourceId(sessionId: string, turnId: string, interactionId: string): string {
+  return remoteStableUuid(
+    'interaction-scope',
+    `${sessionId.length}:${sessionId}${turnId.length}:${turnId}${interactionId.length}:${interactionId}`,
+  );
+}
+
+/**
  * Translate `interaction.respond` answer keys back to the Host question/input
  * ids. The projection hashes non-UUID question ids (AskUserQuestion rides the
  * full question text as its id) into wire UUIDs, so answers arrive keyed by
@@ -106,8 +124,9 @@ export function resolveRemoteAnswerValues(
 ): Record<string, unknown> {
   const questions = projectInteraction(record).questions ?? [];
   if (questions.length === 0) return values;
+  const resourceId = remoteInteractionResourceId(record.sessionId, record.turnId, record.id);
   const originalByWireId = new Map(questions.map((question) => [
-    UUID_RE.test(question.id) ? question.id : remoteStableUuid('input', `${record.id}:${question.id}`),
+    UUID_RE.test(question.id) ? question.id : remoteStableUuid('input', `${resourceId}:${question.id}`),
     question.id,
   ]));
   const resolved: Record<string, unknown> = {};
@@ -122,13 +141,14 @@ export function resolveRemoteAction(
   actionId: string,
 ): { decision?: string; native_option_id?: string } | null {
   const projected = projectInteraction(record);
+  const resourceId = remoteInteractionResourceId(record.sessionId, record.turnId, record.id);
   if (projected.native_options?.length) {
     const option = projected.native_options.find((item) => (
-      remoteActionId(record.id, `native:${item.optionId}`) === actionId
+      remoteActionId(resourceId, `native:${item.optionId}`) === actionId
     ));
     return option ? { native_option_id: option.optionId } : null;
   }
-  const decision = projected.allowed_decisions.find((item) => remoteActionId(record.id, item) === actionId);
+  const decision = projected.allowed_decisions.find((item) => remoteActionId(resourceId, item) === actionId);
   return decision ? { decision } : null;
 }
 
@@ -140,19 +160,20 @@ const PLAN_ACTION_LABELS: Record<string, string> = {
 
 export function projectRemoteInteraction(record: ApprovalRecord, revision: string): RemoteInteraction {
   const tool = projectInteraction(record);
+  const resourceId = remoteInteractionResourceId(record.sessionId, record.turnId, record.id);
   const actions = tool.native_options?.length
     ? tool.native_options.map((option) => ({
-      id: remoteActionId(record.id, `native:${option.optionId}`),
+      id: remoteActionId(resourceId, `native:${option.optionId}`),
       label: option.label || option.optionId,
       tone: option.kind.startsWith('reject') ? 'danger' as const : 'default' as const,
     }))
     : tool.allowed_decisions.map((decision) => ({
-      id: remoteActionId(record.id, decision),
+      id: remoteActionId(resourceId, decision),
       label: PLAN_ACTION_LABELS[decision] ?? decision,
       tone: decision === 'decline' || decision === 'keep_planning' ? 'danger' as const : 'default' as const,
     }));
   return {
-    id: remoteInteractionId(record.id),
+    id: resourceId,
     revision,
     session_id: record.sessionId,
     turn_id: UUID_RE.test(record.turnId) ? record.turnId : remoteStableUuid('turn', record.turnId),
@@ -166,7 +187,7 @@ export function projectRemoteInteraction(record: ApprovalRecord, revision: strin
       ...(tool.subject ? { subject: tool.subject.slice(0, 16_000) } : {}),
       ...(tool.questions?.length ? {
         inputs: tool.questions.map((question) => ({
-          id: UUID_RE.test(question.id) ? question.id : remoteStableUuid('input', `${record.id}:${question.id}`),
+          id: UUID_RE.test(question.id) ? question.id : remoteStableUuid('input', `${resourceId}:${question.id}`),
           label: question.prompt.slice(0, 256),
           type: question.input_type === 'multi_select'
             ? 'multi_select' as const

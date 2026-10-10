@@ -58,9 +58,49 @@ export interface MessageEchoSink {
   /** Mark the echo of run `runId` failed in place. No-op after its correlation
    *  was already cleared by a confirmed result. */
   markFailed(runId: string, sessionId: string): void;
+  /** Append the pending echo of a translated send BEFORE its dispatch, without
+   *  raising the session's pending spinner (no turn is in flight yet — the
+   *  bubble's inline Translating row is the progress signal). */
+  appendTranslating?(sessionId: string, item: MsgItem): void;
+  /** Bind a dispatch to an echo appended earlier by `appendTranslating`:
+   *  stamps the run id / retry payload (and the display translation) onto the
+   *  existing bubble — or, when that bubble is gone, appends the dispatch echo
+   *  in the SAME state update. Adopt-or-append must be one atomic updater:
+   *  deriving a "found" boolean from an updater side effect races with React's
+   *  eager-evaluation bailout (the dispatch already scheduled a lane on the
+   *  owning fiber), which produced duplicate bubbles on 2026-10-09. Raises the
+   *  pending spinner. */
+  adopt?(sessionId: string, echoId: string, runId: string, payload: MessageSendPayload): void;
+  /** Remove a pre-dispatch echo whose translation was abandoned (unmount /
+   *  session switch mid-translation). No-op when the echo is gone. */
+  remove?(sessionId: string, echoId: string): void;
 }
 
 type FunctionalSetter<T> = (update: (previous: T) => T) => void;
+
+/** The echo appended for a dispatched send (regular sends, and the adopt
+ *  fallback when the pre-dispatch translating echo is gone). The operation
+ *  run id is the authoritative correlation, so it keys the rendered item. */
+function dispatchEcho(input: MessageSendPayload, runId: string): MsgItem {
+  const echo = createOptimisticEcho({
+    sessionId: input.sessionId,
+    text: input.text,
+    exec: input.exec,
+    attachments: input.attachments?.map(attachment => ({
+      name: attachment.name,
+      mime: attachment.mime,
+      url: attachment.previewUrl,
+      ...(attachment.size !== undefined ? { size: attachment.size } : {}),
+    })),
+    contextItems: input.contextItems,
+    composerDocument: input.composerDocument,
+  });
+  echo.id = `optimistic:${input.sessionId}:${runId}`;
+  echo.sendRunId = runId;
+  echo.sendRetry = input;
+  if (input.translation) echo.translation = input.translation;
+  return echo;
+}
 
 /** Production transcript reducer used by App and wire-level tests. Keeping
  * this state transition beside the operation definition prevents tests from
@@ -112,6 +152,49 @@ export function createMessageEchoSink(
       });
       setPendingBySession(previous => ({ ...previous, [sessionId]: false }));
     },
+    appendTranslating(sessionId, item) {
+      setItemsBySession(previous => ({
+        ...previous,
+        [sessionId]: [...(previous[sessionId] ?? []), item],
+      }));
+    },
+    adopt(sessionId, echoId, runId, payload) {
+      setItemsBySession(previous => {
+        const items = previous[sessionId] ?? [];
+        let touched = false;
+        const nextItems = items.map(item => {
+          if (item.kind !== 'user' || item.id !== echoId || !item.pending || item.sendCanonical) return item;
+          touched = true;
+          const { sendTranslation: _translating, ...rest } = item;
+          return {
+            ...rest,
+            sendRunId: runId,
+            sendRetry: payload,
+            ...(payload.translation ? { translation: payload.translation } : {}),
+          };
+        });
+        return {
+          ...previous,
+          [sessionId]: touched ? nextItems : [...items, dispatchEcho(payload, runId)],
+        };
+      });
+      setPendingBySession(previous => ({ ...previous, [sessionId]: true }));
+    },
+    remove(sessionId, echoId) {
+      setItemsBySession(previous => {
+        const items = previous[sessionId];
+        const target = items?.find(item => item.kind === 'user' && item.id === echoId);
+        if (!items || !target) return previous;
+        // The echo's attachment previews are blob URLs owned by this entry —
+        // the canonical reconcile path will never see them, so revoke here.
+        if (target.kind === 'user') {
+          for (const attachment of target.attachments ?? []) {
+            try { URL.revokeObjectURL(attachment.url); } catch { /* noop */ }
+          }
+        }
+        return { ...previous, [sessionId]: items.filter(item => item.id !== echoId) };
+      });
+    },
   };
 }
 
@@ -126,6 +209,11 @@ export function wireMessageEchoSink(sink: MessageEchoSink | null): void {
  * The single send path: dispatch the operation, then commit the optimistic
  * echo synchronously (same JS task — proposal §2's local-feedback rule).
  * Returns the run so callers/tests can correlate.
+ *
+ * A translated send (auto-translate on) committed its echo earlier through
+ * `beginTranslationEcho` and passes `input.echoId`: the sink ADOPTS that
+ * bubble (run id + retry payload + display translation), atomically falling
+ * back to appending the dispatch echo when the bubble is gone.
  */
 export function dispatchMessageSend(
   dispatch: OperationDispatcher['dispatch'],
@@ -136,6 +224,34 @@ export function dispatchMessageSend(
     throw new Error(`One-shot bypass is only supported for Claude sessions; got ${input.exec}.`);
   }
   const run = dispatch(input.skill ? 'message.sendSkill' : 'message.send', input);
+  if (input.echoId && echoSink?.adopt) {
+    echoSink.adopt(input.sessionId, input.echoId, run.id, input);
+    return run;
+  }
+  echoSink?.append(input.sessionId, dispatchEcho(input, run.id));
+  return run;
+}
+
+/**
+ * Optimistic up-screen for a translated send (auto-translate on): append the
+ * pending user bubble IMMEDIATELY, before the translation round-trip, marked
+ * `sendTranslation` so the transcript renders the inline Translating row.
+ * The real dispatch later adopts this echo via `MessageSendPayload.echoId`;
+ * the Host's canonical `user_message` then reconciles it exactly like any
+ * other echo (FIFO text/attachment match in applyEnvelope).
+ *
+ * Returns null when no echo sink is wired (tests without the App shell) — the
+ * send flow then behaves as before, sans optimistic bubble.
+ */
+export function beginTranslationEcho(input: {
+  sessionId: string;
+  text: string;
+  exec: import('@gian/shared').Executor;
+  attachments?: Array<import('../attachments.js').ComposerAttachmentPayload & { previewUrl: string }>;
+  contextItems?: MessageContextItem[];
+  composerDocument?: import('@gian/shared').ComposerDocument;
+}): MsgItem | null {
+  if (!echoSink?.appendTranslating) return null;
   const echo = createOptimisticEcho({
     sessionId: input.sessionId,
     text: input.text,
@@ -149,14 +265,15 @@ export function dispatchMessageSend(
     contextItems: input.contextItems,
     composerDocument: input.composerDocument,
   });
-  // `Date.now()` alone can collide when two sends commit in the same
-  // millisecond. The operation run is already unique and is the authoritative
-  // correlation, so use it for the rendered transcript key as well.
-  echo.id = `optimistic:${input.sessionId}:${run.id}`;
-  echo.sendRunId = run.id;
-  echo.sendRetry = input;
-  echoSink?.append(input.sessionId, echo);
-  return run;
+  echo.id = `optimistic:${input.sessionId}:translating:${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}:${Math.random()}`}`;
+  echo.sendTranslation = true;
+  echoSink.appendTranslating(input.sessionId, echo);
+  return echo;
+}
+
+/** Drop a pre-dispatch translation echo whose send was abandoned. */
+export function removeTranslationEcho(sessionId: string, echoId: string): void {
+  echoSink?.remove?.(sessionId, echoId);
 }
 
 /** Structured input items for a text+attachments payload (pre-migration

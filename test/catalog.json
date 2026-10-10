@@ -62,6 +62,7 @@
     {
       "id": "host-unit",
       "patterns": [
+        "packages/host/test/advertised-turn-value.test.ts",
         "packages/host/test/agent-instruction-targets.test.ts",
         "packages/host/test/agent-managed-block.test.ts",
         "packages/host/test/attachments-path.test.ts",
@@ -156,6 +157,7 @@
         "packages/host/test/chat-display-contract.test.ts",
         "packages/host/test/config-sanitize.test.ts",
         "packages/host/test/development-proxy-source.test.ts",
+        "packages/host/test/dev-runtime-provision.test.ts",
         "packages/host/test/contract-001-client-message-parity.test.ts",
         "packages/host/test/contract-002-server-message-parity.test.ts",
         "packages/host/test/contract-003-proxy-methods.test.ts",
@@ -194,6 +196,8 @@
         "packages/host/test/agent-catalog-home.test.ts",
         "packages/host/test/runtime-download.test.ts",
         "packages/host/test/model-002-warmup-retry.test.ts",
+        "packages/host/test/catalog-home-cache.test.ts",
+        "packages/host/test/catalog-choice-downgrade.test.ts",
         "packages/host/test/native-001-scanner.test.ts",
         "packages/host/test/onboarding-state.test.ts",
         "packages/host/test/open-absolute-route.test.ts",
@@ -254,7 +258,13 @@
         "packages/host/test/remote-settings.test.ts",
         "packages/host/test/remote-web-controller.test.ts",
         "packages/host/test/remote-web-crypto-interop.test.ts",
-        "packages/host/test/remote-web-upload.test.ts"
+        "packages/host/test/remote-web-upload.test.ts",
+        "packages/host/test/inbox-service.test.ts",
+        "packages/host/test/inbox-routes.test.ts",
+        "packages/host/test/session-inbox-adapter.test.ts",
+        "packages/host/test/approval-scope.test.ts",
+        "packages/host/test/approval-response-scope.test.ts",
+        "packages/host/test/remote-interaction-scope.test.ts"
       ],
       "module": "host",
       "scope": "integration",
@@ -672,6 +682,7 @@
       "id": "kimi-proxy-unit",
       "patterns": [
         "packages/proxies/kimi-proxy/test/customization.test.ts",
+        "packages/proxies/kimi-proxy/test/kimi-server.test.ts",
         "packages/proxies/kimi-proxy/test/projector.test.ts",
         "packages/proxies/kimi-proxy/test/task-queue.test.ts"
       ],
@@ -806,6 +817,7 @@
         "scripts/check-version-consistency.test.mjs",
         "scripts/catalog-release.test.mjs",
         "scripts/build-managed-runtime-candidates.test.mjs",
+        "scripts/dev-runtime-source-assets.test.mjs",
         "scripts/desktop-runtime-portability.test.mjs",
         "scripts/docs-adr.test.mjs",
         "scripts/process-resource-monitor.test.mjs",

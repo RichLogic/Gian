@@ -12,6 +12,7 @@ import type {
   ThinkingLevel,
 } from '../core/types.js';
 import type { CodexNativeThreadSummary, CodexRuntime } from './types.js';
+import { readPluginVersion } from '../plugin-version.js';
 
 function toError(value: unknown, fallback: string) {
   return value instanceof Error ? value : new Error(value ? String(value) : fallback);
@@ -286,7 +287,7 @@ function normalizeDeadlines(overrides: Partial<CodexAppServerDeadlines> | undefi
 
 export function buildInitializeParams() {
   return {
-    clientInfo: { name: 'codex-proxy', version: '0.3.1' },
+    clientInfo: { name: 'codex-proxy', version: readPluginVersion() },
     capabilities: {
       experimentalApi: true,
       requestAttestation: false,

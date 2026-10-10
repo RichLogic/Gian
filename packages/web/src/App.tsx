@@ -12,12 +12,13 @@ import {
   loadTerminalOptions,
   loadAgents,
   loadSessions,
+  loadArchivedSessions,
   loadTasks,
   loadWorkspaces,
   makeWsUrl,
 } from './api.js';
 import { injectComposerDraft } from './components/Composer.js';
-import { sortSessionsForRail } from './session-routing.js';
+import { createSessionCanon, sortSessionsForRail } from './session-routing.js';
 import { GitHistoryRequestError, loadGitHistoryCommitReachability } from './api.js';
 import { useHistoryMovementRevision } from './controllers/use-history.js';
 import { applyChangesScopeRequest, requestChangesDiffAnchor } from './controllers/use-changes-diff.js';
@@ -86,6 +87,13 @@ import { useViewNav } from './controllers/use-view-nav.js';
 import { useWorkingTrees } from './controllers/use-working-trees.js';
 import { actionControlState } from './components/action-gating.js';
 import { dispatchHeadFork, useForkRunSettledToast } from './components/ForkControls.js';
+import {
+  consumeForkNavigation,
+  forkBeatsUserIntent,
+  noteUserNavigationIntent,
+  peekForkNavigationSequence,
+  retireForkNavigationIntent,
+} from './presentation/fork-navigation.js';
 import { usePanelLayout } from './controllers/use-panel-layout.js';
 import { useAppZoom } from './display-prefs.js';
 import { setKeymapPreferences } from './shortcut-prefs.js';
@@ -95,6 +103,12 @@ import {
   type GianDesktopNavigationTarget,
 } from './desktop-bridge.js';
 import { resolveSessionNavigation, subscribeDesktopNavigation } from './desktop-navigation.js';
+import type {
+  ConversationListMode,
+  DesktopNavigationDelivery,
+  DesktopNavigationRetry,
+  SessionNavigationAction,
+} from './desktop-navigation.js';
 import {
   maybeNotifyForAttention,
   nativeNotificationPreferencesForMigration,
@@ -115,7 +129,7 @@ import './operations/onboarding.js';
 import './operations/sidechat.js';
 import './operations/schedule.js';
 import './operations/translation.js';
-import { sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
+import { applySessionOverlays, sessionEntityKey, wireSessionCanonicalPatch } from './operations/session.js';
 import {
   createMessageEchoSink,
   dispatchAttachmentUpload,
@@ -218,6 +232,37 @@ function reconcileUnresolvedEntity(
  *  `fileLinkHref` in links/link-behavior.ts, surfaced through the unified
  *  LinkBehaviorProvider mounted below. */
 
+/** The newest session open. In-app requests keep their own list and run focus;
+ *  desktop deliveries also remember the target that must be acknowledged. */
+interface PendingSessionNavigation {
+  generation: number;
+  sessionId: string;
+  requestedListMode: ConversationListMode | null;
+  focusRunId?: string;
+  desktopTarget?: Extract<GianDesktopNavigationTarget, { type: 'session' }>;
+}
+
+function sameDesktopSessionTarget(
+  left: Extract<GianDesktopNavigationTarget, { type: 'session' }>,
+  right: GianDesktopNavigationTarget,
+): boolean {
+  return right.type === 'session'
+    && left.sessionId === right.sessionId
+    && left.turn === right.turn
+    && left.kind === right.kind;
+}
+
+/** Keep task ownership and session type paired when a newer canon fact
+ *  replaces the membership on a stale list body. */
+function sessionWithCanonicalMembership(session: Session, taskId: string | null): Session {
+  if (taskId) {
+    if (session.task_id === taskId && session.type === 'subtask' && session.archived !== 1) return session;
+    return { ...session, task_id: taskId, type: 'subtask', archived: 0 };
+  }
+  if (session.type !== 'subtask' && (session.task_id ?? null) === null && session.archived !== 1) return session;
+  return { ...session, task_id: null, type: session.type === 'subtask' ? 'coding' : session.type, archived: 0 };
+}
+
 export function App() {
   useAppZoom();
   // useAppAuth needs the operation dispatcher (auth.logout), which is created
@@ -289,10 +334,19 @@ export function App() {
   void pendingBySidechat;
   const [queueBySession, setQueueBySession] = useState<Record<string, QueueEntry[]>>({});
   const [mode, setMode] = useState<Mode>('tasks');
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   // A selected Task row owns every Session surface and operation immediately,
   // including the render before the stored selection is synchronized.
   const activeSessionId = mode === 'tasks' && activeSubtaskId ? activeSubtaskId : selectedSessionId;
   const [sidebarListMode, setSidebarListMode] = useState<SidebarListMode>('tasks');
+  // Last Repos/Tasks list the user actually chose. Null until that happens;
+  // the Tasks value above is only the startup display default.
+  const [explicitListMode, setExplicitListMode] = useState<ConversationListMode | null>(null);
+  const explicitListModeRef = useRef<ConversationListMode | null>(null);
+  // Assigned once the navigation generation refs exist. Page changes before
+  // that assignment are not possible; effects run after it.
+  const cancelNavigationIntentRef = useRef<() => void>(() => {});
   const [newSubtaskForTaskId, setNewSubtaskForTaskId] = useState<string | null>(null);
   const { workingTrees, reloadWorkingTrees } = useWorkingTrees();
   const refreshWorkingTrees = useCallback(() => {
@@ -314,9 +368,20 @@ export function App() {
   } | null>(null);
   const [systemConfig, setSystemConfig] = useState<SystemConfig | null>(null);
 
+  // The visible list follows the page. This does not record an explicit choice.
   useEffect(() => {
     if (mode === 'tasks' || mode === 'sessions') setSidebarListMode(mode);
   }, [mode]);
+  const rememberExplicitListMode = useCallback((next: ConversationListMode) => {
+    explicitListModeRef.current = next;
+    setExplicitListMode(next);
+    setSidebarListMode(next);
+  }, []);
+  const chooseMode = useCallback((next: Mode) => {
+    cancelNavigationIntentRef.current();
+    if (next === 'tasks' || next === 'sessions') rememberExplicitListMode(next);
+    startTransition(() => setMode(next));
+  }, [rememberExplicitListMode]);
   const [terminalOptions, setTerminalOptions] = useState<TerminalOptions | null>(null);
   // Canonical config for the operation layer's overlay `previous` values —
   // read via ref, never the overlaid render value.
@@ -383,7 +448,7 @@ export function App() {
       } catch { /* best-effort */ }
       if (!flagged) return;
       const created = list.find(w => !workspaceIdsRef.current.has(w.id) && w.name !== '__gian_root__');
-      startTransition(() => setMode('sessions'));
+      chooseMode('sessions');
       // '' still reopens the page (no preselect) when the new row could not
       // be identified — the view falls back to the remembered/first choice.
       setNewSessionForWs(created?.id ?? '');
@@ -505,6 +570,10 @@ export function App() {
       append: (sessionId, item) => route(sessionId).append(sessionId, item),
       markConfirmed: (runId, sessionId) => route(sessionId).markConfirmed(runId, sessionId),
       markFailed: (runId, sessionId) => route(sessionId).markFailed(runId, sessionId),
+      appendTranslating: (sessionId, item) => route(sessionId).appendTranslating?.(sessionId, item),
+      adopt: (sessionId, echoId, runId, payload) =>
+        route(sessionId).adopt?.(sessionId, echoId, runId, payload) ?? false,
+      remove: (sessionId, echoId) => route(sessionId).remove?.(sessionId, echoId),
     });
     wireCanonicalQueueReader(sessionId => {
       const overlay = operationStore.getOverlay(
@@ -586,6 +655,38 @@ export function App() {
   // Rendered sessions = canonical + overlays (proposal §4.3). Canonical
   // `sessions` stays untouched for refs, effects, and the reload paths.
   const displaySessions = useStoreSessionsWithOverlays(operationStore, sessions);
+  const displaySessionsRef = useRef(displaySessions);
+  displaySessionsRef.current = displaySessions;
+  // Last effective task seen for the surface session. A change here is an
+  // overlay or rollback, so task and subtask selection follow both directions.
+  const surfaceMembershipRef = useRef(new Map<string, string | null>());
+  useEffect(() => {
+    if (mode !== 'tasks') return;
+    const surfaceId = activeSubtaskId ?? selectedSessionId;
+    if (!surfaceId) return;
+    const effective = displaySessions.find(session => session.id === surfaceId);
+    if (!effective) return;
+    const taskId = effective.type === 'subtask' ? (effective.task_id ?? null) : null;
+    const previous = surfaceMembershipRef.current.get(surfaceId);
+    surfaceMembershipRef.current.set(surfaceId, taskId);
+    if (previous === undefined) {
+      if (activeSubtaskId === surfaceId && taskId === null) {
+        setActiveSubtaskId(null);
+        setActiveTaskId(null);
+      } else if (activeSubtaskId === surfaceId && taskId && activeTaskId !== taskId) {
+        setActiveTaskId(taskId);
+      }
+      return;
+    }
+    if (previous === taskId) return;
+    if (taskId) {
+      if (activeSubtaskId !== surfaceId) setActiveSubtaskId(surfaceId);
+      if (activeTaskId !== taskId) setActiveTaskId(taskId);
+      return;
+    }
+    if (activeSubtaskId !== null) setActiveSubtaskId(null);
+    if (activeTaskId !== null) setActiveTaskId(null);
+  }, [activeSubtaskId, activeTaskId, displaySessions, mode, selectedSessionId]);
   // Same merge for tasks (rename/done/pin overlays) and workspaces
   // (rename/pin overlays + the whole-list reorder overlay).
   const displayTasks = useStoreTasksWithOverlays(operationStore, tasks);
@@ -957,6 +1058,41 @@ export function App() {
   // handler through this ref, and suppression reads the latest view context
   // through the other — both assigned during render like the sibling refs.
   const desktopNavigationRef = useRef<(target: GianDesktopNavigationTarget) => void>(() => {});
+  const handleDesktopNavigationRef = useRef<
+    (
+      target: GianDesktopNavigationTarget,
+      isCurrent?: () => boolean,
+    ) => DesktopNavigationDelivery | Promise<DesktopNavigationDelivery>
+  >(() => 'pending');
+  const sessionSnapshotReadyRef = useRef(false);
+  const navigationRetryRef = useRef<DesktopNavigationRetry>({ retry: null });
+  const navigationGenerationRef = useRef(0);
+  const userIntentSequenceRef = useRef(0);
+  const sessionCanonRef = useRef(createSessionCanon());
+  const pendingNavigationRef = useRef<PendingSessionNavigation | null>(null);
+  const navigationBusyGenerationRef = useRef<number | null>(null);
+  const desktopResumeRef = useRef(false);
+  const resumeNavigationRef = useRef<(request: PendingSessionNavigation) => void>(() => {});
+  const recoveredForkRef = useRef<(sessionId: string) => void>(() => {});
+  const onSessionSnapshot = useCallback((): void => {
+    sessionSnapshotReadyRef.current = true;
+    // Subscribe retries only its own deferred desktop target. An in-app
+    // request stays here, with its list mode and run id intact.
+    desktopResumeRef.current = true;
+    try {
+      navigationRetryRef.current.retry?.();
+    } finally {
+      desktopResumeRef.current = false;
+    }
+    const still = pendingNavigationRef.current;
+    if (
+      still
+      && still.generation === navigationGenerationRef.current
+      && navigationBusyGenerationRef.current !== still.generation
+    ) {
+      resumeNavigationRef.current(still);
+    }
+  }, []);
   const notificationContextRef = useRef({ mode, viewState, activeSessionId, activeSubtaskId });
   notificationContextRef.current = { mode, viewState, activeSessionId, activeSubtaskId };
   const handleAttentionMessage = useCallback((message: AttentionMessage) => {
@@ -1041,6 +1177,7 @@ export function App() {
     authStatus: runtimeAuthStatus,
     ws,
     sessionsRef,
+    sessionCanonRef,
     itemsBySessionRef,
     activeSessionIdRef,
     pendingFirstMessageRef,
@@ -1070,6 +1207,8 @@ export function App() {
     ops,
     translate: appT,
     onAttention: handleAttentionMessage,
+    onSessionSnapshot,
+    onRecoveredForkSession: sessionId => { recoveredForkRef.current(sessionId); },
   });
 
   const selectSession = useSessionSelection({
@@ -1077,6 +1216,7 @@ export function App() {
     activeSubtaskId,
     activeSessionId: selectedSessionId,
     sessionsRef,
+    effectiveSessionsRef: displaySessionsRef,
     activeSessionIdRef,
     setActiveSessionId,
     restoreChatPanelForSession,
@@ -1086,36 +1226,319 @@ export function App() {
   // Timer deep links (Issue #51): the transcript's schedule provenance tag
   // opens the Timer detail; a bound-session Run opens its control
   // conversation with the transcript focused on the scheduled Turn.
+  const cancelNavigationIntent = useCallback(() => {
+    userIntentSequenceRef.current = noteUserNavigationIntent();
+    // The ref above dies on reload. Drop the stored fork open now so a later
+    // fork arrival cannot treat this leave as if it never happened.
+    retireForkNavigationIntent();
+    navigationGenerationRef.current += 1;
+    pendingNavigationRef.current = null;
+  }, []);
+  cancelNavigationIntentRef.current = cancelNavigationIntent;
+  const claimNavigationIntent = useCallback((
+    request: Omit<PendingSessionNavigation, 'generation'>,
+  ): PendingSessionNavigation => {
+    userIntentSequenceRef.current = noteUserNavigationIntent();
+    retireForkNavigationIntent();
+    const generation = navigationGenerationRef.current + 1;
+    navigationGenerationRef.current = generation;
+    const next: PendingSessionNavigation = { ...request, generation };
+    pendingNavigationRef.current = next;
+    return next;
+  }, []);
+  const navigationStillCurrent = useCallback((
+    generation: number,
+    subscribeIsCurrent?: () => boolean,
+  ) => navigationGenerationRef.current === generation && (subscribeIsCurrent?.() ?? true), []);
+  const clearNavigationRequest = useCallback((generation: number) => {
+    if (pendingNavigationRef.current?.generation === generation) pendingNavigationRef.current = null;
+  }, []);
+  // A newer in-app choice acknowledges the desktop target it replaced so the
+  // main process does not deliver it again. A newer desktop click must not
+  // be acknowledged by the older delivery.
+  const supersededDelivery = useCallback((
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): DesktopNavigationDelivery => {
+    if (subscribeIsCurrent && !subscribeIsCurrent()) return 'dropped';
+    return request.desktopTarget ? 'settled' : 'dropped';
+  }, []);
+  const trackNavigationDelivery = useCallback((
+    request: PendingSessionNavigation,
+    delivery: DesktopNavigationDelivery,
+  ) => {
+    if (
+      delivery === 'pending'
+      && navigationGenerationRef.current === request.generation
+      && pendingNavigationRef.current == null
+    ) {
+      pendingNavigationRef.current = request;
+    }
+  }, []);
+
   const openSchedule = useCallback((scheduleId: string) => {
+    cancelNavigationIntent();
     setTimerScheduleId(scheduleId);
     startTransition(() => setMode('timer'));
-  }, []);
+  }, [cancelNavigationIntent]);
+
+  const commitSessionNavigation = useCallback((
+    action: Exclude<SessionNavigationAction, { kind: 'unavailable' }>,
+    focusRunId?: string,
+  ) => {
+    startTransition(() => {
+      if (action.kind === 'select-subtask-in-tasks') {
+        setMode('tasks');
+        setActiveTaskId(action.taskId);
+        setActiveSubtaskId(action.sessionId);
+      } else if (action.kind === 'select-standalone-in-tasks') {
+        setMode('tasks');
+        setActiveTaskId(null);
+        setActiveSubtaskId(null);
+      } else {
+        setMode('sessions');
+        setActiveTaskId(null);
+        setActiveSubtaskId(null);
+      }
+      // Same transition as the task row. A separate update is snapped back
+      // to the previous subtask while mode is still Tasks.
+      selectSession(action.sessionId);
+      setActiveRail(null);
+      setViewState('main');
+      if (focusRunId) setFocusScheduleRun({ sessionId: action.sessionId, runId: focusRunId });
+    });
+  }, [selectSession, setActiveRail, setViewState]);
+
+  const applySessionTarget = useCallback((
+    sessionId: string,
+    session: Pick<Session, 'task_id' | 'archived'> | null,
+    requestedListMode: ConversationListMode | null,
+    focusRunId?: string,
+  ): boolean => {
+    const action = resolveSessionNavigation(
+      { sessionId },
+      {
+        mode: modeRef.current,
+        explicitListMode: explicitListModeRef.current,
+        requestedListMode,
+        session: session ? { task_id: session.task_id, archived: session.archived } : null,
+      },
+    );
+    if (action.kind === 'unavailable') {
+      toast({
+        kind: 'warning',
+        message: appT(action.reason === 'archived'
+          ? 'navigation.sessionArchived'
+          : 'navigation.sessionMissing'),
+      });
+      return false;
+    }
+    commitSessionNavigation(action, focusRunId);
+    return true;
+  }, [appT, commitSessionNavigation]);
+
+  const loadMissingSession = useCallback(async (
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): Promise<DesktopNavigationDelivery> => {
+    const alive = () => navigationStillCurrent(request.generation, subscribeIsCurrent);
+    if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+    navigationBusyGenerationRef.current = request.generation;
+    const baselineSnapshot = sessionCanonRef.current.snapshot;
+    const baselineRevision = sessionCanonRef.current.facts.get(request.sessionId)?.revision ?? 0;
+    const canonMoved = () => {
+      const canon = sessionCanonRef.current;
+      const fact = canon.facts.get(request.sessionId);
+      return canon.snapshot !== baselineSnapshot || (fact?.revision ?? 0) !== baselineRevision;
+    };
+    // A snapshot or lifecycle write that landed after this request started is
+    // newer than the list body, even when the body arrives later.
+    const settleFromNewerCanon = (listBody: Session | null): DesktopNavigationDelivery => {
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      const fact = sessionCanonRef.current.facts.get(request.sessionId);
+      if (fact?.disposition === 'archived') {
+        applySessionTarget(
+          request.sessionId,
+          { task_id: fact.task_id, archived: 1 },
+          request.requestedListMode,
+          request.focusRunId,
+        );
+      } else if (fact?.disposition === 'active') {
+        const canonical = sessionsRef.current.find(session =>
+          session.id === request.sessionId && session.archived !== 1) ?? null;
+        if (canonical) {
+          applySessionTarget(
+            request.sessionId,
+            canonical,
+            request.requestedListMode,
+            request.focusRunId,
+          );
+        } else if (listBody && listBody.archived !== 1) {
+          const adopted = sessionWithCanonicalMembership(listBody, fact.task_id);
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          sessionsRef.current = [
+            adopted,
+            ...sessionsRef.current.filter(session => session.id !== adopted.id),
+          ];
+          setSessions(previous => [
+            adopted,
+            ...previous.filter(session => session.id !== adopted.id),
+          ]);
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          applySessionTarget(
+            request.sessionId,
+            adopted,
+            request.requestedListMode,
+            request.focusRunId,
+          );
+        } else {
+          applySessionTarget(request.sessionId, null, request.requestedListMode, request.focusRunId);
+        }
+      } else {
+        applySessionTarget(request.sessionId, null, request.requestedListMode, request.focusRunId);
+      }
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    };
+    try {
+      let active: Session[];
+      try {
+        active = await loadSessions();
+      } catch {
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        return 'pending';
+      }
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      const found = active.find(session => session.id === request.sessionId) ?? null;
+      if (canonMoved()) return settleFromNewerCanon(found);
+      if (found && found.archived !== 1) {
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        sessionsRef.current = [
+          found,
+          ...sessionsRef.current.filter(session => session.id !== found.id),
+        ];
+        setSessions(previous => [
+          found,
+          ...previous.filter(session => session.id !== found.id),
+        ]);
+        if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+        applySessionTarget(
+          request.sessionId,
+          found,
+          request.requestedListMode,
+          request.focusRunId,
+        );
+        clearNavigationRequest(request.generation);
+        return 'settled';
+      }
+      let archivedFound: Session | null = found?.archived === 1 ? { ...found, archived: 1 } : null;
+      if (!archivedFound) {
+        try {
+          const hit = (await loadArchivedSessions()).find(session => session.id === request.sessionId) ?? null;
+          archivedFound = hit ? { ...hit, archived: 1 as const } : null;
+        } catch {
+          // The archive query failed. Absence is not confirmed, so the
+          // desktop target stays unacknowledged and can be retried.
+          if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+          return 'pending';
+        }
+      }
+      if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
+      if (canonMoved()) return settleFromNewerCanon(found);
+      applySessionTarget(
+        request.sessionId,
+        archivedFound,
+        request.requestedListMode,
+        request.focusRunId,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    } finally {
+      if (navigationBusyGenerationRef.current === request.generation) {
+        navigationBusyGenerationRef.current = null;
+      }
+    }
+  }, [applySessionTarget, clearNavigationRequest, navigationStillCurrent, supersededDelivery]);
+
+  // Latest canonical row, then the live assign overlay. A previous render's
+  // display list must not outrank a lifecycle update from this turn.
+  const navigationSession = useCallback((sessionId: string): Session | null => {
+    const fact = sessionCanonRef.current.facts.get(sessionId);
+    if (fact?.disposition === 'deleted' || fact?.disposition === 'archived') return null;
+    const canonical = sessionsRef.current.find(session => session.id === sessionId) ?? null;
+    if (!canonical || canonical.archived === 1) return null;
+    return applySessionOverlays(
+      canonical,
+      operationStore.getEntityOverlays(sessionEntityKey(canonical.id)),
+    );
+  }, [operationStore]);
+
+  const continueSessionRequest = useCallback((
+    request: PendingSessionNavigation,
+    subscribeIsCurrent?: () => boolean,
+  ): DesktopNavigationDelivery | Promise<DesktopNavigationDelivery> => {
+    if (!navigationStillCurrent(request.generation, subscribeIsCurrent)) {
+      return supersededDelivery(request, subscribeIsCurrent);
+    }
+    const fact = sessionCanonRef.current.facts.get(request.sessionId);
+    if (fact?.disposition === 'deleted' || fact?.disposition === 'archived') {
+      applySessionTarget(
+        request.sessionId,
+        fact.disposition === 'archived'
+          ? { task_id: fact.task_id, archived: 1 }
+          : null,
+        request.requestedListMode,
+        request.focusRunId,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    }
+    // A desktop delivery parks until the first session snapshot: the REST
+    // session list can predate the snapshot's task ownership, so a local hit
+    // must not settle it early (and must not be acknowledged). In-app
+    // requests may still settle from local knowledge.
+    if (request.desktopTarget && !sessionSnapshotReadyRef.current) return 'pending';
+    const local = navigationSession(request.sessionId);
+    if (local) {
+      applySessionTarget(
+        request.sessionId,
+        local,
+        request.requestedListMode,
+        request.focusRunId,
+      );
+      clearNavigationRequest(request.generation);
+      return 'settled';
+    }
+    if (!sessionSnapshotReadyRef.current) return 'pending';
+    return loadMissingSession(request, subscribeIsCurrent);
+  }, [applySessionTarget, clearNavigationRequest, loadMissingSession, navigationSession, navigationStillCurrent, supersededDelivery]);
+
+  const openExistingSession = useCallback((request: {
+    sessionId: string;
+    requestedListMode?: ConversationListMode | null;
+    focusRunId?: string;
+  }) => {
+    const requestedListMode = request.requestedListMode ?? null;
+    if (requestedListMode === 'sessions' || requestedListMode === 'tasks') {
+      rememberExplicitListMode(requestedListMode);
+    }
+    const pending = claimNavigationIntent({
+      sessionId: request.sessionId,
+      requestedListMode,
+      focusRunId: request.focusRunId,
+    });
+    void Promise.resolve(continueSessionRequest(pending)).then(delivery => {
+      trackNavigationDelivery(pending, delivery);
+    });
+  }, [claimNavigationIntent, continueSessionRequest, rememberExplicitListMode, trackNavigationDelivery]);
+
   const openScheduledTurn = useCallback((sessionId: string, runId: string) => {
-    selectSession(sessionId);
-    setActiveRail(null);
-    setViewState('main');
-    startTransition(() => setMode('sessions'));
-    setFocusScheduleRun({ sessionId, runId });
-  }, [selectSession, setActiveRail, setViewState]);
+    openExistingSession({ sessionId, focusRunId: runId });
+  }, [openExistingSession]);
 
-  // Timer detail "Open chat": jump to the Schedule's control conversation
-  // without focusing a specific Run.
   const openTimerConversation = useCallback((sessionId: string) => {
-    selectSession(sessionId);
-    setActiveRail(null);
-    setViewState('main');
-    startTransition(() => setMode('sessions'));
-  }, [selectSession, setActiveRail, setViewState]);
-
-  // 未分配 (untasked) sessions open inside the Tasks view, not in Project
-  // mode (2026-09-06 owner call): clear any task/subtask selection, point
-  // the active session at the row, stay in Tasks.
-  const selectStandaloneInTasks = useCallback((sessionId: string) => {
-    setActiveTaskId(null);
-    setActiveSubtaskId(null);
-    selectSession(sessionId);
-    startTransition(() => setMode('tasks'));
-  }, [selectSession]);
+    openExistingSession({ sessionId });
+  }, [openExistingSession]);
 
   useEffect(() => {
     const screenshot = desktopBridge()?.screenshot;
@@ -1127,10 +1550,7 @@ export function App() {
         upload: (sessionId, blob, filename) =>
           dispatchAttachmentUpload(ops.dispatch, { sessionId, blob, filename }),
         onSelectSession: session => {
-          selectSession(session.id);
-          setActiveRail(null);
-          setViewState('main');
-          startTransition(() => setMode('sessions'));
+          openExistingSession({ sessionId: session.id });
         },
       }).then(result => {
         if (result.ok) return;
@@ -1160,60 +1580,88 @@ export function App() {
       offCaptured();
       offError();
     };
-  }, [appT, ops.dispatch, selectSession, setActiveRail, setViewState]);
+  }, [appT, openExistingSession, ops.dispatch]);
 
-  const handleDesktopNavigation = useCallback((target: GianDesktopNavigationTarget) => {
+  const handleDesktopNavigation = useCallback((
+    target: GianDesktopNavigationTarget,
+    isCurrent?: () => boolean,
+  ): DesktopNavigationDelivery | Promise<DesktopNavigationDelivery> => {
+    if (isCurrent && !isCurrent()) return 'dropped';
     if (target.type === 'settings') {
+      cancelNavigationIntent();
       setSettingsSection(target.section);
       activateRail('settings');
-      return;
+      return 'settled';
     }
     if (target.type === 'schedule') {
-      // Scheduled-run attention: open the Timer detail — its run log is what
-      // the notification body points at.
+      cancelNavigationIntent();
       openSchedule(target.scheduleId);
+      return 'settled';
+    }
+    if (desktopResumeRef.current) {
+      const pending = pendingNavigationRef.current;
+      if (
+        pending?.desktopTarget
+        && pending.generation === navigationGenerationRef.current
+        && sameDesktopSessionTarget(pending.desktopTarget, target)
+      ) {
+        return continueSessionRequest(pending, isCurrent);
+      }
+      // This desktop delivery is still the subscribe-current one, but a newer
+      // in-app choice owns the view. Acknowledge it without opening it.
+      return 'settled';
+    }
+    const request = claimNavigationIntent({
+      sessionId: target.sessionId,
+      requestedListMode: null,
+      desktopTarget: target,
+    });
+    return continueSessionRequest(request, isCurrent);
+  }, [
+    activateRail, cancelNavigationIntent, claimNavigationIntent,
+    continueSessionRequest, openSchedule,
+  ]);
+  handleDesktopNavigationRef.current = handleDesktopNavigation;
+  desktopNavigationRef.current = target => {
+    void handleDesktopNavigation(target);
+  };
+  resumeNavigationRef.current = request => {
+    void Promise.resolve(continueSessionRequest(request)).then(delivery => {
+      trackNavigationDelivery(request, delivery);
+    });
+  };
+  recoveredForkRef.current = sessionId => {
+    const sequence = peekForkNavigationSequence(sessionId);
+    if (sequence == null) return;
+    // A newer open or page leave already deleted this record. What remains
+    // is a fork the reloaded document has not superseded.
+    if (!forkBeatsUserIntent(sequence, userIntentSequenceRef.current)) {
+      consumeForkNavigation(sessionId);
       return;
     }
-    // In-place jump: Repos and Tasks both present every unarchived Session,
-    // so select inside the current view instead of forcing Repos.
-    const session = sessionsRef.current.find(entry => entry.id === target.sessionId) ?? null;
-    const action = resolveSessionNavigation(target, { mode, session });
-    switch (action.kind) {
-      case 'select-in-sessions':
-        selectSession(action.sessionId);
-        setActiveRail(null);
-        setViewState('main');
-        startTransition(() => setMode('sessions'));
-        break;
-      case 'select-subtask-in-tasks':
-        setActiveTaskId(action.taskId);
-        setActiveSubtaskId(action.sessionId);
-        selectSession(action.sessionId);
-        setActiveRail(null);
-        setViewState('main');
-        break;
-      case 'select-standalone-in-tasks':
-        selectStandaloneInTasks(action.sessionId);
-        setActiveRail(null);
-        setViewState('main');
-        break;
-      case 'fallback-sessions':
-        selectSession(action.sessionId);
-        setActiveTaskId(null);
-        setActiveSubtaskId(null);
-        setActiveRail(null);
-        setViewState('main');
-        startTransition(() => setMode('sessions'));
-        break;
+    const local = sessionsRef.current.find(session => session.id === sessionId) ?? null;
+    if (!local || local.archived === 1) {
+      consumeForkNavigation(sessionId);
+      return;
     }
-  }, [activateRail, mode, openSchedule, selectSession, selectStandaloneInTasks, setActiveRail, setViewState]);
-  desktopNavigationRef.current = handleDesktopNavigation;
+    userIntentSequenceRef.current = sequence;
+    navigationGenerationRef.current += 1;
+    pendingNavigationRef.current = null;
+    consumeForkNavigation(sessionId);
+    applySessionTarget(sessionId, local, null);
+  };
 
   useEffect(() => {
     const navigation = desktopBridge()?.navigation;
     if (!navigation) return;
-    return subscribeDesktopNavigation(navigation, handleDesktopNavigation);
-  }, [handleDesktopNavigation]);
+    // Read the handler through the ref. Resubscribing on every mode change
+    // would drop a cold-start target before it is acknowledged.
+    return subscribeDesktopNavigation(
+      navigation,
+      (target, isCurrent) => handleDesktopNavigationRef.current(target, isCurrent),
+      navigationRetryRef.current,
+    );
+  }, []);
 
   const openAdoptedSession = useCallback((session: Session) => {
     // Make the HTTP result available synchronously for selection and unread
@@ -1227,11 +1675,8 @@ export function App() {
       session,
       ...previous.filter(candidate => candidate.id !== session.id),
     ]);
-    selectSession(session.id);
-    setActiveRail(null);
-    setViewState('main');
-    startTransition(() => setMode('sessions'));
-  }, [selectSession, setActiveRail, setViewState]);
+    openExistingSession({ sessionId: session.id });
+  }, [openExistingSession]);
 
   // A Gian Tool request is an intentional view change and opens immediately.
   // Direct git worktree evidence is weaker: wait for the Turn to finish, then
@@ -1431,6 +1876,10 @@ export function App() {
     setActiveTaskId,
     setActiveSubtaskId,
   });
+  const navigateHistory = useCallback((delta: -1 | 1) => {
+    cancelNavigationIntent();
+    navGo(delta);
+  }, [cancelNavigationIntent, navGo]);
 
   /** Internal Panel-2 settings navigation. */
   function onSettingsNavSelect(key: NavKey): void {
@@ -1445,7 +1894,7 @@ export function App() {
     }
     if (command === 'session.new' || command === 'task.new') {
       const kind = command === 'session.new' ? 'session' : 'task';
-      startTransition(() => setMode(kind === 'session' ? 'sessions' : 'tasks'));
+      chooseMode(kind === 'session' ? 'sessions' : 'tasks');
       setShortcutCreateRequest({ kind, sequence: Date.now() });
       return;
     }
@@ -1485,8 +1934,7 @@ export function App() {
       const next = current < 0
         ? 0
         : (current + delta + displaySessions.length) % displaySessions.length;
-      selectSession(displaySessions[next]!.id);
-      startTransition(() => setMode('sessions'));
+      openExistingSession({ sessionId: displaySessions[next]!.id });
       return;
     }
     if (command === 'workbench.previousTab' || command === 'workbench.nextTab') {
@@ -1505,13 +1953,13 @@ export function App() {
       if (activeId) sheetActions.closeTab(activeId);
       return;
     }
-    if (command === 'navigation.back' && canGoBack) navGo(-1);
-    if (command === 'navigation.forward' && canGoForward) navGo(1);
+    if (command === 'navigation.back' && canGoBack) navigateHistory(-1);
+    if (command === 'navigation.forward' && canGoForward) navigateHistory(1);
     if (command === 'session.rename') handleRenameStart();
   }, [
     activeGroup, activeRail, activeSessionId, activeTabByGroup, canGoBack,
     canGoForward, displaySessions, handleRenameStart, handleToggleSideChat,
-    inspectorAvailable, navGo, panelLayout, selectSession, setViewState,
+    chooseMode, inspectorAvailable, navigateHistory, openExistingSession, panelLayout, setViewState,
     sheetActions, toggleRail, viewState, wbTabs,
   ]);
 
@@ -1532,6 +1980,7 @@ export function App() {
   // then toggle the rail.
   const toggleRailAnyMode = (rail: Parameters<typeof toggleRail>[0]) => {
     if (mode === 'agents' || mode === 'timer' || mode === 'custom') {
+      cancelNavigationIntent();
       startTransition(() => setMode(sidebarListMode));
     }
     toggleRail(rail);
@@ -1594,10 +2043,14 @@ export function App() {
       onOpenChat={request => openChatPanel(surfaceSession.id, request)}
       fileRehype={fileRehype}
       onReopen={() => { ops.dispatch('task.reopenSubtask', { sessionId: surfaceSession.id }); }}
-      onOpenAgents={() => { startTransition(() => setMode('agents')); }}
+      onOpenAgents={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
       onShowLastTurnChanges={(turn, path) => showLastTurnChanges(surfaceSession, turn, path)}
       forkAtTurnControl={forkAtTurnControl}
       sideChatControl={sideChatControl}
+      scheduleFocus={focusScheduleRun && focusScheduleRun.sessionId === surfaceSession.id
+        ? { runId: focusScheduleRun.runId }
+        : null}
+      onConsumeScheduleFocus={() => setFocusScheduleRun(null)}
     />
   ) : null;
 
@@ -1664,6 +2117,12 @@ export function App() {
     <div
       className="app"
       data-testid="app-shell"
+      data-mode={mode}
+      data-session-id={selectedSessionId ?? ''}
+      data-task-id={activeTaskId ?? ''}
+      data-subtask-id={activeSubtaskId ?? ''}
+      data-explicit-list={explicitListMode ?? ''}
+      data-schedule-focus={focusScheduleRun ? `${focusScheduleRun.sessionId}:${focusScheduleRun.runId}` : ''}
       data-connection={wsState === 'open' && authed ? 'ready' : wsState}
     >
       <Topbar
@@ -1679,8 +2138,8 @@ export function App() {
         onToggleP3={panelLayout.toggleInspector}
         canGoBack={canGoBack}
         canGoForward={canGoForward}
-        onGoBack={() => navGo(-1)}
-        onGoForward={() => navGo(1)}
+        onGoBack={() => navigateHistory(-1)}
+        onGoForward={() => navigateHistory(1)}
       />
       <ImageLightbox image={zoomImage} onClose={() => setZoomImage(null)} />
       {wsDialog && (
@@ -1718,7 +2177,7 @@ export function App() {
         onClose={() => { setPaletteOpen(false); setPaletteInitialQuery(undefined); }}
         sessions={displaySessions}
         workspaces={displayWorkspaces}
-        onJumpToSession={sid => { selectSession(sid); setMode('sessions'); setPaletteOpen(false); }}
+        onJumpToSession={sid => { openExistingSession({ sessionId: sid }); setPaletteOpen(false); }}
         initialQuery={paletteInitialQuery}
       /></Suspense>}
       <div
@@ -1739,7 +2198,7 @@ export function App() {
           }}>
             <CodingView
               mode={mode}
-              onSetAppMode={(m) => { startTransition(() => setMode(m)); }}
+              onSetAppMode={chooseMode}
               workspaces={displayWorkspaces}
               sessions={displaySessions}
               activeSession={activeSession}
@@ -1752,7 +2211,7 @@ export function App() {
               historyBySession={historyBySession}
               onLoadOlder={(sessionId, executor) => loadOlder(sessionId, executor)}
               onRetryHistory={(sessionId, executor) => retryHistory(sessionId, executor)}
-              onSelectSession={selectSession}
+              onSelectSession={sessionId => openExistingSession({ sessionId, requestedListMode: 'sessions' })}
               onNewWorkspace={() => setWsDialog({ kind: 'create' })}
               onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
               openNewForWorkspace={newSessionForWs}
@@ -1852,15 +2311,17 @@ export function App() {
           {mode === 'tasks' && (
             <TasksView
               mode={mode}
-              onSetMode={(m) => { startTransition(() => setMode(m)); }}
+              onSetMode={chooseMode}
               tasks={displayTasks}
               sessions={displaySessions}
               workspaces={displayWorkspaces}
               activeTaskId={activeTaskId}
               activeSubtaskId={activeSubtaskId}
-              onSelectSubtask={(taskId, subtaskId) => { setActiveTaskId(taskId); setActiveSubtaskId(subtaskId); }}
+              onSelectSubtask={(_taskId, subtaskId) => {
+                openExistingSession({ sessionId: subtaskId, requestedListMode: 'tasks' });
+              }}
               activeSessionId={activeSessionId}
-              onSelectSession={selectStandaloneInTasks}
+              onSelectSession={sessionId => openExistingSession({ sessionId, requestedListMode: 'tasks' })}
               onPinSession={sessionMainHandlers.onPin}
               onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
               onNewWorkspace={() => setWsDialog({ kind: 'create' })}
@@ -1874,12 +2335,9 @@ export function App() {
           {(mode === 'agents' || mode === 'timer' || mode === 'custom') && (
             <PageWithSidebar
               mode={mode}
-              onSetMode={(next) => { startTransition(() => setMode(next)); }}
+              onSetMode={chooseMode}
               listMode={sidebarListMode}
-              onSetListMode={(next) => {
-                setSidebarListMode(next);
-                startTransition(() => setMode(next));
-              }}
+              onSetListMode={chooseMode}
               workspaces={displayWorkspaces}
               sessions={displaySessions}
               tasks={displayTasks}
@@ -1889,25 +2347,24 @@ export function App() {
               onEditWorkspace={workspace => setWsDialog({ kind: 'edit', workspace })}
               onNewForWorkspace={(workspaceId) => {
                 setNewSessionForWs(workspaceId);
-                startTransition(() => setMode('sessions'));
+                chooseMode('sessions');
               }}
               onPinSession={sessionMainHandlers.onPin}
               onArchiveSession={(sessionId) => sessionMainHandlers.onArchive(sessionId, true)}
-              onSelectSession={(sessionId) => {
-                selectSession(sessionId);
-                startTransition(() => setMode('sessions'));
+              onSelectSession={sessionId => {
+                openExistingSession({ sessionId, requestedListMode: 'sessions' });
               }}
-              onSelectUnassignedSession={selectStandaloneInTasks}
-              onSelectSubtask={(taskId, subtaskId) => {
-                setActiveTaskId(taskId);
-                setActiveSubtaskId(subtaskId);
-                startTransition(() => setMode('tasks'));
+              onSelectUnassignedSession={sessionId => {
+                openExistingSession({ sessionId, requestedListMode: 'tasks' });
+              }}
+              onSelectSubtask={(_taskId, subtaskId) => {
+                openExistingSession({ sessionId: subtaskId, requestedListMode: 'tasks' });
               }}
               onNewSessionForTask={(taskId) => {
                 setActiveTaskId(taskId);
                 setActiveSubtaskId(null);
                 setNewSubtaskForTaskId(taskId);
-                startTransition(() => setMode('tasks'));
+                chooseMode('tasks');
               }}
               railLayout={panelLayout.railLayout}
             >
@@ -1920,7 +2377,7 @@ export function App() {
                 <Suspense fallback={null}>
                   <CustomView
                     workspaces={displayWorkspaces}
-                    onOpenAgents={() => { startTransition(() => setMode('agents')); }}
+                    onOpenAgents={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
                   />
                 </Suspense>
               )}
@@ -1937,7 +2394,7 @@ export function App() {
                       // standard new-session page with the guidance prompt
                       // prefilled; that conversation becomes the owning one.
                       setNewSessionPrefill(prompt);
-                      startTransition(() => setMode('sessions'));
+                      chooseMode('sessions');
                     }}
                     offline={!(wsState === 'open' && authed)}
                   />
@@ -2044,7 +2501,7 @@ export function App() {
                       onSessionOpened={openAdoptedSession}
                       identity={identity}
                       onSignOut={signOut}
-                      onOpenAgentsPage={() => { startTransition(() => setMode('agents')); }}
+                      onOpenAgentsPage={() => { cancelNavigationIntent(); startTransition(() => setMode('agents')); }}
                       remoteController={remoteController}
                     />
                   );

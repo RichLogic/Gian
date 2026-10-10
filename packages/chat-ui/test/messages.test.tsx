@@ -37,6 +37,42 @@ describe('UserMessage', () => {
     expect(text.textContent).toBe('check https://example.com/docs please');
   });
 
+  it('orders user content: original bubble → attachments → translation block', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        text: 'hello there',
+        attachments: [{ name: 'one.png', mime: 'image/png', url: '/api/x/one.png' }],
+        translation: {
+          id: 't1', sessionId: 's1', sourceText: 'hello there', text: '你好',
+          targetLanguage: 'zh-CN', agentId: 'a', model: 'm', purpose: 'send',
+        },
+      })} />,
+    );
+    const body = container.querySelector('.msg-body')!;
+    const text = body.querySelector('.msg-text')!;
+    const attachments = body.querySelector('.msg-attachments')!;
+    const translation = body.querySelector('.translation-sent')!;
+    expect(text.compareDocumentPosition(attachments) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(attachments.compareDocumentPosition(translation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('renders the host-injected send-status slot between attachments and the translation block', () => {
+    const { container } = render(
+      <UserMessage item={userMsg({
+        text: 'hello there',
+        translation: {
+          id: 't1', sessionId: 's1', sourceText: 'hello there', text: '你好',
+          targetLanguage: 'zh-CN', agentId: 'a', model: 'm', purpose: 'send',
+        },
+      })} sendStatus={<div className="translation-send-row">Translating</div>} />,
+    );
+    const body = container.querySelector('.msg-body')!;
+    const row = body.querySelector('.translation-send-row')!;
+    const translation = body.querySelector('.translation-sent')!;
+    expect(row.textContent).toBe('Translating');
+    expect(row.compareDocumentPosition(translation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('renders image attachments inline and routes zoom through the callback', () => {
     const zoom = vi.fn();
     const { container } = render(

@@ -173,7 +173,7 @@ describe('UserMessage composer document markdown', () => {
     expect(container.querySelector('pre code')!.textContent).toContain('const x = 1;');
   });
 
-  it('renders text segments as markdown with chips interleaved in order', () => {
+  it('renders the document as one markdown source with chips spliced inline', () => {
     const { container } = render(
       <UserMessage item={docMsg([
         { type: 'text', text: 'see **this** ' },
@@ -182,10 +182,29 @@ describe('UserMessage composer document markdown', () => {
       ])} />,
     );
     const doc = container.querySelector('.inline-reference-document')!;
-    expect(childClasses(doc)).toEqual(['user-md-seg', 'message-inline-reference', 'user-md-seg']);
-    expect(doc.querySelector('.user-md-seg strong')!.textContent).toBe('this');
-    expect(doc.querySelector('.user-md-seg code')!.textContent).toBe('code');
-    expect(doc.textContent).toContain('spec.pdf');
+    expect(childClasses(doc)).toEqual(['user-md-seg']);
+    const seg = doc.querySelector('.user-md-seg')!;
+    expect(seg.querySelector('strong')!.textContent).toBe('this');
+    expect(seg.querySelector('code')!.textContent).toBe('code');
+    expect(seg.textContent).toBe('see this spec.pdf then code');
+  });
+
+  it('keeps a numbered list intact across an attachment chip (2026-10-09)', () => {
+    // Owner report: "1. " before an image chip parsed as an EMPTY list item,
+    // so the chip and the item text wrapped onto the next line. With the
+    // document parsed as one source, the chip lands inside the list item.
+    const { container } = render(
+      <UserMessage item={docMsg([
+        { type: 'text', text: '1. ' },
+        { type: 'reference', id: 'r1', referenceType: 'attachment', label: 'spec.pdf' },
+        { type: 'text', text: ' 当前文件预览？\n2. 我记得之前讨论过' },
+      ])} />,
+    );
+    const items = container.querySelectorAll('ol li');
+    expect(items).toHaveLength(2);
+    expect(items[0]!.querySelector('.message-inline-reference')!.textContent).toContain('spec.pdf');
+    expect(items[0]!.textContent).toContain('当前文件预览？');
+    expect(items[1]!.textContent).toBe('我记得之前讨论过');
   });
 
   it('keeps a paragraph break around a chip as a visible gap', () => {
@@ -197,18 +216,16 @@ describe('UserMessage composer document markdown', () => {
       ])} />,
     );
     const doc = container.querySelector('.inline-reference-document')!;
-    expect(childClasses(doc)).toEqual([
-      'user-md-seg',
-      'user-md-gap',
-      'message-inline-reference',
-      'user-md-gap',
-      'user-md-seg',
-    ]);
+    // One source → three paragraphs (chip in the middle one); the visible
+    // gap comes from the .user-md-seg p + p CSS.
+    const paras = doc.querySelectorAll('p');
+    expect(paras).toHaveLength(3);
+    expect(paras[1]!.querySelector('.message-inline-reference')!.textContent).toContain('spec.pdf');
     expect(doc.textContent).toContain('para one');
     expect(doc.textContent).toContain('para two');
   });
 
-  it('maps a soft break at a segment boundary to an explicit line break', () => {
+  it('maps a soft break before a chip to a real line break', () => {
     const { container } = render(
       <UserMessage item={docMsg([
         { type: 'text', text: 'line one\n' },
@@ -217,12 +234,10 @@ describe('UserMessage composer document markdown', () => {
       ])} />,
     );
     const doc = container.querySelector('.inline-reference-document')!;
-    expect(childClasses(doc)).toEqual([
-      'user-md-seg',
-      'user-md-br',
-      'message-inline-reference',
-      'user-md-seg',
-    ]);
+    const paras = doc.querySelectorAll('p');
+    expect(paras).toHaveLength(1);
+    // The soft break survives in the text node; the pre-wrap bubble shows it.
+    expect(paras[0]!.textContent).toBe('line one\nspec.pdfline two');
   });
 
   it('drops pretty-print whitespace around blocks inside a document segment', () => {

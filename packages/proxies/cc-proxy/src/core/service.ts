@@ -48,6 +48,35 @@ interface ServiceOptions {
   emitEvent?: ProxyEventSink;
 }
 
+interface UnpublishedProcessExit {
+  code: number | null;
+  signal: string | null;
+  errorDetail?: string;
+  streamedLength: number;
+}
+
+/** Provider text stays the user-facing message. A process that died without
+ *  one is retryable: the user can send the turn again. Exit facts always
+ *  ride along in details, matching the other proxies' error.details record. */
+function claudeProcessExitFailure(
+  code: number | null,
+  signal: string | null,
+  streamedLength: number,
+  errorDetail?: string,
+): { message: string; retryable: boolean; details: Record<string, unknown> } {
+  const detail = errorDetail?.trim() ?? '';
+  const facts = `Claude Code process exited (code=${code}, signal=${signal}, streamed=${streamedLength})`;
+  return {
+    message: detail || facts,
+    retryable: detail.length === 0,
+    details: {
+      exitCode: code,
+      signal,
+      streamedLength,
+    },
+  };
+}
+
 function normalizeNonEmptyString(value: unknown, field: string) {
   if (typeof value !== 'string' || !value.trim()) {
     throw createAppError(400, 'INVALID_REQUEST', `${field} is required.`);
@@ -125,6 +154,9 @@ export class CcProxyService {
    *  can apply the same per-tool handling (approval-bridged tools suppress
    *  both events). Entries are deleted on result / turn end / session end. */
   private readonly toolCallNames = new Map<string, string>();
+  /** CLI exits that arrive after activeTurns is set but before startTurn
+   *  publishes activeTurnId. Replayed once the turn is visible. */
+  private readonly unpublishedExits = new Map<string, UnpublishedProcessExit>();
 
   constructor(options: ServiceOptions) {
     this.runtime = options.runtime;
@@ -179,12 +211,16 @@ export class CcProxyService {
       this.handleUnknownClaudeEvent(sessionId, event);
     });
 
-    this.runtime.on('processExited', (sessionId, code, signal, errorDetail) => {
-      this.handleProcessExited(sessionId, code, signal, errorDetail);
+    this.runtime.on('processExited', (sessionId, code, signal, errorDetail, streamedLength) => {
+      this.handleProcessExited(sessionId, code, signal, errorDetail, streamedLength);
     });
 
     this.runtime.on('debug', (message) => {
       this.emitEvent('debug', { message });
+    });
+
+    this.runtime.on('defaultModelLabeled', () => {
+      this.emitEvent('catalog.refresh', {});
     });
 
     // Start the MCP channel server.
@@ -361,6 +397,9 @@ export class CcProxyService {
 
     // Ensure Claude Code process is running for this session.
     await this.ensureProcess(session, requestedModel);
+    // setSessionModel clears the init model id. Read it first so a Default
+    // turn can still see the model Claude actually started.
+    const detectedModelId = this.runtime.getDetectedModelId(session.id);
     // ClaudeMcpRuntime keeps one registered session while spawning a fresh CLI
     // process per turn. Keep its model synchronized even when ensureProcess()
     // finds the session already registered and therefore does not spawn again.
@@ -390,10 +429,23 @@ export class CcProxyService {
       await this.runtime.awaitModelDiscovery();
       const requestedEffort = params.thinking.trim();
       const discoveredModels = this.runtime.getModels();
-      const modelForEffort = requestedModel ?? session.model;
-      const modelCapabilities = discoveredModels.find(model => model.model === modelForEffort)
-        ?? (discoveredModels.length === 1 ? discoveredModels[0] : null);
-      const supportedEfforts = new Set(modelCapabilities?.supportedEfforts ?? []);
+      // Default's runtime model is '' while an omitted selection is null, so
+      // an exact match only applies to a concrete requested id. A matched
+      // model, including one reported by init, uses only its own efforts.
+      // With neither, any catalog entry may list the level.
+      const concrete = requestedModel
+        ? discoveredModels.find(model => model.model === requestedModel)
+          ?? (discoveredModels.length === 1 ? discoveredModels[0] : null)
+        : null;
+      const detected = !concrete && detectedModelId
+        ? discoveredModels.find(model => model.model === detectedModelId) ?? null
+        : null;
+      const effortSource = concrete ?? detected;
+      const supportedEfforts = new Set(
+        effortSource
+          ? effortSource.supportedEfforts
+          : discoveredModels.flatMap(model => model.supportedEfforts),
+      );
       effort = supportedEfforts.has(requestedEffort) ? requestedEffort : null;
     }
     const additionalDirectories = [...new Set(
@@ -402,12 +454,23 @@ export class CcProxyService {
           item.type === 'localFile')
         .map(item => dirname(item.path)),
     )];
-    await this.runtime.sendMessage(session.id, prompt, {
-      permissionMode: params.permissionMode ?? null,
-      effort,
-      displayName: params.displayName ?? null,
-      additionalDirectories,
-    });
+    try {
+      await this.runtime.sendMessage(session.id, prompt, {
+        permissionMode: params.permissionMode ?? null,
+        effort,
+        displayName: params.displayName ?? null,
+        additionalDirectories,
+      });
+    } catch (error) {
+      this.activeTurns.delete(session.id);
+      this.unpublishedExits.delete(session.id);
+      throw error;
+    }
+    // The child can exit in the same task as spawn, before activeTurnId is
+    // published. Take that exit synchronously — no await — so it cannot land
+    // both as a stash and as a live failure.
+    const pendingExit = this.unpublishedExits.get(session.id);
+    this.unpublishedExits.delete(session.id);
 
     const updatedSession = this.updateSession(session, {
       activeTurnId: turnId,
@@ -423,9 +486,20 @@ export class CcProxyService {
       data: { turnId, status: 'running' },
     });
 
+    if (pendingExit) {
+      this.handleProcessExited(
+        session.id,
+        pendingExit.code,
+        pendingExit.signal,
+        pendingExit.errorDetail,
+        pendingExit.streamedLength,
+      );
+    }
+    const published = this.sessionsById.get(session.id) ?? updatedSession;
+
     return {
-      session: this.serializeSession(updatedSession),
-      turn: { id: turnId, status: 'running' },
+      session: this.serializeSession(published),
+      turn: { id: turnId, status: published.activeTurnId ? 'running' : 'error' },
     };
   }
 
@@ -435,8 +509,15 @@ export class CcProxyService {
       throw createAppError(409, 'INVALID_REQUEST', 'This session does not have an active turn.');
     }
 
-    // Killing the process is the most reliable way to interrupt.
-    this.runtime.killSession(session.id);
+    // Keep the registered session so the next turn resumes it. killSession
+    // drops hasHadFirstTurn, and the replacement CLI then passes --session-id
+    // for an id that already exists and exits 0.
+    if (this.runtime.interruptActiveProcess) {
+      this.runtime.interruptActiveProcess(session.id);
+    } else {
+      this.runtime.killSession(session.id);
+    }
+    this.unpublishedExits.delete(session.id);
     this.activeTurns.delete(session.id);
     this.clearToolCallNames(session.id);
 
@@ -855,12 +936,26 @@ export class CcProxyService {
     code: number | null,
     signal: string | null,
     errorDetail?: string,
+    streamedLength?: number,
   ) {
     const session = this.sessionsById.get(sessionId);
     if (!session) return;
 
     const context = this.activeTurns.get(sessionId);
+    if (session.activeTurnId === null) {
+      if (context) {
+        this.unpublishedExits.set(sessionId, {
+          code,
+          signal,
+          ...(errorDetail !== undefined ? { errorDetail } : {}),
+          streamedLength: streamedLength ?? 0,
+        });
+      }
+      return;
+    }
+
     this.activeTurns.delete(sessionId);
+    this.unpublishedExits.delete(sessionId);
     this.clearToolCallNames(sessionId);
 
     // Clear all pending approvals (an MCP CallTool waiting on the dead
@@ -874,26 +969,28 @@ export class CcProxyService {
       this.approvalsBySessionId.delete(sessionId);
     }
 
-    const hadActiveTurn = session.activeTurnId !== null;
-    const errorMessage = hadActiveTurn
-      ? errorDetail?.trim() || `Claude Code process exited (code=${code}, signal=${signal})`
-      : null;
+    const failure = claudeProcessExitFailure(code, signal, streamedLength ?? 0, errorDetail);
 
     const updated = this.updateSession(session, {
       activeTurnId: null,
       processAlive: false,
-      status: hadActiveTurn ? 'error' : 'idle',
-      lastError: errorMessage,
+      status: 'error',
+      lastError: failure.message,
     });
 
-    if (hadActiveTurn) {
-      this.emitEvent('turn.failed', {
-        requestId: context?.requestId,
-        sessionId: updated.id,
-        turnId: context?.turnId,
-        data: { status: 'failed', error: updated.lastError },
-      });
-    }
+    this.emitEvent('turn.failed', {
+      requestId: context?.requestId,
+      sessionId: updated.id,
+      turnId: context?.turnId,
+      data: {
+        status: 'failed',
+        error: {
+          message: failure.message,
+          retryable: failure.retryable,
+          details: failure.details,
+        },
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -970,6 +1067,8 @@ export class CcProxyService {
 
   private removeSession(session: SessionRecord) {
     this.sessionsById.delete(session.id);
+    this.activeTurns.delete(session.id);
+    this.unpublishedExits.delete(session.id);
     this.clearToolCallNames(session.id);
     const approvals = this.approvalsBySessionId.get(session.id);
     if (approvals) {

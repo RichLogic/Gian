@@ -6,7 +6,7 @@ import {
   resolveKeymap,
 } from '@gian/shared';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAppShortcuts } from '../src/controllers/use-app-shortcuts.js';
 import type { OperationDispatcher } from '../src/operations/dispatcher.js';
 import {
@@ -19,17 +19,10 @@ import {
 } from '../src/shortcut-prefs.js';
 import { sessionContractFixture } from './fixtures/ws-contract.js';
 
-import { clearComposerCapabilityCaches, fetchSteerCached } from '../src/components/composer/capabilities.js';
-
-vi.mock('../src/api.js', () => ({
-  loadProxyCapabilities: vi.fn(async () => ({ capabilities: { 'turn.steer': 1 } })),
+vi.mock('../src/components/composer/capabilities.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/components/composer/capabilities.js')>(),
+  peekSteerCached: () => true,
 }));
-
-beforeEach(async () => {
-  clearComposerCapabilityCaches();
-  await fetchSteerCached('codex');
-});
-
 
 afterEach(() => {
   setKeymapPreferences(undefined);

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_MESSAGE_CONTEXT_ITEMS, MAX_PASTED_TEXT_BYTES } from '@gian/shared';
 import type { GianBrowserPageSnapshotCapture, PastedTextContextItem } from '@gian/shared';
 import type { OperationRun } from '../src/operations/types.js';
+import { dispatchAttachmentUpload } from '../src/operations/message.js';
 import {
   assembleBrowserPageSnapshotText,
   assembleBrowserTabReferenceText,
@@ -201,7 +202,9 @@ describe('attachBrowserPageScreenshot', () => {
       { capturePageScreenshot: vi.fn().mockResolvedValue(capture) },
       TAB_ID,
       SESSION_ID,
-      { dispatch, inject },
+      // Same wiring as the BrowserPanel call site: the controller stays on the
+      // upload callback, the dispatcher binding lives with the caller.
+      { upload: (sessionId, blob, filename) => dispatchAttachmentUpload(dispatch, { sessionId, blob, filename }), inject },
     );
     expect(result).toBe('attached');
     expect(dispatch).toHaveBeenCalledWith('message.uploadAttachment', expect.objectContaining({

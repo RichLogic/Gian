@@ -55,6 +55,9 @@ interface SessionSurfaceProps {
    *  lives on the Dock rail + panel 2). */
   forkAtTurnControl?: ActionControlState | null;
   sideChatControl?: ActionControlState | null;
+  /** Timer open-run request. The transcript owns whether a matching row exists. */
+  scheduleFocus?: { runId: string } | null;
+  onConsumeScheduleFocus?: () => void;
 }
 
 export function SessionSurface({
@@ -84,6 +87,8 @@ export function SessionSurface({
   containerClassName,
   forkAtTurnControl,
   sideChatControl,
+  scheduleFocus,
+  onConsumeScheduleFocus,
 }: SessionSurfaceProps) {
   const linkBehavior = useMemo<LinkBehavior>(() => ({
     openWebUrl: null,
@@ -147,6 +152,8 @@ export function SessionSurface({
                 onShowLastTurnChanges={onShowLastTurnChanges}
                 forkAtTurnControl={forkAtTurnControl}
                 sideChatControl={sideChatControl}
+                scheduleFocus={scheduleFocus}
+                onConsumeScheduleFocus={onConsumeScheduleFocus}
               />
             </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>

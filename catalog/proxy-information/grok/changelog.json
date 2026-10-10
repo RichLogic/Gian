@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "grok",
-  "currentVersion": "0.3.6",
+  "currentVersion": "0.3.7",
   "entries": [
+    {
+      "version": "0.3.7",
+      "firstPublishedAt": "2026-10-07T07:19:09Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-grok-v0.3.7",
+          "publishedAt": "2026-10-07T07:19:09Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.7",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.7/gian-proxy-grok-0.3.7-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "69720ac628ad824b84ac77b02253ea633c71e0f11578b0a0c4dc703200c2142e",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-grok-v0.3.7/gian-proxy-grok-0.3.7-darwin-arm64.tar.gz",
+            "sha256": "1d9d73e52e4f4417426bb04a784a3b886242a6f288f8eb97852dc21f14bf968a",
+            "size": 179251
+          },
+          "runtimeDeclaration": {
+            "id": "grok",
+            "versions": [
+              "1.0.41"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "修复会话配置与 Turn 配置边界、模型切换、原生事件和交互投影；Question 取消仅按明确声明动作免除必填答案。Fork 只在原生 CLI 确认支持时开放。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，受管 Grok CLI 仍为 1.0.41。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.7",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-grok-v0.3.7/packages/proxies/grok-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.6",
       "firstPublishedAt": "2026-09-25T11:45:02Z",

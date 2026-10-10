@@ -2,7 +2,7 @@
   "schemaVersion": 4,
   "id": "kimi",
   "displayName": "Kimi Code",
-  "pluginVersion": "0.4.5",
+  "pluginVersion": "0.4.6-Dev",
   "entry": "proxy.mjs",
   "protocol": {
     "name": "gian.proxy",

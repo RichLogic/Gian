@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.6**，Runtime **1.0.41**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.7**，Runtime **1.0.41**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.7
+
+首次公开发布：2026-10-07T07:19:09Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.7)：2026-10-07T07:19:09Z。
+- 对应 CLI：1.0.41（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 修复会话配置与 Turn 配置边界、模型切换、原生事件和交互投影；Question 取消仅按明确声明动作免除必填答案。Fork 只在原生 CLI 确认支持时开放。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，受管 Grok CLI 仍为 1.0.41。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-grok-v0.3.7) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-grok-v0.3.7/packages/proxies/grok-proxy/README.md)
 
 ## 0.3.6
 
