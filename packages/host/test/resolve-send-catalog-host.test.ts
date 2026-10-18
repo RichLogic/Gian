@@ -101,9 +101,9 @@ async function firstSend(
   });
 }
 
-test('two attached Antigravity sessions resolve their own fences against one process catalog', async (t) => {
+test('open plugin sessions cache only their own real resolved catalog fences', async (t) => {
   const { host, trace } = await startHost(t, {
-    pluginId: 'io.gian.antigravity',
+    pluginId: 'io.fixture.open-catalog',
     sessions: {
       a: 'native-a',
       b: 'native-b',
@@ -113,14 +113,17 @@ test('two attached Antigravity sessions resolve their own fences against one pro
   const a = await attach(host, 'a');
   const b = await attach(host, 'b');
   const ui = await attach(host, 'ui');
-  assert.equal(a.sessionCatalogRevision(), 'native-a');
-  assert.equal(b.sessionCatalogRevision(), 'native-b');
-  // The Host UI revision is stored in the protocol field and is not a fence.
+  assert.equal(a.sessionCatalogRevision(), undefined);
+  assert.equal(b.sessionCatalogRevision(), undefined);
   assert.equal(ui.sessionCatalogRevision(), undefined);
 
   await firstSend(a, 'a', { model: 'gemini-session-a' });
   await firstSend(b, 'b', { model: 'gemini-session-b' });
   await firstSend(ui, 'ui', { model: 'gemini-session-a' });
+  assert.equal(a.sessionCatalogRevision(), 'session-a');
+  assert.equal(b.sessionCatalogRevision(), 'session-b');
+  assert.equal(ui.sessionCatalogRevision(), 'session-ui');
+  await resolveSendCatalog(a, { sessionConfig: {}, turnConfig: { model: 'gemini-session-b' } }, 'process-cold');
 
   const records = await readTrace(trace);
   const lists = records.filter((record) => record.method === 'catalog.list');
@@ -128,33 +131,90 @@ test('two attached Antigravity sessions resolve their own fences against one pro
   const starts = records.filter((record) => record.method === 'turn.start');
   assert.equal(lists.length, 1, 'both sessions share the frozen process catalog');
   assert.deepEqual(resolves.map((record) => record.params.catalogRevision), [
-    'native-a',
-    'native-b',
     'process-cold',
+    'process-cold',
+    'process-cold',
+    'session-a',
   ]);
   assert.deepEqual(starts.map((record) => record.params.sessionId), ['a', 'b', 'ui']);
 });
 
-test('another proxy turnConfigRevision stays an options revision', async (t) => {
+test('Antigravity options revisions and global resolved views never become session fences', async (t) => {
   const { host, trace } = await startHost(t, {
-    pluginId: 'io.gian.grok',
+    pluginId: 'io.gian.antigravity',
     sessions: {
       ui: 'turn-config-ui-1',
-      composer: 'composer-options-9',
+      composer: 'native-looking-options-9',
     },
   });
   const ui = await attach(host, 'ui');
   const composer = await attach(host, 'composer');
   assert.equal(ui.sessionCatalogRevision(), undefined);
   assert.equal(composer.sessionCatalogRevision(), undefined);
+  const global = await composer.resolveCatalog({ catalogRevision: 'process-cold', sessionConfig: {}, turnConfig: {} }, 'global');
+  assert.equal(global.catalogRevision, 'global-resolved');
+  assert.equal(composer.sessionCatalogRevision(), undefined);
   await firstSend(ui, 'ui', { model: 'gemini-session-a' });
   await firstSend(composer, 'composer', { model: 'gemini-session-b' });
   const records = await readTrace(trace);
   assert.deepEqual(
     records.filter((record) => record.method === 'catalog.resolve').map((record) => record.params.catalogRevision),
-    ['process-cold', 'process-cold'],
+    ['process-cold', 'process-cold', 'process-cold'],
   );
   assert.equal(records.filter((record) => record.method === 'turn.start').length, 2);
+});
+
+test('cold conflict refreshes once and caches the returned session fence before turn.start', async (t) => {
+  const { host, trace } = await startHost(t, {
+    pluginId: 'io.fixture.open-catalog', resolve: 'conflict-cold', sessions: { a: 'not-a-catalog-fence' },
+  });
+  const a = await attach(host, 'a');
+  await firstSend(a, 'a', { model: 'gemini-session-a' });
+  assert.equal(a.sessionCatalogRevision(), 'session-a');
+  const records = await readTrace(trace);
+  assert.deepEqual(records.filter((record) => record.method === 'catalog.resolve').map((record) => record.params.catalogRevision), [
+    'process-cold', 'process-fresh',
+  ]);
+  assert.equal(records.filter((record) => record.method === 'catalog.list').length, 2);
+  assert.equal(records.filter((record) => record.method === 'turn.start').length, 1);
+  assert.equal(records.at(-1)?.method, 'turn.start');
+});
+
+test('an older in-flight resolve cannot overwrite the newer real session fence', async (t) => {
+  const { host, trace, release } = await startHost(t, {
+    pluginId: 'io.fixture.open-catalog', resolve: 'hold-first', sessions: { a: 'options-a' },
+  });
+  const a = await attach(host, 'a');
+  const draft = { catalogRevision: 'process-cold', sessionConfig: {}, turnConfig: {} };
+  const old = a.resolveCatalog(draft);
+  await waitFor(async () => (await readTrace(trace)).some((record) => record.method === 'catalog.resolve'));
+  assert.equal((await a.resolveCatalog(draft)).catalogRevision, 'session-new');
+  await writeFile(release, 'go');
+  assert.equal((await old).catalogRevision, 'session-old');
+  assert.equal(a.sessionCatalogRevision(), 'session-new');
+});
+
+test('refresh, notifications and reattach retire in-flight session catalog results', async (t) => {
+  for (const boundary of ['refresh', 'changed', 'options', 'reattach'] as const) {
+    await t.test(boundary, async (child) => {
+      const { host, trace, release } = await startHost(child, {
+        pluginId: 'io.fixture.open-catalog',
+        resolve: boundary === 'changed' || boundary === 'options' ? `${boundary}-during-resolve` : 'hold-first',
+        sessions: { a: 'options-a' },
+      });
+      const a = await attach(host, 'a');
+      const seen: string[] = [];
+      a.onNotification((notification) => seen.push(notification.method));
+      const pending = a.resolveCatalog({ catalogRevision: 'process-cold', sessionConfig: {}, turnConfig: {} });
+      await waitFor(async () => (await readTrace(trace)).some((record) => record.method === 'catalog.resolve'));
+      if (boundary === 'refresh') await a.reloadCatalog();
+      else if (boundary === 'reattach') a.attachFromSnapshot('replacement-stream');
+      else await waitFor(() => seen.includes(boundary === 'changed' ? 'catalog.changed' : 'session.updated'));
+      await writeFile(release, 'go');
+      await pending;
+      assert.equal(a.sessionCatalogRevision(), undefined, 'retired result must not repopulate the session cache');
+    });
+  }
 });
 
 test('a persistent Catalog-changed conflict reloads once for two sessions and does not start turns', async (t) => {
@@ -170,9 +230,9 @@ test('a persistent Catalog-changed conflict reloads once for two sessions and do
   const records = await readTrace(trace);
   const resolves = records.filter((record) => record.method === 'catalog.resolve');
   assert.deepEqual(resolves.map((record) => [record.params.sessionId, record.params.catalogRevision]), [
-    ['a', 'native-a'],
+    ['a', 'process-cold'],
     ['a', 'process-fresh'],
-    ['b', 'native-b'],
+    ['b', 'process-cold'],
     ['b', 'process-fresh'],
   ]);
   assert.equal(
@@ -224,7 +284,7 @@ test('an illegal catalog value is rejected once and does not start a turn', asyn
   const records = await readTrace(trace);
   const resolves = records.filter((record) => record.method === 'catalog.resolve');
   assert.equal(resolves.length, 1);
-  assert.equal(resolves[0]?.params.catalogRevision, 'native-a');
+  assert.equal(resolves[0]?.params.catalogRevision, 'process-cold');
   assert.equal(resolves[0]?.params.turnConfig?.model, 'gemini-not-advertised');
   assert.equal(records.filter((record) => record.method === 'catalog.list').length, 1);
   assert.equal(records.filter((record) => record.method === 'turn.start').length, 0);

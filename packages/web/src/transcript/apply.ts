@@ -473,7 +473,7 @@ export function applyEnvelope(
       ? existing.nativeOptions?.find(option => option.optionId === nativeOptionId)?.kind
       : undefined;
     let decision: string;
-    if (nativeKind?.startsWith('reject')) {
+    if (nativeKind === 'reject_once' || nativeKind === 'reject_always') {
       decision = 'decline';
     } else if (nativeKind === 'allow_session' || nativeKind === 'allow_always') {
       decision = 'allow_session';

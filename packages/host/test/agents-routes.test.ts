@@ -911,7 +911,7 @@ test('POST /api/agents rejects a malformed runtime binding', async t => {
   assert.match((await response.json() as { error: string }).error, /runtime must be an object/);
 });
 
-test('POST /api/agents rejects a custom Runtime that fails the probe', async t => {
+test('POST /api/agents preserves a custom Runtime missing content-root probe failure', async t => {
   const { app, root } = await makeApp(t);
   const response = await app.request('/api/agents', {
     method: 'POST',
@@ -924,7 +924,7 @@ test('POST /api/agents rejects a custom Runtime that fails the probe', async t =
   });
   assert.equal(response.status, 400);
   const body = await response.json() as { error: string; code?: string };
-  assert.equal(body.code, 'RUNTIME_INVALID');
+  assert.equal(body.code, 'RUNTIME_ROOT_MISSING');
 });
 
 test('PATCH /api/agents/:id rejects Runtime edits (create-only binding)', async t => {

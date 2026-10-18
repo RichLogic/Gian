@@ -1881,7 +1881,7 @@ describe('P1a session navigation entries', () => {
       await user.click(screen.getByTestId('dock-search'));
       const archivePalette = await screen.findByPlaceholderText('Search sessions, messages, settings, commands…');
       await user.type(archivePalette, 'Archive');
-      await user.click(await screen.findByRole('button', { name: /^Archive/ }));
+      await user.click(await screen.findByText('Archive', { selector: '.pal-row-label' }));
       await waitFor(() => {
         expect(document.querySelector('.s2-navitem.active')?.textContent).toBe('Archive');
       });
@@ -2232,7 +2232,13 @@ describe('Inbox approval decisions bind the exact native option (issue #1)', () 
       expected_inbox: { id: 'inbox-allow', generation: 5 },
     });
 
+    // Pending disables the focused decision button. Escape still belongs to
+    // the open dialog when that disabled control loses keyboard focus.
+    expect(screen.getByTestId('inbox-action-approve')).toBeDisabled();
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    expect(document.activeElement).toBe(document.body);
     await user.keyboard('{Escape}');
+    await screen.findByTestId('inbox-tab-pending');
     await user.click(await screen.findByText('Reject opaque tool?'));
     await screen.findByTestId('inbox-detail-inbox-reject');
     await user.click(screen.getByTestId('inbox-action-reject'));

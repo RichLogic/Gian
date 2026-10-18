@@ -39,7 +39,7 @@ export interface ProxyClient {
     sessionConfig: Record<string, ConfigValue>;
     turnConfig: Record<string, ConfigValue>;
   }): Promise<ResolvedProxyCatalog>;
-  /** Attached session's proxy catalog fence. Absent until session.create. */
+  /** Fence returned by a current session-scoped catalog resolution, if any. */
   sessionCatalogRevision?(): string | undefined;
   /** Replace the frozen process catalog. Concurrent callers share one list. */
   reloadCatalog?(): Promise<ProxyCatalog>;

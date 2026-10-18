@@ -96,7 +96,7 @@ test('create persists a custom Runtime binding, probes the path, and prefers it 
   assert.equal(reloadedStatus.cli.path, runtimePath);
 });
 
-test('create with a custom Runtime rejects a path that fails the probe', async t => {
+test('create with a custom Runtime preserves the missing content-root probe failure', async t => {
   const { root, manager } = await customHarness(t);
   const missing = join(root, 'bin', 'missing-runtime');
   await assert.rejects(
@@ -106,7 +106,7 @@ test('create with a custom Runtime rejects a path that fails the probe', async t
       runtime: { kind: 'custom', path: missing },
     }),
     (error: unknown) => error instanceof AgentCreateError
-      && error.code === 'RUNTIME_INVALID'
+      && error.code === 'RUNTIME_ROOT_MISSING'
       && error.status === 400,
   );
   assert.equal(manager.listAgents().length, 0);

@@ -56,9 +56,12 @@ describe('Inbox mutations use real registered operations', () => {
     const [run] = dispatcher.store.getPendingRuns();
     expect(run?.name).toBe(action === 'read' ? 'inbox.markRead' : action === 'unread' ? 'inbox.markUnread' : 'inbox.skipVersion');
     expect(run?.phase).toBe('pending');
-    response.resolve(Response.json({ ...item, revision: 2, unread: action !== 'read', read_at: action === 'read' ? item.updated_at : null }));
+    const canonical = { ...item, revision: 2, unread: action !== 'read', read_at: action === 'read' ? item.updated_at : null };
+    response.resolve(Response.json(canonical));
     expect(await result).toBe('ok');
     expect(dispatcher.store.getRun(run!.id)?.phase).toBe('confirmed');
+    expect(dispatcher.store.getRun(run!.id)?.result).toEqual(canonical);
+    expect(getInboxSnapshot().pendingItems).toEqual([canonical]);
     expect(getInboxSnapshot().pendingCount).toBe(1);
   });
 

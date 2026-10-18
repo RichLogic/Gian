@@ -1502,11 +1502,11 @@ function TaskDetail({
 }) {
   const t = useT();
 
+  // App owns the selected surface. An archived deep link deliberately has
+  // no active rail row, but its read-only SessionSurface must still render.
+  if (subtaskMain) return <>{subtaskMain}</>;
+
   if (!task) {
-    // A standalone (未分配) session selected from the Tasks rail opens in
-    // place — no jump to Project mode (2026-09-06 owner call). App builds
-    // the same <SessionSurface> as for a subtask.
-    if (!subtask && subtaskMain) return <>{subtaskMain}</>;
     return (
       <main className="main tasks-detail-empty">
         <p>{t('tasks.detail.empty')}</p>
@@ -1514,30 +1514,18 @@ function TaskDetail({
     );
   }
 
-  // A subtask is selected → a Subtask IS a Session, so render the exact same
-  // full <SessionSurface> (chat/transcript/composer + header) that Sessions
-  // mode renders. App builds it (`subtaskMain`) wired to the same App-level
-  // handlers rebound to the subtask's id; the workbench Sheet + Inspector
-  // also resolve to it because App synced `activeSessionId` to the subtask.
-  // The element already renders its own `.main`, so we drop it in directly —
-  // no extra `.main`/`.view` wrapper (matches how CodingView lays out `.main`).
+  // Keep a lightweight placeholder while App catches up to a rail selection.
   if (subtask) {
-    // `subtaskMain` is built only once App has caught up (activeSession synced
-    // to this subtask); show a lightweight placeholder for the one render where
-    // it's still null.
-    if (!subtaskMain) {
-      return (
-        <main className="main tasks-main">
-          <div className="main-head">
-            <div className="main-head-l">
-              <span className="manager-task-name">{subtask.name || t('coding.session.untitled')}</span>
-            </div>
+    return (
+      <main className="main tasks-main">
+        <div className="main-head">
+          <div className="main-head-l">
+            <span className="manager-task-name">{subtask.name || t('coding.session.untitled')}</span>
           </div>
-          <div className="main-scroll" />
-        </main>
-      );
-    }
-    return <>{subtaskMain}</>;
+        </div>
+        <div className="main-scroll" />
+      </main>
+    );
   }
 
   // Only a task is selected → a simple placeholder: the task name plus a hint

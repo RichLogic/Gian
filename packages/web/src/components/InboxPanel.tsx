@@ -295,6 +295,21 @@ export function InboxPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, focusItem?.id, focusItem?.generation, focusItem?.nonce]);
 
+  // Disabling a pending decision can blur its button onto body. The open
+  // modal still owns Escape; do not depend on focus remaining in the panel.
+  useEffect(() => {
+    if (!open) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      retireDetailRequest();
+      if (!selected) onClose();
+    };
+    document.addEventListener('keydown', onEscape);
+    return () => document.removeEventListener('keydown', onEscape);
+  }, [open, selected, onClose]);
+
   if (!open) return null;
 
   function retryHistory() {
@@ -365,12 +380,6 @@ export function InboxPanel({
   }
 
   function handleKeyDown(event: React.KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      if (selected) retireDetailRequest();
-      else onClose();
-      return;
-    }
     if (event.key !== 'Tab') return;
     const panel = panelRef.current;
     if (!panel) return;

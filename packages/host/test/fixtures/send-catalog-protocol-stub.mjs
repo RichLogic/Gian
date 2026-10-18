@@ -89,6 +89,7 @@ let catalogLists = 0;
 let released = false;
 const pendingResolves = [];
 const releaseWaiters = [];
+let scopedResolves = 0;
 
 function waitRelease() {
   if (released) return Promise.resolve();
@@ -148,7 +149,7 @@ function flushResolves() {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
-function resolveResult(request) {
+async function resolveResult(request) {
   const revision = request.params.catalogRevision;
   const model = request.params.turnConfig?.model;
   if (resolveMode === 'always-conflict') {
@@ -160,12 +161,35 @@ function resolveResult(request) {
     fail(request.id, 'CONFLICT', 'Catalog changed; refresh its options before resolving.');
     return;
   }
+  const sessionId = request.params.sessionId;
+  const sessionRevision = `session-${sessionId}`;
+  if (!['process-cold', 'process-fresh', sessionRevision, 'session-new'].includes(revision)
+    || (resolveMode === 'conflict-cold' && revision === 'process-cold')) {
+    fail(request.id, 'CONFLICT', 'Catalog changed; refresh its options before resolving.');
+    return;
+  }
   if (model === 'gemini-not-advertised') {
     fail(request.id, 'CONFIG_VALUE_INVALID', "Model 'gemini-not-advertised' is not an available Gemini model.");
     return;
   }
+  const index = sessionId ? ++scopedResolves : 0;
+  if (index === 1) {
+    if (resolveMode === 'changed-during-resolve') changed();
+    if (resolveMode === 'options-during-resolve') {
+      send({
+        jsonrpc: '2.0', method: 'session.updated',
+        params: {
+          eventId: 'options-updated-1', emittedAt, sessionId,
+          streamId: `stream-${sessionId}`, sequence: 1,
+          data: { turnConfigOptions: [modelOption('gemini-session-b')], turnConfigRevision: 'options-new' },
+        },
+      });
+    }
+    if (['hold-first', 'changed-during-resolve', 'options-during-resolve'].includes(resolveMode)) await waitRelease();
+  }
   ok(request.id, {
-    ...catalog(revision),
+    ...catalog(!sessionId ? 'global-resolved'
+      : resolveMode === 'hold-first' ? (index === 1 ? 'session-old' : 'session-new') : sessionRevision),
     resolvedDefaults: { sessionConfig: {}, turnConfig: request.params.turnConfig ?? {} },
   });
 }
@@ -209,7 +233,7 @@ async function handle(request) {
     return;
   }
   if (request.method === 'catalog.resolve') {
-    resolveResult(request);
+    await resolveResult(request);
     return;
   }
   if (request.method === 'turn.start') {

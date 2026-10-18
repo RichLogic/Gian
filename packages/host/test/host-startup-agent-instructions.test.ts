@@ -8,6 +8,7 @@ import test from 'node:test';
 import { agentInstructionTargets, buildManagedBlock } from '../src/onboarding/agent-instructions.js';
 import { openDatabase } from '../src/storage/db.js';
 import { saveConfig } from '../src/storage/config.js';
+import { fakeOfficialProxy } from './runtime-test-harness.js';
 
 async function availablePort(): Promise<number> {
   const server = createServer();
@@ -65,6 +66,7 @@ test('real Host startup removes only the legacy Gian instruction block', async t
   });
   db.close();
 
+  const proxyEntry = await fakeOfficialProxy(root, 'claude', 'Claude Code', '0.2.4');
   const hostRoot = resolve(import.meta.dirname, '..');
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     cwd: hostRoot,
@@ -75,6 +77,8 @@ test('real Host startup removes only the legacy Gian instruction block', async t
       GIAN_SKIP_PROXY_WARMUP: '1',
       GIAN_PARENT_MANAGED: '1',
       GIAN_MANAGED_PLUGINS: '0',
+      GIAN_DEV_PROXY_ENTRIES: JSON.stringify({ claude: proxyEntry }),
+      GIAN_DEV_PROXY_OVERRIDES_ONLY: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });

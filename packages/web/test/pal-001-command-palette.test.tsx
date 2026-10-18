@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SearchResult, Session, Workspace } from '@gian/shared';
+import { findLiteralRanges } from '@gian/shared';
 import { CommandPalette } from '../src/components/CommandPalette.js';
 import { mockFetch } from './setup.js';
 
@@ -49,13 +50,14 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
 }
 
 function makeResult(overrides: Partial<SearchResult> = {}): SearchResult {
+  const snippet = 'discuss the release plan';
   return {
     id: 'doc-1',
     kind: 'session',
     title: 'Release planning',
     subtitle: 'My Project',
-    snippet: 'discuss the release plan',
-    ranges: [{ start: 11, end: 18 }],
+    snippet,
+    ranges: findLiteralRanges(snippet, 'release'),
     target: { type: 'session', session_id: 's-1', archived: false },
     updated_at: '2026-10-12T01:00:00.000Z',
     archived: false,
@@ -126,7 +128,7 @@ describe('PAL-001: global search palette', () => {
     expect(screen.getByText('Newer')).toBeTruthy();
     expect(screen.getByText('Older')).toBeTruthy();
     expect(screen.queryByText('Archived', { selector: '.pal-row-label' })).toBeNull();
-    expect(screen.getByText('Commands')).toBeTruthy();
+    expect(screen.getByText('Commands', { selector: '.pal-section-head' })).toBeTruthy();
     expect(screen.getByText('New session')).toBeTruthy();
   });
 
@@ -310,7 +312,9 @@ describe('PAL-001: global search palette', () => {
     let resolveSecond: ((r: Response) => void) | null = null;
     mockFetch(async input => {
       const url = typeof input === 'string' ? input : input.url;
-      if (url.includes('q=one')) return Response.json(searchPage([makeResult({ title: 'Old answer' })]));
+      if (new URL(url, 'http://gian.local').searchParams.get('q') === 'one') {
+        return Response.json(searchPage([makeResult({ title: 'Old answer' })]));
+      }
       return new Promise<Response>(resolve => { resolveSecond = resolve; });
     });
     const { onNavigate, onClose } = openPalette();

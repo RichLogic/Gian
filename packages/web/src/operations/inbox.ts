@@ -10,15 +10,15 @@ interface SkipVersion extends Occurrence { version: string }
 type InboxOperation = 'inbox.markRead' | 'inbox.markUnread' | 'inbox.skipVersion';
 const entityKey = (input: Occurrence) => `inbox:${JSON.stringify([input.id, input.generation])}`;
 
-const markRead: OperationDefinition<Occurrence> = {
+const markRead: OperationDefinition<Occurrence, InboxItemPublic> = {
   policy: 'pending', entityKey, timeoutMs: 30_000,
   execute: input => postRead(input.id, input.generation),
 };
-const markUnread: OperationDefinition<Occurrence> = {
+const markUnread: OperationDefinition<Occurrence, InboxItemPublic> = {
   policy: 'pending', entityKey, timeoutMs: 30_000,
   execute: input => postUnread(input.id, input.generation),
 };
-const skipVersion: OperationDefinition<SkipVersion> = {
+const skipVersion: OperationDefinition<SkipVersion, InboxItemPublic> = {
   policy: 'pending',
   entityKey: input => `${entityKey(input)}:${JSON.stringify(input.version)}`,
   timeoutMs: 30_000,

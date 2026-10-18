@@ -169,11 +169,19 @@ describe('InboxPanel', () => {
     render(<InboxPanel open onClose={vi.fn()} onAction={vi.fn()} />);
     await user.click(await screen.findByText('Answer needed'));
     await screen.findByTestId('inbox-detail-a');
-    // The Host closed the occurrence after a decision (here or elsewhere).
-    applyInboxItemChanged(
-      makeInboxItem({ id: 'a', status: 'resolved', revision: 2, closed_at: '2026-10-12T07:00:00.000Z' }),
+    // An older occurrence cannot close the selected generation.
+    expect(getInboxSnapshot().pendingItems[0]).toMatchObject({ generation: 3, revision: 2, unread: false });
+    act(() => applyInboxItemChanged(
+      makeInboxItem({ id: 'a', generation: 1, status: 'resolved', revision: 1 }),
       11,
-    );
+    ));
+    expect(screen.getByTestId('inbox-detail-a')).toBeTruthy();
+    expect(getInboxSnapshot().pendingCount).toBe(1);
+    // The Host closes the observed occurrence after the read's revision 2.
+    act(() => applyInboxItemChanged(
+      makeInboxItem({ id: 'a', generation: 3, status: 'resolved', revision: 3, closed_at: '2026-10-12T07:00:00.000Z' }),
+      12,
+    ));
     await waitFor(() => expect(screen.queryByTestId('inbox-detail-a')).toBeNull());
     expect(screen.getByTestId('inbox-tab-pending')).toBeTruthy();
     expect(getInboxSnapshot().pendingCount).toBe(0);
@@ -319,7 +327,6 @@ describe('InboxPanel', () => {
     );
     await waitFor(() => expect(screen.queryByTestId('inbox-detail-a')).toBeNull());
     expect(calls.filter(call => call.url === '/api/inbox/a/read')).toHaveLength(1);
-    void user;
   });
 
   it('schedule-confirmation items render approve/reject through the domain path', async () => {
@@ -368,27 +375,38 @@ describe('InboxPanel', () => {
 
   it('a newer click supersedes an in-flight detail read', async () => {
     seedPending();
+    const canonical = new Map(getInboxSnapshot().pendingItems.map(item => [item.id, item] as const));
     const reads = new Map<string, (r: Response) => void>();
+    let refreshes = 0;
     mockFetch(async input => {
       const url = typeof input === 'string' ? input : input.url;
       const match = /\/api\/inbox\/([^/]+)\/read$/.exec(url);
       if (match) return new Promise<Response>(resolve => { reads.set(match[1]!, resolve); });
       if (url.startsWith('/api/inbox')) {
-        return Response.json({ items: [], next_cursor: null, pending_count: 0, inbox_revision: 10 });
+        refreshes += 1;
+        return Response.json({ items: [...canonical.values()], next_cursor: null, pending_count: canonical.size, inbox_revision: 10 });
       }
       return Response.json({ error: 'not_found' }, { status: 404 });
     });
     const user = userEvent.setup();
+    const resolveRead = (id: string) => {
+      const item = { ...canonical.get(id)!, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' };
+      canonical.set(id, item);
+      reads.get(id)!(Response.json(item));
+    };
     render(<InboxPanel open onClose={vi.fn()} onAction={vi.fn()} />);
     await user.click(await screen.findByText('Answer needed'));
     await user.click(screen.getByText('Approve deploy'));
     // A's response lands after B's click — B must own the detail.
     await act(async () => {
-      reads.get('a')!(Response.json(makeInboxItem({ id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' })));
+      resolveRead('a');
     });
     expect(screen.queryByTestId('inbox-detail-a')).toBeNull();
-    reads.get('b')!(Response.json(makeInboxItem({ id: 'b', generation: 1, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' })));
+    await act(async () => { resolveRead('b'); });
     expect(await screen.findByTestId('inbox-detail-b')).toBeTruthy();
+    expect(refreshes).toBeGreaterThan(0);
+    expect(getInboxSnapshot().pendingCount).toBe(2);
+    expect(screen.queryByTestId('inbox-detail-a')).toBeNull();
   });
 
   it('a deep link reads once and cannot reopen after Escape or a read echo', async () => {

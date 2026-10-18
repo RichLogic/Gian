@@ -57,9 +57,8 @@ const BASELINE = {
   },
   "packages/host/src/session/lifecycle-service.ts": {
     "executor\\s*===\\s*['\"](?:claude|codex|kimi|grok|dsh|zcode)['\"]": {
-      "count": 5,
+      "count": 4,
       "snippets": [
-        "executor === 'grok'",
         "executor === 'claude'",
         "executor === 'codex'",
         "executor === 'claude'",

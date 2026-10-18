@@ -8,7 +8,7 @@ export interface SendCatalogClient {
     sessionConfig: Record<string, ConfigValue>;
     turnConfig: Record<string, ConfigValue>;
   }): Promise<ResolvedProxyCatalog>;
-  /** Proxy fence of the attached session. Absent before session.create. */
+  /** Fence from the latest current session-scoped catalog result, if any. */
   sessionCatalogRevision?(): string | undefined;
   /** Drop the frozen process catalog and list the canonical catalog once. */
   reloadCatalog?(): Promise<ProxyCatalog>;
@@ -25,10 +25,9 @@ function isCatalogChangedConflict(error: unknown): boolean {
  *
  * Prefer the catalog fence reported by the client. client.catalog() can
  * still be the process catalog cached before session.create. The protocol
- * does not make every turnConfigRevision that fence; the client reports one
- * only for a producer that publishes the session catalog fingerprint.
- * Antigravity rejects the cached process fence once its cold catalog is
- * cleared or replaced. One explicit Catalog-changed CONFLICT reloads the
+ * does not make turnConfigRevision that fence; the client reports only a
+ * revision returned by a real session-scoped catalog resolution.
+ * One explicit Catalog-changed CONFLICT reloads the
  * canonical catalog and resolves once more. A second conflict, or any other
  * error, is returned to the caller.
  * This function does not start a turn or replay a prompt.

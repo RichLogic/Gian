@@ -197,6 +197,21 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+describe('selected Session surface', () => {
+  it('renders an archived surface without adding an active rail row', () => {
+    renderTasks({
+      tasks: [task()],
+      sessions: [],
+      activeTaskId: 'task-1',
+      activeSubtaskId: 'archived-session',
+      activeSessionId: 'archived-session',
+      subtaskMain: <main data-testid="archived-surface">Archived transcript</main>,
+    });
+    expect(screen.getByTestId('archived-surface')).toBeVisible();
+    expect(screen.queryByTestId('session-row-archived-session')).toBeNull();
+  });
+});
+
 describe('subtasksFor ordering', () => {
   // 2026-09-06 owner call: no pin in the Tasks rail; open rows follow
   // created_at ASC, completed sink to the bottom.

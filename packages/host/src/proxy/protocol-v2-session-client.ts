@@ -276,6 +276,9 @@ export class ProtocolV2SessionClient implements ProxyClient {
   private state: ProxySession['state'] = 'idle';
   private turnConfigOptions: import('@gian/shared').ConfigOption[] | undefined;
   private turnConfigRevision: string | undefined;
+  private resolvedSessionCatalogRevision: string | undefined;
+  private sessionCatalogEpoch = 0;
+  private sessionCatalogRequest = 0;
 
   constructor(
     private readonly host: ProtocolV2Host,
@@ -323,24 +326,19 @@ export class ProtocolV2SessionClient implements ProxyClient {
     return this.catalogCache;
   }
 
-  /**
-   * Attached catalog fence, when this proxy publishes one.
-   *
-   * gian.proxy `turnConfigRevision` is the options-pair revision. The schema
-   * does not define it as `catalog.catalogRevision`. Antigravity is the
-   * producer that stores the session catalog fingerprint in that field.
-   * Other proxies omit it or forward an options revision. The Host UI
-   * revision (`turn-config-...`) is never a catalog fence.
-   */
+  /** Only a real, session-scoped catalog result can supply this fence. */
   sessionCatalogRevision(): string | undefined {
-    if (this.stream === null || this.pluginId !== 'io.gian.antigravity') return undefined;
-    const revision = this.turnConfigRevision;
-    if (!revision || revision.startsWith('turn-config-')) return undefined;
-    return revision;
+    return this.stream === null ? undefined : this.resolvedSessionCatalogRevision;
+  }
+
+  private invalidateSessionCatalog(): void {
+    this.resolvedSessionCatalogRevision = undefined;
+    this.sessionCatalogEpoch += 1;
   }
 
   reloadCatalog(): Promise<ProxyCatalog> {
     if (this.catalogReload) return this.catalogReload;
+    this.invalidateSessionCatalog();
     this.catalogCache = null;
     // Clear only the flag we already observed. A catalog.changed during the
     // await sets it again and must still force the next catalog() to refetch.
@@ -409,6 +407,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
         },
       } : {}),
     }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS });
+    this.invalidateSessionCatalog();
     this.stream = result.session.streamId;
     this.nativeSessionId = result.session.nativeSession?.id ?? params.nativeSessionId ?? null;
     this.cwd = params.cwd;
@@ -444,12 +443,22 @@ export class ProtocolV2SessionClient implements ProxyClient {
     sessionConfig: Record<string, string | boolean | number | null>;
     turnConfig: Record<string, string | boolean | number | null>;
   }, scope: 'session' | 'global' = 'session'): Promise<import('@gian/shared').ResolvedProxyCatalog> {
-    return normalizeProtocolCatalog(await this.host.request<import('@gian/shared').ResolvedProxyCatalog>('catalog.resolve', {
+    const streamId = scope === 'session' ? this.stream : null;
+    const epoch = this.sessionCatalogEpoch;
+    const request = streamId ? ++this.sessionCatalogRequest : 0;
+    const result = normalizeProtocolCatalog(await this.host.request<import('@gian/shared').ResolvedProxyCatalog>('catalog.resolve', {
       catalogRevision: params.catalogRevision,
       sessionConfig: params.sessionConfig,
       turnConfig: params.turnConfig,
-      ...(scope === 'session' && this.stream ? { sessionId: this.hostSessionId, streamId: this.stream } : {}),
+      ...(streamId ? { sessionId: this.hostSessionId, streamId } : {}),
     }, { timeoutMs: PROXY_SESSION_RPC_TIMEOUT_MS }));
+    // Cache the producer's fence, not its draft-bound resolved view. A newer
+    // request, refresh, options update or reattach retires this response.
+    if (streamId && this.stream === streamId && this.sessionCatalogEpoch === epoch
+      && this.sessionCatalogRequest === request) {
+      this.resolvedSessionCatalogRevision = result.catalogRevision;
+    }
+    return result;
   }
 
   async startTurn(params: StartTurnParams) {
@@ -543,6 +552,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       if (!this.host.isExited()) throw error;
     }
     this.stream = null;
+    this.invalidateSessionCatalog();
     this.activeTurnId = null;
     this.state = 'closed';
   }
@@ -552,6 +562,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
   }
 
   attachFromSnapshot(streamId: string, cwd?: string, nativeSessionId?: string | null): void {
+    this.invalidateSessionCatalog();
     this.stream = streamId;
     this.cwd = cwd ?? this.cwd;
     this.state = 'idle';
@@ -697,6 +708,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
       if (data.state) this.state = data.state;
       if (data.lastError !== undefined) this.lastError = data.lastError;
       if (data.turnConfigOptions !== undefined) {
+        this.invalidateSessionCatalog();
         this.turnConfigOptions = this.normalizeTurnConfigOptions(data.turnConfigOptions);
         this.turnConfigRevision = data.turnConfigRevision;
       }
@@ -706,6 +718,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
     } else if (notification.method === 'interaction.resolved') {
       if (this.state === 'waiting_interaction') this.state = this.activeTurnId ? 'running' : 'idle';
     } else if (notification.method === 'catalog.changed') {
+      this.invalidateSessionCatalog();
       // Keep the last normalized catalog available while the Host refetches.
       // A Provider may immediately follow catalog.changed with a role-free
       // 2.1 session.updated snapshot; dropping the old catalog here loses the

@@ -310,6 +310,19 @@ describe('approval_resolved reducer behavior for native option outcomes', () => 
     expect((items[0] as ApprovalItem).status).toBe('resolved');
   });
 
+  it('unknown reject-prefixed kinds remain neutral live and on history replay', () => {
+    const card: ApprovalItem = {
+      ...pendingNative(),
+      nativeOptions: [{ optionId: 'opaque-action', label: 'Choose', kind: 'reject_future' }],
+    };
+    const resolved = nativeResolve('opaque-action', { decision: 'resolved' });
+    let items = applyEnvelope([card], resolved, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+    items = applyEnvelope(items, resolved, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+    expect((items[0] as ApprovalItem).nativeOptionId).toBe('opaque-action');
+  });
+
   it('an empty resolve (no option id, no decision) is neutral, never allowed', () => {
     const items = applyEnvelope([pendingNative()], {
       session_id: 'sess-1',

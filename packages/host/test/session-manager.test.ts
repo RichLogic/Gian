@@ -10,6 +10,7 @@ import type {
   Executor,
   NativeConfigOption,
   NativeConfigValue,
+  ProxyCatalog,
   ProxyNotification,
   ServerToClientMessage,
 } from '@gian/shared';
@@ -58,6 +59,25 @@ function liveNotification(value: {
     },
   });
 }
+
+const LEGACY_APPROVAL_CATALOG: ProxyCatalog = {
+  catalogRevision: 'fixture-legacy-approval',
+  input: [{ type: 'text' }],
+  configOptions: [{
+    id: 'approval_mode',
+    displayName: 'Approval',
+    binding: 'turn',
+    role: 'approval_mode',
+    control: 'select',
+    required: false,
+    defaultValue: 'ask',
+    choices: [
+      { value: 'ask', displayName: 'Ask' },
+      { value: 'auto', displayName: 'Auto' },
+    ],
+  }],
+  slashCommands: [],
+};
 
 function replayEvent(value: {
   method: string;
@@ -594,12 +614,13 @@ function setupDsh(
 }
 
 test('new sessions use defaults owned by their Proxy configuration', async () => {
-  const { dir, db, wsId, sessions } = setup(() => ({
+  const { dir, db, wsId, sessions, proxyMgr } = setup(() => ({
     model: 'claude-opus-4-1',
     thinking: 'xhigh',
     mode: 'ask',
   }));
   try {
+    proxyMgr.client.catalogOverride = LEGACY_APPROVAL_CATALOG;
     const session = await sessions.createSession({
       workspace_id: wsId,
       executor: 'claude',
@@ -607,6 +628,7 @@ test('new sessions use defaults owned by their Proxy configuration', async () =>
     assert.equal(session.model, 'claude-opus-4-1');
     assert.equal(session.thinking_effort, 'xhigh');
     assert.equal(session.approval_mode, 'ask');
+    assert.equal(session.turn_config?.approval_mode, 'ask');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -987,7 +1009,7 @@ test('turn option conditions can reference the persisted Session-bound Catalog s
   }
 });
 
-test('unknown approval catalog values stay off the approval_mode column', async () => {
+test('advertised opaque approval choices persist while unadvertised create values reject', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup();
   try {
     proxyMgr.client.catalogOverride = {
@@ -1014,18 +1036,30 @@ test('unknown approval catalog values stay off the approval_mode column', async 
       executor: 'claude',
       turn_config: { permission_mode: 'yolo' },
     });
-    assert.notEqual(session.approval_mode, 'yolo');
+    assert.equal(session.approval_mode, 'yolo');
     assert.equal(session.turn_config?.permission_mode, 'yolo');
-    sessions.setTurnConfigValue(session.id, 'permission_mode', 'yolo');
-    const afterUnknown = sessions.getSession(session.id);
-    assert.notEqual(afterUnknown.approval_mode, 'yolo');
-    assert.equal(afterUnknown.turn_config?.permission_mode, 'yolo');
-    sessions.setTurnConfigValue(session.id, 'permission_mode', 'ask');
+    const stored = db.prepare('SELECT approval_mode FROM sessions WHERE id = ?')
+      .get(session.id) as { approval_mode: string | null };
+    assert.equal(stored.approval_mode, 'yolo');
+    await sessions.setTurnConfigValue(session.id, 'permission_mode', 'yolo');
+    const afterOpaque = sessions.getSession(session.id);
+    assert.equal(afterOpaque.approval_mode, 'yolo');
+    assert.equal(afterOpaque.turn_config?.permission_mode, 'yolo');
+    await sessions.setTurnConfigValue(session.id, 'permission_mode', 'ask');
     const afterKnown = sessions.getSession(session.id);
     assert.equal(afterKnown.approval_mode, 'ask');
     const row = db.prepare('SELECT approval_mode FROM sessions WHERE id = ?')
       .get(session.id) as { approval_mode: string | null };
     assert.equal(row.approval_mode, 'ask');
+    const previousCreate = proxyMgr.client.lastCreateParams;
+    await assert.rejects(sessions.createSession({
+      workspace_id: wsId,
+      executor: 'claude',
+      turn_config: { permission_mode: 'not-advertised' },
+    }), (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'CONFIG_VALUE_INVALID' && /not advertised/.test(error.message));
+    assert.equal(proxyMgr.client.lastCreateParams, previousCreate);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1520,7 +1554,7 @@ test('Kimi applies a role-less Agent option default to session-bound config', as
   }
 });
 
-test('managed approval presets do not leak into an older Codex native policy catalog', async () => {
+test('an unadvertised managed approval preset rejects before older Codex native create', async () => {
   const { dir, db, wsId, proxyMgr, sessions } = setup(() => ({
     model: '',
     thinking: '',
@@ -1547,13 +1581,14 @@ test('managed approval presets do not leak into an older Codex native policy cat
       }],
       slashCommands: [],
     };
-    const session = await sessions.createSession({ workspace_id: wsId, executor: 'codex' });
-    assert.equal(session.approval_mode, 'ask');
-    assert.equal(session.turn_config?.approval_policy, undefined);
-
-    await sessions.sendMessage(session.id, 'use config.toml permissions');
-    assert.equal(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_policy, null);
-    assert.notEqual(proxyMgr.client.startTurnCalls.at(-1)?.config.approval_policy, 'ask');
+    await assert.rejects(sessions.createSession({ workspace_id: wsId, executor: 'codex' }),
+      (error: unknown) => error instanceof Error && 'code' in error
+        && error.code === 'CONFIG_VALUE_INVALID' && /not advertised/.test(error.message));
+    assert.equal(proxyMgr.client.lastCreateParams, null);
+    assert.equal(proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal(proxyMgr.forceDisposeCalls.length, 1);
+    const stored = db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
+    assert.equal(stored.count, 0);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -2984,6 +3019,7 @@ test('turn.failed persists and broadcasts one Gian-owned terminal boundary', asy
 test('duplicate legacy approval events wait for a fresh inbox occurrence', async () => {
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
+    proxyMgr.client.catalogOverride = LEGACY_APPROVAL_CATALOG;
     const session = await sessions.createSession({
       workspace_id: wsId,
       executor: 'claude',
@@ -3031,6 +3067,7 @@ test('duplicate legacy approval events wait for a fresh inbox occurrence', async
 test('auto-approved requests do not emit attention', async () => {
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
+    proxyMgr.client.catalogOverride = LEGACY_APPROVAL_CATALOG;
     const session = await sessions.createSession({
       workspace_id: wsId,
       executor: 'claude',
