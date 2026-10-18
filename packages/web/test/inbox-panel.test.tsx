@@ -8,7 +8,7 @@
  * empty list.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { InboxPanel } from '../src/components/InboxPanel.js';
 import {
@@ -19,7 +19,7 @@ import {
   invalidateInbox,
 } from '../src/controllers/inbox.js';
 import { mockFetch } from './setup.js';
-import { makeInboxItem } from './inbox-fixtures.js';
+import { makeInboxItem, wireTestInboxOperations } from './inbox-fixtures.js';
 
 function seedPending() {
   applyInboxSyncSnapshot({
@@ -43,9 +43,14 @@ function panelFetchRouter(closedItems: ReturnType<typeof makeInboxItem>[] = []) 
     const readMatch = /\/api\/inbox\/([^/]+)\/(read|unread)$/.exec(url);
     if (readMatch) {
       const [, id, action] = readMatch;
+      const item = getInboxSnapshot().pendingItems.find(entry => entry.id === id)
+        ?? closedItems.find(entry => entry.id === id);
+      if (!item) throw new Error(`missing Inbox fixture ${id}`);
       return Response.json(makeInboxItem({
+        ...item,
         id: id!,
         generation: (body as { generation: number }).generation,
+        revision: item.revision + 1,
         unread: action === 'unread',
         read_at: action === 'read' ? '2026-10-12T06:00:00.000Z' : null,
       }));
@@ -64,8 +69,9 @@ function panelFetchRouter(closedItems: ReturnType<typeof makeInboxItem>[] = []) 
 }
 
 describe('InboxPanel', () => {
-  beforeEach(() => __resetInboxForTests());
-  afterEach(() => __resetInboxForTests());
+  let disposeOperations: () => void;
+  beforeEach(() => { __resetInboxForTests(); disposeOperations = wireTestInboxOperations(); });
+  afterEach(() => { disposeOperations(); __resetInboxForTests(); });
 
   it('opening the panel does not mark anything read', async () => {
     seedPending();
@@ -377,11 +383,74 @@ describe('InboxPanel', () => {
     await user.click(await screen.findByText('Answer needed'));
     await user.click(screen.getByText('Approve deploy'));
     // A's response lands after B's click — B must own the detail.
-    reads.get('a')!(Response.json(makeInboxItem({ id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' })));
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await act(async () => {
+      reads.get('a')!(Response.json(makeInboxItem({ id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' })));
+    });
     expect(screen.queryByTestId('inbox-detail-a')).toBeNull();
     reads.get('b')!(Response.json(makeInboxItem({ id: 'b', generation: 1, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' })));
     expect(await screen.findByTestId('inbox-detail-b')).toBeTruthy();
+  });
+
+  it('a deep link reads once and cannot reopen after Escape or a read echo', async () => {
+    seedPending();
+    let reads = 0;
+    mockFetch(async input => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === '/api/inbox/a/read') {
+        reads += 1;
+        // Bound the broken effect too: report a duplicate instead of letting
+        // the regression itself spin until the worker runs out of memory.
+        if (reads > 1) return Response.json({ error: 'duplicate_read' }, { status: 500 });
+        return Response.json(makeInboxItem({
+          id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z',
+        }));
+      }
+      return Response.json({ error: 'not_found' }, { status: 404 });
+    });
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <InboxPanel open onClose={vi.fn()} onAction={vi.fn()} focusItem={{ id: 'a', generation: 3, nonce: 1 }} />,
+    );
+    await screen.findByTestId('inbox-detail-a');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByTestId('inbox-detail-a')).toBeNull();
+    act(() => applyInboxItemChanged(makeInboxItem({
+      id: 'a', generation: 3, revision: 3, unread: false, read_at: '2026-10-12T06:00:00.000Z',
+    }), 11));
+    rerender(
+      <InboxPanel open onClose={vi.fn()} onAction={vi.fn()} focusItem={{ id: 'a', generation: 3, nonce: 1 }} />,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByTestId('inbox-detail-a')).toBeNull();
+    expect(reads).toBe(1);
+  });
+
+  it('a late deep-link detail fetch cannot supersede a newer row click', async () => {
+    seedPending();
+    let resolveDetail!: (response: Response) => void;
+    const reads: string[] = [];
+    mockFetch(async input => {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url === '/api/inbox/old') return new Promise<Response>(resolve => { resolveDetail = resolve; });
+      if (url.endsWith('/read')) {
+        reads.push(url);
+        return Response.json(makeInboxItem({
+          id: 'b', generation: 1, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z',
+        }));
+      }
+      return Response.json({ error: 'not_found' }, { status: 404 });
+    });
+    const user = userEvent.setup();
+    render(<InboxPanel open onClose={vi.fn()} onAction={vi.fn()} focusItem={{ id: 'old', generation: 1, nonce: 1 }} />);
+    await waitFor(() => expect(resolveDetail).toBeTypeOf('function'));
+    await user.click(screen.getByText('Approve deploy'));
+    await screen.findByTestId('inbox-detail-b');
+    await act(async () => {
+      resolveDetail(Response.json(makeInboxItem({ id: 'old', status: 'resolved' })));
+    });
+    expect(reads).toEqual(['/api/inbox/b/read']);
+    expect(screen.getByTestId('inbox-detail-b')).toBeTruthy();
+    expect(screen.queryByTestId('inbox-detail-old')).toBeNull();
   });
 
   it('a history (closed) row opens its read-only detail even though it is not in the pending window', async () => {

@@ -36,7 +36,7 @@ export function projectSearchText(
     ? stripGianActionBlocks(withoutRole)
     : withoutRole;
   const tree = processor.parse(source) as MdNode;
-  return render(tree, slots).replace(/\n{3,}/g, '\n\n').trim();
+  return normalizeSearchProjection(render(tree, slots)).text;
 }
 
 /**
@@ -178,23 +178,82 @@ function normalizeSearchUnits(text: string): NormalizedUnits {
   return { normalized, spans };
 }
 
-function render(node: MdNode, slots?: ReadonlyMap<number, string>): string {
-  if (SKIPPED.has(node.type)) return '';
-  if (node.type === 'text') return expandSlots(node.value ?? '', slots);
+export interface SearchProjectionPart {
+  text: string;
+  /** Code/math source whitespace is content, not Markdown layout. */
+  verbatim?: boolean;
+}
+
+/** Mapping is opt-in: indexing only needs text, not per-character arrays. */
+export function normalizeSearchProjection(parts: readonly SearchProjectionPart[], mapOffsets?: false): { text: string };
+export function normalizeSearchProjection(parts: readonly SearchProjectionPart[], mapOffsets: true): {
+  text: string;
+  rawIndexes: number[];
+};
+export function normalizeSearchProjection(parts: readonly SearchProjectionPart[], mapOffsets = false): {
+  text: string;
+  rawIndexes?: number[];
+} {
+  const raw = parts.map(part => part.text).join('');
+  const verbatim: Array<{ start: number; end: number }> = [];
+  let offset = 0;
+  for (const part of parts) {
+    if (part.verbatim && part.text.length > 0) verbatim.push({ start: offset, end: offset + part.text.length });
+    offset += part.text.length;
+  }
+  const start = Math.min(raw.length - raw.trimStart().length, verbatim[0]?.start ?? raw.length);
+  const end = Math.max(raw.trimEnd().length, verbatim.at(-1)?.end ?? 0);
+  const rawIndexes = mapOffsets ? [] as number[] : undefined;
+  let text = '';
+  const append = (from: number, to: number) => {
+    text += raw.slice(from, to);
+    if (rawIndexes) for (let index = from; index < to; index += 1) rawIndexes.push(index);
+  };
+  let sliceStart = start;
+  let protectedIndex = 0;
+  let index = raw.indexOf('\n', start);
+  while (index >= 0 && index < end) {
+    while (verbatim[protectedIndex] && verbatim[protectedIndex]!.end <= index) protectedIndex += 1;
+    const protectedRange = verbatim[protectedIndex];
+    if (protectedRange && protectedRange.start <= index) {
+      index = raw.indexOf('\n', protectedRange.end);
+      continue;
+    }
+    let next = index + 1;
+    const boundary = Math.min(end, protectedRange?.start ?? end);
+    while (next < boundary && raw[next] === '\n') next += 1;
+    if (next - index > 2) {
+      append(sliceStart, index + 2);
+      sliceStart = next;
+    }
+    index = raw.indexOf('\n', next);
+  }
+  append(sliceStart, end);
+  return rawIndexes ? { text, rawIndexes } : { text };
+}
+
+function joinParts(parts: SearchProjectionPart[][], separator: string): SearchProjectionPart[] {
+  return parts.flatMap((part, index) => index === 0 ? part : [{ text: separator }, ...part]);
+}
+
+function render(node: MdNode, slots?: ReadonlyMap<number, string>): SearchProjectionPart[] {
+  if (SKIPPED.has(node.type)) return [];
+  if (node.type === 'text') return [{ text: expandSlots(node.value ?? '', slots) }];
   if (node.type === 'inlineCode' || node.type === 'code'
     || node.type === 'math' || node.type === 'inlineMath') {
-    return node.value ?? '';
+    return [{ text: node.value ?? '', verbatim: true }];
   }
-  if (node.type === 'image' || node.type === 'imageReference') return node.alt ?? '';
-  if (node.type === 'break' || node.type === 'thematicBreak') return '\n';
+  if (node.type === 'image' || node.type === 'imageReference') return [{ text: node.alt ?? '' }];
+  if (node.type === 'break' || node.type === 'thematicBreak') return [{ text: '\n' }];
   const children = node.children ?? [];
-  if (node.type === 'tableRow') return children.map(child => render(child, slots)).join('\t');
+  const parts = children.map(child => render(child, slots));
+  if (node.type === 'tableRow') return joinParts(parts, '\t');
   if (node.type === 'tableCell' || node.type === 'link' || node.type === 'linkReference'
     || node.type === 'paragraph' || node.type === 'heading' || node.type === 'emphasis'
     || node.type === 'strong' || node.type === 'delete') {
-    return children.map(child => render(child, slots)).join('');
+    return parts.flat();
   }
-  return children.map(child => render(child, slots)).filter(part => part.length > 0).join('\n');
+  return joinParts(parts.filter(part => part.some(chunk => chunk.text.length > 0)), '\n');
 }
 
 function expandSlots(value: string, slots?: ReadonlyMap<number, string>): string {

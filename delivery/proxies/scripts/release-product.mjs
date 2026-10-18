@@ -111,7 +111,7 @@ async function qualify() {
   });
   await step('build', build);
   await step('proxy-contracts', async () => {
-    command(process.execPath, ['--test', 'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs',
+    command(process.execPath, ['--test', 'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/build-antigravity-runtime.test.mjs', 'scripts/proxy-release-metadata.test.mjs',
       'scripts/catalog-docs-policy.test.mjs', 'scripts/runtime-qualification.test.mjs']);
     for (const definition of shipping) command('pnpm', ['--filter', definition.packageName, 'test']);
     command('pnpm', ['--filter', '@gian/dsh-bridge', 'test']);

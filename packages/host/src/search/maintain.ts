@@ -14,6 +14,7 @@ import {
   deleteDocuments,
   deleteWhere,
   documentId,
+  ensureSearchSchema,
   planFtsMode,
   probeFts,
   readState,
@@ -79,6 +80,7 @@ export async function drainSearchOnce(
   let failed = false;
   try {
     if (stopped()) return result;
+    ensureSearchSchema(db);
     // Creating the virtual table cannot run inside a SQLite transaction.
     const fts = probeFts(db) === 'trigram';
     if (stopped()) return result;

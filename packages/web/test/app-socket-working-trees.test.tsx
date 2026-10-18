@@ -11,6 +11,7 @@ vi.mock('../src/api.js', () => ({
   loadSessions: vi.fn(async () => []),
   loadTasks: vi.fn(async () => []),
   loadWorkspaces: vi.fn(async () => []),
+  loadInboxPage: vi.fn(async () => ({ items: [], next_cursor: null, pending_count: 0, inbox_revision: 0 })),
 }));
 
 class FakeWs {

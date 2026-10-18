@@ -65,6 +65,9 @@ export type OperationName =
   | 'queue.clear'
   | 'queue.sendNow'
   | 'approval.resolve'
+  | 'inbox.markRead'
+  | 'inbox.markUnread'
+  | 'inbox.skipVersion'
   // Task
   | 'task.create'
   | 'task.rename'
@@ -191,6 +194,9 @@ export const OPERATION_POLICIES = {
   'queue.clear': 'optimistic',
   'queue.sendNow': 'pending',
   'approval.resolve': 'pending',
+  'inbox.markRead': 'pending',
+  'inbox.markUnread': 'pending',
+  'inbox.skipVersion': 'pending',
   'task.create': 'pending',
   'task.rename': 'optimistic',
   'task.toggleDone': 'optimistic',

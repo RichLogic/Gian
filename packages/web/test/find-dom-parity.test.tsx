@@ -200,6 +200,21 @@ describe('canonical range → visible DOM (real renderers)', () => {
     expect(domRange.toString()).toBe('const x');
   });
 
+  it('code whitespace is preserved across normalization with exact node offsets', () => {
+    const source = '  const x = 1;\n\n\n';
+    const markdown = ['```ts', source, '```'].join('\n');
+    const projected = projectSearchText(markdown);
+    expect(projected).toBe(source);
+    const root = renderMarkdown(markdown);
+    const alignment = alignMessageToProjection(root, projected);
+    expect(alignment).not.toBeNull();
+    const [range] = findLiteralRanges(projected, 'x = 1;\n\n\n');
+    const mapped = rangeForProjectionRange(alignment!.spans, range!)!;
+    expect(mapped.range.toString()).toBe('x = 1;\n\n\n');
+    const node = mapped.range.endContainer as Text;
+    expect(mapped.range.endOffset).toBe(node.data.length - 1);
+  });
+
   it('math: the canonical TeX range highlights the whole visible .katex element, never the hidden annotation', () => {
     const markdown = 'energy is $E=mc^2$ exactly';
     const projected = projectSearchText(markdown);
@@ -265,7 +280,7 @@ describe('canonical range → visible DOM (real renderers)', () => {
     expect(domRange.endOffset).toBe('image'.length);
     expect((domRange.endContainer as Text).parentElement?.classList.contains('mir-label')).toBe(true);
     const texts: string[] = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node.textContent ?? '');
     expect(texts).toContain(' ');
   });

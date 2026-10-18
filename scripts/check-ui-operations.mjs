@@ -67,6 +67,9 @@ const WS_TYPE_EXEMPTIONS = new Set([
  * workspace metadata writes). Exported for the gate's test fixtures.
  */
 export const REST_MUTATION_TO_OPERATION = {
+  markInboxRead: ['inbox.markRead'],
+  markInboxUnread: ['inbox.markUnread'],
+  skipInboxVersion: ['inbox.skipVersion'],
   mergeSession: ['session.merge'],
   dropSession: ['session.drop'],
   uploadAttachment: ['message.uploadAttachment'],

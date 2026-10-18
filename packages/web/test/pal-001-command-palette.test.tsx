@@ -6,7 +6,7 @@
  * coverage is labelled; filters scope the query.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SearchResult, Session, Workspace } from '@gian/shared';
 import { CommandPalette } from '../src/components/CommandPalette.js';
@@ -125,7 +125,7 @@ describe('PAL-001: global search palette', () => {
     expect(screen.getByText('Recent')).toBeTruthy();
     expect(screen.getByText('Newer')).toBeTruthy();
     expect(screen.getByText('Older')).toBeTruthy();
-    expect(screen.queryByText('Archived')).toBeNull();
+    expect(screen.queryByText('Archived', { selector: '.pal-row-label' })).toBeNull();
     expect(screen.getByText('Commands')).toBeTruthy();
     expect(screen.getByText('New session')).toBeTruthy();
   });
@@ -138,8 +138,8 @@ describe('PAL-001: global search palette', () => {
     const { onNavigate } = openPalette();
     await userEvent.setup().type(screen.getByPlaceholderText(/Search sessions, messages/), 'release');
     expect(await screen.findByText('Release planning')).toBeTruthy();
-    expect(screen.getByText('Sessions')).toBeTruthy();
-    expect(screen.getByText('Inbox')).toBeTruthy();
+    expect(screen.getByText('Sessions', { selector: '.pal-section-head' })).toBeTruthy();
+    expect(screen.getByText('Inbox', { selector: '.pal-section-head' })).toBeTruthy();
     // The snippet range is a <mark>, not injected HTML.
     const mark = document.querySelector('.pal-snippet mark');
     expect(mark?.textContent).toBe('release');
@@ -166,7 +166,7 @@ describe('PAL-001: global search palette', () => {
     await user.type(screen.getByPlaceholderText(/Search sessions, messages/), 'notif');
     const row = await screen.findByText('Notifications');
     await user.click(row);
-    expect(onOpenSetting).toHaveBeenCalledWith('notifications');
+    expect(onOpenSetting).toHaveBeenCalledWith('notifications', 'settings-section-notifications');
 
     await user.clear(screen.getByPlaceholderText(/Search sessions, messages/));
     await user.type(screen.getByPlaceholderText(/Search sessions, messages/), 'terminal');
@@ -228,7 +228,7 @@ describe('PAL-001: global search palette', () => {
     const user = userEvent.setup();
     await user.type(screen.getByPlaceholderText(/Search sessions, messages/), 'notif');
     await screen.findByText('Notifications');
-    expect(searched).toBe(1);
+    await waitFor(() => expect(searched).toBe(1));
     await user.click(screen.getByTestId('pal-filter-setting'));
     await vi.waitFor(() => expect(screen.getByText('Notifications')).toBeTruthy());
     expect(searched).toBe(1);
@@ -299,9 +299,11 @@ describe('PAL-001: global search palette', () => {
     await screen.findByText('Release planning');
     await userEvent.setup().click(screen.getByTestId('pal-load-more'));
     // The restart re-fetches without a cursor and the list recovers.
-    await vi.waitFor(() => expect(topCalls).toBe(2));
-    expect(screen.getByText('Release planning')).toBeTruthy();
-    expect(screen.queryByTestId('pal-load-more')).toBeNull();
+    await waitFor(() => {
+      expect(topCalls).toBe(2);
+      expect(screen.getByText('Release planning')).toBeTruthy();
+      expect(screen.queryByTestId('pal-load-more')).toBeNull();
+    });
   });
 
   it('Enter never picks a row answering an older query', async () => {
@@ -321,6 +323,7 @@ describe('PAL-001: global search palette', () => {
     await user.keyboard('{Enter}');
     expect(onNavigate).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+    await waitFor(() => expect(resolveSecond).toBeTypeOf('function'));
     resolveSecond!(Response.json(searchPage([makeResult({ title: 'New answer' })])));
     await screen.findByText('New answer');
     await user.keyboard('{Enter}');

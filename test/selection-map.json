@@ -79,6 +79,7 @@
         ".github/workflows/*.yml"
       ],
       "modules": [
+        "antigravity-proxy",
         "cc-proxy",
         "codex-proxy",
         "desktop",
@@ -168,6 +169,7 @@
         "packages/shared/**"
       ],
       "modules": [
+        "antigravity-proxy",
         "cc-proxy",
         "codex-proxy",
         "desktop",
@@ -198,6 +200,7 @@
         "packages/proxy-protocol/**"
       ],
       "modules": [
+        "antigravity-proxy",
         "cc-proxy",
         "codex-proxy",
         "dsh-proxy",

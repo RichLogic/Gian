@@ -4,6 +4,15 @@
  * are exact).
  */
 import type { InboxItemPublic } from '@gian/shared';
+import { invalidateInbox } from '../src/controllers/inbox.js';
+import { createOperationDispatcher } from '../src/operations/dispatcher.js';
+import { wireInboxOperations } from '../src/operations/inbox.js';
+
+export function wireTestInboxOperations(): () => void {
+  const dispatcher = createOperationDispatcher();
+  const unwire = wireInboxOperations(dispatcher, invalidateInbox);
+  return () => { unwire(); dispatcher.dispose(); };
+}
 
 export function makeInboxItem(overrides: Partial<InboxItemPublic> = {}): InboxItemPublic {
   return {

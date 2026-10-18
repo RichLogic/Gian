@@ -601,7 +601,7 @@ describe('P1a session navigation entries', () => {
     expect(attr('data-explicit-list')).toBe('tasks');
   });
 
-  it('leaves the current selection in place for a missing session and for an archived session', async () => {
+  it('keeps selection for a missing session and opens an archived notification read-only', async () => {
     const user = userEvent.setup();
     const keep = session({ id: 'keep', name: 'Keep' });
     world.sessions = [keep];
@@ -623,12 +623,14 @@ describe('P1a session navigation entries', () => {
 
     navigation.push(target('old'));
     await waitFor(() => expect(navigation.acks).toHaveLength(2));
-    expect(await screen.findByText('That session is archived.')).toBeInTheDocument();
-    expect(attr('data-session-id')).toBe('keep');
+    expect(await screen.findByTestId('archived-readonly-banner')).toBeInTheDocument();
+    expect(attr('data-session-id')).toBe('old');
     expect(attr('data-mode')).toBe('tasks');
     expect(attr('data-task-id')).toBe('');
     expect(attr('data-subtask-id')).toBe('');
     expect(screen.queryByTestId('session-row-old')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(requests.some(item => item.method !== 'GET' && item.url.startsWith('/api/sessions/old'))).toBe(false);
   });
 
   it('does not acknowledge a session when the archive lookup fails', async () => {
@@ -1087,7 +1089,7 @@ describe('P1a session navigation entries', () => {
     expect(navigation.acks).toHaveLength(0);
   });
 
-  it('does not resurrect a session archived while its list lookup was in flight', async () => {
+  it('ignores a stale active body and opens the canonical archived row read-only', async () => {
     const user = userEvent.setup();
     const keep = session({ id: 'keep', name: 'Keep', type: 'subtask', task_id: 'task-1' });
     const stale = session({ id: 'stale', name: 'Stale', type: 'subtask', task_id: 'task-1' });
@@ -1108,15 +1110,16 @@ describe('P1a session navigation entries', () => {
       socket.fakeMessage({ type: 'session:updated', session: { id: 'stale', archived: 1 } });
     });
     world.activeOverride = [keep, stale];
+    world.archived = [{ ...stale, archived: 1 }];
     releaseActiveLoads();
-    await waitFor(() => expect(screen.getByText('That session is archived.')).toBeInTheDocument());
-    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
-    expect(attr('data-session-id')).toBe('keep');
+    expect(await screen.findByTestId('archived-readonly-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-stale')).not.toBeInTheDocument();
+    expect(attr('data-session-id')).toBe('stale');
     expect(attr('data-mode')).toBe('tasks');
     expect(attr('data-task-id')).toBe('task-1');
-    expect(attr('data-subtask-id')).toBe('keep');
-    await expectOpenSession('keep', 'Keep');
-    expect(requests.some(item => item.url.startsWith('/api/sessions/stale/events'))).toBe(false);
+    expect(attr('data-subtask-id')).toBe('stale');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(requests.some(item => item.method !== 'GET' && item.url.startsWith('/api/sessions/stale'))).toBe(false);
     expect(navigation.acks).toHaveLength(1);
   });
 
@@ -1388,9 +1391,9 @@ describe('P1a session navigation entries', () => {
     fireEvent.dragOver(header, { dataTransfer, clientY: 0 });
     fireEvent.drop(header, { dataTransfer });
     const moved = await waitFor(() => {
-      expect(screen.queryByTestId('session-row-alpha')).toBeNull();
       const row = sessionRowInTask('Ship', 'Alpha');
       expect(row).not.toBeNull();
+      expect(screen.getByTestId('session-row-alpha')).toBe(row);
       return row!;
     });
     await user.click(moved);
@@ -1442,7 +1445,7 @@ describe('P1a session navigation entries', () => {
     rejectLastAssign();
     await waitFor(() => {
       expect(sessionRowInTask('Ship', 'Alpha')).not.toBeNull();
-      expect(screen.queryByTestId('session-row-alpha')).toBeNull();
+      expect(screen.getByTestId('session-row-alpha').closest('.tasks-list-task')).toBe(taskGroup('Ship'));
       expect(attr('data-task-id')).toBe('task-1');
       expect(attr('data-subtask-id')).toBe('alpha');
       expect(attr('data-session-id')).toBe('alpha');
@@ -1477,7 +1480,7 @@ describe('P1a session navigation entries', () => {
     expect(navigation.acks).toHaveLength(1);
   });
 
-  it('does not open a session archived in the same turn as the notification', async () => {
+  it('opens a session archived in the same turn as the notification read-only', async () => {
     const user = userEvent.setup();
     const keep = session({ id: 'keep', name: 'Keep', type: 'subtask', task_id: 'task-1' });
     const stale = session({ id: 'stale', name: 'Stale', type: 'subtask', task_id: 'task-1' });
@@ -1490,17 +1493,18 @@ describe('P1a session navigation entries', () => {
     await expectOpenSession('keep', 'Keep');
 
     const socket = getMockWebSockets()[0]!;
+    world.archived = [{ ...stale, archived: 1 }];
     act(() => {
       socket.fakeMessage({ type: 'session:updated', session: { id: 'stale', archived: 1 } });
       navigation.push(target('stale'));
     });
-    await waitFor(() => expect(screen.getByText('That session is archived.')).toBeInTheDocument());
-    expect(screen.queryByText('Stale')).not.toBeInTheDocument();
-    expect(attr('data-session-id')).toBe('keep');
+    expect(await screen.findByTestId('archived-readonly-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-row-stale')).not.toBeInTheDocument();
+    expect(attr('data-session-id')).toBe('stale');
     expect(attr('data-task-id')).toBe('task-1');
-    expect(attr('data-subtask-id')).toBe('keep');
-    await expectOpenSession('keep', 'Keep');
-    expect(requests.some(item => item.url.startsWith('/api/sessions/stale/events'))).toBe(false);
+    expect(attr('data-subtask-id')).toBe('stale');
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(requests.some(item => item.method !== 'GET' && item.url.startsWith('/api/sessions/stale'))).toBe(false);
     expect(navigation.acks).toHaveLength(1);
   });
 
@@ -1617,8 +1621,11 @@ describe('P1a session navigation entries', () => {
       const scrolledWhileHidden = await openFontSizeFromSearch(user);
       await waitFor(() => expect(attr('data-mode')).toBe('sessions'));
       expect(attr('data-explicit-list')).toBe('');
-      const control = document.getElementById('settings-control-chat.fontSize');
-      expect(control).not.toBeNull();
+      const control = await waitFor(() => {
+        const anchor = document.getElementById('settings-control-chat.fontSize');
+        expect(anchor).not.toBeNull();
+        return anchor!;
+      });
       const sheet = control!.closest('[data-testid="workbench-sheet"]') as HTMLElement | null;
       expect(sheet).not.toBeNull();
       expect(sheet!.style.display).not.toBe('none');
@@ -1645,8 +1652,11 @@ describe('P1a session navigation entries', () => {
       const scrolledWhileHidden = await openFontSizeFromSearch(user);
       await waitFor(() => expect(attr('data-mode')).toBe('tasks'));
       expect(attr('data-explicit-list')).toBe('tasks');
-      const control = document.getElementById('settings-control-chat.fontSize');
-      expect(control).not.toBeNull();
+      const control = await waitFor(() => {
+        const anchor = document.getElementById('settings-control-chat.fontSize');
+        expect(anchor).not.toBeNull();
+        return anchor!;
+      });
       const sheet = control!.closest('[data-testid="workbench-sheet"]') as HTMLElement | null;
       expect(sheet!.style.display).not.toBe('none');
       await waitFor(() => expect(scrolledWhileHidden.length).toBeGreaterThan(0), { timeout: 3000 });

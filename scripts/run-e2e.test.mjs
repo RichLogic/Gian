@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -66,7 +66,7 @@ test('the explicit Proxy mock profile uses one generic pluginId entry map', () =
   assert.equal(env.CODEX_BIN, undefined);
 });
 
-test('the Proxy mock profile is derived for every shipping package', () => {
+test('the Proxy mock profile is derived for every shipping package with an owned entry', async () => {
   for (const provider of shippingProxyIds) {
     const definition = proxyDefinitions.find(item => item.id === provider);
     const env = createE2eEnvironment({ PATH: '/bin' }, {
@@ -83,6 +83,17 @@ test('the Proxy mock profile is derived for every shipping package', () => {
       [definition.pluginId],
     );
     assert.ok(JSON.parse(env.GIAN_E2E_PROXY_CAPABILITIES).length > 0);
+    await access(JSON.parse(env.GIAN_DEV_PROXY_ENTRIES)[definition.pluginId]);
+    if (provider === 'antigravity') {
+      assert.equal(definition.pluginId, 'io.gian.antigravity');
+      assert.equal(env.GIAN_E2E_PROXY_PROCESS_SCOPE, 'shared');
+      const capabilities = JSON.parse(env.GIAN_E2E_PROXY_CAPABILITIES);
+      assert.ok(capabilities.includes('catalog.modeSemantics'));
+      assert.ok(capabilities.includes('interaction'));
+      for (const unsupported of ['input.localImage', 'turn.steer', 'session.replay', 'event.diff']) {
+        assert.ok(!capabilities.includes(unsupported), unsupported);
+      }
+    }
   }
 });
 

@@ -22,7 +22,8 @@
 
 import type { EventEnvelope } from './web.js';
 
-export const SEARCH_SCHEMA_VERSION = 1;
+// Bump when canonical projection/range semantics change, not only SQL shape.
+export const SEARCH_SCHEMA_VERSION = 2;
 
 export const SEARCH_QUERY_MAX_CODE_POINTS = 256;
 export const SEARCH_LIMIT_DEFAULT = 20;

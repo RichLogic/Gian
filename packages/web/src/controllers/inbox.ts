@@ -34,7 +34,8 @@
  * (exact generation, enforced Host-side with a 409 `stale` fence).
  */
 import type { InboxItemPublic, InboxSyncSnapshot } from '@gian/shared';
-import { InboxApiError, loadInboxPage, markInboxRead, markInboxUnread, skipInboxVersion } from '../api.js';
+import { InboxApiError, loadInboxPage } from '../api.js';
+import { markInboxRead, markInboxUnread, skipInboxVersion } from '../operations/inbox.js';
 
 export interface InboxState {
   /** True once a sync snapshot or a REST page landed. */

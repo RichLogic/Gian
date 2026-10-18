@@ -37,6 +37,7 @@ test('Proxy product excludes App and private protocol source and reuses the exac
   assert.equal(proxiesExportPath('catalog/proxy-information/claude/tutorial.md'), 'catalog/proxy-information/claude/tutorial.md');
   for (const path of ['scripts/build-zcode-runtime.mjs', 'scripts/zcode-runtime-source.mjs',
     'scripts/build-antigravity-runtime.mjs',
+    'scripts/build-antigravity-runtime.test.mjs',
     'scripts/verify-zcode-runtime-protocol.mjs',
     'scripts/zcode-runtime-integration.mjs',
     'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs',

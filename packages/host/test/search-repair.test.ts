@@ -7,13 +7,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { parseContextQuery, parseFindQuery, parseGlobalSearchQuery, SearchContractError } from '../../shared/src/search.js';
-import { projectComposerSearchText, projectSearchText } from '../../shared/src/search-text.js';
+import { SEARCH_SCHEMA_VERSION, parseContextQuery, parseFindQuery, parseGlobalSearchQuery, SearchContractError } from '../../shared/src/search.js';
+import { normalizeSearchText, projectComposerSearchText, projectSearchText } from '../../shared/src/search-text.js';
 import { EventStore } from '../src/session/event-store.js';
 import { drainSearchOnce, type MaintainLimits } from '../src/search/maintain.js';
 import { createSearchModule } from '../src/search/module.js';
 import { findInSession, readContext, searchGlobal, searchStatus } from '../src/search/query.js';
-import { documentId, readState } from '../src/search/store.js';
+import { documentId, ensureSearchSchema, readState } from '../src/search/store.js';
 import type { SearchWorkingTreeSource } from '../src/search/types.js';
 import { openDatabase, type Db } from '../src/storage/db.js';
 
@@ -22,6 +22,7 @@ const LIMITS: MaintainLimits = { dirtyPage: 10, sourcePage: 40, turnPage: 5 };
 function openDb(): { dir: string; db: Db; close: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'gian-search-repair-'));
   const db = openDatabase(dir);
+  ensureSearchSchema(db);
   return {
     dir,
     db,
@@ -78,6 +79,186 @@ function workspaceIds(db: Db): string[] {
     "SELECT source_id FROM search_documents WHERE kind = 'workspace' ORDER BY source_id",
   ).all() as Array<{ source_id: string }>).map(row => row.source_id);
 }
+
+test('startup retires legacy projections once and bounded backfill resumes after reopen', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gian-search-projection-upgrade-'));
+  let db = openDatabase(dir);
+  try {
+    insertWorkspace(db, 'ws-upgrade', 'Upgrade Place');
+    insertSession(db, 'sess-upgrade', 'Upgrade Session', 'ws-upgrade');
+    const sources = [
+      ['code-turn', 'code-user', 1, '```ts\n  needle();\n\n\n\n```'],
+      ['math-turn', 'math-user', 2, '$$\n  needle + x  \n$$'],
+    ] as const;
+    for (const [turnId, callId, turn, text] of sources) {
+      insertTurn(db, turnId, 'sess-upgrade', turn);
+      new EventStore(db).persist({
+        sessionId: 'sess-upgrade', turnId, callId, type: 'user_message', data: { text },
+      });
+    }
+    await settle(db, dir);
+    const messages = db.prepare(
+      "SELECT id, group_key, search_text, anchor_json FROM search_documents WHERE kind = 'message' ORDER BY sort_turn",
+    ).all() as Array<{ id: string; group_key: string; search_text: string; anchor_json: string }>;
+    assert.equal(messages.length, 2);
+    const oldRevisions = new Map<string, string>();
+    for (const row of messages) {
+      const legacy = row.search_text.replace(/\n{3,}/g, '\n\n').trim();
+      assert.notEqual(legacy, row.search_text);
+      const revision = createHash('sha256').update(legacy).digest('hex');
+      oldRevisions.set(row.id, revision);
+      const anchor = { ...JSON.parse(row.anchor_json), text_revision: revision };
+      db.prepare(
+        'UPDATE search_documents SET search_text = ?, normalized_text = ?, source_revision = ?, anchor_json = ? WHERE id = ?',
+      ).run(legacy, normalizeSearchText(legacy), revision, JSON.stringify(anchor), row.id);
+      db.prepare('DELETE FROM search_fts WHERE document_id = ?').run(row.id);
+      db.prepare('INSERT INTO search_fts (document_id, normalized) VALUES (?, ?)').run(row.id, normalizeSearchText(legacy));
+    }
+    db.prepare(
+      "UPDATE search_state SET schema_version = ?, backfill_stage = 'done', backfill_complete = 1, backfill_cursor = NULL WHERE id = 1",
+    ).run(SEARCH_SCHEMA_VERSION - 1);
+    const find = findInSession(db, parseFindQuery('sess-upgrade', { q: 'needle', limit: '1' }));
+    const global = searchGlobal(db, parseGlobalSearchQuery({ q: 'needle', types: 'message', limit: '1' }));
+    assert.ok(find.next_cursor);
+    assert.ok(global.next_cursor);
+    const findCursor = parseFindQuery('sess-upgrade', { q: 'needle', limit: '1', cursor: find.next_cursor });
+    const globalCursor = parseGlobalSearchQuery({ q: 'needle', types: 'message', limit: '1', cursor: global.next_cursor });
+    const canonical = () => ['sessions', 'turns', 'events'].map(table =>
+      db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const sourceBefore = canonical();
+    const revisionBefore = readState(db).index_revision;
+    db.prepare("INSERT INTO search_dirty(kind, source_key, cursor) VALUES ('workspace', 'ws-upgrade', 'legacy-cursor')").run();
+    db.close();
+    db = openDatabase(dir);
+
+    const mod = createSearchModule({ db, dataDir: dir, listWorkingTrees: async () => [] });
+    const reset = readState(db);
+    assert.equal(reset.schema_version, SEARCH_SCHEMA_VERSION);
+    assert.equal(reset.index_revision, revisionBefore + 1);
+    assert.equal(reset.backfill_stage, 'workspace');
+    assert.equal(reset.backfill_cursor, null);
+    assert.equal(reset.backfill_complete, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM search_documents').get() as { n: number }).n, 0);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM search_fts').get() as { n: number }).n, 0);
+    assert.deepEqual(db.prepare('SELECT kind, source_key, cursor FROM search_dirty').all(), [
+      { kind: 'workspace', source_key: 'ws-upgrade', cursor: null },
+    ]);
+    assert.throws(() => findInSession(db, findCursor), staleCursor);
+    assert.throws(() => searchGlobal(db, globalCursor), staleCursor);
+    const building = findInSession(db, parseFindQuery('sess-upgrade', { q: 'needle' }));
+    assert.equal(building.matches.length, 0);
+    assert.equal(building.total_complete, false);
+    assert.equal(building.coverage.state, 'building');
+    const globalBuilding = searchGlobal(db, parseGlobalSearchQuery({ q: 'needle', types: 'message' }));
+    assert.equal(globalBuilding.results.length, 0);
+    assert.equal(globalBuilding.coverage.state, 'building');
+    assert.equal(globalBuilding.coverage.complete, false);
+    assert.equal(searchStatus(db).coverage.complete, false);
+    await mod.dispose();
+
+    const limits = { dirtyPage: 1, sourcePage: 1, turnPage: 1 };
+    await drainSearchOnce(db, dir, async () => [], limits);
+    const progress = readState(db);
+    assert.equal(progress.backfill_cursor, 'ws-upgrade');
+    assert.equal(progress.backfill_complete, 0);
+    const partial = messageSnaps(db, 'sess-upgrade');
+    assert.ok(partial.length <= 1);
+    db.close();
+    db = openDatabase(dir);
+    const resumed = createSearchModule({ db, dataDir: dir, listWorkingTrees: async () => [] });
+    assert.deepEqual(readState(db), progress);
+    assert.deepEqual(messageSnaps(db, 'sess-upgrade'), partial);
+    await resumed.dispose();
+    await settle(db, dir, limits);
+    assert.equal(searchStatus(db).coverage.state, 'ready');
+    assert.equal(searchStatus(db).backfill_complete, true);
+    for (const row of messages) {
+      const rebuilt = db.prepare(
+        'SELECT search_text, source_revision, anchor_json FROM search_documents WHERE id = ?',
+      ).get(row.id) as { search_text: string; source_revision: string; anchor_json: string };
+      assert.equal(rebuilt.search_text, row.search_text);
+      assert.notEqual(rebuilt.source_revision, oldRevisions.get(row.id));
+      assert.equal(rebuilt.source_revision, createHash('sha256').update(row.search_text).digest('hex'));
+      assert.equal(JSON.parse(rebuilt.anchor_json).text_revision, rebuilt.source_revision);
+      assert.equal((db.prepare('SELECT normalized FROM search_fts WHERE document_id = ?')
+        .get(row.id) as { normalized: string }).normalized, normalizeSearchText(row.search_text));
+      assert.throws(() => readContext(db, parseContextQuery('sess-upgrade', {
+        turn_id: row.group_key, document_id: row.id, text_revision: oldRevisions.get(row.id)!,
+      })), (error: unknown) => error instanceof SearchContractError && error.code === 'text_revision_mismatch');
+      assert.ok(readContext(db, parseContextQuery('sess-upgrade', {
+        turn_id: row.group_key, document_id: row.id, text_revision: rebuilt.source_revision,
+      })).events.length > 0);
+    }
+    const fresh = findInSession(db, parseFindQuery('sess-upgrade', { q: 'needle' }));
+    assert.equal(fresh.total_complete, true);
+    assert.equal(fresh.matches.length, 2);
+    for (const match of fresh.matches) {
+      const text = messages.find(row => row.id === match.document_id)!.search_text;
+      assert.equal(text.slice(match.range.start, match.range.end), 'needle');
+      assert.ok(match.range.start > 0);
+    }
+    const settled = readState(db);
+    assert.equal(ensureSearchSchema(db), false);
+    await drainSearchOnce(db, dir, async () => [], limits);
+    assert.deepEqual(readState(db), settled);
+    assert.deepEqual(canonical(), sourceBefore);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function staleCursor(error: unknown): boolean {
+  return error instanceof SearchContractError && error.code === 'stale_cursor';
+}
+
+test('standalone drain upgrades a completed legacy index with no FTS table in bounded pages', async () => {
+  const handle = openDb();
+  try {
+    const { db, dir } = handle;
+    insertWorkspace(db, 'ws-a', 'Alpha Place');
+    insertWorkspace(db, 'ws-b', 'Beta Place');
+    await settle(db, dir);
+    db.exec('DROP TABLE search_fts');
+    db.prepare(
+      "UPDATE search_state SET schema_version = ?, backfill_stage = 'done', backfill_complete = 1 WHERE id = 1",
+    ).run(SEARCH_SCHEMA_VERSION - 1);
+    await drainSearchOnce(db, dir, async () => [], { dirtyPage: 1, sourcePage: 1, turnPage: 1 });
+    assert.equal(readState(db).schema_version, SEARCH_SCHEMA_VERSION);
+    assert.equal(readState(db).backfill_cursor, 'ws-a');
+    assert.deepEqual(workspaceIds(db), ['ws-a']);
+    assert.equal(searchStatus(db).coverage.state, 'building');
+    await settle(db, dir);
+    assert.deepEqual(workspaceIds(db), ['ws-a', 'ws-b']);
+    assert.equal(searchStatus(db).coverage.state, 'ready');
+  } finally {
+    handle.close();
+  }
+});
+
+test('projection upgrade rolls back documents, FTS, queue and revision together on failure', async () => {
+  const handle = openDb();
+  try {
+    const { db, dir } = handle;
+    insertWorkspace(db, 'ws-rollback', 'Rollback Place');
+    await settle(db, dir);
+    db.prepare('UPDATE search_state SET schema_version = ? WHERE id = 1').run(SEARCH_SCHEMA_VERSION - 1);
+    db.prepare("INSERT INTO search_dirty(kind, source_key, cursor) VALUES ('workspace', 'ws-rollback', 'resume-here')").run();
+    const snapshot = () => ['search_state', 'search_documents', 'search_fts', 'search_dirty'].map(table =>
+      db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all());
+    const before = snapshot();
+    db.exec(`CREATE TRIGGER reject_search_schema BEFORE UPDATE OF schema_version ON search_state
+      BEGIN SELECT RAISE(ABORT, 'simulated projection upgrade failure'); END;`);
+    assert.throws(() => ensureSearchSchema(db), /simulated projection upgrade failure/);
+    assert.deepEqual(snapshot(), before);
+    db.exec('DROP TRIGGER reject_search_schema');
+    assert.equal(ensureSearchSchema(db), true);
+    assert.equal(readState(db).schema_version, SEARCH_SCHEMA_VERSION);
+    assert.equal(ensureSearchSchema(db), false);
+  } finally {
+    handle.close();
+  }
+});
 
 test('a failed FTS insert does not keep a document that later drains would skip', async () => {
   const handle = openDb();

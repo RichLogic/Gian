@@ -97,6 +97,14 @@ export interface AntigravityCliModelsResult {
   models: readonly AntigravityCliModelOption[];
 }
 
+/** Internal diagnostics contain no helper output, environment, paths or raw errors. */
+export interface AntigravityCliModelsCleanupDiagnostic {
+  phase: 'abort-signal' | 'leader-deadline' | 'reap-signal' | 'reap-deadline' | 'stop-deadline';
+  code: string | null;
+}
+
+type CleanupDiagnosticSink = (diagnostic: AntigravityCliModelsCleanupDiagnostic) => void;
+
 export interface AntigravityCliModelsOptions {
   /** Copied into the child at `list()` time. Never logged. */
   env?: NodeJS.ProcessEnv;
@@ -116,6 +124,8 @@ export interface AntigravityCliModelsOptions {
   maxOutputBytes?: number;
   stopMs?: number;
   signal?: AbortSignal;
+  /** Internal test injection; production does not log cleanup diagnostics. */
+  onCleanupDiagnostic?: CleanupDiagnosticSink;
 }
 
 interface ResolvedConfig {
@@ -127,6 +137,7 @@ interface ResolvedConfig {
   timeoutMs: number;
   maxOutputBytes: number;
   stopMs: number;
+  onCleanupDiagnostic: CleanupDiagnosticSink | null;
 }
 
 interface LeaderExit {
@@ -202,7 +213,7 @@ export class AntigravityCliModels {
     this.closed = true;
     const running = this.inflight;
     this.abortInFlight?.();
-    this.stopPromise = settleStop(running, this.config.stopMs);
+    this.stopPromise = settleStop(running, this.config.stopMs, this.config.onCleanupDiagnostic);
     return this.stopPromise;
   }
 
@@ -273,6 +284,7 @@ function resolveConfig(options: AntigravityCliModelsOptions): {
       candidates: options.candidates ?? null,
       timeoutMs: requireBound(options.timeoutMs, ANTIGRAVITY_CLI_MODELS_TIMEOUT_MS),
       maxOutputBytes: requireBound(options.maxOutputBytes, ANTIGRAVITY_CLI_MODELS_MAX_OUTPUT_BYTES),
+      onCleanupDiagnostic: options.onCleanupDiagnostic ?? null,
       stopMs: requireBound(options.stopMs, ANTIGRAVITY_CLI_MODELS_STOP_MS),
     },
     signal: options.signal ?? null,
@@ -452,12 +464,14 @@ async function runQuery(
       if (pid > 0) {
         try {
           signalOwnedGroup(pid, 'SIGKILL');
-        } catch {
+        } catch (error) {
+          cleanupDiagnostic(config.onCleanupDiagnostic, 'abort-signal', error);
           finishErr(new AntigravityCliModelsError('cleanup_failed'));
           return;
         }
       }
       cleanupTimer = setTimeout(() => {
+        cleanupDiagnostic(config.onCleanupDiagnostic, 'leader-deadline');
         finishErr(failure?.failure === 'cleanup_failed'
           ? failure
           : new AntigravityCliModelsError('cleanup_failed'));
@@ -511,7 +525,7 @@ async function runQuery(
     chunks.length = 0;
     if (pid > 0 && failure?.failure !== 'cleanup_failed') {
       try {
-        await reapOwnedGroup(pid, config.stopMs);
+        await reapOwnedGroup(pid, config.stopMs, config.onCleanupDiagnostic);
       } catch (error) {
         failure = error instanceof AntigravityCliModelsError
           ? error
@@ -631,16 +645,44 @@ function ownGroup(pid: number): () => void {
   };
 }
 
-async function reapOwnedGroup(pid: number, budgetMs: number): Promise<void> {
+/** @internal Exported for deterministic signal/probe race regressions. */
+export async function reapOwnedGroup(
+  pid: number,
+  budgetMs: number,
+  onDiagnostic: CleanupDiagnosticSink | null = null,
+): Promise<void> {
   if (process.platform === 'win32' || pid <= 0) return;
-  signalOwnedGroup(pid, 'SIGKILL');
+  if (!groupHasMembers(pid)) return;
   const started = Date.now();
+  try {
+    signalOwnedGroup(pid, 'SIGKILL');
+  } catch (error) {
+    cleanupDiagnostic(onDiagnostic, 'reap-signal', error);
+    // Abort may already have killed this group. A second signal racing its
+    // teardown is not proof of survivors; only a confirmed absent group is
+    // success. Keep the existing bounded wait, without retrying the signal.
+  }
   for (;;) {
     if (!groupHasMembers(pid)) return;
     if (Date.now() - started >= budgetMs) {
+      cleanupDiagnostic(onDiagnostic, 'reap-deadline');
       throw new AntigravityCliModelsError('cleanup_failed');
     }
     await delay(20);
+  }
+}
+
+function cleanupDiagnostic(
+  sink: CleanupDiagnosticSink | null,
+  phase: AntigravityCliModelsCleanupDiagnostic['phase'],
+  error?: unknown,
+): void {
+  if (sink === null) return;
+  const code = error !== null && typeof error === 'object' && 'code' in error ? error.code : null;
+  try {
+    sink({ phase, code: typeof code === 'string' && /^E[A-Z0-9_]{1,31}$/.test(code) ? code : null });
+  } catch {
+    // Diagnostics never change cleanup or cancellation semantics.
   }
 }
 
@@ -713,6 +755,7 @@ async function finishesWithin(promise: Promise<void>, timeoutMs: number): Promis
 async function settleStop(
   running: Promise<AntigravityCliModelsResult> | null,
   deadlineMs: number,
+  onDiagnostic: CleanupDiagnosticSink | null,
 ): Promise<void> {
   if (running === null) return;
   let timer: NodeJS.Timeout | undefined;
@@ -721,7 +764,10 @@ async function settleStop(
     const outcome = await Promise.race([
       watched,
       new Promise<AntigravityCliModelsError>((resolveDeadline) => {
-        timer = setTimeout(() => resolveDeadline(new AntigravityCliModelsError('cleanup_failed')), deadlineMs);
+        timer = setTimeout(() => {
+          cleanupDiagnostic(onDiagnostic, 'stop-deadline');
+          resolveDeadline(new AntigravityCliModelsError('cleanup_failed'));
+        }, deadlineMs);
       }),
     ]);
     if (outcome instanceof AntigravityCliModelsError && outcome.failure === 'cleanup_failed') throw outcome;

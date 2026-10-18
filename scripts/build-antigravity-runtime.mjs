@@ -223,27 +223,48 @@ async function readPinnedArchive(archivePath) {
     throw new Error('Antigravity source archive must be a regular file.');
   }
   if (info.size !== antigravityRuntimeSource.sourceSize) {
-    throw new Error('Antigravity source archive differs from the pinned recipe.');
+    throw archiveMismatch('file-size', { actualSize: info.size });
   }
   const bytes = await readFile(archivePath);
+  const actualSha256 = digest(bytes);
   if (bytes.length !== antigravityRuntimeSource.sourceSize
-    || digest(bytes) !== antigravityRuntimeSource.sourceSha256) {
-    throw new Error('Antigravity source archive differs from the pinned recipe.');
+    || actualSha256 !== antigravityRuntimeSource.sourceSha256) {
+    throw archiveMismatch('file-integrity', { actualSize: bytes.length, actualSha256 });
   }
   return bytes;
 }
 
-async function downloadAntigravitySource(destination) {
-  const response = await fetch(antigravityRuntimeSource.sourceUrl, {
+function archiveMismatch(stage, observed) {
+  return new Error(`Antigravity source archive differs from the pinned recipe. ${JSON.stringify({
+    stage,
+    expectedSize: antigravityRuntimeSource.sourceSize,
+    expectedSha256: antigravityRuntimeSource.sourceSha256,
+    ...observed,
+  })}`);
+}
+
+async function downloadAntigravitySource(destination, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl(antigravityRuntimeSource.sourceUrl, {
+    headers: { 'Accept-Encoding': 'identity' },
     redirect: 'follow',
     signal: AbortSignal.timeout(120_000),
   });
   if (!response.ok || !response.body) {
+    await response.body?.cancel().catch(() => undefined);
     throw new Error(`Antigravity source archive download failed (${response.status}).`);
   }
   const declared = response.headers.get('content-length');
+  const declaredSize = declared === null ? null : Number(declared);
+  const encoding = response.headers.get('content-encoding')?.trim().toLowerCase();
+  // Fetch decodes HTTP compression, while Content-Length counts encoded
+  // bytes. Require identity before comparing it with the pinned ZIP size.
+  if (encoding && encoding !== 'identity') {
+    await response.body.cancel().catch(() => undefined);
+    throw archiveMismatch('content-encoding', { declaredSize, contentEncoding: 'non-identity' });
+  }
   if (declared !== null && Number(declared) !== antigravityRuntimeSource.sourceSize) {
-    throw new Error('Antigravity source archive differs from the pinned recipe.');
+    await response.body.cancel().catch(() => undefined);
+    throw archiveMismatch('content-length', { declaredSize });
   }
   const reader = response.body.getReader();
   const chunks = [];
@@ -254,7 +275,7 @@ async function downloadAntigravitySource(destination) {
       if (step.done) break;
       received += step.value.byteLength;
       if (received > antigravityRuntimeSource.sourceSize) {
-        throw new Error('Antigravity source archive differs from the pinned recipe.');
+        throw archiveMismatch('download-size', { declaredSize, actualSize: received });
       }
       chunks.push(Buffer.from(step.value));
     }
@@ -262,7 +283,7 @@ async function downloadAntigravitySource(destination) {
     await reader.cancel().catch(() => undefined);
   }
   if (received !== antigravityRuntimeSource.sourceSize) {
-    throw new Error('Antigravity source archive differs from the pinned recipe.');
+    throw archiveMismatch('download-size', { declaredSize, actualSize: received });
   }
   await writeFile(destination, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
   return destination;
@@ -323,7 +344,7 @@ export async function buildAntigravityRuntimeCandidate(outputDir, workDir, optio
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   const archivePath = options.archivePath
-    ?? await downloadAntigravitySource(join(workDir, 'agy-acp-source.zip'));
+    ?? await downloadAntigravitySource(join(workDir, 'agy-acp-source.zip'), options.fetch);
   const bytes = await readPinnedArchive(archivePath);
   const pairRoot = join(workDir, 'antigravity-pair');
   await extractAntigravityPair(bytes, pairRoot);

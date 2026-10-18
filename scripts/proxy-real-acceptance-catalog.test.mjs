@@ -3,8 +3,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { proxyDefinitions } from './build-proxy-artifacts.mjs';
 
 import {
+  expectedAcceptanceCapabilities,
   loadProxyRealAcceptanceCatalog,
   resolveAcceptanceTargets,
   renderProxyRealAcceptanceHtml,
@@ -37,9 +39,62 @@ test('real Proxy catalog covers every request and notification schema', async ()
   assert.ok(catalog.scenarios.length >= 25);
   assert.deepEqual(
     Object.keys(catalog.providers).sort(),
-    ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode'],
+    proxyDefinitions.map(definition => definition.id).sort(),
   );
   assert.equal(catalog.providers.codex.cheapestConfig.service_tier, false);
+});
+
+test('Antigravity classifications preserve its native contract rather than another Provider profile', async () => {
+  const catalog = await loadProxyRealAcceptanceCatalog();
+  const provider = catalog.providers.antigravity;
+  assert.equal(provider.pluginId, 'io.gian.antigravity');
+  assert.equal(provider.pluginVersion, proxyDefinitions.find(definition => definition.id === 'antigravity').pluginVersion);
+  assert.equal(provider.processScope, 'shared');
+  assert.ok(provider.implementedMethods.includes('runtime.probe'));
+  assert.ok(provider.implementedMethods.includes('interaction.respond'));
+  assert.ok(provider.unsupportedMethods.includes('session.replay'));
+  assert.ok(provider.unsupportedMethods.includes('turn.steer'));
+  assert.ok(!provider.capabilities.includes('input.localImage'));
+  assert.ok(!provider.implementedNotifications.includes('input.recorded'));
+  assert.ok(!provider.implementedNotifications.includes('diff.updated'));
+  for (const scenario of catalog.scenarios) assert.ok(scenario.providerNotes.antigravity.trim());
+  const statuses = Object.fromEntries(catalog.scenarios.map(scenario => [scenario.id, scenario.providers.antigravity]));
+  assert.equal(statuses['input.local_file'], 'unsupported');
+  assert.equal(statuses['activity.plan'], 'conditional');
+  assert.equal(statuses['native.discovery_replay_identity'], 'partial');
+  assert.equal(statuses['interaction.permission'], 'required');
+  assert.equal(statuses['interaction.question'], 'unsupported');
+  assert.equal(statuses['invalidation.catalog_history'], 'unsupported');
+
+  const missing = structuredClone(catalog);
+  delete missing.scenarios[0].providers.antigravity;
+  assert.throws(() => validateProxyRealAcceptanceCatalog(missing), /must classify every provider/);
+  const missingMethod = structuredClone(catalog);
+  missingMethod.providers.antigravity.unsupportedMethods.pop();
+  assert.throws(() => validateProxyRealAcceptanceCatalog(missingMethod), /cover every request exactly once/);
+  const duplicateMethod = structuredClone(catalog);
+  duplicateMethod.providers.antigravity.unsupportedMethods.push('initialize');
+  assert.throws(() => validateProxyRealAcceptanceCatalog(duplicateMethod), /cover every request exactly once/);
+});
+
+test('conditional native capabilities are bounded, not a relaxation of required or unknown capabilities', async () => {
+  const catalog = await loadProxyRealAcceptanceCatalog();
+  const provider = catalog.providers.antigravity;
+  const required = [...provider.capabilities].sort();
+  assert.deepEqual(expectedAcceptanceCapabilities(provider, required), required);
+  const optional = [...required, ...provider.conditionalCapabilities].sort();
+  assert.deepEqual(expectedAcceptanceCapabilities(provider, optional), optional);
+  const missing = required.filter(capability => capability !== 'interaction');
+  assert.notDeepEqual(expectedAcceptanceCapabilities(provider, missing), missing);
+  const unknown = [...required, 'event.diff'].sort();
+  assert.notDeepEqual(expectedAcceptanceCapabilities(provider, unknown), unknown);
+
+  const overlapping = structuredClone(catalog);
+  overlapping.providers.antigravity.conditionalCapabilities.push('interaction');
+  assert.throws(() => validateProxyRealAcceptanceCatalog(overlapping), /duplicate required\/conditional capabilities/);
+  const invalid = structuredClone(catalog);
+  invalid.providers.antigravity.conditionalCapabilities.push('invented.capability');
+  assert.throws(() => validateProxyRealAcceptanceCatalog(invalid), /unknown capability/);
 });
 
 test('real Proxy catalog rejects a missing provider classification', async () => {

@@ -116,6 +116,7 @@ import { nativeOptionForDecision } from './operations/approval.js';
 import { useAppZoom } from './display-prefs.js';
 import { setKeymapPreferences } from './shortcut-prefs.js';
 import { createOperationDispatcher, type OperationDispatcher } from './operations/dispatcher.js';
+import { wireInboxOperations } from './operations/inbox.js';
 import {
   desktopBridge,
   type GianDesktopNavigationTarget,
@@ -584,6 +585,7 @@ export function App() {
     ops.connect();
     return () => ops.dispose();
   }, [ops]);
+  useEffect(() => wireInboxOperations(ops, invalidateInbox), [ops]);
   // Late-bound dispatch for useAppAuth (see the declaration above).
   useEffect(() => { opsDispatchRef.current = ops.dispatch; }, [ops]);
 
@@ -1542,7 +1544,7 @@ export function App() {
       const archivedReadOnlyPath = request.allowArchivedReadOnly === true
         && sessionCanonRef.current.facts.get(request.sessionId)?.disposition === 'archived';
       if (canonMoved() && !archivedReadOnlyPath) return settleFromNewerCanon(found);
-      if (found && found.archived !== 1) {
+      if (found && found.archived !== 1 && !archivedReadOnlyPath) {
         if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
         sessionsRef.current = [
           found,
@@ -1575,7 +1577,7 @@ export function App() {
         }
       }
       if (!alive()) return supersededDelivery(request, subscribeIsCurrent);
-      if (canonMoved() && !archivedReadOnlyPath) return settleFromNewerCanon(found, archivedFound);
+      if (canonMoved()) return settleFromNewerCanon(found, archivedFound);
       if (archivedFound && request.allowArchivedReadOnly) {
         setReadOnlySession(archivedFound);
       }

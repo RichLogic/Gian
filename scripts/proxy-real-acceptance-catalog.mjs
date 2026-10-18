@@ -117,6 +117,11 @@ function sameMembers(left, right) {
   return JSON.stringify(sorted(left)) === JSON.stringify(sorted(right));
 }
 
+export function expectedAcceptanceCapabilities(provider, actualCapabilities) {
+  return sorted([...provider.capabilities,
+    ...(provider.conditionalCapabilities ?? []).filter(capability => actualCapabilities.includes(capability))]);
+}
+
 function requireRecord(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
@@ -245,13 +250,26 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
       throw new Error(`${providerId}.binary must be a non-empty command or path.`);
     }
     const capabilities = requireStringArray(provider.capabilities, `${providerId}.capabilities`);
+    const conditional = provider.conditionalCapabilities === undefined ? []
+      : requireStringArray(provider.conditionalCapabilities, `${providerId}.conditionalCapabilities`);
+    if (new Set([...capabilities, ...conditional]).size !== capabilities.length + conditional.length) {
+      throw new Error(`${providerId} has duplicate required/conditional capabilities.`);
+    }
     const notifications = requireStringArray(
       provider.implementedNotifications,
       `${providerId}.implementedNotifications`,
     );
-    for (const capability of capabilities) {
+    for (const capability of [...capabilities, ...conditional]) {
       if (!knownCapabilities.has(capability)) {
         throw new Error(`${providerId} declares unknown capability ${capability}.`);
+      }
+    }
+    if (provider.implementedMethods !== undefined || provider.unsupportedMethods !== undefined) {
+      const implemented = requireStringArray(provider.implementedMethods, `${providerId}.implementedMethods`);
+      const unsupported = requireStringArray(provider.unsupportedMethods, `${providerId}.unsupportedMethods`);
+      if (new Set([...implemented, ...unsupported]).size !== implemented.length + unsupported.length
+        || !sameMembers([...implemented, ...unsupported], PROXY_METHODS)) {
+        throw new Error(`${providerId} method classifications must cover every request exactly once.`);
       }
     }
     for (const method of notifications) {
@@ -317,6 +335,11 @@ export function validateProxyRealAcceptanceCatalog(catalog) {
         throw new Error(`${scenario.id}.${providerId} has unknown status ${status}.`);
       }
     }
+    for (const [providerId, note] of Object.entries(scenario.providerNotes ?? {})) {
+      if (!providerIds.includes(providerId) || typeof note !== 'string' || !note.trim()) {
+        throw new Error(`${scenario.id} has an invalid provider reason.`);
+      }
+    }
   }
 
   if (!sameMembers(coveredMethods, PROXY_METHODS)) {
@@ -357,7 +380,8 @@ export function renderProxyRealAcceptanceHtml(catalog) {
       <td><div class="schema"><b>Requests</b>${scenario.methods.map(method => `<code>${escapeHtml(method)}</code>`).join('')}<b>Notifications</b>${scenario.notifications.length ? scenario.notifications.map(method => `<code>${escapeHtml(method)}</code>`).join('') : '<span class="muted">none</span>'}</div></td>
       ${providers.map(([providerId]) => {
         const status = scenario.providers[providerId];
-        return `<td><span class="status ${statusClass(status)}">${escapeHtml(status)}</span></td>`;
+        const reason = scenario.providerNotes?.[providerId];
+        return `<td><span class="status ${statusClass(status)}">${escapeHtml(status)}</span>${reason ? `<small>${escapeHtml(reason)}</small>` : ''}</td>`;
       }).join('')}
     </tr>`).join('');
   const schemaRows = Object.entries(catalog.notificationSchemas).map(([method, schema]) => `

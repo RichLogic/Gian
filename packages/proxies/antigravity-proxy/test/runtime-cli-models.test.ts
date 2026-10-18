@@ -16,6 +16,8 @@ import {
   AntigravityCliModelsError,
   antigravityCliHelperCandidates,
   listAntigravityCliModels,
+  reapOwnedGroup,
+  type AntigravityCliModelsCleanupDiagnostic,
   type AntigravityCliModelsFailure,
   type AntigravityCliModelsOptions,
 } from '../src/runtime/cli-models.js';
@@ -819,7 +821,69 @@ test('a pipe held after the leader exits fails inside the cleanup budget', { ...
   }
 });
 
-test('stop reaps a held helper and its descendant', skipWindows, async () => {
+test('reap does not signal an owned group already confirmed absent', skipWindows, async t => {
+  const pid = process.pid;
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  t.mock.method(process, 'kill', (target: number, signal?: NodeJS.Signals | number): true => {
+    assert.equal(target, -pid);
+    signals.push(signal);
+    throw Object.assign(new Error(SECRET_URL), { code: 'ESRCH' });
+  });
+  await reapOwnedGroup(pid, 1_000);
+  assert.deepEqual(signals, [0]);
+});
+
+test('reap confirms disappearance after a racing second signal error without retrying SIGKILL', skipWindows, async t => {
+  const pid = process.pid;
+  const diagnostics: AntigravityCliModelsCleanupDiagnostic[] = [];
+  let probes = 0;
+  let kills = 0;
+  t.mock.method(process, 'kill', (target: number, signal?: NodeJS.Signals | number): true => {
+    assert.equal(target, -pid);
+    if (signal === 0) {
+      if (++probes <= 2) return true;
+      throw Object.assign(new Error(SECRET_URL), { code: 'ESRCH' });
+    }
+    assert.equal(signal, 'SIGKILL');
+    kills += 1;
+    throw Object.assign(new Error(SECRET_URL), { code: 'EPERM' });
+  });
+  await reapOwnedGroup(pid, 1_000, diagnostic => diagnostics.push(diagnostic));
+  assert.equal(probes, 3);
+  assert.equal(kills, 1);
+  assert.deepEqual(diagnostics, [{ phase: 'reap-signal', code: 'EPERM' }]);
+  assert.equal(JSON.stringify(diagnostics).includes(SECRET), false);
+});
+
+test('a failed reap signal still fails closed for surviving or unobservable members', skipWindows, async t => {
+  for (const probeCode of [null, 'EPERM']) {
+    await t.test(probeCode === null ? 'members remain' : 'probe cannot confirm absence', async subtest => {
+      const pid = process.pid;
+      const diagnostics: AntigravityCliModelsCleanupDiagnostic[] = [];
+      let kills = 0;
+      subtest.mock.method(process, 'kill', (target: number, signal?: NodeJS.Signals | number): true => {
+        assert.equal(target, -pid);
+        if (signal === 0 && probeCode === null) return true;
+        if (signal !== 0) {
+          assert.equal(signal, 'SIGKILL');
+          kills += 1;
+        }
+        throw Object.assign(new Error(SECRET_URL), { code: 'EPERM' });
+      });
+      await assert.rejects(reapOwnedGroup(pid, 1, diagnostic => diagnostics.push(diagnostic)), (error: unknown) => {
+        assertFailure(error, 'cleanup_failed', 'Antigravity CLI model query process cleanup failed.', 'RUNTIME_ERROR');
+        return true;
+      });
+      assert.equal(kills, 1);
+      assert.deepEqual(diagnostics, [
+        { phase: 'reap-signal', code: 'EPERM' },
+        { phase: 'reap-deadline', code: null },
+      ]);
+    });
+  }
+});
+
+test('stop reaps a held helper and its descendant', skipWindows, async t => {
   const paths = await makePaths();
   const descendantPath = join(paths.root, 'descendant.pid');
   let leader = 0;
@@ -828,7 +892,11 @@ test('stop reaps a held helper and its descendant', skipWindows, async () => {
     FAKE_AGY_CLI_HOLD: '1',
     FAKE_AGY_CLI_DESCENDANT_PID: descendantPath,
     FAKE_AGY_CLI_STDERR: SECRET_URL,
-  }, { timeoutMs: 5_000, stopMs: 1_000 }));
+  }, {
+    timeoutMs: 5_000,
+    stopMs: 1_000,
+    onCleanupDiagnostic: diagnostic => t.diagnostic(JSON.stringify({ diagnostic, leader, descendant })),
+  }));
   try {
     const pending = catalog.list();
     pending.catch(() => undefined);

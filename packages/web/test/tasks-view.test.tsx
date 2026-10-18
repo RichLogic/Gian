@@ -510,10 +510,11 @@ describe('unassigned group (未分配)', () => {
     expect(section).toHaveTextContent('Unassigned');
     // No count badge on section headers (2026-09-07 Codex-style refactor).
     expect(section.querySelector('.count')).toBeNull();
-    // Expanded by default; the untasked row shows, the task-bound one does not.
+    // Expanded by default; the untasked row belongs outside the task group.
     const row = screen.getByTestId('session-row-sess-loose');
     expect(row).toBeInTheDocument();
-    expect(screen.queryByTestId('session-row-sub-1')).not.toBeInTheDocument();
+    expect(row.closest('.tasks-list-task')).toBeNull();
+    expect(screen.getByTestId('session-row-sub-1').closest('.tasks-list-task')).not.toBeNull();
     // Collapse hides the rows.
     await userEvent.click(section);
     expect(screen.queryByTestId('session-row-sess-loose')).not.toBeInTheDocument();

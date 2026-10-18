@@ -23,6 +23,7 @@ class FakeHighlight {
   constructor(...ranges: Range[]) { this.ranges = ranges; }
 }
 const highlightRegistry = new Map<string, FakeHighlight>();
+Object.defineProperty(globalThis, 'Highlight', { configurable: true, value: FakeHighlight });
 Object.defineProperty(globalThis, 'CSS', {
   configurable: true,
   value: { highlights: highlightRegistry, escape: (value: string) => value.replace(/"/g, '\\"') },
@@ -183,7 +184,7 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'plan');
-    expect(await screen.findByTestId('conversation-find-count')).toHaveTextContent('1 / 2');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 2'));
     expect(calls.some(url => url.includes('/api/sessions/s-1/find') && url.includes('q=plan'))).toBe(true);
     // Both loaded matches highlighted through canonical ranges; active distinct.
     await waitFor(() => expect(highlightRegistry.get('gian-find')?.ranges.length).toBe(2));
@@ -225,7 +226,7 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'plan');
-    expect(await screen.findByTestId('conversation-find-count')).toHaveTextContent('1 / 5+');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 5+'));
     expect(screen.getByText('Partial')).toBeTruthy();
   });
 
@@ -316,7 +317,7 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'plan');
-    expect(await screen.findByTestId('conversation-find-count')).toHaveTextContent('0 / 0+');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('0 / 0+'));
     const next = screen.getByTestId('conversation-find-next');
     expect(next).not.toBeDisabled();
     await user.click(next);
@@ -339,10 +340,12 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'plan');
-    await screen.findByTestId('conversation-find-count');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 3'));
     await user.click(screen.getByTestId('conversation-find-next'));
-    await vi.waitFor(() => expect(topCalls).toBe(2));
-    expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 1');
+    await waitFor(() => {
+      expect(topCalls).toBe(2);
+      expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 1');
+    });
   });
 
   it('a find error shows retry and recovers', async () => {
@@ -362,21 +365,23 @@ describe('ConversationFind', () => {
   });
 
   it('a new query clears old matches — the stale page is never navigated', async () => {
+    const item = msg('m-one', 'user', 1, 'one result');
     let resolveSecond: ((r: Response) => void) | null = null;
     mockFetch(async input => {
       const url = typeof input === 'string' ? input : input.url;
       if (url.includes('q=one&') || url.endsWith('q=one')) {
-        return Response.json(findPage([hostMatch('occ-1', 'doc-1', TEXT_PLAN, 'plan')], { total: 1 }));
+        return Response.json(findPage([hostMatch('occ-1', 'doc-1', item, 'one')], { total: 1 }));
       }
       return new Promise<Response>(resolve => { resolveSecond = resolve; });
     });
-    render(<Harness items={[TEXT_PLAN]} />);
+    render(<Harness items={[item]} />);
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'one');
     await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 1'));
     await user.type(screen.getByPlaceholderText(/Find in conversation/), ' two');
     expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('…');
+    await waitFor(() => expect(resolveSecond).toBeTypeOf('function'));
     resolveSecond!(Response.json(findPage([], { total: 0 })));
     await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('0 / 0'));
   });
@@ -391,7 +396,7 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'plan');
-    await screen.findByTestId('conversation-find-count');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 2'));
     await user.keyboard('{Enter}');
     expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('2 / 2');
     // Streaming drift: same query re-runs, the active hit stays the second.
@@ -526,7 +531,7 @@ describe('ConversationFind', () => {
     const user = userEvent.setup();
     await openFind(user);
     await user.type(screen.getByPlaceholderText(/Find in conversation/), 'span.ri-title');
-    expect(await screen.findByTestId('conversation-find-count')).toHaveTextContent('1 / 1');
+    await waitFor(() => expect(screen.getByTestId('conversation-find-count')).toHaveTextContent('1 / 1'));
     expect(screen.getByText('Viewing a history window')).toBeTruthy();
     expect(onLoad).not.toHaveBeenCalled();
 

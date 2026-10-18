@@ -4,7 +4,7 @@
 // jsdom's missing surface.
 
 import '@testing-library/jest-dom/vitest';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
 // React Testing Library — tear down any rendered tree after each test
@@ -19,20 +19,26 @@ afterEach(() => {
 
 // `matchMedia` is used by some components for prefers-color-scheme.
 // Always install (jsdom's omission of it is not announced via `in`).
-Object.defineProperty(window, 'matchMedia', {
-  writable: true,
-  configurable: true,
-  value: vi.fn().mockImplementation((query: string) => ({
-    matches: false,
-    media: query,
-    onchange: null,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),    // legacy alias
-    removeListener: vi.fn(), // legacy alias
-    dispatchEvent: vi.fn(),
-  })),
-});
+function installMatchMedia(): void {
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),    // legacy alias
+      removeListener: vi.fn(), // legacy alias
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
+installMatchMedia();
+// Some suites restore/reset all mocks. Each test needs a working browser
+// fixture again, not a reset vi.fn returning undefined.
+beforeEach(installMatchMedia);
 
 // `ResizeObserver` is used by xterm / fit addon / Splitter — without
 // this stub, components that mount them throw on construction.

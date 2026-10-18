@@ -251,13 +251,24 @@ export function InboxPanel({
     if (selected && !liveSelected) setSelected(null);
   }, [selected, liveSelected]);
 
+  // Replacing the list/detail removes its focused button. Keep keyboard
+  // navigation inside the dialog so Escape still reaches the panel.
+  useEffect(() => {
+    if (!open) return;
+    panelRef.current?.querySelector<HTMLElement>(
+      liveSelected ? '.inbox-detail-head button' : '.inbox-close',
+    )?.focus();
+  }, [open, liveSelected?.id]);
+
   // Search deep link: open the exact item. Pending window hit → detail from
   // the store; otherwise a one-shot canonical detail fetch. Same read-on-open
   // semantics as a row click. The hit's generation is verified first — a
   // moved generation refreshes canonical state and is never auto-opened/read.
   useEffect(() => {
+    const request = ++detailRequestRef.current;
     if (!open || !focusItem) return;
     const openVerified = (item: InboxItemPublic, fromList: boolean) => {
+      if (request !== detailRequestRef.current) return;
       if (item.generation !== focusItem.generation) {
         toast({ kind: 'warning', message: t('inbox.staleRefresh') });
         invalidateInbox();
@@ -266,7 +277,7 @@ export function InboxPanel({
       selectedFromListRef.current = fromList;
       openDetail(item);
     };
-    const fromStore = inbox.pendingItems.find(item => item.id === focusItem.id);
+    const fromStore = getInboxSnapshot().pendingItems.find(item => item.id === focusItem.id);
     if (fromStore) {
       openVerified(fromStore, true);
       return;
@@ -279,9 +290,10 @@ export function InboxPanel({
       })
       .catch(() => undefined);
     return () => { alive = false; };
-    // openDetail reads the clicked item's own generation; the focus nonce
-    // scopes one deep link. eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, focusItem, inbox.pendingItems]);
+    // Read echoes update pendingItems; they are not new navigation intents.
+    // Key on primitives so a rebuilt prop cannot reopen a retired detail.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, focusItem?.id, focusItem?.generation, focusItem?.nonce]);
 
   if (!open) return null;
 

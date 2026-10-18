@@ -29,6 +29,7 @@ import {
   resolveProviderBinary,
 } from './run-provider-attachment-canary.mjs';
 import {
+  expectedAcceptanceCapabilities,
   loadProxyRealAcceptanceCatalog,
   validateProxyRealAcceptanceCatalog,
 } from './proxy-real-acceptance-catalog.mjs';
@@ -1584,7 +1585,7 @@ async function runProvider({
     let runtimeCatalog = await client.request('catalog.list', {});
     assert.deepEqual(
       providerCapabilityNames(initialized.capabilities),
-      [...providerConfig.capabilities].sort(),
+      expectedAcceptanceCapabilities(providerConfig, providerCapabilityNames(initialized.capabilities)),
     );
     results.push({
       scenarioId: 'transport.initialize_catalog',

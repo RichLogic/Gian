@@ -43,6 +43,14 @@ describe('MarkdownText', () => {
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('const x = 1;'));
   });
 
+  it('copies intentional trailing blank lines inside a code fence', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const { container } = render(<MarkdownText>{'```js\nconst x = 1;\n\n\n```'}</MarkdownText>);
+    fireEvent.click(container.querySelector('.code-copy')!);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('const x = 1;\n\n'));
+  });
+
   it('routes external links through the app callback instead of navigating', () => {
     const openWebUrl = vi.fn();
     const { container } = render(

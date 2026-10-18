@@ -7,6 +7,7 @@ import {
   SEARCH_SOURCE_PAGE,
   SEARCH_TURN_PAGE,
   dirtyCount,
+  ensureSearchSchema,
   readState,
 } from './store.js';
 import type { SearchModule, SearchModuleDeps } from './types.js';
@@ -21,6 +22,8 @@ const IDLE_DELAY_MS = 2000;
  * caller's `listWorkingTrees` cache. This module does not scan git worktrees.
  */
 export function createSearchModule(deps: SearchModuleDeps): SearchModule {
+  // Registration must never expose old offsets during the first tick delay.
+  ensureSearchSchema(deps.db);
   const limits: MaintainLimits = {
     dirtyPage: positive(deps.limits?.dirtyPage, SEARCH_DIRTY_PAGE),
     sourcePage: positive(deps.limits?.sourcePage, SEARCH_SOURCE_PAGE),

@@ -152,7 +152,8 @@ test('the Dev Antigravity coordinate follows the Manifest and publishes no asset
   const manifest = JSON.parse(await readFile(new URL('packages/proxies/antigravity-proxy/manifest.json', root)));
   const pkg = JSON.parse(await readFile(new URL('packages/proxies/antigravity-proxy/package.json', root)));
   const coordinate = coordinates.find(item => item.pluginId === manifest.id);
-  assert.equal(pkg.gianProxy.shipping, false);
+  assert.equal(pkg.gianProxy.shipping, true, 'Owner-selected shipping candidate, not a qualification result');
+  assert.equal(pkg.version, manifest.pluginVersion);
   assert.equal(coordinate.runtimeId, manifest.runtime.id);
   assert.equal(coordinate.version, manifest.runtime.verifiedVersions[0]);
   assert.equal(coordinate.format, 'tar.gz');

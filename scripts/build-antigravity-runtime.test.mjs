@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, lstat, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, lstat, mkdir, open, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -169,4 +169,54 @@ test('an archive other than the pinned official ZIP is rejected before packing',
   await assert.rejects(buildAntigravityRuntimeCandidate(join(root, 'out-2'), join(root, 'work-2'), {
     archivePath: link,
   }), /regular file/);
+
+  const sameSize = join(root, 'same-size.zip');
+  const file = await open(sameSize, 'wx');
+  try { await file.truncate(antigravityRuntimeSource.sourceSize); }
+  finally { await file.close(); }
+  await assert.rejects(buildAntigravityRuntimeCandidate(join(root, 'out-3'), join(root, 'work-3'), {
+    archivePath: sameSize,
+  }), error => {
+    assert.match(error.message, /"stage":"file-integrity"/);
+    assert.match(error.message, /"actualSize":111456962/);
+    assert.match(error.message, /"actualSha256":"[a-f0-9]{64}"/);
+    assert.match(error.message, /"expectedSha256":"7cd97045/);
+    return true;
+  });
+});
+
+test('download requests identity bytes and distinguishes HTTP, encoding, declared and actual size failures', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'agy-download-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cases = [
+    { name: 'http', response: () => new Response('private response body', { status: 503 }), error: /download failed \(503\)/ },
+    { name: 'no-body', response: () => new Response(null), error: /download failed \(200\)/ },
+    { name: 'encoded', response: () => new Response('private response body', { headers: { 'content-encoding': 'gzip', 'content-length': '111404059' } }), error: /"stage":"content-encoding".*"declaredSize":111404059/ },
+    { name: 'declared', response: () => new Response('private response body', { headers: { 'content-length': '111404059' } }), error: /"stage":"content-length".*"declaredSize":111404059/ },
+    { name: 'short', response: () => new Response('zip', { headers: { 'content-length': String(antigravityRuntimeSource.sourceSize) } }), error: /"stage":"download-size".*"declaredSize":111456962,"actualSize":3/ },
+    { name: 'unknown-length', response: () => new Response('zip'), error: /"stage":"download-size".*"declaredSize":null,"actualSize":3/ },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const work = join(root, fixture.name);
+      let calls = 0;
+      await assert.rejects(buildAntigravityRuntimeCandidate(join(work, 'out'), work, {
+        fetch: async (url, init) => {
+          calls += 1;
+          assert.equal(url, antigravityRuntimeSource.sourceUrl);
+          assert.equal(new Headers(init.headers).get('accept-encoding'), 'identity');
+          assert.equal(init.redirect, 'follow');
+          assert.ok(init.signal instanceof AbortSignal);
+          return fixture.response();
+        },
+      }), error => {
+        assert.match(error.message, fixture.error);
+        assert.doesNotMatch(error.message, /private response body/);
+        return true;
+      });
+      assert.equal(calls, 1);
+      await assert.rejects(lstat(join(work, 'agy-acp-source.zip')), { code: 'ENOENT' });
+      await assert.rejects(lstat(join(work, 'antigravity-pair')), { code: 'ENOENT' });
+    });
+  }
 });

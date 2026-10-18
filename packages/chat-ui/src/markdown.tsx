@@ -73,7 +73,7 @@ function mermaidBlockOf(
  *  wrapper stays so the copy button still copies the diagram source. */
 function MarkdownPre({ children }: { node?: unknown; children?: React.ReactNode }) {
   const t = useChatUiT();
-  const code = reactNodeText(children).replace(/\n+$/, '');
+  const code = reactNodeText(children).replace(/\n$/, '');
   const mermaid = mermaidBlockOf(children, code);
   if (mermaid) {
     return (
@@ -104,6 +104,7 @@ function MarkdownTable({ children }: { node?: unknown; children?: React.ReactNod
 
 interface MarkdownBoundaryNode {
   type: string;
+  tagName?: string;
   value?: string;
   children?: MarkdownBoundaryNode[];
 }
@@ -128,6 +129,12 @@ function rehypeTightBlockWhitespace() {
       node.children = node.children.filter(child =>
         child.type !== 'text' || !child.value?.includes('\n') || child.value.trim() !== '');
     }
+    // HAST inserts a layout newline after <br>. The break already carries
+    // the line boundary; retaining both doubles it in pre-wrap user text.
+    node.children.forEach((child, index) => {
+      if (child.type === 'text' && child.value?.startsWith('\n')
+        && node.children?.[index - 1]?.tagName === 'br') child.value = child.value.slice(1);
+    });
     for (const child of node.children) {
       visit(child, child.type === 'element'
         && INSIGNIFICANT_WHITESPACE_PARENTS.has((child as { tagName?: string }).tagName ?? ''));

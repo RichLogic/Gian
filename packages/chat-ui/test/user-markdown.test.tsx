@@ -94,6 +94,12 @@ describe('UserMessage markdown', () => {
     expect(container.querySelector('.user-text')!.textContent).toBe('line one\nline two');
   });
 
+  it('renders one hard break without a second layout newline in pre-wrap text', () => {
+    const { container } = render(<UserMessage item={userMsg('line one  \nline two')} />);
+    const paragraph = container.querySelector('.user-text p')!;
+    expect(paragraph.innerHTML).toBe('line one<br>line two');
+  });
+
   it('drops pretty-print whitespace around block elements (pre-wrap bubble phantom lines)', () => {
     const { container } = render(<UserMessage item={userMsg('9. first line\n\nsecond line')} />);
     const text = container.querySelector('.msg-text')!;

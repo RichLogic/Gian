@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { normalizeSearchText } from '@gian/shared';
+import { SEARCH_SCHEMA_VERSION, normalizeSearchText } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 
 export const SEARCH_DIRTY_PAGE = 10;
@@ -97,6 +97,33 @@ export function commitSearchUnit(db: Db, work: () => boolean): boolean {
     if (wrote) bumpRevision(db);
   })();
   return wrote;
+}
+
+/** Retire incompatible derived text before serving it; the existing worker
+ *  resumes the bounded backfill. Never rewrite canonical source tables. */
+export function ensureSearchSchema(db: Db): boolean {
+  if (readState(db).schema_version === SEARCH_SCHEMA_VERSION) return false;
+  return commitSearchUnit(db, () => {
+    const state = readState(db);
+    if (state.schema_version === SEARCH_SCHEMA_VERSION) return false;
+    if (state.schema_version > SEARCH_SCHEMA_VERSION) {
+      throw new Error('search index schema is newer than this Host');
+    }
+    const fts = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_fts'",
+    ).get();
+    if (fts) db.prepare('DELETE FROM search_fts').run();
+    db.prepare('DELETE FROM search_documents').run();
+    db.prepare('UPDATE search_dirty SET cursor = NULL').run();
+    db.prepare(
+      `UPDATE search_state
+       SET schema_version = ?, backfill_stage = 'workspace', backfill_cursor = NULL,
+           backfill_complete = 0, fts_mode = 'unknown', fts_rebuild = 0,
+           fts_cursor = NULL, last_error = NULL, agent_marker = NULL
+       WHERE id = 1`,
+    ).run(SEARCH_SCHEMA_VERSION);
+    return true;
+  });
 }
 
 /**

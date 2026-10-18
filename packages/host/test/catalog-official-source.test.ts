@@ -53,7 +53,9 @@ test('official source sidecars project external Runtime and CatalogService repor
         'zh-CN': { displayName: 'Codex', tagline: '中文简介', documents: chineseDocs },
       } },
     });
-    assert.equal(bundle.index.plugins.length, 6);
+    assert.deepEqual(bundle.index.plugins.map(plugin => plugin.pluginId).sort(), [
+      'ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'grok', 'io.gian.antigravity', 'kimi',
+    ]);
     for (const plugin of bundle.index.plugins) {
       assert.equal(plugin.stable.runtime?.kind, 'external');
     }
@@ -82,7 +84,9 @@ test('official source sidecars project external Runtime and CatalogService repor
       policy,
     });
     const list = await service.list();
-    assert.equal(list.items.length, 6);
+    assert.deepEqual(list.items.map(item => item.pluginId).sort(), [
+      'ai.deepseek.harness', 'claude', 'codex', 'com.zhipu.zcode', 'grok', 'io.gian.antigravity', 'kimi',
+    ]);
     const codex = list.items.find(item => item.pluginId === 'codex')!;
     assert.equal(codex.localizations?.en?.tagline, 'English summary');
     assert.equal(codex.localizations?.['zh-CN']?.tagline, '中文简介');

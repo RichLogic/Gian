@@ -1,5 +1,8 @@
 # Installation And Account Setup
 
+Requires Gian 0.6.7 or later. Older Hosts do not fully support creation with
+the Proxy's native Mode values; upgrade Gian before using this Proxy.
+
 Install the exact signed Catalog combination for darwin-arm64. The Runtime
 must keep `agy_acp_server.par` and `localharness_external` together from the
 same pinned official 1.3.0 archive. Gian does not replace this server with a

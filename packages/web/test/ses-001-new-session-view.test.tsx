@@ -246,6 +246,10 @@ describe('NewSessionView', () => {
       expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('High');
       expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Default');
     });
+    // Agent defaults label an inherited choice; pick the model explicitly
+    // before asserting that the draft submits the complete triplet.
+    await userEvent.click(screen.getByTestId('ns-model-chip'));
+    await userEvent.click(await screen.findByText('Gemini 3.8 Flash', { selector: '.model-pop .mp-row-title' }));
     await userEvent.click(screen.getByTestId('ns-thinking-chip'));
     await userEvent.click(await screen.findByText('Low', { selector: '.think-pop .mp-row-title' }));
     await waitFor(() => expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low'));

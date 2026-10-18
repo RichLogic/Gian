@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { GIAN_ACTION_CLOSE, GIAN_ACTION_OPEN, GIAN_ROLE_CLOSE, GIAN_ROLE_OPEN } from '../../shared/src/action.js';
 import { MANAGER_SYS_CLOSE, MANAGER_SYS_OPEN } from '../../shared/src/manager.js';
 import type { ComposerDocument } from '../../shared/src/context.js';
-import { findLiteralRanges, projectComposerSearchText, projectSearchText, scanLiteralRanges, snippetAround } from '../../shared/src/search-text.js';
+import { findLiteralRanges, normalizeSearchProjection, projectComposerSearchText, projectSearchText, scanLiteralRanges, snippetAround } from '../../shared/src/search-text.js';
 
 test('projection keeps visible text and drops html plus link destinations', () => {
   const text = projectSearchText([
@@ -22,6 +22,29 @@ test('projection keeps visible text and drops html plus link destinations', () =
   assert.equal(text.includes('pnpm test'), true);
   assert.equal(text.includes('E=mc^2'), true);
   assert.equal(text.includes('after'), true);
+});
+
+test('projection mapping is opt-in and layout runs never collapse code/math whitespace', () => {
+  const parts = [
+    { text: '  before\n\n\n' },
+    { text: '\n\n\n code \n\n\n', verbatim: true },
+    { text: '\n\n\n after  ' },
+  ];
+  const plain = normalizeSearchProjection(parts);
+  const mapped = normalizeSearchProjection(parts, true);
+  assert.equal(plain.text, 'before\n\n\n\n\n code \n\n\n\n\n after');
+  assert.equal('rawIndexes' in plain, false);
+  assert.equal(mapped.text, plain.text);
+  const raw = parts.map(part => part.text).join('');
+  assert.equal(mapped.rawIndexes.map(index => raw[index]).join(''), plain.text);
+  assert.equal(mapped.rawIndexes.length, plain.text.length);
+  assert.deepEqual(normalizeSearchProjection([{ text: ' \n\n ' }], true), { text: '', rawIndexes: [] });
+  assert.equal(normalizeSearchProjection([{ text: '  x  ', verbatim: true }]).text, '  x  ');
+
+  const large = 'x'.repeat(1024 * 1024);
+  const textOnly = normalizeSearchProjection([{ text: large }]);
+  assert.equal(textOnly.text, large);
+  assert.equal('rawIndexes' in textOnly, false);
 });
 
 test('projection strips role headers and settled action blocks only', () => {

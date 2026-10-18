@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import {
   SEARCH_QUERY_MAX_CODE_POINTS,
+  SEARCH_SCHEMA_VERSION,
   SearchContractError,
   assertCursorFresh,
   encodeSearchCursor,
@@ -20,7 +21,7 @@ function cursor(overrides: Partial<SearchCursor> = {}): SearchCursor {
   return {
     v: 1,
     endpoint: 'search',
-    schema: 1,
+    schema: SEARCH_SCHEMA_VERSION,
     indexRevision: '1',
     queryRevision: 'rev',
     q: 'hello',
@@ -97,7 +98,7 @@ test('a cursor for a different query or index revision is stale', () => {
   assert.throws(
     () => assertCursorFresh(withCursor.cursor!, {
       endpoint: 'search',
-      schema: 1,
+      schema: SEARCH_SCHEMA_VERSION,
       indexRevision: '5',
       queryRevision: parsed.queryRevision,
       q: 'hello',
@@ -122,6 +123,28 @@ test('a malformed cursor is rejected and FTS text stays a quoted literal', () =>
     (error: unknown) => error instanceof SearchContractError && error.code === 'invalid_argument',
   );
   assert.equal(ftsTrigramLiteral('say "hello"'), '"say ""hello"""');
+});
+
+test('a cursor from the previous projection schema is stale for search and find', () => {
+  const global = parseGlobalSearchQuery({ q: 'hello', types: 'session' });
+  assert.throws(
+    () => parseGlobalSearchQuery({
+      q: 'hello', types: 'session',
+      cursor: encodeSearchCursor(cursor({ schema: SEARCH_SCHEMA_VERSION - 1, queryRevision: global.queryRevision })),
+    }),
+    (error: unknown) => error instanceof SearchContractError && error.code === 'stale_cursor',
+  );
+  const find = parseFindQuery('session-1', { q: 'hello' });
+  assert.throws(
+    () => parseFindQuery('session-1', {
+      q: 'hello',
+      cursor: encodeSearchCursor(cursor({
+        endpoint: 'find', schema: SEARCH_SCHEMA_VERSION - 1, queryRevision: find.queryRevision,
+        types: ['message'], includeArchived: true, sessionId: 'session-1',
+      })),
+    }),
+    (error: unknown) => error instanceof SearchContractError && error.code === 'stale_cursor',
+  );
 });
 
 test('context keeps a long opaque transcript identity and a short document id', () => {

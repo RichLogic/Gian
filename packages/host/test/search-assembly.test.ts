@@ -4,7 +4,7 @@
 
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { SEARCH_ROUTES } from '../../shared/src/search.js';
+import { SEARCH_ROUTES, SEARCH_SCHEMA_VERSION } from '../../shared/src/search.js';
 import { makeTestApp } from './fixtures/test-app.js';
 
 test('createApp serves search status and disposes the module during shutdown', async () => {
@@ -20,7 +20,7 @@ test('createApp serves search status and disposes the module during shutdown', a
       backfill_complete: boolean;
       coverage: unknown;
     };
-    assert.equal(typeof body.schema_version, 'number');
+    assert.equal(body.schema_version, SEARCH_SCHEMA_VERSION);
     assert.equal(typeof body.index_revision, 'string');
     assert.equal(typeof body.backfill_complete, 'boolean');
     assert.ok(body.fts === 'trigram' || body.fts === 'unavailable');

@@ -17,6 +17,7 @@
  * caller re-queries instead of highlighting a guess.
  */
 import type { SearchTextRange } from '@gian/shared';
+import { normalizeSearchProjection } from '@gian/shared';
 
 export interface DomTextSpan {
   kind: 'text';
@@ -52,7 +53,7 @@ const BLOCK = 'p, pre, li, td, th, h1, h2, h3, h4, h5, h6, blockquote';
 const CELL = 'td, th';
 
 type Segment =
-  | { kind: 'text'; node: Text; text: string; pre: HTMLElement | null }
+  | { kind: 'text'; node: Text; text: string; pre: HTMLElement | null; verbatim: boolean }
   | { kind: 'sep'; text: string }
   | { kind: 'atomic'; element: HTMLElement; text: string };
 
@@ -120,7 +121,11 @@ function collectSegments(message: HTMLElement): Segment[] {
     const cell = parent?.closest(CELL) ?? null;
     const block = parent?.closest(BLOCK) ?? message;
     boundary(block, cell);
-    segments.push({ kind: 'text', node, text: node.data, pre: parent?.closest('pre') ?? null });
+    segments.push({
+      kind: 'text', node, text: node.data,
+      pre: parent?.closest('pre') ?? null,
+      verbatim: !!parent?.closest('code'),
+    });
   }
   // The projection is trimmed — trailing separators have no counterpart.
   while (segments.length > 0 && segments[segments.length - 1]!.kind === 'sep') segments.pop();
@@ -141,46 +146,12 @@ function collectSegments(message: HTMLElement): Segment[] {
   return segments.filter(segment => segment.kind !== 'text' || segment.text !== '');
 }
 
-/**
- * The same final normalization as `projectSearchText`: collapse runs of
- * three or more newlines to two, then `String.trim`. Returns the raw indexes
- * of the characters that survive, in projection order.
- */
-function normalizeLikeSearchProjection(raw: string): { text: string; rawIndexes: number[] } {
-  let collapsed = '';
-  const collapsedRaw: number[] = [];
-  let index = 0;
-  while (index < raw.length) {
-    if (raw.charCodeAt(index) === 10) {
-      let end = index + 1;
-      while (end < raw.length && raw.charCodeAt(end) === 10) end += 1;
-      const count = end - index;
-      const kept = count >= 3 ? 2 : count;
-      for (let offset = 0; offset < kept; offset += 1) {
-        collapsed += '\n';
-        collapsedRaw.push(index + offset);
-      }
-      index = end;
-      continue;
-    }
-    collapsed += raw[index]!;
-    collapsedRaw.push(index);
-    index += 1;
-  }
-  const trimmed = collapsed.trim();
-  if (trimmed.length === 0) return { text: '', rawIndexes: [] };
-  const start = collapsed.indexOf(trimmed);
-  return {
-    text: trimmed,
-    rawIndexes: collapsedRaw.slice(start, start + trimmed.length),
-  };
-}
-
 /** Align the rendered message with its canonical projection. Null when the
  *  normalized DOM text disagrees — the caller must NOT fall back to guessed
  *  offsets. Renderer structural whitespace (the <pre> trailing newline) is
  *  normalized at segment collection. The projection's own final newline
- *  collapse and trim are then applied, and surviving characters map back to
+ *  layout normalization is then applied without trimming code content.
+ *  Surviving characters map back to
  *  the DOM nodes that produced them. Boundary spaces the projection drops
  *  (composer caret space, leading whitespace slots) do not shift interior
  *  offsets. */
@@ -195,7 +166,12 @@ export function alignMessageToProjection(
     pieces.push({ ...segment, rawStart: raw.length });
     raw += segment.text;
   }
-  const normalized = normalizeLikeSearchProjection(raw);
+  const normalized = normalizeSearchProjection(segments.map(segment => ({
+    text: segment.text,
+    verbatim: segment.kind === 'atomic'
+      ? segment.element.classList.contains('katex')
+      : segment.kind === 'text' && segment.verbatim,
+  })), true);
   if (normalized.text !== projected) return null;
   const normAtRaw = new Array<number>(raw.length).fill(-1);
   normalized.rawIndexes.forEach((rawIndex, normIndex) => {

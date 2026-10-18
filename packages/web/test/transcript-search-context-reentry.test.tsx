@@ -191,7 +191,8 @@ describe('search context hydration and transcript focus', () => {
     });
     expect(await screen.findByText('fresh window text')).toBeTruthy();
     expect(screen.queryByText('stale window text')).toBeNull();
-    expect(screen.getByTestId('consumed').textContent).toBe('0');
+    // Only the successful new target is consumed, never the stale response.
+    expect(screen.getByTestId('consumed').textContent).toBe('1');
     expect(vi.mocked(loadSearchContext).mock.calls).toEqual([
       ['s1', { turnId: 'turn-2', turn: 2, documentId: 'doc-old', textRevision: 'rev-old' }],
       ['s1', { turnId: 'turn-6', turn: 6, documentId: 'doc-new', textRevision: 'rev-new' }],
@@ -237,7 +238,9 @@ describe('search context hydration and transcript focus', () => {
     });
     expect(await screen.findByText('stable focus target')).toBeTruthy();
     expect(vi.mocked(loadSearchContext).mock.calls.length).toBe(1);
-    expect(screen.getByTestId('consumed').textContent).toBe('0');
+    expect(screen.getByTestId('consumed').textContent).toBe('1');
+    await user.click(screen.getByRole('button', { name: 'parent tick' }));
+    expect(screen.getByTestId('consumed').textContent).toBe('1');
   });
 
   it('lands the context target when the initial history page is still in flight', async () => {
@@ -283,7 +286,7 @@ describe('search context hydration and transcript focus', () => {
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText('target landed')).toBeTruthy();
     expect(screen.queryByText('latest tail')).toBeNull();
-    expect(screen.getByTestId('consumed').textContent).toBe('0');
+    expect(screen.getByTestId('consumed').textContent).toBe('1');
     expect(vi.mocked(loadEvents).mock.calls.length).toBe(1);
   });
 

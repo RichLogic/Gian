@@ -23,7 +23,7 @@ import {
   subscribeInbox,
 } from '../src/controllers/inbox.js';
 import { mockFetch } from './setup.js';
-import { makeInboxItem } from './inbox-fixtures.js';
+import { makeInboxItem, wireTestInboxOperations } from './inbox-fixtures.js';
 
 function snapshot(items: InboxItemPublic[], pendingCount = items.length) {
   return {
@@ -72,8 +72,9 @@ function pageResponse(spec: PageSpec): Response {
 }
 
 describe('inbox store', () => {
-  beforeEach(() => __resetInboxForTests());
-  afterEach(() => __resetInboxForTests());
+  let disposeOperations: () => void;
+  beforeEach(() => { __resetInboxForTests(); disposeOperations = wireTestInboxOperations(); });
+  afterEach(() => { disposeOperations(); __resetInboxForTests(); });
 
   it('seeds from the state_sync snapshot; the badge counts pending, not unread', () => {
     const readPending = makeInboxItem({ id: 'a', unread: false, read_at: '2026-10-12T02:00:00.000Z' });

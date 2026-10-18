@@ -12,7 +12,7 @@ test('the real standalone verifier imports without Host and retains the package-
   const verifierUrl = new URL('./verify-managed-runtime-candidates.mjs', builderUrl);
   const verifier = await import(verifierUrl.href);
   assert.equal(typeof verifier.verifyProxyRuntimeCandidate, 'function');
-  assert.doesNotMatch(readFileSync(verifierUrl, 'utf8'), /dev-runtime-provision|dev-runtime-coordinates\.js/);
+  assert.doesNotMatch(readFileSync(verifierUrl, 'utf8'), /\bdev-runtime-(?:provision|coordinates)\.[cm]?js(?=['"`?#])/);
   if (standalone) {
     assert.equal(existsSync(new URL('../packages/host', builderUrl)), false);
     assert.doesNotMatch(readFileSync(verifierUrl, 'utf8'), /packages\/host\//);

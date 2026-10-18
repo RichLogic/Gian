@@ -10,6 +10,7 @@ const common = new Set(['LICENSE', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.y
   'scripts/check-node.js', 'scripts/build-proxy-artifacts.mjs', 'scripts/proxy-release-metadata.mjs',
   'scripts/build-managed-runtime-candidates.mjs', 'scripts/verify-managed-runtime-candidates.mjs',
   'scripts/build-antigravity-runtime.mjs',
+  'scripts/build-antigravity-runtime.test.mjs',
   'scripts/build-zcode-runtime.mjs', 'scripts/zcode-runtime-source.mjs',
   'scripts/verify-zcode-runtime-protocol.mjs',
   'scripts/zcode-runtime-integration.mjs',

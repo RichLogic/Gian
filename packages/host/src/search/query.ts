@@ -1,4 +1,5 @@
 import {
+  SEARCH_SCHEMA_VERSION,
   SearchContractError,
   assertCursorFresh,
   encodeSearchCursor,
@@ -530,7 +531,7 @@ function freshCursor(
   if (!cursor) return null;
   assertCursorFresh(cursor, {
     endpoint: cursor.endpoint,
-    schema: cursor.schema,
+    schema: SEARCH_SCHEMA_VERSION,
     indexRevision: String(indexRevision),
     queryRevision: cursor.queryRevision,
     q: cursor.q,
@@ -573,7 +574,7 @@ function claims(
     return {
       v: 1,
       endpoint: 'search',
-      schema: 1,
+      schema: SEARCH_SCHEMA_VERSION,
       indexRevision,
       queryRevision: parsed.queryRevision,
       q: parsed.q,
@@ -586,7 +587,7 @@ function claims(
   return {
     v: 1,
     endpoint: 'find',
-    schema: 1,
+    schema: SEARCH_SCHEMA_VERSION,
     indexRevision,
     queryRevision: parsed.queryRevision,
     q: parsed.q,
