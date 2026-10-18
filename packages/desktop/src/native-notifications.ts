@@ -552,8 +552,9 @@ export class NativeNotificationService {
         this.active.delete(oldestId);
         oldest?.close?.();
       }
-      if (this.lastError !== null) {
-        this.lastError = null;
+      const nextError = this.hasWithdrawFailure() ? 'withdraw_failed' : null;
+      if (this.lastError !== nextError) {
+        this.lastError = nextError;
         this.emit();
       }
       return true;

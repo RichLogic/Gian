@@ -2235,10 +2235,19 @@ describe('Inbox approval decisions bind the exact native option (issue #1)', () 
     // Pending disables the focused decision button. Escape still belongs to
     // the open dialog when that disabled control loses keyboard focus.
     expect(screen.getByTestId('inbox-action-approve')).toBeDisabled();
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-    expect(document.activeElement).toBe(document.body);
-    await user.keyboard('{Escape}');
-    await screen.findByTestId('inbox-tab-pending');
+    const panel = screen.getByRole('dialog', { name: 'Inbox' });
+    const outside = document.createElement('button');
+    outside.type = 'button';
+    document.body.appendChild(outside);
+    try {
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+      expect(panel.contains(document.activeElement)).toBe(false);
+      await user.keyboard('{Escape}');
+      await screen.findByTestId('inbox-tab-pending');
+    } finally {
+      outside.remove();
+    }
     await user.click(await screen.findByText('Reject opaque tool?'));
     await screen.findByTestId('inbox-detail-inbox-reject');
     await user.click(screen.getByTestId('inbox-action-reject'));

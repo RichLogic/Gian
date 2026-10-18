@@ -13,7 +13,7 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 - Search conversations and messages, open historical matches in their source conversation, and use Cmd+F to find text within the current conversation.
 - Open actionable Inbox items for permissions, questions and update decisions, with exact native approval options and navigation to the source session. The Inbox is not a collection of completed or failed turns; marking an item read does not resolve it.
-- Add Antigravity integration with Gemini model families, separate Thinking and native Mode controls, using the official Antigravity ACP Server. Its independently versioned Proxy release candidate is 0.0.1; the upstream ACP Runtime remains 1.3.0.
+- Add Antigravity integration with Gemini model families, separate Thinking and native Mode controls, using the official Antigravity ACP Server. Its independently released Proxy is version 0.0.1; the upstream ACP Runtime remains 1.3.0.
 
 ### Changed
 
@@ -25,6 +25,7 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 - Preserve Repos/Tasks ownership when opening search hits, Inbox items and notifications; expand the owning sidebar group and reveal the selected row without background refreshes stealing scroll position.
 - Open unread Inbox items when a WebSocket read-state echo arrives before the HTTP response, while retaining exact occurrence and generation fences.
+- Keep failed native notification withdrawals visible until the affected notifications are removed, even when another notification succeeds.
 - Forward the exact native option for Inbox Approve/Reject, and display known native denials as declined rather than allowed. Unverifiable historical native outcomes render neutrally.
 - Resolve cold session catalogs before first-send dispatch, preserve native configuration through session creation, and accept the Host's attachment root as execution context without granting extra permissions.
 - Keep translated sends and their original message identity aligned, preserve selected-text translation context and font sizing, and avoid stale translation results replacing a newer selection.
@@ -32,9 +33,9 @@ Releases through 0.5.5 were unsigned macOS Apple Silicon beta builds. Version
 
 ### Known Limitations
 
-- Full Desktop lifecycle, notification, reconnect and automatic-update acceptance is not claimed. A reported blank window after Reconnect remains unconfirmed; this release does not claim to fix its root cause.
-- Proxy availability requires separately qualified, published Proxy/Runtime artifacts and a signed Catalog. Preparing the Antigravity candidate does not certify or publish it, and installing this App does not replace those resources.
-- Older Agent defaults containing a combined native model/effort ID remain compatible, but their canonical split display and direct Thinking edits are not fully migrated; conflicting explicit selections are rejected rather than silently rewritten.
+- Antigravity's cold model catalog query requires the separate official `agy` helper CLI and the OS account's default `~/.gemini` configuration. Managed/custom HOME roots are not supported for that query.
+- Proxy availability requires compatible independently published Proxy/Runtime artifacts and a signed Catalog; installing this App does not replace those resources.
+- Older Agent defaults containing a combined native model/effort ID remain runnable. Reselect the model family and Thinking level to use the separate controls; conflicting selections are rejected rather than silently rewritten.
 
 ## [0.6.6] - 2026-10-10
 

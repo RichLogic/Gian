@@ -795,6 +795,7 @@ test('a failed withdraw retries without another control, and shutdown spends no 
     kind: 'approval',
     inbox_ref: { id: 'item-02', generation: 1 },
   }), true);
+  assert.equal(service.getState().lastError, 'withdraw_failed', 'another successful show does not resolve the failed withdrawal');
   passId = otherId;
   service.applyAttentionControl({
     type: 'attention:control',
@@ -860,6 +861,63 @@ test('a failed withdraw retries without another control, and shutdown spends no 
   stolen();
   assert.equal(stopped, 1);
   assert.deepEqual(stopping.attentionLookupRefs(), [{ id: 'item-03', generation: 2 }]);
+});
+
+test('delivery recovery retains per-id withdrawal failures until all clear, independently of registry errors', () => {
+  const first = storedRef('item-01', 4);
+  const second = storedRef('item-02', 1);
+  const removedIds: string[] = [];
+  let passId = '';
+  let failShow = false;
+  let failSave = false;
+  const service = new NativeNotificationService({
+    hostId: HOST_ID,
+    supported: true,
+    store: { load: () => ({ desktop: true, sound: false }), save: () => undefined },
+    refs: {
+      loadRefs: () => [first, second],
+      saveRefs: () => { if (failSave) throw new Error('ENOSPC'); },
+    },
+    delivery: {
+      show() {
+        if (failShow) throw new Error('delivery unavailable');
+        return { close() {} };
+      },
+      remove(id) { removedIds.push(id); return id === passId; },
+    },
+    onActivate: () => undefined,
+    scheduleWithdrawRetry: () => () => undefined,
+  });
+  service.setContext({ visibleSessionId: null });
+  const withdraw = (ref: DesktopAttentionRefRecord) => service.applyAttentionControl({
+    type: 'attention:control',
+    items: [{ id: ref.id, generation: ref.generation, revision: ref.revision, read: true, terminal: false }],
+  });
+  withdraw(first);
+  withdraw(second);
+  assert.equal(service.getState().lastError, 'withdraw_failed');
+
+  failShow = true;
+  assert.equal(service.handleAttention({ ...attention, id: 'delivery-fails' }), false);
+  assert.equal(service.getState().lastError, 'delivery_failed');
+  failShow = false;
+  assert.equal(service.handleAttention({ ...attention, id: 'delivery-recovers' }), true);
+  assert.equal(service.getState().lastError, 'withdraw_failed');
+  assert.equal(service.getState().registryError, null);
+
+  passId = first.osId;
+  withdraw(first);
+  assert.deepEqual(service.attentionLookupRefs(), [{ id: second.id, generation: second.generation }]);
+  assert.equal(service.getState().lastError, 'withdraw_failed');
+  passId = second.osId;
+  failSave = true;
+  withdraw(second);
+  assert.deepEqual(service.attentionLookupRefs(), []);
+  assert.equal(service.getState().lastError, null);
+  assert.equal(service.getState().registryError, 'persist_failed');
+  assert.deepEqual(removedIds, [first.osId, second.osId, first.osId, second.osId]);
+  service.close();
+  assert.deepEqual(removedIds, [first.osId, second.osId, first.osId, second.osId]);
 });
 
 test('registry save failure stays in memory, does not reject, and a later save rewrites it', async () => {

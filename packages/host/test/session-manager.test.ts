@@ -286,13 +286,16 @@ class FakeProxyManager {
   client: StubProxyClient;
   private active: StubProxyClient | null;
   private initialized = false;
+  acquiredSessionIds: string[] = [];
+  disposeCalls: string[] = [];
   forceDisposeCalls: string[] = [];
   forceDisposeGate: Promise<void> | null = null;
   constructor(executor: Executor = 'claude') {
     this.client = new StubProxyClient(executor);
     this.active = this.client;
   }
-  async getOrCreate(_sessionId?: string, executor: Executor = 'claude'): Promise<ProxyClient> {
+  async getOrCreate(sessionId?: string, executor: Executor = 'claude'): Promise<ProxyClient> {
+    if (sessionId !== undefined) this.acquiredSessionIds.push(sessionId);
     if (!this.initialized) {
       this.initialized = true;
       if (this.client.executor !== executor) {
@@ -315,7 +318,7 @@ class FakeProxyManager {
     if (client) await client.forceKill();
     if (this.forceDisposeGate) await this.forceDisposeGate;
   }
-  async dispose(): Promise<void> {}
+  async dispose(sessionId: string): Promise<void> { this.disposeCalls.push(sessionId); }
   async closeAll(): Promise<void> { /* no-op */ }
 }
 
@@ -1586,7 +1589,13 @@ test('an unadvertised managed approval preset rejects before older Codex native 
         && error.code === 'CONFIG_VALUE_INVALID' && /not advertised/.test(error.message));
     assert.equal(proxyMgr.client.lastCreateParams, null);
     assert.equal(proxyMgr.client.startTurnCalls.length, 0);
-    assert.equal(proxyMgr.forceDisposeCalls.length, 1);
+    assert.equal(proxyMgr.acquiredSessionIds.length, 1);
+    assert.deepEqual(proxyMgr.disposeCalls, proxyMgr.acquiredSessionIds);
+    assert.equal(proxyMgr.forceDisposeCalls.length, 0);
+    assert.equal(proxyMgr.client.forceKillCalls, 0);
+    assert.equal(proxyMgr.client.notificationHandlers.length, 0);
+    assert.equal(proxyMgr.client.exitHandlers.length, 0);
+    assert.equal(proxyMgr.client.faultHandlers.length, 0);
     const stored = db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number };
     assert.equal(stored.count, 0);
   } finally {
