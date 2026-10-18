@@ -2,11 +2,11 @@
 
 ## 1. 在 Gian 中做什么
 
-ZCode Integration 将 ZCode CLI 的编码会话、模型配置和活动事件接入 Gian。0.4.2 使用随 Proxy 发布并校验的 ZCode CLI 0.16.9，不再依赖 ZCode.app 内嵌 Runtime，也不读取桌面进程的私有凭据。
+ZCode Integration 将 ZCode CLI 的编码会话、模型配置和活动事件接入 Gian。0.4.4 使用随 Proxy 发布并校验的 ZCode CLI 0.16.9，不再依赖 ZCode.app 内嵌 Runtime，也不读取桌面进程的私有凭据。
 
 ## 2. 支持的能力与限制
 
-支持会话创建与恢复、历史重放、模型和配置快照、工具活动、权限交互、附件、重命名、分叉、当前轮次引导（Steer）、子 Agent 活动和按会话注入 Gian MCP。具体选项以实际 Runtime 返回的目录为准。原生历史删除不受支持；普通关闭只是解除 Gian 的会话关联。真实 Provider 请求还需要单独验收，安装成功不等于模型请求已成功。
+支持会话创建与恢复、历史重放、模型和配置快照、工具活动、权限交互、MCP 表单提问（自由文本、可选字段与选项）、附件、重命名、分叉、当前轮次引导（Steer）、子 Agent 活动和按会话注入 Gian MCP。具体选项以实际 Runtime 返回的目录为准。原生历史删除不受支持；普通关闭只是解除 Gian 的会话关联。真实 Provider 请求还需要单独验收，安装成功不等于模型请求已成功。
 
 ## 3. 运行原理与进程关系
 
@@ -22,7 +22,7 @@ Gian Host → ZCode Proxy → 按工作区隔离的 ZCode CLI 0.16.9 Runtime →
 
 ## 5. 第一次使用
 
-1. 在 Gian 中安装并准备 ZCode Integration，确认 Proxy 0.4.2 和 CLI 0.16.9 校验成功。
+1. 在 Gian 中安装并准备 ZCode Integration，确认 Proxy 0.4.4 和 CLI 0.16.9 校验成功。
 2. 使用随安装提供的 `zcode login` 或 ZCode TUI 完成官方 Provider 配置。
 3. 在 Agent 中选择模型和工作区，先进行小范围文本任务；附件和其他能力按实际模型及 Provider 支持情况使用。
 

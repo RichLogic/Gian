@@ -16,11 +16,17 @@ interface DockBtnProps {
   title?: string;
   /** Count badge (e.g. open Side Chats); hidden when 0/undefined. */
   badge?: number;
+  /** Optional display cap: counts above it render as `<cap>+` (the Inbox
+   *  pending badge keeps the pre-move 99+ contract). */
+  badgeCap?: number;
   onClick?: () => void;
   children: React.ReactNode;
 }
 
-function DockBtn({ group, testId, label, active, disabled, title, badge, onClick, children }: DockBtnProps) {
+function DockBtn({ group, testId, label, active, disabled, title, badge, badgeCap, onClick, children }: DockBtnProps) {
+  const badgeText = badge !== undefined && badgeCap !== undefined && badge > badgeCap
+    ? `${badgeCap}+`
+    : badge;
   return (
     <button
       type="button"
@@ -35,7 +41,7 @@ function DockBtn({ group, testId, label, active, disabled, title, badge, onClick
       {children}
       <span className="lbl">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className="dock-badge" aria-hidden="true">{badge}</span>
+        <span className="dock-badge" aria-hidden="true">{badgeText}</span>
       )}
     </button>
   );
@@ -54,6 +60,9 @@ const ICONS = {
   sidechat: 'M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z M12 8v6 M9 11h6',
   browser: 'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z M3.5 12h17 M12 3.5c2.2 2.3 3.3 5.1 3.3 8.5S14.2 18.2 12 20.5 M12 3.5C9.8 5.8 8.7 8.6 8.7 12s1.1 6.2 3.3 8.5',
   gear: 'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M18.7 12a6 6 0 0 0-.1-1.2l1.8-1.4-1.8-3.1-2.1.8a6.2 6.2 0 0 0-2.1-1.2L14 3.5h-4l-.4 2.4a6.2 6.2 0 0 0-2.1 1.2l-2.1-.8-1.8 3.1 1.8 1.4a6 6 0 0 0 0 2.4l-1.8 1.4 1.8 3.1 2.1-.8a6.2 6.2 0 0 0 2.1 1.2l.4 2.4h4l.4-2.4a6.2 6.2 0 0 0 2.1-1.2l2.1.8 1.8-3.1-1.8-1.4c.07-.4.1-.8.1-1.2z',
+  // lucide.dev `search` and `inbox` (same 24-grid family).
+  search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.35-4.35',
+  inbox: 'M22 12h-6l-2 3h-4l-2-3H2 M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z',
 };
 
 function Icon({ d, size = 17 }: { d: string; size?: number }) {
@@ -89,6 +98,14 @@ interface Props {
   workbenchDisabled?: boolean;
   /** Browser is available only in the Electron desktop renderer. */
   browserAvailable?: boolean;
+  /** Global entries pinned at the bottom of the dock (0.6.7, Air-style):
+   *  Search, Inbox (pending badge), then Settings — Settings last. */
+  onOpenSearch?: () => void;
+  inbox?: {
+    pendingCount: number;
+    open: boolean;
+    onToggle: () => void;
+  };
 
   // Runner chip (V1-style clickable status pill anchored bottom-right).
   wsState: WsState;
@@ -104,6 +121,8 @@ export function Dock({
   sideChat,
   workbenchDisabled,
   browserAvailable,
+  onOpenSearch,
+  inbox,
   wsState,
   wsAttempt,
   authed,
@@ -215,23 +234,6 @@ export function Dock({
         </DockBtn>
       </div>
 
-      <div className="dock-divider" aria-hidden />
-
-      <div className="dock-group" data-dock-group-label={t('dock.group.system')}>
-        {/* Settings is mode-independent (2026-09-06): it must stay clickable
-            on the primary pages (Agents/Timer/Custom) — App hops back to the
-            current chat list mode before opening the rail. */}
-        <DockBtn
-          group="wb"
-          testId="settings"
-          label={t('dock.settings')}
-          active={activeRail === 'settings'}
-          onClick={() => onToggleRail('settings')}
-        >
-          <Icon d={ICONS.gear} />
-        </DockBtn>
-      </div>
-
       <span className="dock-spacer" />
 
       {/* Connection chip: hidden while healthy (a static green dot is noise);
@@ -281,6 +283,47 @@ export function Dock({
       </span>
         </>
       )}
+
+      {/* Global entries pinned to the dock bottom (0.6.7, Air-style):
+          Search, Inbox (pending badge), Settings — Settings always last. */}
+      <div className="dock-divider" aria-hidden />
+      <div className="dock-group dock-global" data-dock-group-label={t('dock.group.global')}>
+        {onOpenSearch && (
+          <DockBtn
+            group="wb"
+            testId="search"
+            label={t('topbar.search')}
+            onClick={onOpenSearch}
+          >
+            <Icon d={ICONS.search} />
+          </DockBtn>
+        )}
+        {inbox && (
+          <DockBtn
+            group="wb"
+            testId="inbox"
+            label={t('topbar.inbox')}
+            active={inbox.open}
+            badge={inbox.pendingCount}
+            badgeCap={99}
+            onClick={inbox.onToggle}
+          >
+            <Icon d={ICONS.inbox} />
+          </DockBtn>
+        )}
+        {/* Settings is mode-independent (2026-09-06): it must stay clickable
+            on the primary pages (Agents/Timer/Custom) — App hops back to the
+            current chat list mode before opening the rail. */}
+        <DockBtn
+          group="wb"
+          testId="settings"
+          label={t('dock.settings')}
+          active={activeRail === 'settings'}
+          onClick={() => onToggleRail('settings')}
+        >
+          <Icon d={ICONS.gear} />
+        </DockBtn>
+      </div>
     </aside>
   );
 }

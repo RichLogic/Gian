@@ -147,6 +147,7 @@ export class RemoteConnector {
       command: CommandRequest,
       hooks?: {
         snapshotParts?: boolean;
+        wireFeatures?: readonly string[];
         onAccepted?: () => Promise<void>;
         onResultSent?: () => Promise<void>;
       },
@@ -337,10 +338,14 @@ export class RemoteConnector {
         // order stays FIFO through this dedicated chain.
         const hooks: {
           snapshotParts?: boolean;
+          wireFeatures?: readonly string[];
           onAccepted?: () => Promise<void>;
           onResultSent?: () => Promise<void>;
         } = {
           snapshotParts: this.protocolMode === 'legacy' || this.wireFeatures.includes('wire.snapshot_parts'),
+          // A legacy (no-hello) peer deployed before feature negotiation must
+          // never receive fields it would reject closed.
+          wireFeatures: this.protocolMode === 'legacy' ? [] : this.wireFeatures,
           onAccepted: async () => {
             await this.sendControl({
               type: 'command.accepted',

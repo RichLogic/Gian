@@ -4,13 +4,16 @@ export const REMOTE_PROTOCOL = 'gian.remote/1' as const;
 
 export const REMOTE_MAJOR_VERSION = 1 as const;
 export const REMOTE_MIN_MINOR_VERSION = 1 as const;
-export const REMOTE_MAX_MINOR_VERSION = 1 as const;
+export const REMOTE_MAX_MINOR_VERSION = 2 as const;
 
 export const WIRE_FEATURES = [
   'wire.snapshot_parts',
   'wire.content_resume',
   'wire.transcript_page',
   'wire.execution_v1',
+  /** Snapshot `host.locale` (the Host UI locale) may be sent only when this
+   *  feature was negotiated; older clients parse snapshots closed. */
+  'wire.host_locale',
 ] as const;
 
 export const REMOTE_METHODS = [

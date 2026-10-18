@@ -6,7 +6,8 @@ source export, not a copy of private Git history.
 
 ## Contents
 
-- Claude, Codex, Kimi, Grok, DSH and ZCode shipping Proxies, each independently versioned.
+- Claude, Codex, Kimi, Grok, DSH and ZCode shipping Proxies, plus the
+  Antigravity 0.0.1 candidate, each independently versioned.
 - Release versions come from each Proxy package on GianDev main. Export does
   not assign a repository-wide version or automatically bump Proxy versions.
 - DSH Proxy includes its exact Bridge rather than relying on an App-bundled copy.
@@ -24,8 +25,17 @@ by `pnpm build` builds the standalone product. No Provider credentials are neede
 publish. Its signed base Catalog is verified against the existing pinned key;
 unselected Proxies retain their complete immutable executable and certificate
 coordinates. A subset release never rebuilds, retags or republishes an excluded
-Proxy. The final Catalog must preserve the plugin set and every excluded stable
-tuple exactly. Update the selection in GianDev before exporting source.
+Proxy. The final Catalog must retain every base plugin and every excluded stable
+tuple exactly. A new plugin may be added only when it is explicitly selected,
+has complete Catalog source, and matches actual PASS-qualified artifacts and
+shipping metadata. A failed or NOT_RUN qualification cannot admit an addition.
+Update the selection in GianDev before exporting source.
+
+This batch selects only Antigravity 0.0.1 against signed `catalog-v1.28.0`.
+All base28 plugins, excluded executable URLs, documentation and localizations
+are retained from the verified signed bundle. Later standalone releases of
+other Proxies are not implicitly selected. Antigravity's official ACP Runtime
+remains 1.3.0; the Proxy version is not its upstream version.
 
 1. Dispatch **Qualify Proxy Artifacts** on main. The hosted macOS ARM64 workflow
    verifies source provenance, compiles, exercises Proxy contracts with fake
@@ -58,17 +68,29 @@ an upstream protocol mismatch blocks publication even when `--version` works.
 Published Runtime archives are copied from qualification, never rebuilt by
 the publisher. Updating the source pin requires a new Proxy release.
 
-The 0.4.1 candidate pins CLI 0.16.9 and includes a versioned integration layer
-for model metadata and standalone authentication. Proxy requests use complete
-model/reasoning selections. The layer's input source hash and resulting source
-digests are checked/recorded; upstream changes require renewed review.
-This source candidate still requires hosted qualification and real-provider
-acceptance before it can be described as a verified usable combination.
+ZCode Proxy 0.4.4 pins reviewed v3.15.1 source aac4755; upstream still reports
+CLI 0.16.9. Its versioned integration provides model metadata and standalone
+authentication, and native MCP form answers retain free text, optional fields
+and indexed identity. Proxy requests use complete model/reasoning selections.
+The input source hash and resulting source digests are checked and recorded;
+upstream changes require renewed review and exact hosted qualification.
+Real-provider acceptance remains separate from artifact qualification.
 Before Catalog publication, capture the newly published release/Manifest and
 Runtime coordinate in `catalog/proxy-information/evidence/` and author its
 history entry. Historical snapshots must not be filled with invented hashes.
 
 ## Updates
+
+Claude Proxy 0.3.4 and its 0.3.5 creation/CLI follow-up have explicit
+Owner-selected direct-publication exceptions:
+dispatch qualification with `owner_no_tests=true`, then publish the exact
+artifacts and dispatch Catalog publication with the same input. The receipt
+records `status: NOT_RUN`; contracts, Runtime probes, archive self-tests and
+documentation tests are skipped. This exception accepts only the single
+Claude selection for these versions. It reuses the signed base Runtime or
+hash-checks the pinned current official Claude CLI without executing it, and
+retains provenance, artifact digests, immutable tags and Catalog signatures.
+It does not claim successful qualification or authorize another version.
 
 Change source in GianDev and export an integrated commit with
 `node scripts/export-proxies.mjs --ref main --output <new-empty-directory>`.

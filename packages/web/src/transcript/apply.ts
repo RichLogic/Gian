@@ -472,13 +472,33 @@ export function applyEnvelope(
     const nativeKind = nativeOptionId
       ? existing.nativeOptions?.find(option => option.optionId === nativeOptionId)?.kind
       : undefined;
-    const decision = nativeKind?.startsWith('reject')
-      ? 'decline'
-      : nativeKind === 'allow_session' || nativeKind === 'allow_always'
-        ? 'allow_session'
-        : nativeKind === 'allow_once'
-          ? 'allow_once'
-          : String(data.decision ?? '');
+    let decision: string;
+    if (nativeKind?.startsWith('reject')) {
+      decision = 'decline';
+    } else if (nativeKind === 'allow_session' || nativeKind === 'allow_always') {
+      decision = 'allow_session';
+    } else if (nativeKind === 'allow_once') {
+      decision = 'allow_once';
+    } else if (nativeOptionId) {
+      // The resolve names a native option whose kind we cannot verify: legacy
+      // events predate the requested event's permissionOptionKinds, and the
+      // option list may be gone on replay. The legacy Host projection stamped
+      // a default `allow_once` decision for exactly this shape, so an
+      // allow-flavored data.decision is NOT trustworthy here — never guess an
+      // outcome from opaque option text. Only Gian's own plan-action enum
+      // (the card advertises those actions itself) and the safe decline
+      // direction survive; anything else settles neutral.
+      if (nativeOptionId === 'accept_with_ask' || nativeOptionId === 'accept_with_auto') {
+        decision = nativeOptionId;
+      } else if (nativeOptionId === 'keep_planning') {
+        decision = 'keep_planning';
+      } else {
+        const raw = String(data.decision ?? '');
+        decision = raw === 'decline' || raw === 'declined' ? 'decline' : '';
+      }
+    } else {
+      decision = String(data.decision ?? '');
+    }
     // A late auto-decline during session shutdown must NOT clobber a card the user already
     // answered. Once an approval is non-pending, ignore any `auto:true` resolve.
     if (data.auto === true && existing.status !== 'pending') {
@@ -1165,8 +1185,15 @@ export function normalizeRisk(v: unknown): 'low' | 'medium' | 'high' {
 
 export function mapApprovalDecision(d: string): ApprovalItem['status'] {
   if (d === 'declined' || d === 'decline' || d === 'keep_planning') return 'declined';
-  if (d.includes('session')) return 'approved-session';
-  return 'approved-once';
+  if (d === 'allow_session' || d === 'allow_always' || d === 'approved-session') return 'approved-session';
+  // accept_with_ask / accept_with_auto settle the plan card as accepted for
+  // this plan (the Host flips the session approval mode separately); the
+  // bare 'allow'/'approved' are legacy affirmative strings.
+  if (d === 'allow_once' || d === 'approved-once' || d === 'allow' || d === 'approved'
+    || d === 'accept_with_ask' || d === 'accept_with_auto') return 'approved-once';
+  // Unknown or unmatched (native option id that never mapped, absent
+  // decision) never claims an allow — the outcome is neutral.
+  return 'resolved';
 }
 
 /**

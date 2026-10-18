@@ -1,7 +1,7 @@
 {
   "name": "@gian/desktop",
   "productName": "Gian",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "private": true,
   "description": "macOS desktop shell for the Gian coding agent workspace",
   "author": "RichLogic",
@@ -21,7 +21,7 @@
     "make:mac": "node ../../scripts/execution-policy.mjs package && pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --publish never",
     "make:mac:dev": "node ../../scripts/build-dev-package.mjs",
     "make:mac:release": "node ../../scripts/execution-policy.mjs package && node -e \"for (const name of ['CSC_KEYCHAIN','APPLE_API_KEY','APPLE_API_KEY_ID','APPLE_API_ISSUER','GIAN_GITHUB_CLIENT_ID']) if (!process.env[name]) throw new Error('Missing release environment: ' + name)\" && pnpm run bundle:build && electron-builder --mac dmg zip --arm64 --config.forceCodeSigning=true --config.mac.notarize=true --config.extraMetadata.gianReleaseChannel=stable --publish never && pnpm run verify:update-artifacts",
-    "verify:update-artifacts": "node ../../scripts/verify-update-artifacts.mjs --release-dir release --version $npm_package_version",
+    "verify:update-artifacts": "node ../../scripts/verify-update-artifacts.mjs --release-dir release --version $npm_package_version --app-update-config release/mac-arm64/Gian.app/Contents/Resources/app-update.yml",
     "clean": "rm -rf dist release *.tsbuildinfo"
   },
   "dependencies": {
@@ -97,7 +97,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "RichLogic",
+        "owner": "RichToyo",
         "repo": "Gian",
         "private": false,
         "channel": "latest",

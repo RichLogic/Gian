@@ -4,6 +4,7 @@ import type { AttentionMessage } from '@gian/shared';
 import {
   AttentionClient,
   attentionWebSocketUrl,
+  parseAttentionControlMessage,
   parseAttentionMessage,
   type AttentionSocket,
 } from '../src/attention-client.js';
@@ -138,4 +139,63 @@ test('parser accepts a well-formed schedule target and rejects malformed ones', 
   for (const candidate of malformed) {
     assert.equal(parseAttentionMessage(JSON.stringify(candidate)), null, JSON.stringify(candidate));
   }
+});
+
+test('semantic attention requires a safe name, exact event label, and typed target', () => {
+  const semantic: AttentionMessage = {
+    ...attention,
+    id: 'gian:s1:2:turn_complete',
+    title: 'Design notes',
+    body: 'Turn complete',
+    event: 'turn_complete',
+    session_name: 'Design notes',
+    target: { type: 'session', session_id: 's1', turn: 2, interaction_id: null },
+    inbox_ref: { id: 'item-01', generation: 4 },
+  };
+  assert.deepEqual(parseAttentionMessage(JSON.stringify(semantic)), semantic);
+  assert.equal(parseAttentionMessage(JSON.stringify({
+    ...semantic,
+    body: 'The agent finished turn 2.',
+  })), null);
+  assert.equal(parseAttentionMessage(JSON.stringify({
+    ...semantic,
+    session_name: '/tmp/notes',
+    title: '/tmp/notes',
+  })), null);
+  assert.equal(parseAttentionMessage(JSON.stringify({
+    ...semantic,
+    inbox_ref: { id: 'item-01', generation: 4, summary: 'secret' },
+  })), null);
+});
+
+test('reconnect lookup is sent after auth and control frames stay body-free', () => {
+  const socket = new FakeSocket();
+  const controls: unknown[] = [];
+  const client = new AttentionClient({
+    hostUrl: 'http://127.0.0.1:8990',
+    token: 'desktop-secret',
+    tokenHeader: 'X-Gian-Desktop-Token',
+    socketFactory: () => socket,
+    onAttention: () => {},
+    onControl: message => controls.push(message),
+    lookupRefs: () => [{ id: 'item-01', generation: 4 }],
+  });
+  client.start();
+  socket.emit('open');
+  socket.emit('message', JSON.stringify({ type: 'auth_ok', user: 'desktop' }));
+  assert.deepEqual(socket.sent.map(message => JSON.parse(message)), [
+    { type: 'auth', token: 'desktop-secret', client: 'attention' },
+    { type: 'attention:lookup', refs: [{ id: 'item-01', generation: 4 }] },
+  ]);
+  const control = {
+    type: 'attention:control',
+    items: [{ id: 'item-01', generation: 4, revision: 2, read: true, terminal: false }],
+  };
+  socket.emit('message', JSON.stringify(control));
+  assert.deepEqual(controls, [control]);
+  assert.deepEqual(parseAttentionControlMessage(JSON.stringify({
+    ...control,
+    items: [{ ...control.items[0], title: 'Design notes' }],
+  })), null);
+  client.stop();
 });

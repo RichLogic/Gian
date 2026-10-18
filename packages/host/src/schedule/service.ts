@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AttentionInboxRef,
   Schedule,
   ScheduleConfirmation,
   ScheduleConfirmationPayload,
@@ -27,6 +28,10 @@ import {
   type ScheduleCursor,
 } from './repository.js';
 import { normalizeTimezone, normalizeTrigger, nextOccurrence, previewOccurrences } from './trigger.js';
+import {
+  assertScheduleConfirmationInbox,
+  type ScheduleConfirmationInboxObserver,
+} from '../inbox/schedule-confirmation-producer.js';
 import {
   type ControlSessionDisplay,
   type ScheduleConfirmationRow,
@@ -96,6 +101,25 @@ export interface CreateConfirmationInput {
 
 export type ConfirmationDecision = 'approve' | 'reject';
 
+interface ResolveConfirmationInput {
+  confirmationId: string;
+  decision: ConfirmationDecision;
+  /** Present only for an Inbox decision. Omitted callers keep today's return. */
+  expectedInbox?: AttentionInboxRef;
+}
+
+type ResolveEffect =
+  | { type: 'stored'; confirmation: ScheduleConfirmation }
+  | { type: 'rejected'; confirmation: ScheduleConfirmation }
+  | { type: 'expired'; confirmation: ScheduleConfirmation }
+  | {
+      type: 'approved';
+      confirmation: ScheduleConfirmation;
+      scheduleId: string;
+      scheduleRevision: number;
+      created: boolean;
+    };
+
 const SCHEDULE_CHANGED_REASONS = [
   'created', 'updated', 'state_changed', 'run_created', 'run_updated', 'archived',
 ] as const;
@@ -117,9 +141,42 @@ export class ScheduleService {
     });
   }
 
+  private confirmationInbox: ScheduleConfirmationInboxObserver | null = null;
+  private confirmationAttention: ((
+    confirmation: ScheduleConfirmation,
+    inbox: AttentionInboxRef,
+  ) => void) | null = null;
+
   /** Wired by createApp after both objects exist (breaks the cycle). */
   setWake(wake: () => void): void {
     this.deps.wake = wake;
+  }
+
+  setConfirmationInbox(observer: ScheduleConfirmationInboxObserver): void {
+    this.confirmationInbox = observer;
+  }
+
+  /**
+   * OS attention for a confirmation that was just inserted unread.
+   * Repair and reconcile do not call it.
+   */
+  setConfirmationAttention(publish: (
+    confirmation: ScheduleConfirmation,
+    inbox: AttentionInboxRef,
+  ) => void): void {
+    this.confirmationAttention = publish;
+  }
+
+  /** Startup mirror for confirmations and already-open Inbox rows. */
+  reconcileConfirmationInbox(): void {
+    this.confirmationInbox?.reconcile();
+  }
+
+  /** A tool retry found the confirmation row and should mirror it once. */
+  syncConfirmationInbox(confirmationId: string): void {
+    const row = this.repo.confirmationRow(confirmationId);
+    if (!row) return;
+    this.confirmationInbox?.repair(toConfirmation(row));
   }
 
   private wake(): void {
@@ -290,6 +347,17 @@ export class ScheduleService {
       now: now.iso,
     });
     const confirmation = toConfirmation(row);
+    // The insert is already durable. An Inbox or attention failure must not
+    // hide it or skip the confirmation broadcast. Only a new unread row asks
+    // for an OS notification; repair does not.
+    const freshInbox = this.confirmationInbox?.opened(confirmation) ?? null;
+    if (freshInbox) {
+      try {
+        this.confirmationAttention?.(confirmation, freshInbox);
+      } catch (error) {
+        console.error('[attention] schedule confirmation publish failed', error);
+      }
+    }
     this.broadcastConfirmation(confirmation);
     return confirmation;
   }
@@ -331,68 +399,124 @@ export class ScheduleService {
     }
   }
 
-  resolveConfirmation(input: {
-    confirmationId: string;
-    decision: ConfirmationDecision;
-  }): ScheduleConfirmation {
+  resolveConfirmation(input: ResolveConfirmationInput): ScheduleConfirmation {
     const now = this.clock();
+    // Ref check, confirmation CAS, and schedule insert share this transaction.
+    // Nothing awaits inside it. Broadcast, wake, and the Inbox close run after.
+    const effect = this.deps.db.transaction(() => this.resolveLocked(input, now))();
+    return this.publishResolve(effect);
+  }
+
+  private resolveLocked(
+    input: ResolveConfirmationInput,
+    now: { ms: number; iso: string },
+  ): ResolveEffect {
     const row = this.repo.confirmationRow(input.confirmationId);
     if (!row) {
       throw scheduleFailure('SCHEDULE_CONFIRMATION_NOT_FOUND', `confirmation not found: ${input.confirmationId}`);
     }
+    if (input.expectedInbox) {
+      assertScheduleConfirmationInbox(
+        this.deps.db,
+        input.confirmationId,
+        input.expectedInbox,
+        row.status === 'pending',
+      );
+    }
     if (row.status === 'expired') {
-      // The caller must learn that their decision could not commit anything.
       throw scheduleFailure(
         'SCHEDULE_CONFIRMATION_EXPIRED',
         'confirmation expired before a decision was recorded',
       );
     }
     if (row.status !== 'pending') {
-      return toConfirmation(row); // idempotent repeat converges
+      if (input.expectedInbox && !storedDecisionMatches(row.status, input.decision)) {
+        throw scheduleFailure(
+          'PRECONDITION_FAILED',
+          'schedule confirmation already has a different decision',
+        );
+      }
+      return { type: 'stored', confirmation: toConfirmation(row) };
     }
     if (Date.parse(row.expires_at) <= now.ms) {
-      const expired = this.repo.resolveConfirmation(input.confirmationId, 'expired', null, now.iso);
-      const confirmation = toConfirmation(expired ?? row);
-      this.broadcastConfirmation(confirmation);
-      throw scheduleFailure(
-        'SCHEDULE_CONFIRMATION_EXPIRED',
-        'confirmation expired before a decision was recorded',
-      );
+      const expired = this.repo.expireConfirmationIfDue(input.confirmationId, now.iso);
+      if (!expired) {
+        throw scheduleFailure(
+          'SCHEDULE_CONFIRMATION_EXPIRED',
+          'confirmation expired before a decision was recorded',
+        );
+      }
+      return { type: 'expired', confirmation: toConfirmation(expired) };
     }
-
     if (input.decision === 'reject') {
       const rejected = this.repo.resolveConfirmation(input.confirmationId, 'rejected', null, now.iso);
-      if (!rejected) return toConfirmation(this.repo.requireConfirmationRow(input.confirmationId));
-      const confirmation = toConfirmation(rejected);
-      this.broadcastConfirmation(confirmation);
-      return confirmation;
-    }
-
-    // Approve: commit the Schedule first (using the pre-allocated domain id),
-    // then CAS the confirmation to approved. If the CAS loses (expired under
-    // us), archive the just-created Schedule so an expired confirmation never
-    // leaves an active Schedule behind.
-    const schedule = this.commitApprovedSchedule(row);
-    const resolved = this.repo.resolveConfirmation(input.confirmationId, 'approved', schedule.id, now.iso);
-    if (!resolved) {
-      try {
-        this.archiveSchedule(schedule.id);
-      } catch {
-        // Already archived/converged — nothing left to undo.
+      if (!rejected) {
+        const current = this.repo.requireConfirmationRow(input.confirmationId);
+        if (current.status === 'pending' || current.status === 'expired') {
+          throw scheduleFailure(
+            'SCHEDULE_CONFIRMATION_EXPIRED',
+            'confirmation expired before a decision was recorded',
+          );
+        }
+        if (input.expectedInbox && !storedDecisionMatches(current.status, input.decision)) {
+          throw scheduleFailure(
+            'PRECONDITION_FAILED',
+            'schedule confirmation already has a different decision',
+          );
+        }
+        return { type: 'stored', confirmation: toConfirmation(current) };
       }
+      return { type: 'rejected', confirmation: toConfirmation(rejected) };
+    }
+    const committed = this.commitApprovedSchedule(row);
+    const resolved = this.repo.resolveConfirmation(
+      input.confirmationId,
+      'approved',
+      committed.schedule.id,
+      now.iso,
+    );
+    if (!resolved) {
       throw scheduleFailure(
         'SCHEDULE_CONFIRMATION_EXPIRED',
         'confirmation expired while the approval was being committed',
       );
     }
-    const confirmation = toConfirmation(resolved);
-    this.broadcastConfirmation(confirmation);
-    this.wake();
-    return confirmation;
+    return {
+      type: 'approved',
+      confirmation: toConfirmation(resolved),
+      scheduleId: committed.schedule.id,
+      scheduleRevision: committed.schedule.revision,
+      created: committed.created,
+    };
   }
 
-  /** The only path that turns a pending confirmation into a live Schedule. */
-  private commitApprovedSchedule(row: ScheduleConfirmationRow): Schedule {
+  private publishResolve(effect: ResolveEffect): ScheduleConfirmation {
+    if (effect.type === 'stored') {
+      // The decision already committed. Finish a lagging Inbox close only.
+      this.confirmationInbox?.repair(effect.confirmation);
+      return effect.confirmation;
+    }
+    this.broadcastConfirmation(effect.confirmation);
+    if (effect.type === 'approved') {
+      if (effect.created) this.broadcast(effect.scheduleId, 'created', effect.scheduleRevision);
+      this.wake();
+      this.confirmationInbox?.closed(effect.confirmation.id, 'resolved', 'user');
+      return effect.confirmation;
+    }
+    if (effect.type === 'rejected') {
+      this.confirmationInbox?.closed(effect.confirmation.id, 'rejected', 'user');
+      return effect.confirmation;
+    }
+    this.confirmationInbox?.closed(effect.confirmation.id, 'expired', 'system');
+    throw scheduleFailure(
+      'SCHEDULE_CONFIRMATION_EXPIRED',
+      'confirmation expired before a decision was recorded',
+    );
+  }
+
+  /** The only path that turns a pending confirmation into a live Schedule.
+   *  Side effects stay with the caller, after the surrounding transaction. */
+  private commitApprovedSchedule(row: ScheduleConfirmationRow): { schedule: Schedule; created: boolean } {
     const payload = JSON.parse(row.payload_json) as ScheduleConfirmationPayload;
     return this.createScheduleFromConfirmation({
       domainId: row.schedule_id,
@@ -407,7 +531,9 @@ export class ScheduleService {
   }
 
   getConfirmation(id: string): ScheduleConfirmation {
-    return toConfirmation(this.repo.requireConfirmationRow(id));
+    const confirmation = toConfirmation(this.repo.requireConfirmationRow(id));
+    this.confirmationInbox?.repair(confirmation);
+    return confirmation;
   }
 
   listConfirmations(options: {
@@ -429,6 +555,7 @@ export class ScheduleService {
     for (const id of expired) {
       const row = this.repo.confirmationRow(id);
       if (row) this.broadcastConfirmation(toConfirmation(row));
+      this.confirmationInbox?.closed(id, 'expired', 'system');
     }
   }
 
@@ -446,12 +573,14 @@ export class ScheduleService {
     misfirePolicy: ScheduleMisfirePolicy;
     controlSessionId: string;
     creatorActorId: string;
-  }): Schedule {
+  }): { schedule: Schedule; created: boolean } {
     const now = this.clock();
     // Crash recovery: a pre-allocated id converges on the canonical Schedule.
     if (input.domainId) {
       const existing = this.repo.scheduleRow(input.domainId);
-      if (existing) return toSchedule(existing, this.controlDisplay(existing.control_session_id));
+      if (existing) {
+        return { schedule: toSchedule(existing, this.controlDisplay(existing.control_session_id)), created: false };
+      }
     }
     const nextRunAt = this.computeNextRunAt(input.trigger, input.timezone, now.ms);
     if (nextRunAt === null) {
@@ -472,10 +601,7 @@ export class ScheduleService {
       creatorActorId: input.creatorActorId,
       now: now.iso,
     }, MAX_NON_ARCHIVED_SCHEDULES);
-    const schedule = toSchedule(row, this.controlDisplay(row.control_session_id));
-    this.broadcast(schedule.id, 'created', schedule.revision);
-    this.wake();
-    return schedule;
+    return { schedule: toSchedule(row, this.controlDisplay(row.control_session_id)), created: true };
   }
 
   /** Direct create for tests and future Host-internal callers only: the
@@ -791,6 +917,11 @@ function describeTrigger(trigger: ScheduleTrigger): string {
     case 'cron':
       return `Cron \`${trigger.expression}\``;
   }
+}
+
+function storedDecisionMatches(status: string, decision: ConfirmationDecision): boolean {
+  return (status === 'approved' && decision === 'approve')
+    || (status === 'rejected' && decision === 'reject');
 }
 
 function describeInterval(everyMs: number): string {

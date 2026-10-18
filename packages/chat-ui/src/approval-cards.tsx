@@ -144,9 +144,9 @@ function CardHead({
 
 /** Resolving indicator — pinned to the far left of the action row
  *  (`margin-right: auto` in CSS), so the buttons stay right-aligned. */
-function ResolvingNote() {
+function ResolvingNote({ text }: { text?: string }) {
   const t = useChatUiT();
-  return <span className="ap2-resolving">{t('transcript.approval.resolving')}</span>;
+  return <span className="ap2-resolving">{text ?? t('transcript.approval.resolving')}</span>;
 }
 
 /**
@@ -175,11 +175,15 @@ function isKimiQuestion(item: ApprovalItem): boolean {
 export function ApprovalCard({
   item,
   onApprove,
-  resolving = false,
+  resolving: resolvingProp = false,
+  lockedReason,
 }: {
   item: ApprovalItem;
   onApprove: OnApprove;
   resolving?: boolean;
+  /** Read-only surfaces (archived transcript, 0.6.7): every action disabled
+   *  and the reason shown where the resolving note would be. */
+  lockedReason?: string;
 }) {
   const t = useChatUiT();
   const isQuestion = item.category === 'question' && item.questions && item.questions.length > 0;
@@ -189,6 +193,9 @@ export function ApprovalCard({
   const isNative = !hasProtocolActions && (item.nativeOptions?.length ?? 0) > 0;
   const [inputValues, setInputValues] = useState<Record<string, string | boolean | string[]>>({});
   const [externalUrlOpened, setExternalUrlOpened] = useState(false);
+  // A locked card (read-only transcript) behaves like a resolving one for
+  // every action, with the reason in place of the resolving note.
+  const resolving = resolvingProp || lockedReason !== undefined;
   const kimiQuestion = isKimiQuestion(item);
   // Plan bodies are model-written markdown — repair spec-invalid tables the
   // same way the transcript renderer does.
@@ -222,7 +229,7 @@ export function ApprovalCard({
       : item.interactionKind === 'confirmation' ? 'confirmation'
       : subjectIcon(item);
     return (
-      <div className={`ap2${ap2ToneClass(item)}`}>
+      <div className={`ap2${ap2ToneClass(item)}`} data-transcript-interaction-id={item.approvalId}>
         <CardHead kind={headKind} icon={headIcon} meta={<RiskMeta risk={item.risk} />} />
         {item.cmd && (
           item.hasSubject
@@ -240,7 +247,7 @@ export function ApprovalCard({
           />
         )}
         <div className="ap2-actions">
-          {resolving && <ResolvingNote />}
+          {resolving && <ResolvingNote text={lockedReason} />}
           {item.externalUrl && !externalUrlOpened && (
             <a
               className="btn sm secondary"
@@ -280,11 +287,11 @@ export function ApprovalCard({
   }
 
   if (isQuestion) {
-    return <QuestionCard item={item} onApprove={onApprove} resolving={resolving} />;
+    return <QuestionCard item={item} onApprove={onApprove} resolving={resolving} lockedReason={lockedReason} />;
   }
 
   if (kimiQuestion) {
-    return <KimiQuestionCard item={item} onApprove={onApprove} resolving={resolving} />;
+    return <KimiQuestionCard item={item} onApprove={onApprove} resolving={resolving} lockedReason={lockedReason} />;
   }
 
   // Bash gets a `$ ` prompt prefix; everything else just shows the value
@@ -297,7 +304,7 @@ export function ApprovalCard({
   const answers = interactionAnswers(item.inputs, inputValues);
   const inputsReady = protocolInputsReady(item.inputs, inputValues);
   return (
-    <div className={`ap2${ap2ToneClass(item)}`}>
+    <div className={`ap2${ap2ToneClass(item)}`} data-transcript-interaction-id={item.approvalId}>
       <CardHead
         kind={isPlanExit ? 'plan' : 'approval'}
         icon={isPlanExit ? 'plan' : subjectIcon(item)}
@@ -330,7 +337,7 @@ export function ApprovalCard({
       )}
       {hasProtocolActions ? (
         <div className="ap2-actions">
-          {resolving && <ResolvingNote />}
+          {resolving && <ResolvingNote text={lockedReason} />}
           {dangerLast(protocolActions).map(action => (
             <button
               key={action.id}
@@ -352,7 +359,7 @@ export function ApprovalCard({
         </div>
       ) : isNative ? (
         <div className="ap2-actions">
-          {resolving && <ResolvingNote />}
+          {resolving && <ResolvingNote text={lockedReason} />}
           {dangerLastNative(item.nativeOptions!).map(option => {
             const rejected = option.kind.startsWith('reject');
             const decision: ApprovalDecision = rejected
@@ -382,7 +389,7 @@ export function ApprovalCard({
         </div>
       ) : isPlanExit ? (
         <div className="ap2-actions">
-          {resolving && <ResolvingNote />}
+          {resolving && <ResolvingNote text={lockedReason} />}
           <button
             className="btn secondary sm"
             disabled={resolving}
@@ -407,7 +414,7 @@ export function ApprovalCard({
         </div>
       ) : (
         <div className="ap2-actions">
-          {resolving && <ResolvingNote />}
+          {resolving && <ResolvingNote text={lockedReason} />}
           {allowSession && (
             <button className="btn secondary sm" disabled={resolving} onClick={() => onApprove(item.approvalId, 'allow_session')}>{t('transcript.approval.allowSession')}</button>
           )}
@@ -594,18 +601,21 @@ function InteractionInputs({
  */
 export function ApprovalLine({ item }: { item: ApprovalItem }) {
   const t = useChatUiT();
-  const ok = item.status !== 'declined';
+  // Only canonical approvals count as ok: an unknown/native outcome
+  // ('resolved') is neutral — never the ✓ of an allow.
+  const ok = item.status === 'approved-once' || item.status === 'approved-session';
   let subject: React.ReactNode;
   let note: string;
   if (item.category === 'question') {
     subject = item.questions?.[0]?.question ?? item.title;
-    note = ok
-      ? (item.answeredWith ?? t('transcript.question.answered'))
-      : t('transcript.question.cancelled');
+    note = item.status === 'declined'
+      ? t('transcript.question.cancelled')
+      : (item.answeredWith ?? t('transcript.question.answered'));
   } else {
     const label =
       item.status === 'approved-once' ? t('transcript.approval.allowedOnce') :
       item.status === 'approved-session' ? t('transcript.approval.allowedSession') :
+      item.status === 'resolved' ? t('transcript.approval.resolved') :
       t('transcript.approval.declined');
     note = `${label} · ${t('transcript.approval.byWeb')}`;
     if (item.category === 'exit_plan_mode' || !item.cmd) {
@@ -621,8 +631,10 @@ export function ApprovalLine({ item }: { item: ApprovalItem }) {
     }
   }
   return (
-    <div className="approval-line">
-      <span className={`al-mark ${ok ? 'ok' : 'no'}`}>{ok ? '✓' : '✕'}</span>
+    <div className="approval-line" data-transcript-interaction-id={item.approvalId}>
+      <span className={`al-mark ${ok ? 'ok' : item.status === 'declined' ? 'no' : 'neutral'}`}>
+        {ok ? '✓' : item.status === 'declined' ? '✕' : '·'}
+      </span>
       <span className="al-subject">{subject}</span>
       <span className="al-note">{note}</span>
     </div>
@@ -648,10 +660,14 @@ function QuestionCard({
   item,
   onApprove,
   resolving = false,
+  lockedReason,
 }: {
   item: ApprovalItem;
   onApprove: OnApprove;
   resolving?: boolean;
+  /** Read-only surfaces (archived transcript, 0.6.7): every action disabled
+   *  and the reason shown where the resolving note would be. */
+  lockedReason?: string;
 }) {
   const t = useChatUiT();
   // Per-question selection state. Single-select stores the chosen label;
@@ -712,7 +728,7 @@ function QuestionCard({
   const q = cur;
   const sel = q ? selections[q.question] : undefined;
   return (
-    <div className={`ap2${ap2ToneClass(item)}`}>
+    <div className={`ap2${ap2ToneClass(item)}`} data-transcript-interaction-id={item.approvalId}>
       <CardHead
         kind="question"
         icon="question"
@@ -768,7 +784,7 @@ function QuestionCard({
         </>
       )}
       <div className="ap2-actions">
-        {resolving && <ResolvingNote />}
+        {resolving && <ResolvingNote text={lockedReason} />}
         <button
           className="btn ghost sm"
           disabled={resolving}
@@ -821,10 +837,14 @@ function KimiQuestionCard({
   item,
   onApprove,
   resolving = false,
+  lockedReason,
 }: {
   item: ApprovalItem;
   onApprove: OnApprove;
   resolving?: boolean;
+  /** Read-only surfaces (archived transcript, 0.6.7): every action disabled
+   *  and the reason shown where the resolving note would be. */
+  lockedReason?: string;
 }) {
   const t = useChatUiT();
   const [picked, setPicked] = useState<string | null>(null);
@@ -833,7 +853,7 @@ function KimiQuestionCard({
   const rejectOption = options.find(o => o.kind.startsWith('reject'));
   const questionText = item.reason || item.title;
   return (
-    <div className={`ap2${ap2ToneClass(item)}`}>
+    <div className={`ap2${ap2ToneClass(item)}`} data-transcript-interaction-id={item.approvalId}>
       <CardHead kind="question" icon="question" meta={<RiskMeta risk={item.risk} />} />
       <div className="ap2-q-text">{questionText}</div>
       <ul className="ap2-opts">
@@ -854,7 +874,7 @@ function KimiQuestionCard({
         ))}
       </ul>
       <div className="ap2-actions">
-        {resolving && <ResolvingNote />}
+        {resolving && <ResolvingNote text={lockedReason} />}
         <button
           className="btn ghost sm"
           disabled={resolving}

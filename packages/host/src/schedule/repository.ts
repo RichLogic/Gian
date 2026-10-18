@@ -1073,6 +1073,18 @@ export class ScheduleRepository {
     ).run(scheduleId, now, id);
   }
 
+  /** Expires one pending confirmation whose deadline has passed.
+   *  Stays in the caller's transaction. The decision CAS cannot do this:
+   *  that update only matches `expires_at > now`. */
+  expireConfirmationIfDue(id: string, nowIso: string): ScheduleConfirmationRow | null {
+    const result = this.db.prepare(
+      `UPDATE schedule_confirmations
+          SET status = 'expired', resolved_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending' AND expires_at <= ?`,
+    ).run(nowIso, nowIso, id, nowIso);
+    return result.changes === 1 ? this.confirmationRow(id) : null;
+  }
+
   /** Lazily expires stale pending rows; returns the ids it transitioned. */
   expirePendingConfirmations(nowIso: string, limit = 100): string[] {
     return this.db.transaction((): string[] => {

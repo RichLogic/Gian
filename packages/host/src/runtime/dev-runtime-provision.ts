@@ -2,14 +2,33 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+
+import { manifestSchema, type ProxyManifest } from '@gian/proxy-protocol';
 
 import { recordRuntimeArtifact, runtimeFileInventory, verifiedRuntimeReuse } from './artifact-reuse.js';
 import { devRuntimeCoordinates, type DevRuntimeCoordinate } from './dev-runtime-coordinates.js';
 import { downloadDevRuntimeAsset } from './dev-runtime-assets.js';
+import {
+  DevRuntimeProbeError,
+  probeDevRuntimeVersion,
+  requireDevRuntimeProxyBinding,
+  type ProbeDevRuntimeVersionInput,
+} from './dev-runtime-probe.js';
+import { discoverDevelopmentProxyEntries } from './development-proxy-source.js';
 import { ManagedRuntimeInstallError } from './errors.js';
 import { extractManagedRuntimeArchive } from './safe-extract.js';
 import { packageDirectoryFromEntry } from './trusted-launch.js';
+
+export {
+  DEV_RUNTIME_PROXY_PROBE_TIMEOUT_MS,
+  DevRuntimeProbeError,
+  probeDevRuntimeVersion,
+} from './dev-runtime-probe.js';
+export type {
+  DevRuntimeProxyProbeTarget,
+  ProbeDevRuntimeVersionInput,
+} from './dev-runtime-probe.js';
 
 export type { DevRuntimeCoordinate };
 
@@ -17,6 +36,14 @@ export interface DevRuntimeDeclaration {
   pluginId: string;
   runtimeId: string;
   versions: readonly string[];
+  /** Manifest pluginVersion. Host-internal, present only for a bound entry. */
+  pluginVersion?: string;
+  /** Manifest process.scope. Host-internal. */
+  processScope?: 'shared' | 'session';
+  /** Manifest runtime displayName. Host-internal. */
+  displayName?: string;
+  /** Exact trusted Proxy entry. Host-internal. Never a PATH lookup. */
+  entryPath?: string;
 }
 
 export interface ProvisionedDevRuntime {
@@ -98,27 +125,132 @@ export async function assertGianDevRuntimeDataDir(
   }
 }
 
+function declaredRuntime(
+  entryPath: string,
+  manifest: ProxyManifest,
+): { runtimeId: string; displayName: string; versions: readonly string[] } {
+  if (manifest.schemaVersion === 4) {
+    if (manifest.runtime.kind !== 'external') {
+      throw new Error(`Proxy entry has no Runtime declaration: ${entryPath}`);
+    }
+    return {
+      runtimeId: manifest.runtime.id,
+      displayName: manifest.runtime.displayName,
+      versions: manifest.runtime.verifiedVersions,
+    };
+  }
+  const runtime = manifest.runtime;
+  const versions = runtime?.verifiedCliVersions ?? [];
+  if (!runtime || versions.length === 0) {
+    throw new Error(`Proxy entry has no Runtime declaration: ${entryPath}`);
+  }
+  return {
+    runtimeId: runtime.id,
+    displayName: runtime.displayName,
+    versions,
+  };
+}
+
+/** Packaged Dev layout keeps bundled Proxy entries beside the asset directory. */
+export function bundledDevProxyDirectory(assetsDir: string): string {
+  return resolve(assetsDir, '..', 'proxies');
+}
+
+/**
+ * Read exact bundled Proxy entries from one directory. An empty or missing
+ * directory fails. This does not search PATH or a source checkout.
+ */
+export async function declarationsFromProxyDirectory(
+  proxiesDir: string,
+): Promise<DevRuntimeDeclaration[]> {
+  const entries = await discoverDevelopmentProxyEntries({ proxiesDir });
+  if (Object.keys(entries).length === 0) {
+    throw new Error(`No exact bundled Proxy entry in ${proxiesDir}. Refusing to guess a Proxy path.`);
+  }
+  return declarationsFromProxyEntries(entries);
+}
+
 export async function declarationsFromProxyEntries(
   entries: Readonly<Record<string, string>>,
 ): Promise<DevRuntimeDeclaration[]> {
   const declarations: DevRuntimeDeclaration[] = [];
-  for (const entry of Object.values(entries)) {
-    const directory = await packageDirectoryFromEntry(entry);
-    const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as {
-      id?: unknown;
-      runtime?: { id?: unknown; verifiedVersions?: unknown };
-    };
-    const versions = manifest.runtime?.verifiedVersions;
-    if (typeof manifest.id !== 'string' || typeof manifest.runtime?.id !== 'string' || !Array.isArray(versions)) {
-      throw new Error(`Proxy entry has no Runtime declaration: ${entry}`);
+  for (const [pluginId, entryPath] of Object.entries(entries)) {
+    if (!isAbsolute(entryPath)) {
+      throw new Error(`Proxy entry must be an exact absolute path: ${entryPath}`);
     }
+    const info = await lstat(entryPath).catch(() => {
+      throw new Error(`Proxy entry is not an exact regular file: ${entryPath}`);
+    });
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error(`Proxy entry is not an exact regular file: ${entryPath}`);
+    }
+    const directory = await packageDirectoryFromEntry(entryPath);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as unknown;
+    } catch {
+      throw new Error(`Proxy entry has no Runtime declaration: ${entryPath}`);
+    }
+    const parsed = manifestSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error(`Proxy entry has no Runtime declaration: ${entryPath}`);
+    }
+    const manifest = parsed.data;
+    if (manifest.id !== pluginId) {
+      throw new Error(`Proxy entry ${entryPath} does not match Manifest id ${manifest.id}.`);
+    }
+    const runtime = declaredRuntime(entryPath, manifest);
     declarations.push({
       pluginId: manifest.id,
-      runtimeId: manifest.runtime.id,
-      versions: versions.filter((version): version is string => typeof version === 'string'),
+      runtimeId: runtime.runtimeId,
+      versions: [...runtime.versions],
+      pluginVersion: manifest.pluginVersion,
+      processScope: manifest.process.scope,
+      displayName: runtime.displayName,
+      entryPath,
     });
   }
   return declarations;
+}
+
+function declarationFor(
+  coordinate: DevRuntimeCoordinate,
+  declarations: readonly DevRuntimeDeclaration[],
+): DevRuntimeDeclaration | undefined {
+  return declarations.find((item) => (
+    item.pluginId === coordinate.pluginId
+    && item.runtimeId === coordinate.runtimeId
+    && item.versions.includes(coordinate.version)
+  ));
+}
+
+/**
+ * Keep already-read Proxy bindings for pinned coordinates. A bundled Proxy
+ * with no pinned coordinate is not installed. A pinned `probe.kind === 'proxy'`
+ * coordinate with no exact entry fails here. CLI coordinates still get a
+ * version-only declaration when their Proxy package is absent.
+ */
+export function devRuntimeDeclarationsForCoordinates(
+  discovered: readonly DevRuntimeDeclaration[],
+  coordinates: readonly DevRuntimeCoordinate[] = COORDINATES,
+): DevRuntimeDeclaration[] {
+  return coordinates.map((coordinate) => {
+    const found = declarationFor(coordinate, discovered);
+    const probeKind = coordinate.probe?.kind;
+    if (probeKind !== undefined && probeKind !== 'proxy') {
+      throw new DevRuntimeProbeError(
+        'RUNTIME_PROBE_INVALID',
+        `${coordinate.runtimeId} has an unsupported Dev Runtime probe.`,
+      );
+    }
+    if (probeKind === 'proxy') requireDevRuntimeProxyBinding(coordinate, found);
+    if (found) return { ...found, versions: [coordinate.version] };
+    return {
+      pluginId: coordinate.pluginId,
+      runtimeId: coordinate.runtimeId,
+      versions: [coordinate.version],
+    };
+  });
 }
 
 function runtimeTree(dataDir: string, coordinate: DevRuntimeCoordinate): string {
@@ -209,7 +341,11 @@ export async function provisionDevRuntimes(input: {
   declarations?: readonly DevRuntimeDeclaration[];
   coordinates?: readonly DevRuntimeCoordinate[];
   download?: (asset: DevRuntimeCoordinate['asset']) => Promise<Buffer>;
+  /** `--version` probe for coordinates that do not set probe.kind proxy. */
   probe?: (executable: string) => Promise<string>;
+  /** Test seam. Production calls probeDevRuntimeVersion. */
+  probeProxy?: (request: ProbeDevRuntimeVersionInput) => Promise<string>;
+  hostVersion?: string;
   /** Host startup records the failure and keeps the CLIs that succeeded.
    * A local package build leaves this unset and stops on the first failure. */
   continueOnError?: boolean;
@@ -224,12 +360,36 @@ export async function provisionDevRuntimes(input: {
   }));
   const selected = selectDevRuntimeCoordinates(declarations, input.coordinates ?? COORDINATES);
   const download = input.download ?? downloadDevRuntimeAsset;
-  const probe = input.probe ?? defaultProbe;
+  const cliProbe = input.probe ?? defaultProbe;
+  const proxyProbe = input.probeProxy ?? probeDevRuntimeVersion;
+  const hostVersion = input.hostVersion ?? process.env.GIAN_RELEASE_VERSION ?? '0.0.0';
   const installed: ProvisionedDevRuntime[] = [];
   for (const coordinate of selected) {
     console.log(`[gian] provisioning ${coordinate.runtimeId} ${coordinate.version} into ${input.dataDir}/runtimes`);
     try {
-      const entryPath = await installCoordinate(input.dataDir, coordinate, download, probe);
+      const probeKind = coordinate.probe?.kind;
+      if (probeKind !== undefined && probeKind !== 'proxy') {
+        throw new DevRuntimeProbeError(
+          'RUNTIME_PROBE_INVALID',
+          `${coordinate.runtimeId} has an unsupported Dev Runtime probe.`,
+        );
+      }
+      let readVersion = cliProbe;
+      if (probeKind === 'proxy') {
+        const declaration = declarationFor(coordinate, declarations) ?? {
+          pluginId: coordinate.pluginId,
+          runtimeId: coordinate.runtimeId,
+          versions: [coordinate.version],
+        };
+        requireDevRuntimeProxyBinding(coordinate, declaration);
+        readVersion = (executable: string) => proxyProbe({
+          executable,
+          coordinate,
+          declaration,
+          hostVersion,
+        });
+      }
+      const entryPath = await installCoordinate(input.dataDir, coordinate, download, readVersion);
       installed.push({
         pluginId: coordinate.pluginId,
         runtimeId: coordinate.runtimeId,

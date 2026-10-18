@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   ApprovalCategory,
-  AttentionMessage,
   ChatEvent,
   ConfigOption,
   EventEnvelope,
@@ -46,11 +45,7 @@ import {
 import { kimiContentText } from './input-items.js';
 import { AttentionDispatcher } from './attention.js';
 
-export {
-  ATTENTION_BODY_MAX_BYTES,
-  ATTENTION_TITLE_MAX_BYTES,
-  attentionMessageForEvent,
-} from './attention.js';
+export { attentionMessageForEvent } from './attention.js';
 
 function isReplaceableSnapshot(event: ChatEvent): boolean {
   if (event.event === 'diff.updated') return true;
@@ -1297,18 +1292,11 @@ export class SessionEventCoordinator {
     // still awaiting the Stop RPC. The turn remains active until lifecycle
     // handling below, but its stop intent is already authoritative for user
     // attention: never flash a completion/error alert for work they stopped.
-    const attention = attentionEligible
-      && !this.turns.isStopRequested(e.session_id, turnId)
-      ? this.attention.claim(e)
-      : null;
-    if (
-      attention
-      && e.display?.type !== 'interaction.approval'
-      && e.display?.type !== 'interaction.question'
-    ) {
-      this.broadcaster.broadcast(attention);
+    if (attentionEligible && !this.turns.isStopRequested(e.session_id, turnId)) {
+      // Same gate as JSONL Live Sync. Actionable kinds stay quiet here.
+      this.attention.broadcast(e);
     }
-    this.afterChatEvent(e, turnId, attention, providerEventId);
+    this.afterChatEvent(e, turnId, providerEventId);
     for (const fn of this.eventSubscribers) {
       try { fn(e); } catch {}
     }
@@ -1393,7 +1381,6 @@ export class SessionEventCoordinator {
   private afterChatEvent(
     e: ChatEvent,
     turnId: string,
-    attention: AttentionMessage | null,
     providerEventId: string | null,
   ): void {
     if (e.display?.type === 'interaction.approval' || e.display?.type === 'interaction.question') {
@@ -1430,7 +1417,6 @@ export class SessionEventCoordinator {
           ...(d.inputs ? { inputs: d.inputs } : {}),
         },
         nativeOptions: d.nativeOptions,
-        ...(attention ? { attention } : {}),
       }).catch(err => {
         console.error('[approval] request failed', err);
       });

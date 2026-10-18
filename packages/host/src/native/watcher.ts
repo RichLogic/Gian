@@ -337,6 +337,8 @@ export class NativeJsonlWatcher {
       ...(display ? { display } : {}),
     };
     this.broadcaster.broadcast({ type: 'event', ...event });
+    // Completion and failure only. The dispatcher withholds approval and
+    // question attention until a fresh Inbox occurrence exists.
     if (inserted && options.attentionEligible) this.attention.broadcast(event);
     if (display?.type === 'interaction.approval' || display?.type === 'interaction.question') {
       this.persistSessionStatus(state.sessionId, 'pending');

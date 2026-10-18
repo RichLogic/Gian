@@ -141,6 +141,8 @@ export function registerTaskRoutes(
         ...(body.approval_mode !== undefined ? { approval_mode: body.approval_mode } : {}),
         ...(body.thinking_effort !== undefined ? { thinking_effort: body.thinking_effort } : {}),
         ...(body.service_tier !== undefined ? { service_tier: body.service_tier } : {}),
+        ...(body.session_config !== undefined ? { session_config: body.session_config } : {}),
+        ...(body.turn_config !== undefined ? { turn_config: body.turn_config } : {}),
       });
       broadcaster.broadcast({ type: 'session:created', session, origin: 'task-create' });
       return c.json({ session });

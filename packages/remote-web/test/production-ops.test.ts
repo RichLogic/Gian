@@ -44,6 +44,7 @@ function emptyState(): RemoteUiState {
     connection: { kind: 'online' },
     hosts: [],
     currentHostId: hostId,
+    locale: 'en',
     workspaces: [],
     tasks: [],
     sessions: [],
@@ -2149,6 +2150,44 @@ describe('production controller operations', () => {
     expect(controller.state.view).toEqual({ kind: 'chat', sessionId });
     expect(controller.state.mobilePage).toBe('chat');
     controller.close();
+  });
+
+  it('applies the Host locale from the snapshot and falls back to en when absent', async () => {
+    const relays: FakeRelay[] = [];
+    const { controller } = await pairedController({
+      createRelay(input) {
+        const relay = new FakeRelay(input);
+        relays.push(relay);
+        return relay;
+      },
+    });
+    try {
+      controller.actions.challengeLogin(hostId);
+      await viWait(async () => controller.state.connection.kind === 'online');
+      expect(controller.state.locale).toBe('en');
+      const first = relays[0]!.sent.find(message => message.method === 'state.refresh')!;
+      const zh = sampleSnapshot(hostId, 'Office Mac');
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(first.command_id),
+        ok: true,
+        data: { ...zh, host: { ...zh.host, locale: 'zh-CN' } },
+      });
+      await viWait(async () => controller.state.locale === 'zh-CN');
+      // A later snapshot without the field (older Host) reverts to English.
+      controller.actions.refreshState();
+      await viWait(async () => relays[0]!.sent.filter(message => message.method === 'state.refresh').length === 2);
+      const second = relays[0]!.sent.filter(message => message.method === 'state.refresh').at(-1)!;
+      await relays[0]!.emit({
+        type: 'command.result',
+        command_id: String(second.command_id),
+        ok: true,
+        data: sampleSnapshot(hostId, 'Office Mac'),
+      });
+      await viWait(async () => controller.state.locale === 'en');
+    } finally {
+      controller.close();
+    }
   });
 
   it('reuses an unexpired access token on reconnect without another auth round trip', async () => {

@@ -1,4 +1,10 @@
-import { isProxyPluginId, type AttentionMessage } from '@gian/shared';
+import {
+  isAttentionControlMessage,
+  isAttentionMessage,
+  type AttentionControlMessage,
+  type AttentionInboxRef,
+  type AttentionMessage,
+} from '@gian/shared';
 
 export interface AttentionSocket {
   addEventListener(type: 'open', listener: () => void): void;
@@ -24,6 +30,10 @@ export interface AttentionClientOptions {
   tokenHeader: string;
   socketFactory: AttentionSocketFactory;
   onAttention: (message: AttentionMessage) => void;
+  /** Read/terminal frames. They never include Inbox bodies. */
+  onControl?: (message: AttentionControlMessage) => void;
+  /** Stored OS refs to reconcile after each successful auth, including reconnect. */
+  lookupRefs?: () => readonly AttentionInboxRef[];
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   reconnectDelaysMs?: readonly number[];
@@ -106,8 +116,16 @@ export class AttentionClient {
     });
     socket.addEventListener('message', event => {
       if (!this.running || generation !== this.generation || this.socket !== socket) return;
-      const message = parseAttentionMessage(event.data);
-      if (message) this.options.onAttention(message);
+      const frame = parseJson(event.data);
+      if (isAuthOk(frame)) {
+        this.sendLookup(socket);
+        return;
+      }
+      if (isAttentionControlMessage(frame)) {
+        this.options.onControl?.(frame);
+        return;
+      }
+      if (isAttentionMessage(frame)) this.options.onAttention(frame);
     });
     socket.addEventListener('close', () => {
       if (generation !== this.generation || this.socket !== socket) return;
@@ -118,6 +136,15 @@ export class AttentionClient {
     // implementations emit both error and close; scheduling from both would
     // create duplicate connections.
     socket.addEventListener('error', () => {});
+  }
+
+  private sendLookup(socket: AttentionSocket): void {
+    const refs = this.options.lookupRefs?.() ?? [];
+    for (let index = 0; index < refs.length; index += 32) {
+      const chunk = refs.slice(index, index + 32);
+      if (chunk.length === 0) continue;
+      socket.send(JSON.stringify({ type: 'attention:lookup', refs: chunk }));
+    }
   }
 
   private scheduleReconnect(generation: number): void {
@@ -139,44 +166,24 @@ export function attentionWebSocketUrl(hostUrl: string): string {
 }
 
 export function parseAttentionMessage(data: unknown): AttentionMessage | null {
-  let value: unknown;
+  const value = parseJson(data);
+  return isAttentionMessage(value) ? value : null;
+}
+
+export function parseAttentionControlMessage(data: unknown): AttentionControlMessage | null {
+  const value = parseJson(data);
+  return isAttentionControlMessage(value) ? value : null;
+}
+
+function parseJson(data: unknown): unknown {
   try {
     if (typeof data !== 'string') return null;
-    value = JSON.parse(data);
+    return JSON.parse(data);
   } catch {
     return null;
   }
-  if (!value || typeof value !== 'object') return null;
-  const candidate = value as Partial<AttentionMessage>;
-  if (
-    candidate.type !== 'attention'
-    || !isBoundedString(candidate.id, 1, 512)
-    || !isBoundedString(candidate.session_id, 1, 512)
-    || !Number.isInteger(candidate.turn)
-    || (candidate.turn ?? 0) < 1
-    || !Number.isFinite(candidate.timestamp)
-    || !isBoundedString(candidate.title, 1, 256)
-    || !isBoundedString(candidate.body, 1, 512)
-    || !['turn-completed', 'approval', 'question', 'error'].includes(String(candidate.kind))
-    || !isProxyPluginId(candidate.provider)
-    || !isValidScheduleTarget(candidate.schedule)
-  ) {
-    return null;
-  }
-  return candidate as AttentionMessage;
 }
 
-/** Optional scheduled-run navigation target: present and well-formed, or
- *  absent entirely. Anything in between is a malformed message. */
-function isValidScheduleTarget(
-  value: AttentionMessage['schedule'] | undefined,
-): boolean {
-  if (value === undefined) return true;
-  if (!value || typeof value !== 'object') return false;
-  return isBoundedString(value.schedule_id, 1, 512)
-    && isBoundedString(value.run_id, 1, 512);
-}
-
-function isBoundedString(value: unknown, min: number, max: number): value is string {
-  return typeof value === 'string' && value.length >= min && value.length <= max;
+function isAuthOk(value: unknown): boolean {
+  return !!value && typeof value === 'object' && (value as { type?: unknown }).type === 'auth_ok';
 }

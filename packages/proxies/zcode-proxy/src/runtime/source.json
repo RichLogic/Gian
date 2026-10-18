@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "integrationVersion": 1,
-  "protocolEntrypointSha256": "35b9b0f59bae680e98ef4a3e985aead2607f3aff371dec82120aec29ce0211f6",
+  "protocolEntrypointSha256": "e45d5cdc4f9f90640ef93d89e4b87aa0e40c2a459946b954daa772b7d5594d9d",
   "repository": "https://github.com/zai-org/ZCode.git",
-  "commit": "328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f",
+  "commit": "aac4755666d09fdcd70272fcf063c077a639015f",
   "cliVersion": "0.16.9",
   "nodeVersion": "24.14.0",
   "pnpmVersion": "10.33.2",
-  "lockfileSha256": "7d40b0231089692a91eb39f73b212f7eae86ee9402c360139216cff577e9583c",
+  "lockfileSha256": "763b3f63bccf174fea66b0c2e950970d5928e8eb55fbe478e19ccbd1635d65e5",
   "platform": "darwin-arm64",
   "entryRelativePath": "zcode/agent/zcode.cjs"
 }

@@ -10,6 +10,7 @@ import {
   selfRevokePayload,
   verifyBytes,
 } from '@gian/remote-protocol';
+import type { PairingInboxObserver } from '../inbox/pairing-producer.js';
 import type { Db } from '../storage/db.js';
 import { RemoteDeviceStore, devicePublicKeyCanonical, type RemoteDeviceRecord } from './device-store.js';
 
@@ -64,11 +65,45 @@ interface PairingRow {
 }
 
 export class RemotePairingService {
+  private inboxObserver: PairingInboxObserver | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly devices: RemoteDeviceStore,
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  /** Observe committed pairing transitions. The domain write does not roll back if Inbox fails. */
+  setInboxObserver(observer: PairingInboxObserver | null): void {
+    this.inboxObserver = observer;
+  }
+
+  /**
+   * Startup snapshot after the observer is attached. Opens every current
+   * pending_confirmation. Closes an already-open Inbox row only when this
+   * read of the pairing table did not race a write. A pairing that never
+   * opened an Inbox row stays absent.
+   */
+  reconcileInbox(): void {
+    if (!this.inboxObserver) return;
+    this.expireStale();
+    const before = this.totalChanges();
+    const rows = this.db.prepare(
+      `SELECT id, status, device_name
+         FROM remote_pairings`,
+    ).all() as Array<{ id: string; status: RemotePairingStatus; device_name: string | null }>;
+    const complete = this.totalChanges() === before;
+    for (const row of rows) {
+      if (row.status === 'pending_confirmation') {
+        this.notifyOpened(row.id, row.device_name);
+        continue;
+      }
+      if (!complete) continue;
+      if (row.status === 'confirmed') this.notifyClosed(row.id, 'resolved', 'user');
+      else if (row.status === 'rejected') this.notifyClosed(row.id, 'rejected', 'user');
+      else if (row.status === 'expired') this.notifyClosed(row.id, 'expired', 'system');
+    }
+  }
 
   recordServerGrant(input: {
     grantId: string;
@@ -115,7 +150,9 @@ export class RemotePairingService {
       throw Object.assign(new Error('pairing grant not found'), { code: 'DEVICE_NOT_PAIRED' });
     }
     if (row.status === 'pending_confirmation' && row.server_pairing_id === input.pairingId) {
-      return this.project(row);
+      const current = this.project(row);
+      this.notifyOpened(current.id, current.deviceName);
+      return current;
     }
     this.assertClaimable(row);
     const claimedAt = this.now();
@@ -142,7 +179,9 @@ export class RemotePairingService {
       new Date(claimedAt.getTime() + PAIRING_TTL_MS).toISOString(),
       input.grantId,
     );
-    return this.project(this.row(row.id)!);
+    const claimed = this.project(this.row(row.id)!);
+    if (claimed.status === 'pending_confirmation') this.notifyOpened(claimed.id, claimed.deviceName);
+    return claimed;
   }
 
   get(id: string): RemotePairingRecord | null {
@@ -219,7 +258,9 @@ export class RemotePairingService {
       this.now().toISOString(),
       row.id,
     );
-    return this.project(this.row(row.id)!);
+    const claimed = this.project(this.row(row.id)!);
+    if (claimed.status === 'pending_confirmation') this.notifyOpened(claimed.id, claimed.deviceName);
+    return claimed;
   }
 
   confirm(pairingId: string, assignedDeviceId?: string): RemotePairingRecord {
@@ -238,7 +279,9 @@ export class RemotePairingService {
           SET status = 'confirmed', resolved_at = ?, device_id = ?
         WHERE id = ?`,
     ).run(this.now().toISOString(), deviceId, pairingId);
-    return this.project(this.row(pairingId)!);
+    const confirmed = this.project(this.row(pairingId)!);
+    if (confirmed.status === 'confirmed') this.notifyClosed(confirmed.id, 'resolved', 'user');
+    return confirmed;
   }
 
   reject(pairingId: string): RemotePairingRecord {
@@ -247,10 +290,15 @@ export class RemotePairingService {
     if (row.status !== 'pending_confirmation' && row.status !== 'pending_claim') {
       throw Object.assign(new Error('pairing cannot be rejected'), { code: 'DEVICE_NOT_PAIRED' });
     }
+    const wasConfirmation = row.status === 'pending_confirmation';
     this.db.prepare(
       `UPDATE remote_pairings SET status = 'rejected', resolved_at = ? WHERE id = ?`,
     ).run(this.now().toISOString(), pairingId);
-    return this.project(this.row(pairingId)!);
+    const rejected = this.project(this.row(pairingId)!);
+    if (wasConfirmation && rejected.status === 'rejected') {
+      this.notifyClosed(rejected.id, 'rejected', 'user');
+    }
+    return rejected;
   }
 
   async applySignedSelfRevoke(input: {
@@ -321,12 +369,43 @@ export class RemotePairingService {
   }
 
   private expireStale(): void {
+    const now = this.now().toISOString();
+    const expired = this.db.prepare(
+      `SELECT id FROM remote_pairings
+        WHERE status = 'pending_confirmation' AND expires_at <= ?`,
+    ).all(now) as Array<{ id: string }>;
     this.db.prepare(
       `UPDATE remote_pairings
           SET status = 'expired', resolved_at = ?
         WHERE status IN ('pending_claim', 'pending_confirmation')
           AND expires_at <= ?`,
-    ).run(this.now().toISOString(), this.now().toISOString());
+    ).run(now, now);
+    for (const row of expired) this.notifyClosed(row.id, 'expired', 'system');
+  }
+
+  private totalChanges(): number {
+    const row = this.db.prepare('SELECT total_changes() AS n').get() as { n: number };
+    return row.n;
+  }
+
+  private notifyOpened(id: string, deviceName: string | null): void {
+    try {
+      this.inboxObserver?.opened({ id, deviceName });
+    } catch (error) {
+      console.error('[inbox] pairing open failed', error);
+    }
+  }
+
+  private notifyClosed(
+    id: string,
+    outcome: 'resolved' | 'rejected' | 'expired',
+    actor: 'user' | 'system',
+  ): void {
+    try {
+      this.inboxObserver?.closed(id, outcome, actor);
+    } catch (error) {
+      console.error('[inbox] pairing close failed', error);
+    }
   }
 
   private assertClaimable(row: PairingRow): void {

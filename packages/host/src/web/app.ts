@@ -16,7 +16,11 @@ import { TaskManager } from '../task/manager.js';
 import { ApprovalManager } from '../approval/index.js';
 import { QueueManager } from '../queue/index.js';
 import { NativeJsonlWatcher } from '../native/watcher.js';
-import { AttentionDispatcher, attentionGateForPreferences } from '../session/attention.js';
+import {
+  AttentionDispatcher,
+  attentionGateForPreferences,
+  publishFreshSessionAttention,
+} from '../session/attention.js';
 import { loadConfig } from '../storage/config.js';
 import { makeWsHandlers } from './ws-handler.js';
 import { RemoteControllerHub } from '../remote/controller-hub.js';
@@ -74,8 +78,14 @@ import { ScheduleRunDispatcher } from '../schedule/dispatcher.js';
 import { ScheduleOrchestrator } from '../schedule/orchestrator.js';
 import { registerScheduleRoutes } from './routes/schedules.js';
 import { InboxService } from '../inbox/service.js';
+import { accountRepairInboxObserver } from '../inbox/account-repair-producer.js';
+import { catalogUpdateInboxObserver } from '../inbox/catalog-update-producer.js';
+import { pairingInboxObserver } from '../inbox/pairing-producer.js';
+import { scheduleConfirmationInboxObserver } from '../inbox/schedule-confirmation-producer.js';
+import { publishFreshScheduleConfirmationAttention } from '../schedule/confirmation-attention.js';
 import { SessionInboxAdapter } from '../inbox/session-adapter.js';
 import { registerInboxRoutes } from './routes/inbox.js';
+import { createSearchModule, type SearchModule } from '../search/index.js';
 import type { BrowserToolClient } from '../tool/browser-broker.js';
 
 export interface AppContext {
@@ -123,6 +133,7 @@ export interface AppHandle {
   scheduleService: ScheduleService;
   scheduleOrchestrator: ScheduleOrchestrator;
   inbox: InboxService;
+  search: SearchModule;
 }
 
 export function createApp(ctx: AppContext): AppHandle {
@@ -132,6 +143,7 @@ export function createApp(ctx: AppContext): AppHandle {
   const broadcaster = new WsBroadcaster();
   const inbox = new InboxService(ctx.db, {
     broadcast: message => broadcaster.broadcast(message),
+    onAttentionControl: message => broadcaster.broadcast(message),
   });
   const sessionBindingPlanner = ctx.agentManager
       ? new SessionBindingPlanner({
@@ -198,7 +210,12 @@ export function createApp(ctx: AppContext): AppHandle {
   // scheduled-run failures alike). It reads the live config so a Settings
   // change takes effect without a restart.
   const attentionGate = attentionGateForPreferences(() => loadConfig(ctx.db).notifications);
-  const attention = new AttentionDispatcher(broadcaster, attentionGate);
+  const attention = new AttentionDispatcher(broadcaster, attentionGate, (sessionId) => {
+    const row = ctx.db.prepare('SELECT name FROM sessions WHERE id = ?').get(sessionId) as {
+      name?: unknown;
+    } | undefined;
+    return row?.name;
+  });
   const watcher = new NativeJsonlWatcher(ctx.db, broadcaster, attention);
   const toolCredentials = new GianToolCredentialManager(ctx.db);
   // No raw internal token survives the Host process. A restart invalidates
@@ -284,6 +301,9 @@ export function createApp(ctx: AppContext): AppHandle {
     sessionHostServices,
     sessionBindingPlanner,
   );
+  const accountRepair = accountRepairInboxObserver(ctx.db, inbox);
+  accountRepair.reconcile();
+  sessions.onEvent(event => accountRepair.observe(event));
   const tasks = new TaskManager(ctx.db);
   const translations = new TranslationService(ctx.db, createTranslationModel(ctx.dataDir, async (id, preferences) => {
     if (!ctx.agentManager || !sessionBindingPlanner) throw new Error('Translation Agent management is unavailable.');
@@ -307,10 +327,7 @@ export function createApp(ctx: AppContext): AppHandle {
     assertControlSessionReady: sessionId => sessions.assertReadyForScheduledTurn(sessionId),
   });
   const scheduleLedger = new ScheduleCommandLedger(ctx.db);
-  const scheduleDispatcher = new ScheduleRunDispatcher(scheduleService, sessions, ctx.db, {
-    broadcaster,
-    attentionGate,
-  });
+  const scheduleDispatcher = new ScheduleRunDispatcher(scheduleService, sessions, ctx.db, {});
   const scheduleOrchestrator = new ScheduleOrchestrator(
     { service: scheduleService, dispatcher: scheduleDispatcher, broadcaster, db: ctx.db, sessions },
     {
@@ -319,6 +336,18 @@ export function createApp(ctx: AppContext): AppHandle {
     },
   );
   scheduleService.setWake(() => scheduleOrchestrator.wake());
+  scheduleService.setConfirmationInbox(scheduleConfirmationInboxObserver(ctx.db, inbox));
+  scheduleService.setConfirmationAttention((confirmation, inboxRef) => {
+    publishFreshScheduleConfirmationAttention({
+      db: ctx.db,
+      claim: (id, generation) => inbox.claimNotification(id, generation),
+      broadcast: message => broadcaster.broadcast(message),
+      gate: attentionGate,
+      confirmation,
+      inbox: inboxRef,
+    });
+  });
+  scheduleService.reconcileConfirmationInbox();
   const toolService = new GianToolService({
     db: ctx.db,
     tasks,
@@ -341,6 +370,9 @@ export function createApp(ctx: AppContext): AppHandle {
     identity: ctx.remoteIdentity ?? createRemoteIdentityFromEnv(),
     dataDir: ctx.dataDir,
     hostVersion: ctx.hostVersion ?? '0.0.0',
+    // Read live so a Settings locale change reaches the next Remote
+    // snapshot without a Host restart.
+    locale: () => loadConfig(ctx.db).locale,
     listAgents: ctx.agentManager
       ? () => ctx.agentManager!.listAgents().map(agent => ({
           id: agent.id,
@@ -359,6 +391,12 @@ export function createApp(ctx: AppContext): AppHandle {
         )
       : undefined,
   });
+  remote.pairings.setInboxObserver(pairingInboxObserver(ctx.db, inbox));
+  remote.pairings.reconcileInbox();
+  if (ctx.catalogService) {
+    ctx.catalogService.setInboxObserver(catalogUpdateInboxObserver(ctx.db, inbox));
+    ctx.catalogService.reconcileInbox();
+  }
   void remote.start().catch((error) => {
     console.error('[remote] outbound connector failed to start', error);
   });
@@ -418,7 +456,15 @@ export function createApp(ctx: AppContext): AppHandle {
   // here after both objects exist.
   approvals.setRespondFn((sid, aid, dec) => sessions.respondApproval(sid, aid, dec));
   approvals.setGetModeFn(sid => sessions.getApprovalModeForActiveTurn(sid));
-  sessions.setSessionInbox(new SessionInboxAdapter(ctx.db, inbox));
+  sessions.setSessionInbox(new SessionInboxAdapter(ctx.db, inbox, undefined, (fresh) => {
+    publishFreshSessionAttention({
+      db: ctx.db,
+      claim: (id, generation) => inbox.claimNotification(id, generation),
+      broadcast: message => broadcaster.broadcast(message),
+      gate: attentionGate,
+      fresh,
+    });
+  }));
 
   // Pre-warm proxy capabilities so model controls are ready before the first
   // session opens. Async, non-blocking; failures are tolerated.
@@ -524,9 +570,15 @@ export function createApp(ctx: AppContext): AppHandle {
     },
   });
   registerWorkspaceFileRoutes(app, ctx.db);
-  registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
+  const { listWorkingTrees } = registerWorkingTreeRoutes(app, ctx.db, broadcaster, {
     applicationRoutes: ctx.applicationRouteOptions,
   });
+  const search = createSearchModule({
+    db: ctx.db,
+    dataDir: ctx.dataDir,
+    listWorkingTrees,
+  });
+  search.register(app);
   registerAbsoluteFileRoutes(app, ctx.db, {
     dataDir: ctx.dataDir,
     ...ctx.applicationRouteOptions,
@@ -614,6 +666,7 @@ export function createApp(ctx: AppContext): AppHandle {
 
   // Timer ownership starts only after the app is fully assembled so boot
   // recovery never races route registration (contract K).
+  search.start();
   scheduleOrchestrator.start();
   remoteController.start();
 
@@ -626,7 +679,10 @@ export function createApp(ctx: AppContext): AppHandle {
     scheduleService,
     scheduleOrchestrator,
     inbox,
+    search,
     shutdown: async () => {
+      await ctx.catalogService?.closeInboxObservation();
+      await search.dispose();
       sessions.setSessionInbox(null);
       await translations.shutdown();
       await scheduleOrchestrator.stop();

@@ -1,8 +1,264 @@
 {
   "schemaVersion": 1,
   "pluginId": "claude",
-  "currentVersion": "0.3.2",
+  "currentVersion": "0.3.8",
   "entries": [
+    {
+      "version": "0.3.8",
+      "firstPublishedAt": "2026-10-17T18:11:15Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.8",
+          "publishedAt": "2026-10-17T18:11:15Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.8",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.8/gian-proxy-claude-0.3.8-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "0ac5a28e7f361745c296f88bb04087e29ded3a0dd032346919f880ac1f4b878f",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.8/gian-proxy-claude-0.3.8-darwin-arm64.tar.gz",
+            "sha256": "4ef7131c7d50301baa154f5dbc572ab83100f5c6491f35414448c864ecd5c307",
+            "size": 517719
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.302"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Claude Code Runtime 更新至 2.1.302（2026-10-16 已晋升至 /latest、npm latest 与 GitHub latest；SHA-256 与大小经官方清单校验）。上游 2.1.302 变更不涉及线协议或启动面，全部相关命令行标志已在新二进制上复验。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.8",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.8/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.7",
+      "firstPublishedAt": "2026-10-16T18:19:53Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.7",
+          "publishedAt": "2026-10-16T18:19:53Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.7",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.7/gian-proxy-claude-0.3.7-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "1a284b23f7075e404405a27d3d00e0a7f87ee3af96ea3e6160fdbbf49d196cdd",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.7/gian-proxy-claude-0.3.7-darwin-arm64.tar.gz",
+            "sha256": "6146ff0d398e8413344d0f22ed55560ee1ec34fc6a080ec2a608a96df06a98e5",
+            "size": 517721
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.301"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Claude Code Runtime 更新至 2.1.301（2026-10-15 已晋升至 /latest、npm latest 与 GitHub latest；SHA-256 与大小经官方清单校验）。上游 2.1.301 变更不涉及线协议或启动面，全部相关命令行标志已在新二进制上复验。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.7",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.7/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.6",
+      "firstPublishedAt": "2026-10-15T10:55:19Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.6",
+          "publishedAt": "2026-10-15T10:55:19Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.6/gian-proxy-claude-0.3.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "dbffd5491f2b09aea949d0eb2190a4508d6e38b9806103a7cfafdf16f8751bb2",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.6/gian-proxy-claude-0.3.6-darwin-arm64.tar.gz",
+            "sha256": "98f6250c2532ada1465034b1a2e05f709f956768d8c307a572f12f8a9dc8e3b4",
+            "size": 517719
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.300"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Claude Code Runtime 更新至 2.1.300（SHA-256 与大小经官方 2.1.300 清单校验）。适配器不变：2.1.297–2.1.300 没有线协议或启动面变更，适配器使用的全部命令行标志均已在新二进制上确认。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.6",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.6/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.5",
+      "firstPublishedAt": "2026-10-11T16:22:19Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.5",
+          "publishedAt": "2026-10-11T16:22:19Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.5/gian-proxy-claude-0.3.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "f2f3bd7deab8060eb26881130f865e306361775dd2bb23da51c341c9523167b9",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.5/gian-proxy-claude-0.3.5-darwin-arm64.tar.gz",
+            "sha256": "5a0208abc7b297e82749e01037fd781e3559cea0d5991e17f386ce7139eef017",
+            "size": 517721
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.296"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Fix session-creation effort resolution: apply the default model before checking conditions, omit disabled effort defaults and retain model-specific choices on the live connection. Update the managed Claude Code Runtime to 2.1.296. The wire protocol range is unchanged. Owner-selected direct publication: all tests, Runtime probes and archive self-tests were not run.",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.5",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.5/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts"
+          ]
+        }
+      ],
+      "unknowns": [
+        "All tests, Runtime probes and archive self-tests are NOT_RUN by Owner instruction."
+      ]
+    },
+    {
+      "version": "0.3.4",
+      "firstPublishedAt": "2026-10-11T15:03:28Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.4",
+          "publishedAt": "2026-10-11T15:03:28Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.4",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.4/gian-proxy-claude-0.3.4-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5ada1231924616d27e644129bde89187d8d67ed9f4651055a4fcc6e5ea26cfcf",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.4/gian-proxy-claude-0.3.4-darwin-arm64.tar.gz",
+            "sha256": "7e49607147174b2d8d21a350f37486bcd31bcc7215e267098d60da8b55bfee54",
+            "size": 517659
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.285"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "通过仅含 initialize 的控制握手读取 Claude 原生 /model 目录及每个模型的思考强度，当前默认模型不再遮蔽其余选择；保留现有配置 ID 与网关清单优先级，探测超时和关闭时清理子进程。Claude Code Runtime 仍为 2.1.285，线协议范围不变。Owner 指定直接发布，本次未运行任何测试、Runtime 探测或包自检。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.4",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.4/packages/proxies/cc-proxy/src/runtime/native-model-catalog.ts"
+          ]
+        }
+      ],
+      "unknowns": [
+        "Owner 指定未运行任何测试、Runtime 探测或包自检。"
+      ]
+    },
+    {
+      "version": "0.3.3",
+      "firstPublishedAt": "2026-10-11T05:51:28Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-claude-v0.3.3",
+          "publishedAt": "2026-10-11T05:51:28Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.3",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.3/gian-proxy-claude-0.3.3-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "9d0658212cd96fc4f209a28b745c80f2ad0dd68cbee64d6ea425942f5a7ae855",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-claude-v0.3.3/gian-proxy-claude-0.3.3-darwin-arm64.tar.gz",
+            "sha256": "837a8a8741c3ccd282d389acfc0f5129440e6cd367d83b9937150de03ca099a2",
+            "size": 516333
+          },
+          "runtimeDeclaration": {
+            "id": "claude",
+            "versions": [
+              "2.1.285"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "session"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "受管 Claude Code 升至 2.1.285；中断后保留并恢复 Claude 会话，Turn 内的 CLI 退出按退出码与信号如实失败；模型目录改从 wrapper 自身 HOME 与 settings 发现。线协议范围不变。本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.3",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.3/packages/proxies/claude-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.2",
       "firstPublishedAt": "2026-09-24T09:39:21Z",

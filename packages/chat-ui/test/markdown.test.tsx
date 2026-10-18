@@ -81,6 +81,42 @@ describe('MarkdownText', () => {
     expect(fireEvent.click(container.querySelector('a')!)).toBe(false);
     expect(openRelative).toHaveBeenCalledWith('./missing.md');
   });
+
+  // CommonMark right-flanking rules reject a closing `**` that sits between
+  // CJK fullwidth punctuation and a CJK character, so the bold markers leaked
+  // as literal text; remark-cjk-friendly relaxes those rules.
+  it.each([
+    ['**在普通 ChatGPT 对话里直接开启 Decisions 模式：**我没有查到', '在普通 ChatGPT 对话里直接开启 Decisions 模式：'],
+    ['**让 ChatGPT 把它当工具调用：可以做。**把 Decisions API', '让 ChatGPT 把它当工具调用：可以做。'],
+    ['**智能体的表现具有随机性。**每个任务运行 k 次', '智能体的表现具有随机性。'],
+    ['**静态检查和状态检查：**构建、lint', '静态检查和状态检查：'],
+  ])('renders CJK-adjacent bold as <strong>: %s', (source, boldText) => {
+    const { container } = render(<MarkdownText>{source}</MarkdownText>);
+    expect(container.querySelector('strong')?.textContent).toBe(boldText);
+    expect(container.textContent).not.toContain('**');
+  });
+
+  it('keeps non-CJK bold rendering unchanged', () => {
+    const { container } = render(<MarkdownText>{'**mode:** rest'}</MarkdownText>);
+    expect(container.querySelector('strong')?.textContent).toBe('mode:');
+  });
+
+  it('keeps plain CJK bold rendering unchanged', () => {
+    const { container } = render(<MarkdownText>{'**加粗**后续'}</MarkdownText>);
+    expect(container.querySelector('strong')?.textContent).toBe('加粗');
+  });
+
+  it('leaves spaced double asterisks literal', () => {
+    const { container } = render(<MarkdownText>{'2 ** 3'}</MarkdownText>);
+    expect(container.querySelector('strong')).toBeNull();
+    expect(container.textContent).toContain('2 ** 3');
+  });
+
+  it('leaves asterisks inside inline code literal', () => {
+    const { container } = render(<MarkdownText>{'`**不是加粗：**x`'}</MarkdownText>);
+    expect(container.querySelector('strong')).toBeNull();
+    expect(container.querySelector('code')?.textContent).toBe('**不是加粗：**x');
+  });
 });
 
 describe('FileLink', () => {

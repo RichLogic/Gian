@@ -27,7 +27,12 @@ import type {
   GianScreenshotErrorCode,
   GianScreenshotTarget,
 } from '@gian/shared';
-import { officialCatalogSourcePolicy } from '@gian/shared';
+import {
+  ATTENTION_EVENT_LABELS,
+  officialCatalogSourcePolicy,
+  type AttentionEvent,
+  type AttentionMessage,
+} from '@gian/shared';
 import electronUpdater from 'electron-updater';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -99,8 +104,15 @@ import {
 import {
   FileDesktopNotificationPreferenceStore,
   NativeNotificationService,
+  deliveredInboxRead,
+  desktopNavigationTargetsEqual,
+  desktopNotificationHostId,
+  inboxMarkReadHeaders,
+  nativeAttentionUsesChinese,
+  type DesktopAttentionLocale,
   type DesktopNotificationState,
   type DesktopNotificationTarget,
+  type NativeNotificationDelivery,
 } from './native-notifications.js';
 import {
   DEFAULT_ZOOM_PERCENT,
@@ -224,6 +236,7 @@ const DISABLED_NOTIFICATION_STATE: DesktopNotificationState = {
     sound: false,
   },
   lastError: null,
+  registryError: null,
 };
 
 function dataDirectory(): string {
@@ -464,30 +477,148 @@ async function ensureMainWindow(): Promise<BrowserWindow> {
 async function activateDesktopNavigation(target: DesktopNavigationTarget): Promise<void> {
   if (desktopReplacementPending()) return;
   pendingNavigationTarget = target;
-  const window = await ensureMainWindow();
+  let window: BrowserWindow;
+  try {
+    window = await ensureMainWindow();
+  } catch (error) {
+    console.warn('[desktop] navigation window was not created', error);
+    return;
+  }
+  if (desktopReplacementPending() || pendingNavigationTarget !== target) return;
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
   // A cold renderer may already have claimed this target through
   // `desktop:navigation:ready` while createMainWindow was awaiting loadURL.
   if (!rendererCanNavigate() || pendingNavigationTarget !== target) return;
-  window.webContents.send('desktop:navigation', target);
+  try {
+    window.webContents.send('desktop:navigation', target);
+  } catch (error) {
+    console.warn('[desktop] navigation delivery failed', error);
+    return;
+  }
+  if (pendingNavigationTarget !== target) return;
+  markDeliveredInboxRead(target);
 }
 
-function createNativeNotificationDelivery() {
+function createNativeNotificationDelivery(): NativeNotificationDelivery {
   return {
-    show(
-      payload: { title: string; body: string; silent: boolean },
-      callbacks: { onClick: () => void; onClose: () => void; onFailed: () => void },
-    ) {
-      const notification = new Notification(payload);
+    show(payload, callbacks) {
+      const notification = new Notification({
+        id: payload.id,
+        title: payload.title,
+        body: payload.body,
+        silent: payload.silent,
+      });
       notification.once('click', callbacks.onClick);
       notification.once('close', callbacks.onClose);
       notification.once('failed', callbacks.onFailed);
       notification.show();
       return { close: () => notification.close() };
     },
+    remove(id) {
+      // Electron's per-id delete is darwin-only. Other platforms keep the ref.
+      if (process.platform !== 'darwin' || typeof Notification.remove !== 'function') return false;
+      try {
+        Notification.remove(id);
+        return true;
+      } catch (error) {
+        console.warn('[desktop] notification remove failed', error);
+        return false;
+      }
+    },
+    async reclaim(id, callbacks) {
+      if (process.platform !== 'darwin' || typeof Notification.getHistory !== 'function') return null;
+      let history: Notification[];
+      try {
+        history = await Notification.getHistory();
+      } catch (error) {
+        console.warn('[desktop] notification history failed', error);
+        return null;
+      }
+      const found = history.find(notification => notification.id === id);
+      if (!found) return null;
+      // A restored notification stays where it is. show() would dismiss and repost it.
+      found.once('click', callbacks.onClick);
+      found.once('close', callbacks.onClose);
+      return { close: () => found.close() };
+    },
   };
+}
+
+const NATIVE_ATTENTION_LABELS_ZH: Record<AttentionEvent, string> = {
+  turn_complete: '回合完成',
+  answer_needed: '需要回答',
+  approval_needed: '需要批准',
+  plan_review_needed: '需要审阅计划',
+  turn_failed: '回合失败',
+};
+
+function formatNativeAttention(
+  message: AttentionMessage,
+  locale: DesktopAttentionLocale | null,
+): { title: string; body: string } {
+  if (!message.event) return { title: message.title, body: message.body };
+  const chinese = nativeAttentionUsesChinese(locale, app.getLocale());
+  const sessionName = message.session_name;
+  const named = sessionName?.trim() ?? '';
+  return {
+    title: sessionName && named.length > 0 ? sessionName : (chinese ? '未命名会话' : 'Untitled'),
+    body: chinese ? NATIVE_ATTENTION_LABELS_ZH[message.event] : ATTENTION_EVENT_LABELS[message.event],
+  };
+}
+
+function markDeliveredInboxRead(target: DesktopNavigationTarget): void {
+  if (target.type !== 'session' && target.type !== 'schedule_confirmation') return;
+  const ref = deliveredInboxRead(target, target);
+  if (!ref) return;
+  void deliverInboxRead(ref);
+}
+
+async function deliverInboxRead(ref: { id: string; generation: number }): Promise<void> {
+  // Packaged Main owns the desktop token. Unpackaged dev has no token and no
+  // native OS notification path. Do not invent a credential or skip auth.
+  if (!desktopToken) {
+    console.warn('[desktop] inbox mark-read skipped because this process has no desktop token');
+    return;
+  }
+  // The window uses the default session (no partition). Login stores
+  // httpOnly SameSite=Strict `gian_session` there for the Host origin.
+  // This fetch has no document origin, so do not rely on the cookie jar
+  // attaching that Strict cookie. Read it and send it. requireAuth still
+  // checks the cookie or Bearer; the desktop token only satisfies
+  // requireDesktopClient.
+  let sessionCookie: string | null = null;
+  try {
+    const cookies = await session.defaultSession.cookies.get({
+      url: targets.hostUrl,
+      name: 'gian_session',
+    });
+    const value = cookies.find(cookie => cookie.name === 'gian_session')?.value ?? '';
+    sessionCookie = value.length > 0 ? value : null;
+  } catch (error) {
+    console.warn('[desktop] inbox mark-read could not read the session cookie', error);
+    return;
+  }
+  const headers = inboxMarkReadHeaders({
+    desktopToken,
+    sessionCookie,
+    desktopTokenHeader: DESKTOP_TOKEN_HEADER,
+  });
+  if (!headers) return;
+  const url = new URL(`/api/inbox/${encodeURIComponent(ref.id)}/read`, targets.hostUrl);
+  try {
+    const response = await session.defaultSession.fetch(url.href, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ generation: ref.generation }),
+    });
+    if (!response.ok) {
+      console.warn(`[desktop] inbox mark-read was not accepted status=${response.status}`);
+    }
+  } catch (error) {
+    console.warn('[desktop] inbox mark-read failed', error);
+  }
 }
 
 function showUpdateReadyNotification(state: AppUpdateState): void {
@@ -533,12 +664,19 @@ function initializeDesktopServices(): void {
     && process.platform === 'darwin'
     && process.env['GIAN_DESKTOP_SMOKE_MANAGE_HOST'] !== '1'
     && Notification.isSupported();
+  const notificationHostId = desktopNotificationHostId(dataDirectory());
+  const notificationStore = new FileDesktopNotificationPreferenceStore(
+    join(app.getPath('userData'), 'notification-preferences.json'),
+    notificationHostId,
+  );
   notificationService = new NativeNotificationService({
+    hostId: notificationHostId,
     supported: nativeNotificationSupported,
-    store: new FileDesktopNotificationPreferenceStore(
-      join(app.getPath('userData'), 'notification-preferences.json'),
-    ),
+    store: notificationStore,
+    refs: notificationStore,
+    localeStore: notificationStore,
     delivery: createNativeNotificationDelivery(),
+    format: formatNativeAttention,
     onActivate: target => { void activateDesktopNavigation(target); },
   });
   notificationService.subscribe(state => {
@@ -573,6 +711,8 @@ function initializeDesktopServices(): void {
         new WebSocket(url, init) as unknown as AttentionSocket
       ),
       onAttention: message => { notificationService?.handleAttention(message); },
+      onControl: message => { notificationService?.applyAttentionControl(message); },
+      lookupRefs: () => notificationService?.attentionLookupRefs() ?? [],
     });
   }
 }
@@ -1391,7 +1531,11 @@ ipcMain.handle('desktop:set-frame-vibrancy', (event, theme: unknown, system: unk
 ipcMain.handle('desktop:navigation:ready', event => {
   if (!isMainWindowSender(event.sender) || !rendererDocumentReady) return null;
   rendererReady = true;
-  return pendingNavigationTarget;
+  const delivered = pendingNavigationTarget;
+  // Returning this object is delivery. A newer pending target is a different
+  // object, so an older click cannot mark that newer generation read.
+  if (delivered) markDeliveredInboxRead(delivered);
+  return delivered;
 });
 
 ipcMain.handle('desktop:navigation:ack', (event, target: unknown) => {
@@ -1429,8 +1573,14 @@ ipcMain.handle('desktop:notifications:set-context', (event, value: unknown) => {
   // which Session is visible (a renderer-supplied focus flag would be dead
   // state overwritten at this boundary).
   notificationService?.setWindowFocused(mainWindow?.isFocused() ?? false);
+  const record = value as Record<string, unknown>;
+  // `locale` is additive on this existing channel. C sends SystemConfig.locale
+  // (`zh-CN` | `en`) with visibleSessionId. Omitted or invalid locale keeps
+  // the persisted choice; Main falls back to the OS locale only when no
+  // choice has arrived. OS Chinese must not replace a stored English choice.
   notificationService?.setContext({
-    visibleSessionId: (value as Record<string, unknown>).visibleSessionId,
+    visibleSessionId: record.visibleSessionId,
+    ...(record.locale === 'zh-CN' || record.locale === 'en' ? { locale: record.locale } : {}),
   });
   return true;
 });
@@ -1856,6 +2006,9 @@ app.on('before-quit', event => {
 });
 
 app.on('will-quit', () => {
+  // before-quit can still be cancelled and then resumes this service.
+  // Handles close only once quit actually proceeds.
+  notificationService?.close();
   appUpdateController?.confirmInstallQuit();
 });
 
@@ -1876,14 +2029,7 @@ function navigationTargetsEqual(
   const candidate = actual as Record<string, unknown>;
   if (expected.type !== candidate.type) return false;
   if (expected.type === 'settings') return candidate.section === expected.section;
-  if (expected.type === 'schedule') {
-    return candidate.scheduleId === expected.scheduleId
-      && candidate.runId === expected.runId;
-  }
-  return candidate.type === 'session'
-    && candidate.sessionId === expected.sessionId
-    && candidate.turn === expected.turn
-    && candidate.kind === expected.kind;
+  return desktopNavigationTargetsEqual(expected, actual);
 }
 
 function isBrowserTabId(value: unknown): value is string {

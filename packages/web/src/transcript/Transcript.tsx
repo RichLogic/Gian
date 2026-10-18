@@ -12,7 +12,7 @@
  * Local Web and Remote Web render the same components — this file only maps
  * web state onto chat-ui's DTOs/callbacks.
  */
-import { useCallback, useMemo, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import type { ApprovalDecision } from '@gian/shared';
 import {
   renderChatItem,
@@ -71,11 +71,35 @@ export function renderItem(item: TranscriptItem, ctx: RenderItemContext): ReactN
   }
 }
 
+function focusRequestKeyOf(focus: {
+  nonce: number;
+  messageId?: string;
+  interactionId?: string;
+  turn?: number;
+  turnId?: string;
+  documentId?: string;
+  textRevision?: string;
+} | null): string {
+  if (!focus) return '';
+  return [
+    focus.nonce,
+    focus.messageId ?? '',
+    focus.interactionId ?? '',
+    focus.turn ?? '',
+    focus.turnId ?? '',
+    focus.documentId ?? '',
+    focus.textRevision ?? '',
+  ].join('\0');
+}
+
 export function Transcript({
   items, pending, onApprove, hiddenApprovalId, extras, hydrated = true,
   hasOlder = false, loadingOlder = false, onLoadOlder, historyError, onRetryHistory,
   forkAtTurn, selectionActions, inlineEventDetails = false,
   scheduleFocus = null, onConsumeScheduleFocus,
+  messageFocus = null, onConsumeMessageFocus, onLoadMessageContext, findActive = false,
+  returnToLatestGeneration = 0,
+  approvalsLockedReason = null,
   translation,
 }: {
   items: TranscriptItem[];
@@ -117,9 +141,122 @@ export function Transcript({
   /** Timer request to reveal the canonical message for one Schedule Run. */
   scheduleFocus?: { runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  /** Exact message navigation (Issue #168): when the target is not in the
+   *  loaded window, `onLoadMessageContext` fetches the bounded context
+   *  window (Host search context route); chat-ui scrolls once it renders. */
+  messageFocus?: {
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  onLoadMessageContext?: (focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => Promise<boolean>;
+  /** Explicit Back-to-latest generation from the history layer. A newer value
+   *  retires the in-flight context load for the current focus and does not
+   *  start another one for that same focus. */
+  returnToLatestGeneration?: number;
+  /** Conversation find owns the scroll position — suppress re-pinning. */
+  findActive?: boolean;
+  /** Read-only transcript (archived, Issue #168): approval/question cards
+   *  render but cannot submit; the reason replaces the resolving note. */
+  approvalsLockedReason?: string | null;
   translation?: TranslationController;
 }) {
   const t = useT();
+  // Exact message/interaction navigation: the target may sit outside the
+  // loaded window. Load its bounded context window (Host search context
+  // route) instead of walking older pages; chat-ui scrolls once the target
+  // renders. A failed load (stale text revision, unavailable target)
+  // consumes the focus — the caller surfaces the error.
+  const messageFocusLoaded = messageFocus
+    ? messageFocus.messageId
+      ? items.some(item => transcriptItemIdentity(item) === messageFocus.messageId)
+      : messageFocus.interactionId
+        ? items.some(item => item.kind === 'approval' && item.approvalId === messageFocus.interactionId)
+        : messageFocus.turn !== undefined
+          ? items.some(item => item.turn === messageFocus.turn)
+          : true
+    : true;
+  const contextRequestRef = useRef<number>(0);
+  // App and CodingView rebuild this object and the load callback on every
+  // render. The context route bumps a navigation token per call, so an effect
+  // that re-fires on those identities discards every response and leaves the
+  // transcript blank. Key the request on the focus primitives and read the
+  // callbacks from refs.
+  const messageFocusRef = useRef(messageFocus);
+  messageFocusRef.current = messageFocus;
+  const onLoadMessageContextRef = useRef(onLoadMessageContext);
+  onLoadMessageContextRef.current = onLoadMessageContext;
+  const onConsumeMessageFocusRef = useRef(onConsumeMessageFocus);
+  onConsumeMessageFocusRef.current = onConsumeMessageFocus;
+  const focusRequestKey = focusRequestKeyOf(messageFocus);
+  // Back to latest retires the load that belongs to the focus currently on
+  // screen. A later focus is a new request. A false from the retired load
+  // must not consume that newer focus, and this effect must not ask for the
+  // old window again while the same focus is still current.
+  const returnGenerationRef = useRef(returnToLatestGeneration);
+  const returnBlockedKeyRef = useRef<string | null>(null);
+  if (returnToLatestGeneration !== returnGenerationRef.current) {
+    returnGenerationRef.current = returnToLatestGeneration;
+    contextRequestRef.current += 1;
+    returnBlockedKeyRef.current = focusRequestKey;
+  } else if (returnBlockedKeyRef.current && returnBlockedKeyRef.current !== focusRequestKey) {
+    returnBlockedKeyRef.current = null;
+  }
+  useEffect(() => {
+    const focus = messageFocusRef.current;
+    const load = onLoadMessageContextRef.current;
+    if (returnBlockedKeyRef.current === focusRequestKey) return;
+    if (!focus || messageFocusLoaded || !load) return;
+    // The context route locates by turn_id/turn + document_id; without any
+    // of them there is no bounded window to fetch.
+    if (!focus.turnId && focus.turn === undefined && !focus.documentId) return;
+    const requestId = ++contextRequestRef.current;
+    const requestKey = focusRequestKey;
+    let alive = true;
+    void load({
+      turnId: focus.turnId,
+      turn: focus.turn,
+      documentId: focus.documentId,
+      textRevision: focus.textRevision,
+    }).then(ok => {
+      if (!alive || contextRequestRef.current !== requestId) return;
+      // The parent may already have installed a newer focus during render,
+      // before this effect's cleanup runs. A stale false belongs to the
+      // request above, not to that newer focus.
+      if (focusRequestKeyOf(messageFocusRef.current) !== requestKey) return;
+      if (ok) return;
+      // Return-to-latest already retired this focus. A superseded false must
+      // not clear it. A false for a focus that is still current is the
+      // bounded-window failure: consume that focus and let the history error
+      // retry the same locator.
+      if (returnBlockedKeyRef.current === requestKey) return;
+      onConsumeMessageFocusRef.current?.();
+    });
+    return () => { alive = false; };
+  }, [focusRequestKey, messageFocusLoaded, returnToLatestGeneration]);
+  const chatMessageFocus = useMemo(() => (
+    messageFocus ? {
+      messageId: messageFocus.messageId,
+      interactionId: messageFocus.interactionId,
+      turn: messageFocus.turn,
+      nonce: messageFocus.nonce,
+    } : null
+  ), [
+    messageFocus?.messageId,
+    messageFocus?.interactionId,
+    messageFocus?.turn,
+    messageFocus?.nonce,
+  ]);
   const selectionSourceIds = useMemo(
     () => new Set(items
       .filter(item => item.kind === 'user' || item.kind === 'assistant')
@@ -148,6 +285,14 @@ export function Transcript({
     }
     return <UserMessage key={identity} item={item} sendStatus={row} />;
   }, [translation]);
+  // Read-only transcripts (archived): approval/question cards render their
+  // state but cannot submit — the lock replaces the live onApprove path.
+  const renderWithLock = useCallback((item: TranscriptItem, ctx: RenderItemContext): ReactNode => {
+    if (item.kind === 'approval' && approvalsLockedReason) {
+      return <ApprovalCard key={transcriptItemIdentity(item)} item={item} onApprove={ctx.onApprove} lockedReason={approvalsLockedReason} />;
+    }
+    return renderWithTranslation(item, ctx);
+  }, [approvalsLockedReason, renderWithTranslation]);
   return (
     <ChatTranscript
       items={items}
@@ -161,7 +306,7 @@ export function Transcript({
       onLoadOlder={onLoadOlder}
       historyError={historyError}
       onRetryHistory={onRetryHistory}
-      renderItem={renderWithTranslation}
+      renderItem={renderWithLock}
       workingIndicator={<GianMascot size={36} state="working" title={t('transcript.workingEllipsis')} />}
       renderAssistantFooterActions={(item, turnEnd: StatusItem | undefined) => <>
           {forkAtTurn && <ForkFromTurnControl
@@ -202,6 +347,9 @@ export function Transcript({
         : undefined}
       scheduleFocus={scheduleFocus}
       onConsumeScheduleFocus={onConsumeScheduleFocus}
+      messageFocus={chatMessageFocus}
+      onConsumeMessageFocus={onConsumeMessageFocus}
+      findActive={findActive}
     />
   );
 }

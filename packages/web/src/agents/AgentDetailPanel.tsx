@@ -6,7 +6,7 @@ import type {
   UserAgentStatus,
 } from '@gian/shared';
 import { executorIdForPluginId } from '@gian/shared';
-import { loadProxyCapabilities, loadResolvedProxyCatalog } from '../api.js';
+import { AgentApiError, loadProxyCapabilities, loadResolvedProxyCatalog } from '../api.js';
 import { useT } from '../i18n/index.js';
 import { AgentLogo } from '../components/AgentLogo.js';
 import {
@@ -18,6 +18,47 @@ import {
 import { agentIdEntityKey } from '../operations/agents.js';
 import { usePendingOperations } from '../operations/use-operations.js';
 import type { ProxyLogoDisplay } from './catalog-model.js';
+
+/** Fixed reason tokens. A switch never resolves constructor or __proto__. */
+function capabilityReasonKey(reason: string): string | null {
+  switch (reason) {
+    case 'helper_missing': return 'agents.detail.cliHelperMissing';
+    case 'home_unsupported': return 'agents.detail.cliHome';
+    case 'models_unavailable': return 'agents.detail.cliNoModels';
+    case 'invalid_response': return 'agents.detail.cliUnexpected';
+    case 'query_failed': return 'agents.detail.cliFailed';
+    case 'timeout': return 'agents.detail.cliTimeout';
+    case 'output_limit': return 'agents.detail.cliOutputLimit';
+    case 'cancelled': return 'agents.detail.cliCancelled';
+    case 'cleanup_failed': return 'agents.detail.cliCleanup';
+    case 'busy': return 'agents.detail.cliBusy';
+    default: return null;
+  }
+}
+
+type CapabilityNotice = { kind: 'known'; reason: string } | { kind: 'generic' };
+
+function capabilityNoticeFromError(error: unknown): CapabilityNotice {
+  const reason = error instanceof AgentApiError ? error.reason : undefined;
+  if (typeof reason === 'string' && capabilityReasonKey(reason) !== null) {
+    return { kind: 'known', reason };
+  }
+  return { kind: 'generic' };
+}
+
+/** Lucide refresh-cw. The loading state reuses the shared spinner keyframes. */
+function RetryIcon({ spinning }: { spinning: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+         style={spinning ? { animation: 'spinner-rot 0.8s linear infinite' } : undefined}>
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M8 16H3v5" />
+    </svg>
+  );
+}
 
 /** Section-heading ⓘ with a CSS hover/focus tooltip (the shared .help-hint
  *  pattern from gian-v2.css — no positioning JS). */
@@ -82,27 +123,83 @@ export function AgentDetailPanel({
   const [resolvedSignature, setResolvedSignature] = useState('');
   const [resolvingDefaults, setResolvingDefaults] = useState(false);
   const resolveSequence = useRef(0);
-  const [capabilityError, setCapabilityError] = useState(false);
+  const [capabilityNotice, setCapabilityNotice] = useState<CapabilityNotice | null>(null);
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const [capabilityAttempt, setCapabilityAttempt] = useState(0);
+  const [capabilityAgentId, setCapabilityAgentId] = useState(agent.id);
+  const capabilityGeneration = useRef(0);
+  const agentIdRef = useRef(agent.id);
+  const retryBusy = useRef(false);
+  agentIdRef.current = agent.id;
+  const defaults = agent.defaults;
+  const defaultsRef = useRef(defaults);
+  defaultsRef.current = defaults;
+  // The panel is not remounted when the selection changes. Drop the previous
+  // Agent's catalog before paint so the first frame cannot show it.
+  if (capabilityAgentId !== agent.id) {
+    retryBusy.current = false;
+    setCapabilityAgentId(agent.id);
+    setCapabilities(null);
+    setResolvedCapabilities(null);
+    setResolvedSignature('');
+    setCapabilityNotice(null);
+    setResolvingDefaults(false);
+    setCapabilitiesLoading(false);
+  }
+  function releaseDefaultsLoad(): void {
+    retryBusy.current = false;
+    setCapabilitiesLoading(false);
+    setResolvingDefaults(false);
+  }
   useEffect(() => setName(agent.name), [agent.name]);
-  // Capability-driven Defaults exist for every Agent with a ready plugin.
   useEffect(() => {
+    const generation = ++capabilityGeneration.current;
+    const requestedId = agent.id;
     let alive = true;
+    let followResolve = false;
     resolveSequence.current += 1;
     setCapabilities(null);
     setResolvedCapabilities(null);
     setResolvedSignature('');
     setResolvingDefaults(false);
-    setCapabilityError(false);
-    if (agent.plugin.state !== 'ready') return () => { alive = false; };
-    loadProxyCapabilities(pluginId, agent.id)
+    const invalidateResolve = () => {
+      alive = false;
+      resolveSequence.current += 1;
+    };
+    if (agent.plugin.state !== 'ready') {
+      retryBusy.current = false;
+      setCapabilitiesLoading(false);
+      setCapabilityNotice(null);
+      return invalidateResolve;
+    }
+    setCapabilitiesLoading(true);
+    loadProxyCapabilities(pluginId, requestedId)
       .then(value => {
-        if (alive) setCapabilities(value);
+        if (!alive || capabilityGeneration.current !== generation || agentIdRef.current !== requestedId) return;
+        const catalog = catalogFromCapabilities(value);
+        const config = configsFromDefaults(defaultsRef.current, catalog);
+        followResolve = !!catalog.catalogRevision
+          && !!catalog.resolveAdvertised
+          && (Object.keys(config.sessionConfig).length > 0 || Object.keys(config.turnConfig).length > 0);
+        setCapabilities(value);
+        setResolvedCapabilities(null);
+        setResolvedSignature('');
+        if (!followResolve) setCapabilityNotice(null);
       })
-      .catch(() => {
-        if (alive) setCapabilityError(true);
+      .catch(error => {
+        if (!alive || capabilityGeneration.current !== generation || agentIdRef.current !== requestedId) return;
+        followResolve = false;
+        setCapabilities(null);
+        setResolvedCapabilities(null);
+        setResolvedSignature('');
+        setCapabilityNotice(capabilityNoticeFromError(error));
+      })
+      .finally(() => {
+        if (!alive || capabilityGeneration.current !== generation || agentIdRef.current !== requestedId) return;
+        if (!followResolve) releaseDefaultsLoad();
       });
-    return () => { alive = false; };
-  }, [agent.id, pluginId, agent.cliPath, agent.plugin.state, agent.plugin.version]);
+    return invalidateResolve;
+  }, [agent.id, pluginId, agent.cliPath, agent.plugin.state, agent.plugin.version, capabilityAttempt]);
 
   async function commitName() {
     const next = name.trim();
@@ -113,7 +210,6 @@ export function AgentDetailPanel({
     if (!(await onRename(next))) setName(agent.name);
   }
 
-  const defaults = agent.defaults;
   const settingsCapabilities = resolvedCapabilities ?? capabilities;
 
   async function toggleEnabled(next: boolean): Promise<void> {
@@ -184,13 +280,14 @@ export function AgentDetailPanel({
    *  the base catalog's ids and bindings for `catalog.resolve`. */
   function configsFromDefaults(
     value: AgentProxyDefaults,
+    catalog: ReturnType<typeof catalogFromCapabilities> = baseCatalog,
   ): { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } {
     const sessionConfig: Record<string, ConfigValue> = {};
     const turnConfig: Record<string, ConfigValue> = {};
     const assign = (option: ConfigOption, optionValue: ConfigValue): void => {
       (option.binding === 'session' ? sessionConfig : turnConfig)[option.id] = optionValue;
     };
-    for (const option of baseCatalog.configOptions) {
+    for (const option of catalog.configOptions) {
       if (option.role === 'model' && value.model) assign(option, value.model);
       else if (option.role === 'effort' && value.thinking) assign(option, value.thinking);
       else if ((option.role === 'approval_mode' || option.role === 'execution_mode') && value.mode) {
@@ -222,6 +319,8 @@ export function AgentDetailPanel({
     patch: Partial<AgentProxyDefaults>,
     { writeAlways = true }: { writeAlways?: boolean } = {},
   ): Promise<void> {
+    const requestedAgentId = agent.id;
+    const requestedGeneration = capabilityGeneration.current;
     const next = mergedDefaults(patch);
     const config = configsFromDefaults(next);
     const canResolve = !!baseCatalog.catalogRevision
@@ -230,6 +329,10 @@ export function AgentDetailPanel({
     if (!canResolve) {
       setResolvedCapabilities(null);
       setResolvedSignature('');
+      if (!writeAlways) {
+        releaseDefaultsLoad();
+        return;
+      }
       if (patch.model !== undefined) {
         const nextModel = models.find(candidate => candidate.model === patch.model)
           ?? models.find(candidate => candidate.isDefault)
@@ -254,15 +357,25 @@ export function AgentDetailPanel({
     }
 
     const sequence = ++resolveSequence.current;
+    const stillCurrent = (): boolean => (
+      resolveSequence.current === sequence
+      && agentIdRef.current === requestedAgentId
+      && capabilityGeneration.current === requestedGeneration
+    );
     setResolvingDefaults(true);
     try {
       const resolved = await loadResolvedProxyCatalog(pluginId, {
         catalogRevision: baseCatalog.catalogRevision!,
         ...config,
       }, agent.id);
-      if (resolveSequence.current !== sequence) return;
+      if (!stillCurrent()) return;
       setResolvedCapabilities(resolved);
       setResolvedSignature(JSON.stringify(config));
+      if (!writeAlways) {
+        setCapabilityNotice(null);
+        releaseDefaultsLoad();
+        return;
+      }
       const resolvedCatalog = catalogFromCapabilities(resolved);
       const resolvedSettings = executorSettingsFromCapabilities(pluginId, resolved);
       const atomic: Partial<AgentProxyDefaults> = {
@@ -299,43 +412,58 @@ export function AgentDetailPanel({
         }
       }
       if (writeAlways || Object.keys(atomic).length > 0) await onSetDefaults(atomic);
-    } catch {
-      if (resolveSequence.current !== sequence) return;
+    } catch (error) {
+      if (!stillCurrent()) return;
       setResolvedCapabilities(null);
       setResolvedSignature('');
-      if (writeAlways) {
-        await onSetDefaults({
-          ...patch,
-          ...(patch.model !== undefined && defaults.thinking ? { thinking: '' } : {}),
-        });
+      if (!writeAlways) {
+        setCapabilityNotice(capabilityNoticeFromError(error));
+        releaseDefaultsLoad();
+        return;
       }
+      await onSetDefaults({
+        ...patch,
+        ...(patch.model !== undefined && defaults.thinking ? { thinking: '' } : {}),
+      });
     } finally {
-      if (resolveSequence.current === sequence) setResolvingDefaults(false);
+      if (stillCurrent()) setResolvingDefaults(false);
     }
   }
 
-  // Re-resolve whenever the effective defaults signature changes so dependent
-  // selects (thinking/models per model or provider) render the Proxy's own
-  // choices; stale stored defaults are cleared by the same reconciliation.
+  // Display resolve follows the defaults signature only and never writes.
+  // A signature that no longer resolves still drops an in-flight result.
   useEffect(() => {
-    if (
-      !capabilities
-      || !!resolvedCapabilities
-      || !baseCatalog.resolveAdvertised
-      || !baseCatalog.catalogRevision
-      || defaultsSignature === resolvedSignature
-      || (Object.keys(defaultsConfig.sessionConfig).length === 0
-        && Object.keys(defaultsConfig.turnConfig).length === 0)
-    ) {
+    const configEmpty = Object.keys(defaultsConfig.sessionConfig).length === 0
+      && Object.keys(defaultsConfig.turnConfig).length === 0;
+    if (!capabilities || !baseCatalog.resolveAdvertised || !baseCatalog.catalogRevision || configEmpty) {
+      if (capabilities && configEmpty && defaultsSignature !== resolvedSignature) {
+        resolveSequence.current += 1;
+        setResolvedCapabilities(null);
+        setResolvedSignature('');
+        releaseDefaultsLoad();
+      }
       return;
     }
+    if (defaultsSignature === resolvedSignature) return;
     void changeDefaultOption({}, { writeAlways: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capabilities, defaultsSignature]);
 
   const defaultsEditable = agent.ready
     && (models.length > 0 || thinkingLevels.length > 0 || modes.length > 0
-      || extraOptions.length > 0 || capabilityError);
+      || extraOptions.length > 0);
+  const capabilityErrorText = capabilityNotice === null
+    ? null
+    : t(capabilityNotice.kind === 'known'
+      ? capabilityReasonKey(capabilityNotice.reason) ?? 'agents.detail.defaultsUnavailable'
+      : 'agents.detail.defaultsUnavailable');
+
+  function retryDefaults(): void {
+    if (retryBusy.current || capabilitiesLoading || busy) return;
+    retryBusy.current = true;
+    setCapabilitiesLoading(true);
+    setCapabilityAttempt(attempt => attempt + 1);
+  }
   const externalHome = agent.home === null;
 
   return (
@@ -449,7 +577,23 @@ export function AgentDetailPanel({
           <span className="s2-subhead">
             {t('agents.detail.defaults')}
             <HelpHint text={t('agents.detail.defaultsHelp')} />
+            {capabilityErrorText && (
+              <button type="button" className="btn icon ghost"
+                      data-testid="agent-defaults-retry"
+                      title={t('agents.detail.retryDefaults')}
+                      aria-label={t('agents.detail.retryDefaults')}
+                      aria-busy={capabilitiesLoading}
+                      disabled={busy || capabilitiesLoading}
+                      onClick={retryDefaults}>
+                <RetryIcon spinning={capabilitiesLoading} />
+              </button>
+            )}
           </span>
+          {capabilityErrorText && (
+            <p className="field-error" role="alert" data-testid="agent-defaults-error">
+              {capabilityErrorText}
+            </p>
+          )}
           {defaultsEditable ? (
               <div className="exec-defaults">
                 {models.length > 0 && (
@@ -489,23 +633,19 @@ export function AgentDetailPanel({
                     </select>
                   </label>
                 )}
-                {(modes.length > 0 || capabilityError) && (
+                {modes.length > 0 && (
                   <label className="exec-default">
                     <span className="lbl">{t('settings.executors.mode')}</span>
-                    {modes.length > 0 ? (
-                      <select
-                        className="select mono"
-                        value={selectedMode}
-                        disabled={busy || resolvingDefaults || !capabilities}
-                        onChange={event => void onSetDefaults({ mode: event.target.value })}
-                      >
-                        {modes.map(mode => (
-                          <option key={mode.id} value={mode.id}>{mode.label}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="s2-help">{t('settings.executors.status.unavailable')}</span>
-                    )}
+                    <select
+                      className="select mono"
+                      value={selectedMode}
+                      disabled={busy || resolvingDefaults || !capabilities}
+                      onChange={event => void onSetDefaults({ mode: event.target.value })}
+                    >
+                      {modes.map(mode => (
+                        <option key={mode.id} value={mode.id}>{mode.label}</option>
+                      ))}
+                    </select>
                   </label>
                 )}
                 {extraOptions.map(option => {

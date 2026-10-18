@@ -21,6 +21,7 @@ import type {
 } from '@gian/remote-protocol';
 import type { catalogReadResultSchema } from '@gian/remote-protocol';
 import type { z } from 'zod';
+import type { Locale } from '../i18n/messages.js';
 
 /** `catalog.read` result — inferred from the protocol schema (the package
  *  exports no alias for it). */
@@ -238,6 +239,11 @@ export interface RemoteUiState {
   connection: ConnectionState;
   hosts: RemoteHostEntry[];
   currentHostId: string | null;
+  /** UI locale, synced from the Host snapshot (`host.locale`). 'en' until the
+   *  first snapshot arrives and whenever the Host predates `wire.host_locale`
+   *  (old Host, stale encrypted cache). Conversation, Task, Repo, and Host
+   *  names remain user data and are never translated. */
+  locale: Locale;
 
   /** Host-scoped snapshot projection (undefined until the first snapshot). */
   workspaces: Array<{ id: string; name: string }>;

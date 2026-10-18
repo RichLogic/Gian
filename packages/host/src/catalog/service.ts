@@ -28,6 +28,11 @@ import type { PluginInstallReceipt } from '../plugin-store/receipt.js';
 import { compareSemver } from '../plugin-store/semver.js';
 import type { PluginStore } from '../plugin-store/store.js';
 import type { InstalledPackageView, PluginCurrentLaunch, PluginInstallCoordinate } from '../plugin-store/types.js';
+import {
+  INTEGRATION_UPDATE_CHANNEL,
+  type CatalogInboxObserver,
+  type CatalogUpdateCandidate,
+} from '../inbox/catalog-update-producer.js';
 import { PluginStoreError } from '../plugin-store/errors.js';
 import type { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
 import { readDevelopmentProxyLogo, type OfficialPresence, type TrustedLaunch } from '../runtime/trusted-launch.js';
@@ -38,6 +43,69 @@ export type OfficialBundledLaunch = OfficialPresence;
 export class CatalogService {
   private localizedFiles: Map<string, Buffer> | null = null;
   private localizedContent: CatalogLocalizations | null = null;
+  private inboxObserver: CatalogInboxObserver | null = null;
+  private inboxObservationClosed = false;
+  private inboxObservationGeneration = 0;
+  private readonly inboxObservationFlights = new Set<Promise<void>>();
+  private inboxRecoveryToken = 0;
+  private inboxImmediateRecovery: Promise<void> | null = null;
+  private inboxDelayedCancel: (() => void) | null = null;
+  private inboxRecoveryScheduler: ((run: () => Promise<void>) => () => void) | null = null;
+
+  setInboxObserver(observer: CatalogInboxObserver): void {
+    this.inboxObserver = observer;
+  }
+
+  /**
+   * Stop Inbox observation and wait until the in-flight read leaves the
+   * database. Catalog projection, install, update, and rollback stay available.
+   */
+  async closeInboxObservation(): Promise<void> {
+    this.inboxObservationClosed = true;
+    this.inboxObservationGeneration += 1;
+    this.inboxRecoveryToken += 1;
+    this.inboxDelayedCancel?.();
+    this.inboxDelayedCancel = null;
+    await Promise.allSettled([...this.inboxObservationFlights]);
+  }
+
+  /** Wait for observation already in flight. Does not cancel a delayed retry. */
+  async settleInboxObservation(): Promise<void> {
+    await Promise.allSettled([...this.inboxObservationFlights]);
+  }
+
+  /**
+   * Test seam for the delayed Inbox retry. Production uses one unref'd timer.
+   * A waiting timer is left in place so a stream of stale writes cannot starve it.
+   */
+  setInboxRecoveryScheduler(
+    scheduler: ((run: () => Promise<void>) => () => void) | null,
+  ): void {
+    this.inboxRecoveryScheduler = scheduler;
+  }
+
+  /** Startup snapshot. Development proxies have no release update channel. */
+  reconcileInbox(): void {
+    void this.observeInbox();
+  }
+
+  private beginInboxObservation(): number | null {
+    if (!this.inboxObserver || this.inboxObservationClosed) return null;
+    this.inboxObservationGeneration += 1;
+    return this.inboxObservationGeneration;
+  }
+
+  private inboxObservationCurrent(generation: number): boolean {
+    return !this.inboxObservationClosed && generation === this.inboxObservationGeneration;
+  }
+
+  private trackInboxObservation(run: Promise<unknown>): void {
+    const flight = run.then(() => undefined, () => undefined);
+    this.inboxObservationFlights.add(flight);
+    void flight.finally(() => {
+      this.inboxObservationFlights.delete(flight);
+    });
+  }
 
   private localizedEntry(pluginId: string, snapshot = this.options.store.snapshot()) {
     if (!snapshot.files || !snapshot.index) return undefined;
@@ -78,19 +146,52 @@ export class CatalogService {
   ) {}
 
   async list(): Promise<ProxyCatalogList> {
+    return this.observeCatalog('user');
+  }
+
+  private async observeCatalog(
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<ProxyCatalogList> {
     if (this.options.developmentProxies) return this.listDevelopment();
+    const generation = this.beginInboxObservation();
+    const fence = generation === null ? undefined : this.inboxObserver?.begin();
+    const run = this.projectCatalog(generation, fence, recovery);
+    if (generation !== null) this.trackInboxObservation(run);
+    return run;
+  }
+
+  private async projectCatalog(
+    generation: number | null,
+    fence: number | undefined,
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<ProxyCatalogList> {
     const snapshot = this.options.store.snapshot();
     const installed = await this.options.plugins.listInstalled();
     const installedById = new Map(installed.map((item) => [item.pluginId, item]));
     const items: ProxyCatalogItem[] = [];
+    const candidates: CatalogUpdateCandidate[] = [];
     const seen = new Set<string>();
     for (const entry of snapshot.index?.plugins ?? []) {
-      items.push(await this.project(entry, installedById.get(entry.pluginId) ?? null, snapshot));
+      const installedPackage = installedById.get(entry.pluginId) ?? null;
+      const item = await this.project(entry, installedPackage, snapshot);
+      items.push(item);
       seen.add(entry.pluginId);
+      const candidate = this.integrationCandidate(entry.pluginId, item, installedPackage, snapshot.sequence);
+      if (candidate) candidates.push(candidate);
     }
     for (const local of installed) {
       if (seen.has(local.pluginId)) continue;
       items.push(await this.projectInstalledOnly(local));
+    }
+    if (generation !== null && fence !== undefined) {
+      await this.publishIntegrationUpdates(
+        generation,
+        fence,
+        snapshot,
+        installed,
+        candidates,
+        recovery,
+      );
     }
     return {
       source: sourceState(snapshot.state, snapshot.sequence, snapshot.error, this.options.policy.sourceId),
@@ -133,6 +234,7 @@ export class CatalogService {
       { replaceUntrustedCurrent: replaceUntrusted },
     );
     this.retirePluginGeneration(item.pluginId);
+    await this.observeInbox();
     return receipt;
   }
 
@@ -156,6 +258,7 @@ export class CatalogService {
     }
     const receipt = await this.options.plugins.install(this.coordinateFrom(view, pluginId));
     this.retirePluginGeneration(item.pluginId);
+    await this.observeInbox();
     return receipt;
   }
 
@@ -164,6 +267,7 @@ export class CatalogService {
     const id = parseProxyPluginId(pluginId);
     const receipt = await this.options.plugins.rollback(id, pluginVersion);
     this.retirePluginGeneration(id);
+    await this.observeInbox();
     return receipt;
   }
 
@@ -260,6 +364,130 @@ export class CatalogService {
   private retirePluginGeneration(pluginId: string): void {
     this.options.readinessCache?.invalidate(pluginId);
     this.options.onPluginGenerationChanged?.(pluginId);
+  }
+
+  private async observeInbox(
+    recovery: 'user' | 'immediate' | 'delayed' = 'user',
+  ): Promise<void> {
+    if (!this.inboxObserver || this.inboxObservationClosed) return;
+    try {
+      await this.observeCatalog(recovery);
+    } catch (error) {
+      console.error('[catalog-inbox] observation failed', error);
+    }
+  }
+
+  /**
+   * One immediate reconciliation for the user observation that noticed the
+   * gap, then one delayed retry. A retry that is already waiting is not
+   * replaced. Nested retries do not start another immediate pass, so a
+   * continuous stale fence cannot grow the flight set or busy-loop.
+   */
+  private recoverInbox(allowImmediate: boolean): void {
+    if (this.inboxObservationClosed || !this.inboxObserver) return;
+    if (allowImmediate && this.inboxImmediateRecovery === null) {
+      const run = this.observeInbox('immediate');
+      this.inboxImmediateRecovery = run;
+      this.trackInboxObservation(run);
+      void run.finally(() => {
+        if (this.inboxImmediateRecovery === run) this.inboxImmediateRecovery = null;
+      });
+    }
+    this.scheduleDelayedInboxRecovery();
+  }
+
+  private scheduleDelayedInboxRecovery(): void {
+    if (this.inboxObservationClosed || !this.inboxObserver || this.inboxDelayedCancel) return;
+    const token = this.inboxRecoveryToken;
+    let started = false;
+    const run = async (): Promise<void> => {
+      if (started || token !== this.inboxRecoveryToken || this.inboxObservationClosed) return;
+      started = true;
+      this.inboxDelayedCancel = null;
+      if (token !== this.inboxRecoveryToken || this.inboxObservationClosed || !this.inboxObserver) return;
+      await this.observeInbox('delayed');
+    };
+    const schedule = this.inboxRecoveryScheduler ?? scheduleCatalogInboxRecovery;
+    this.inboxDelayedCancel = schedule(run);
+  }
+
+  private async publishIntegrationUpdates(
+    generation: number,
+    fence: number,
+    snapshot: CatalogSnapshot,
+    installed: InstalledPackageView[],
+    candidates: CatalogUpdateCandidate[],
+    recovery: 'user' | 'immediate' | 'delayed',
+  ): Promise<void> {
+    const observer = this.inboxObserver;
+    if (!observer || !this.inboxObservationCurrent(generation)) return;
+    let stable = false;
+    let moved = false;
+    let receiptsChanged = false;
+    try {
+      const installedAfter = await this.options.plugins.listInstalled();
+      if (!this.inboxObservationCurrent(generation)) return;
+      const again = this.options.store.snapshot();
+      moved = again !== snapshot || again.sequence !== snapshot.sequence;
+      receiptsChanged = !sameInstalledReceipts(installed, installedAfter);
+      stable = !moved
+        && !receiptsChanged
+        && snapshot.state === 'ready'
+        && snapshot.index !== null
+        && snapshot.sequence !== null
+        && snapshot.sequence >= 1
+        && again.state === 'ready'
+        && again.index !== null;
+    } catch (error) {
+      console.error('[catalog-inbox] installed receipts changed while they were read', error);
+    }
+    if (!this.inboxObservationCurrent(generation)) return;
+    if (moved || receiptsChanged) {
+      this.recoverInbox(recovery === 'user');
+      return;
+    }
+    let outcome: 'applied' | 'stale' | 'ignored';
+    try {
+      outcome = observer.finish(fence, {
+        mode: stable ? 'complete' : 'ignore',
+        catalogSequence: snapshot.sequence,
+        candidates: stable ? candidates : [],
+      });
+    } catch (error) {
+      console.error('[catalog-inbox] observation failed', error);
+      return;
+    }
+    if (outcome === 'stale' && this.inboxObservationCurrent(generation)) {
+      this.recoverInbox(recovery === 'user');
+    }
+  }
+
+  private integrationCandidate(
+    pluginId: string,
+    item: ProxyCatalogItem,
+    installed: InstalledPackageView | null,
+    sequence: number | null,
+  ): CatalogUpdateCandidate | null {
+    const version = item.installation.latestVersion;
+    if (
+      sequence === null
+      || sequence < 1
+      || !version
+      || !item.availableActions.includes('update_proxy')
+    ) {
+      return null;
+    }
+    const failed = installed?.versions.some(entry => (
+      entry.version === version && entry.state === 'quarantined'
+    )) === true;
+    return {
+      pluginId,
+      displayName: item.displayName,
+      version,
+      channel: INTEGRATION_UPDATE_CHANNEL,
+      phase: failed ? 'failed' : 'available',
+      catalogSequence: sequence,
+    };
   }
 
   async logo(
@@ -620,6 +848,39 @@ export class CatalogService {
 interface CatalogActionView {
   snapshot: CatalogSnapshot;
   installedById: Map<string, InstalledPackageView>;
+}
+
+const CATALOG_INBOX_RECOVERY_DELAY_MS = 1_000;
+
+/** A zero delay would busy-loop while Inbox writes keep the collection fence stale. */
+function scheduleCatalogInboxRecovery(run: () => Promise<void>): () => void {
+  const timer = setTimeout(() => {
+    void run();
+  }, CATALOG_INBOX_RECOVERY_DELAY_MS);
+  timer.unref();
+  return () => {
+    clearTimeout(timer);
+  };
+}
+
+function sameInstalledReceipts(
+  before: readonly InstalledPackageView[],
+  after: readonly InstalledPackageView[],
+): boolean {
+  return receiptSignature(before) === receiptSignature(after);
+}
+
+function receiptSignature(installed: readonly InstalledPackageView[]): string {
+  return installed
+    .map(item => {
+      const versions = item.versions
+        .map(version => `${version.version}:${version.state}`)
+        .sort()
+        .join(',');
+      return `${item.pluginId}|${item.currentPointer}|${item.currentVersion ?? ''}|${versions}`;
+    })
+    .sort()
+    .join('\n');
 }
 
 function sourceState(

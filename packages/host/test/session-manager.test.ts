@@ -2981,7 +2981,7 @@ test('turn.failed persists and broadcasts one Gian-owned terminal boundary', asy
   }
 });
 
-test('duplicate legacy approval events emit one attention signal', async () => {
+test('duplicate legacy approval events wait for a fresh inbox occurrence', async () => {
   const { dir, db, wsId, sessions, proxyMgr, broadcaster } = setup();
   try {
     const session = await sessions.createSession({
@@ -3021,8 +3021,7 @@ test('duplicate legacy approval events emit one attention signal', async () => {
       (message): message is Extract<ServerToClientMessage, { type: 'attention' }> =>
         message.type === 'attention',
     );
-    assert.equal(attentions.length, 1, 'bounded identity de-duplication suppresses the repeat');
-    assert.match(attentions[0]?.id ?? '', /^gian:attention:[A-Za-z0-9_-]{43}$/u);
+    assert.equal(attentions.length, 0, 'approval attention is published only after a fresh inbox occurrence');
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

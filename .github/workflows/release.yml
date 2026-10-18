@@ -233,6 +233,7 @@ jobs:
             if node scripts/verify-update-artifacts.mjs \
               --release-dir packages/desktop/release \
               --version "${VERSION}" \
+              --app-update-config packages/desktop/release/mac-arm64/Gian.app/Contents/Resources/app-update.yml \
               --github-release-json "${RELEASE_JSON}"; then
               VERIFIED=true
               break

@@ -1,6 +1,7 @@
 import { MarkdownText, type MsgItem } from '@gian/chat-ui';
 import { TRANSLATION_LANGUAGES } from '@gian/shared';
 import { useT } from '../i18n/index.js';
+import { SEND_TRANSLATE_TIMEOUT_MS } from './send-timeout.js';
 import type { ReadingTranslation, TranslationController } from './use-translation.js';
 
 export function languageName(code: string): string {
@@ -63,14 +64,16 @@ export function TranslationResult({ value, expanded, onRetry }: { value: Reading
 /**
  * Inline progress row under a pending send echo while its translation runs
  * (the optimistic up-screen replaced the old centered TranslationSendStatus
- * bar). Pending: Translating dots + a "Send original" shortcut. Error: the
- * message plus Retry / Send original text links. There is deliberately no way
- * to cancel the whole message — the bubble is already on screen.
+ * bar). Translating: dots + a "Send original" shortcut. Failed (error or the
+ * 45s timeout): the message plus Retry / Send original / Take text back.
+ * There is deliberately no way to silently drop the message — reclaim hands
+ * the text back to the composer instead.
  */
 export function TranslationSendRow({ controller }: { controller: TranslationController }) {
   const t = useT();
-  if (!controller.sending) return null;
-  if (controller.sending.pending) {
+  const sending = controller.sending;
+  if (!sending) return null;
+  if (sending.phase === 'translating') {
     return <div className="translation-send-row" role="status">
       <TranslatingIndicator />
       <button type="button" className="translation-link" onClick={() => controller.finishSend(true)}>
@@ -79,12 +82,17 @@ export function TranslationSendRow({ controller }: { controller: TranslationCont
     </div>;
   }
   return <div className="translation-send-row" role="alert">
-    <span className="translation-error">{controller.sending.error}</span>
+    <span className="translation-error">{sending.timedOut
+      ? t('translation.sendTimeout').replace('{s}', String(SEND_TRANSLATE_TIMEOUT_MS / 1000))
+      : sending.error}</span>
     <button type="button" className="translation-link" onClick={() => void controller.retrySend()}>
       {t('translation.retry')}
     </button>
     <button type="button" className="translation-link" onClick={() => controller.finishSend(true)}>
       {t('translation.sendOriginal')}
+    </button>
+    <button type="button" className="translation-link" onClick={() => controller.reclaimSend()}>
+      {t('translation.reclaim')}
     </button>
   </div>;
 }

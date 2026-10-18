@@ -1,8 +1,14 @@
 {
   "name": "@gian/shared",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

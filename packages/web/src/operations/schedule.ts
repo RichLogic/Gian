@@ -148,14 +148,15 @@ const scheduleArchive: OperationDefinition<ScheduleActionInput, Schedule> = {
 /** Host-enforced create confirmation (contract L). The resolve REST route
  *  does not take an Idempotency-Key (the confirmation id itself is the
  *  dedupe); the run result is the resolved Confirmation, which the card
- *  upserts into the pending store on `confirmed`. */
+ *  upserts into the pending store on `confirmed`. Inbox-originated resolves
+ *  bind the exact seen occurrence (0.6.7 expected_inbox precondition). */
 const scheduleResolveConfirmation: OperationDefinition<
-  { confirmationId: string; decision: 'approve' | 'reject' },
+  { confirmationId: string; decision: 'approve' | 'reject'; expectedInbox?: { id: string; generation: number } },
   ScheduleConfirmation
 > = {
   policy: 'pending',
   entityKey: input => scheduleConfirmationEntityKey(input.confirmationId),
-  execute: input => resolveScheduleConfirmation(input.confirmationId, input.decision),
+  execute: input => resolveScheduleConfirmation(input.confirmationId, input.decision, input.expectedInbox),
   // No toast: the card keeps the failure visible and offers retry.
   timeoutMs: REST_TIMEOUT_MS,
 };

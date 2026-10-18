@@ -21,7 +21,7 @@ import type { CreateSessionInput } from './new-session-view.js';
 import { confirm as confirmDialog, toast } from '../feedback.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { taskEntityKey } from '../operations/task.js';
-import { sessionNeedsAttention, orderByIds } from '../session-routing.js';
+import { sessionNeedsAttention, orderByIds, delegatedCallerIds } from '../session-routing.js';
 import { moveById, useDragReorder } from '../dnd-reorder.js';
 import type { RowDragProps } from '../dnd-reorder.js';
 import {
@@ -33,6 +33,14 @@ import {
   useTaskOrderOverlay,
 } from '../operations/use-operations.js';
 import type { PendingFirstMessage } from '../pending-first-message.js';
+import {
+  consumeSessionReveal,
+  notifyRevealRowReady,
+  peekSessionReveal,
+  scrollRowIntoContainerView,
+  subscribeRevealRowReady,
+  subscribeSessionReveal,
+} from '../presentation/session-reveal.js';
 
 // ── V2 icon paths (verbatim subset from design/gian-design-v2/js/data.jsx) ──
 const I = {
@@ -51,6 +59,9 @@ const I = {
   // task with steps" and avoids overloading the pin, which already means
   // "pinned to top" in the task menu.
   listChecks: 'M3 17l2 2 4-4 M3 7l2 2 4-4 M13 6h8 M13 12h8 M13 18h8',
+  // lucide "compass" — the subtask created a child conversation via the Gian
+  // MCP session.create delegation tool (same glyph as the Repos rail badge).
+  compass: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z M16.24 7.76l-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z',
   // lucide lock-open — the done subtask's hover toggle (2026-08-04): the
   // action is "reopen", so a plain check (which reads as "complete") was
   // misleading.
@@ -802,6 +813,10 @@ export function TasksSidebar({
   // EVERY conversation, not just task-bound subtasks.
   // Most recently updated first (2026-09-15 owner).
   const wsById = useMemo(() => new Map(workspaces.map(w => [w.id, w])), [workspaces]);
+  // Delegation callers (2026-10-12): the compass badge marks the session that
+  // CREATED a child via the Gian MCP session.create tool — derived from the
+  // children's created_by_session_id FKs.
+  const delegatedCallers = useMemo(() => delegatedCallerIds(sessions), [sessions]);
   const unassigned = useMemo(
     () => sessions
       .filter(s => s.task_id === null
@@ -810,6 +825,89 @@ export function TasksSidebar({
       .sort(compareSessionsByUpdatedDesc),
     [sessions, wsById],
   );
+
+  // ── Explicit-navigation reveal (Issue #53/#168) ─────────────────────────
+  // Same contract as the Repos rail: only a pending bus intent (posted by an
+  // explicit session navigation) reveals a row here; WS refreshes never do.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // The pending scroll carries the intent nonce: a newer navigation that
+  // arrives before the row renders invalidates it, and the stale pass clears
+  // itself instead of scrolling back to the old target.
+  const pendingRevealScrollRef = useRef<{ sessionId: string; nonce: number } | null>(null);
+  const [revealTick, setRevealTick] = useState(0);
+  const [revealRowReadyTick, setRevealRowReadyTick] = useState(0);
+  const [revealSessionId, setRevealSessionId] = useState<string | null>(null);
+  useEffect(() => subscribeSessionReveal(() => setRevealTick(tick => tick + 1)), []);
+  // A task group's completed-cap raise happens in the CHILD's effect pass;
+  // its re-render alone never re-runs this rail's layout effect, so the child
+  // signals readiness explicitly and the scroll pass re-runs on the tick.
+  useEffect(() => subscribeRevealRowReady(() => setRevealRowReadyTick(tick => tick + 1)), []);
+
+  // Phase 1: make the target row renderable — expand the owning section
+  // (doing / 未分配), expand the task group, un-hide completed rows when the
+  // target is one, and raise the 未分配 show-more cap. A session or task
+  // missing from the read model keeps the intent pending until data arrives;
+  // an archived read-only target or a done/archived task has no rail row, so
+  // the intent is consumed and dropped.
+  useEffect(() => {
+    const request = peekSessionReveal();
+    if (!request || request.surface !== 'tasks') return;
+    const target = sessions.find(s => s.id === request.sessionId);
+    if (!target) return;
+    if (target.archived === 1) {
+      consumeSessionReveal(request.nonce);
+      return;
+    }
+    const taskId = target.task_id || null;
+    if (taskId) {
+      const task = tasks.find(candidate => candidate.id === taskId);
+      if (!task) return; // task list still loading — retry on the next change
+      if (task.status !== 'open') {
+        // Done/archived tasks render no subtask rows.
+        consumeSessionReveal(request.nonce);
+        return;
+      }
+      if (collapsedSections.has('doing')) toggleSection('doing');
+      if (collapsedTasks.has(taskId)) toggleTaskCollapsed(taskId);
+      if (target.completed_at != null && tasksWithCompletedHidden.has(taskId)) {
+        toggleCompletedSessions(taskId);
+      }
+    } else {
+      if (collapsedSections.has('unassigned')) toggleSection('unassigned');
+      const index = unassigned.findIndex(s => s.id === target.id);
+      if (index >= 0 && index >= unassignedShown) setUnassignedShown(index + 1);
+    }
+    pendingRevealScrollRef.current = { sessionId: target.id, nonce: request.nonce };
+    setRevealSessionId(target.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealTick, sessions, tasks, collapsedSections, collapsedTasks, tasksWithCompletedHidden, unassigned, unassignedShown]);
+
+  // Phase 2: once the row is in the DOM, scroll it into the rail's own
+  // scroll container and consume the intent. The pass re-runs on parent
+  // renders AND on the row-ready tick a capped group raises after its cap
+  // effect grows.
+  useLayoutEffect(() => {
+    const pending = pendingRevealScrollRef.current;
+    if (!pending) return;
+    const request = peekSessionReveal();
+    if (!request || request.nonce !== pending.nonce
+        || request.surface !== 'tasks' || request.sessionId !== pending.sessionId) {
+      // Superseded or retired before the row rendered — never scroll back.
+      pendingRevealScrollRef.current = null;
+      setRevealSessionId(null);
+      return;
+    }
+    const container = scrollRef.current;
+    if (!container) return;
+    const row = container.querySelector(`[data-testid="session-row-${pending.sessionId}"]`);
+    if (!(row instanceof HTMLElement)) return;
+    scrollRowIntoContainerView(container, row);
+    pendingRevealScrollRef.current = null;
+    setRevealSessionId(null);
+    consumeSessionReveal(request.nonce);
+    // revealTick + revealRowReadyTick re-arm the pass; the rest re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealTick, revealRowReadyTick, sessions, tasks, collapsedSections, collapsedTasks, unassignedShown, revealSessionId]);
 
   // Task drag reorder (2026-08-29): the open group is the draggable range;
   // the 完成 section keeps its automatic order. While the `task.reorder` run
@@ -863,7 +961,7 @@ export function TasksSidebar({
         <SidebarNavRows mode={mode} onSetMode={onSetMode} />
         <SidebarListSwitch listMode={listMode} onSetListMode={onSetListMode} />
       </div>
-      <div className="sb-scroll">
+      <div className="sb-scroll" ref={scrollRef}>
         {creating && (
           <NewTaskForm onSubmit={createTaskNow} onCancel={() => setCreating(false)} />
         )}
@@ -889,11 +987,13 @@ export function TasksSidebar({
             activeSubtaskId={activeSubtaskId}
             isCollapsed={collapsedTasks.has(task.id)}
             completedSessionsHidden={tasksWithCompletedHidden.has(task.id)}
+            revealSessionId={revealSessionId}
             renaming={renamingTaskId === task.id}
             deleting={deletingTaskIds.has(task.id)}
             dragProps={taskDnd.rowProps(task.id)}
             dragClass={taskDnd.rowClass(task.id)}
             wsById={wsById}
+            delegatedCallers={delegatedCallers}
             onToggleCollapsed={() => toggleTaskCollapsed(task.id)}
             onToggleCompletedSessions={() => toggleCompletedSessions(task.id)}
             onRenameDone={() => setRenamingTaskId(null)}
@@ -941,6 +1041,7 @@ export function TasksSidebar({
                 hideAge
                 hidePin
                 workspaceName={s.workspace_id != null ? wsById.get(s.workspace_id)?.name : undefined}
+                delegatedCaller={delegatedCallers.has(s.id)}
                 drag={unassignedDrag(s.id)}
                 onSelect={() => onSelectSession(s.id)}
                 onPin={pinned => onPinSession(s.id, pinned)}
@@ -1024,11 +1125,13 @@ function OpenTaskGroup({
   activeSubtaskId,
   isCollapsed,
   completedSessionsHidden,
+  revealSessionId,
   renaming,
   deleting,
   dragProps,
   dragClass,
   wsById,
+  delegatedCallers,
   onToggleCollapsed,
   onToggleCompletedSessions,
   onRenameDone,
@@ -1046,6 +1149,9 @@ function OpenTaskGroup({
   activeSubtaskId: string | null;
   isCollapsed: boolean;
   completedSessionsHidden: boolean;
+  /** Explicit-navigation reveal target: when a completed subtask row sits
+   *  beyond the show-more cap, raise the cap so the row renders. */
+  revealSessionId?: string | null;
   renaming: boolean;
   deleting: boolean;
   /** Task-level drag (owned by TasksList's controller) on the group header. */
@@ -1053,6 +1159,9 @@ function OpenTaskGroup({
   dragClass: string;
   /** T3 hover-card context (project names) for the subtask rows. */
   wsById: Map<string, Workspace>;
+  /** Sessions that created a child via the Gian MCP session.create tool — the
+   *  compass badge marks the caller, not the child. */
+  delegatedCallers: Set<string>;
   onToggleCollapsed: () => void;
   onToggleCompletedSessions: () => void;
   onRenameDone: () => void;
@@ -1097,6 +1206,22 @@ function OpenTaskGroup({
   // full; only the completed tail (shown via the ⋯ menu) caps at 5 rows +
   // 显示更多. View-only — the drag order is unaffected.
   const [completedShown, setCompletedShown] = useState(GROUP_INITIAL_SHOWN);
+  // An explicit-navigation reveal targeting a completed row beyond the cap
+  // raises the cap so the row actually renders before it is scrolled into
+  // view. Open rows always render, so they need no bump. The parent's scroll
+  // pass re-runs on the row-ready signal — this component's re-render alone
+  // never re-fires the parent's effects.
+  useEffect(() => {
+    if (!revealSessionId) return;
+    const index = rows.findIndex(s => s.id === revealSessionId);
+    if (index < 0) return;
+    const openCount = rows.filter(s => s.completed_at == null).length;
+    const completedIndex = index - openCount;
+    if (completedIndex >= 0 && completedIndex >= completedShown) {
+      setCompletedShown(completedIndex + 1);
+      notifyRevealRowReady();
+    }
+  }, [revealSessionId, rows, completedShown]);
   const completedCount = rows.length - rows.filter(s => s.completed_at == null).length;
   const visibleRows = rows.filter(s => s.completed_at == null)
     .concat(rows.filter(s => s.completed_at != null).slice(0, completedShown));
@@ -1166,6 +1291,7 @@ function OpenTaskGroup({
           subtask={st}
           active={(mode === 'tasks' || mode === 'sessions') && st.id === activeSubtaskId}
           workspaceName={st.workspace_id != null ? wsById.get(st.workspace_id)?.name : undefined}
+          delegatedCaller={delegatedCallers.has(st.id)}
           onSelect={() => onSelectSubtask(task.id, st.id)}
           drag={reorderDrag
             ? {
@@ -1259,6 +1385,7 @@ function SubtaskRow({
   subtask,
   active,
   workspaceName,
+  delegatedCaller,
   onSelect,
   drag,
 }: {
@@ -1266,6 +1393,9 @@ function SubtaskRow({
   active: boolean;
   /** T3 hover-card context (2026-09-06). */
   workspaceName?: string;
+  /** This subtask CREATED a child conversation via the Gian MCP
+   *  session.create tool (compass badge, same as the Repos rail). */
+  delegatedCaller?: boolean;
   onSelect: () => void;
   /** Drag-reorder wiring (OpenTaskGroup's controller); absent for completed
    *  rows, which sit outside the draggable range. */
@@ -1287,6 +1417,7 @@ function SubtaskRow({
       className={`rail-item session-row${done ? ' subtask-done' : ''}${active ? ' active' : ''}${running ? ' is-running' : ''}${statusGlyphShown(subtask.status, subtask.unread === 1) ? ' has-status' : ''}${drag?.className ?? ''}`}
       role="button"
       tabIndex={0}
+      data-testid={`session-row-${subtask.id}`}
       onClick={onSelect}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
@@ -1307,6 +1438,19 @@ function SubtaskRow({
       )}
       <div className="ri-body">
         <div className="ri-row1">
+          {/* Delegation glyph: this subtask CREATED a child conversation via
+              the Gian MCP session.create tool — the badge marks the caller,
+              same gutter as the Repos rail's delegation/remote badges. */}
+          {delegatedCaller && (
+            <span
+              className="ri-delegate-badge"
+              title={t('coding.session.delegatedCaller')}
+              aria-label={t('coding.session.delegatedCaller')}
+              data-testid={`session-delegated-${subtask.id}`}
+            >
+              <Icon d={I.compass} size={13} />
+            </span>
+          )}
           <span className="ri-title">{subtask.name || t('coding.session.untitled')}</span>
           {/* Row-end: the status glyph only (T4, 2026-09-06 — the Tasks rail
               dropped the relative-time stamp; the 38px reservation is scoped

@@ -199,7 +199,6 @@ async function setup(): Promise<Fixture> {
   });
   const dispatcher = new ScheduleRunDispatcher(service, sessions, db, {
     now: () => ({ ms: clockMs, iso: new Date(clockMs).toISOString() }),
-    broadcaster: broadcaster as unknown as WsBroadcaster,
   });
   return { dir, db, sessions, service, dispatcher, stub, controlSessionId: controlSession.id, clockMs };
 }

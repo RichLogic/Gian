@@ -21,7 +21,7 @@ import {
   shutdownProxyProcess,
   waitForProcessGroupEmpty,
 } from './process-shutdown.js';
-import { redactSensitiveText } from '../logging/redact.js';
+import { capabilityReasonFromRpcData, redactSensitiveText } from '../logging/redact.js';
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -441,7 +441,10 @@ export class ProtocolV2Client {
       && typeof (data as { domainCode?: unknown }).domainCode === 'string'
       ? (data as { domainCode: DomainCode }).domainCode
       : 'INTERNAL';
-    return new ProxyProtocolError(domainCode, `[${domainCode}] ${parsed.data.message}`, false);
+    const error = new ProxyProtocolError(domainCode, `[${domainCode}] ${parsed.data.message}`, false);
+    const reason = capabilityReasonFromRpcData(data);
+    if (reason !== undefined) error.reason = reason;
+    return error;
   }
 
   private handleAcceptError(error: unknown, line?: string): void {

@@ -105,7 +105,7 @@ function request(id: string, method: string, params: Record<string, unknown> = {
 
 type Emitted = { method: string; params: Record<string, unknown> };
 
-async function setup(permissionModes?: string[]) {
+async function setup(permissionModes?: string[], extraModels: ModelCapabilities[] = []) {
   const runtime = new FakeRuntime([
     {
       id: 'claude-default',
@@ -127,6 +127,7 @@ async function setup(permissionModes?: string[]) {
       defaultEffort: 'high',
       supportedEfforts: ['low', 'high', 'max'],
     },
+    ...extraModels,
   ], permissionModes);
   const service = new CcProxyService({ runtime });
   await service.initialize();
@@ -466,6 +467,72 @@ test('Claude gian.proxy/2 lazily resolves model ids and applies turn-bound effor
   } finally {
     await service.close();
   }
+});
+
+const NO_EFFORT_MODEL: ModelCapabilities = {
+  id: 'claude-alias-haiku', model: 'haiku', displayName: 'Haiku', description: '',
+  hidden: false, isDefault: false, defaultEffort: null, supportedEfforts: [],
+};
+
+test('Claude resolves an effort-only creation draft using the configured default model', async () => {
+  const { service, adapter } = await setup(undefined, [NO_EFFORT_MODEL]);
+  try {
+    const catalog = await adapter.handle(request('default-catalog', 'catalog.list')) as { catalogRevision: string };
+    for (const turnConfig of [{ effort: 'high' }, { model: null, effort: 'high' }]) {
+      const resolved = await adapter.handle(request('default-resolve', 'catalog.resolve', {
+        catalogRevision: catalog.catalogRevision, sessionConfig: {}, turnConfig,
+      })) as { resolvedDefaults: { turnConfig: Record<string, unknown> } };
+      if (!('model' in turnConfig)) assert.equal(resolved.resolvedDefaults.turnConfig.model, 'claude-default');
+      assert.equal(resolved.resolvedDefaults.turnConfig.effort, undefined, 'preserve the explicit effort');
+    }
+  } finally { await service.close(); }
+});
+
+test('Claude omits disabled effort defaults from resolution and the first turn', async () => {
+  const { runtime, service, adapter, streamId } = await setup(undefined, [NO_EFFORT_MODEL]);
+  try {
+    const catalog = await adapter.handle(request('haiku-catalog', 'catalog.list')) as { catalogRevision: string };
+    const resolved = await adapter.handle(request('haiku-resolve', 'catalog.resolve', {
+      catalogRevision: catalog.catalogRevision, sessionConfig: {}, turnConfig: { model: NO_EFFORT_MODEL.id },
+    })) as { resolvedDefaults: { turnConfig: Record<string, unknown> } };
+    assert.equal(Object.hasOwn(resolved.resolvedDefaults.turnConfig, 'effort'), false);
+    await adapter.handle(request('haiku-turn', 'turn.start', {
+      sessionId: 'host-session', streamId, turnId: 'haiku-turn',
+      input: [{ type: 'text', text: 'hello' }], config: { model: NO_EFFORT_MODEL.id },
+    }));
+    assert.equal(runtime.messages[0]?.model, 'haiku');
+    assert.equal(runtime.messages[0]?.effort ?? null, null);
+  } finally { await service.close(); }
+});
+
+test('Claude still rejects explicit effort for a model that does not support it', async () => {
+  const { service, adapter } = await setup(undefined, [NO_EFFORT_MODEL]);
+  try {
+    const catalog = await adapter.handle(request('disabled-catalog', 'catalog.list')) as { catalogRevision: string };
+    await assert.rejects(adapter.handle(request('disabled-resolve', 'catalog.resolve', {
+      catalogRevision: catalog.catalogRevision, sessionConfig: {},
+      turnConfig: { model: NO_EFFORT_MODEL.id, effort: 'high' },
+    })), { domainCode: 'CONFIG_VALUE_INVALID', message: /effort is not enabled/ });
+    await adapter.handle(request('clear-effort', 'catalog.resolve', {
+      catalogRevision: catalog.catalogRevision, sessionConfig: {},
+      turnConfig: { model: NO_EFFORT_MODEL.id, effort: null },
+    }));
+  } finally { await service.close(); }
+});
+
+test('Claude uses resolved model-specific effort choices on the live connection', async () => {
+  const { runtime, service, adapter, streamId } = await setup(undefined, [NO_EFFORT_MODEL]);
+  try {
+    const catalog = await adapter.handle(request('live-catalog', 'catalog.list')) as { catalogRevision: string };
+    await adapter.handle(request('live-resolve', 'catalog.resolve', {
+      catalogRevision: catalog.catalogRevision, sessionConfig: {}, turnConfig: { model: 'claude-alias-opus' },
+    }));
+    await adapter.handle(request('live-turn', 'turn.start', {
+      sessionId: 'host-session', streamId, turnId: 'resolved-opus',
+      input: [{ type: 'text', text: 'hello' }], config: { model: 'claude-alias-opus', effort: 'max' },
+    }));
+    assert.equal(runtime.messages[0]?.effort, 'max');
+  } finally { await service.close(); }
 });
 
 test('Claude gian.proxy/2 rejects a catalog model id the current menu no longer lists', async () => {

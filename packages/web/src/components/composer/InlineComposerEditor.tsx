@@ -57,6 +57,7 @@ import {
   LINK,
   ORDERED_LIST,
   QUOTE,
+  STRIKETHROUGH,
   type ElementTransformer,
   type Transformer,
   UNORDERED_LIST,
@@ -127,6 +128,7 @@ import {
 } from '@gian/shared';
 import { useT } from '../../i18n/index.js';
 import type { ComposerFileOption } from './capabilities.js';
+import { FormatShortcutPlugin, FormatToolbarPlugin } from './FormatSelectionToolbar.js';
 import { highlightMatch } from './highlight-match.js';
 import { upwardPopoverLayout } from './upward-popover.js';
 
@@ -286,9 +288,9 @@ function $isReferenceNode(node: LexicalNode | null | undefined): node is Referen
   return node instanceof ReferenceNode;
 }
 
-// In-scope markdown only: headings, bold/italic, inline code, lists,
-// blockquote, and code fences. Tables, math, mermaid, checklists,
-// strikethrough, highlight, and horizontal rules stay out of the composer.
+// In-scope markdown only: headings, bold/italic/strikethrough, inline code,
+// lists, blockquote, and code fences. Tables, math, mermaid, checklists,
+// highlight, and horizontal rules stay out of the composer.
 const COMPOSER_TRANSFORMERS: Transformer[] = [
   HEADING,
   QUOTE,
@@ -302,6 +304,7 @@ const COMPOSER_TRANSFORMERS: Transformer[] = [
   BOLD_UNDERSCORE,
   ITALIC_STAR,
   ITALIC_UNDERSCORE,
+  STRIKETHROUGH,
   LINK,
 ];
 
@@ -330,7 +333,9 @@ function textNodeMarkdown(node: TextNode): string {
   const text = node.getTextContent();
   if (!text) return '';
   if (node.hasFormat('code')) return inlineCodeMarkdown(text);
-  const markers = (node.hasFormat('bold') ? '**' : '') + (node.hasFormat('italic') ? '*' : '');
+  const markers = (node.hasFormat('bold') ? '**' : '')
+    + (node.hasFormat('strikethrough') ? '~~' : '')
+    + (node.hasFormat('italic') ? '*' : '');
   if (!markers) return text;
   // CommonMark flanking: markers must hug non-whitespace, so leading and
   // trailing spaces stay outside them.
@@ -1349,6 +1354,7 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
         text: {
           bold: 'composer-md-bold',
           italic: 'composer-md-italic',
+          strikethrough: 'composer-md-strikethrough',
           code: 'composer-md-inline-code',
         },
       },
@@ -1388,6 +1394,8 @@ export const InlineComposerEditor = forwardRef<InlineComposerEditorHandle, Inlin
         <MarkdownShortcutPlugin transformers={COMPOSER_TRANSFORMERS} />
         <SoftLineElementMarkdownPlugin />
         <BoundaryFormatPlugin />
+        {!disabled && <FormatToolbarPlugin />}
+        {!disabled && <FormatShortcutPlugin />}
         <OnChangePlugin
           ignoreSelectionChange
           onChange={(state: EditorState, _editor: LexicalEditor) => {

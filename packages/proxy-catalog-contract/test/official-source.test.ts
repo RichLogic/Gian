@@ -121,3 +121,16 @@ test('production official source stays documentation-only', async () => {
     );
   }
 });
+
+test('Antigravity first source has complete docs and distinct logo paths without invented release coordinates', async () => {
+  const plugins = await loadOfficialCatalogSource(officialSourceRoot());
+  verifyOfficialCatalogSource(plugins);
+  const plugin = plugins.find(item => item.entry.pluginId === 'io.gian.antigravity');
+  assert.ok(plugin);
+  assert.equal(plugin.entry.channels.stable.pluginVersion, '0.0.1');
+  assert.notEqual(plugin.entry.branding.logoLight.path, plugin.entry.branding.logoDark.path);
+  assert.equal(plugin.entry.channels.stable.manifest, undefined);
+  assert.equal(plugin.entry.channels.stable.combination, undefined);
+  for (const document of Object.values(plugin.documents)) assert.ok(document.byteLength > 0);
+  assert.match(Buffer.from(plugin.documents.overview).toString('utf8'), /not a successful/);
+});

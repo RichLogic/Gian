@@ -500,6 +500,67 @@ test('structured questions keep options and round-trip the native accept content
   }
 });
 
+// Native shape from ZCode aac4755 zcode-protocol-v4/mcp-elicitation.ts:
+// free-text sentinel options, property-order questions, indexed answers.
+test('MCP elicitation preserves free text, optional fields and repeated question labels', async () => {
+  const requestedSchema = {
+    type: 'object', required: ['host', 'tls'],
+    properties: {
+      host: { type: 'string', description: 'Value' },
+      port: { type: 'integer', description: 'Value' },
+      tls: { type: 'boolean' },
+      scope: { type: 'string', enum: ['staging', 'production'] },
+    },
+  };
+  const harness = startHarness({ scenario: { turn: {
+    ...ASK_TURN,
+    userInputRequest: {
+      requestId: 'mcp-elicit-42', toolName: 'McpElicitation',
+      prompt: 'Provide connection details',
+      schema: { interaction: 'mcp_elicitation', serverName: 'fixture', requestedSchema },
+      questions: [
+        { header: 'host', question: 'Value', options: [{ value: '__zcode_free_text__', label: 'Type your answer' }] },
+        { header: 'port', question: 'Value', options: [{ value: '__zcode_free_text__', label: 'Type your answer' }] },
+        { header: 'tls', question: 'Provide connection details\n\ntls', options: [{ value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }] },
+        { header: 'scope', question: 'Provide connection details\n\nscope', options: [{ value: 'staging', label: 'staging' }, { value: 'production', label: 'production' }] },
+      ],
+    },
+  } } });
+  try {
+    await initialize(harness);
+    const streamId = await createSession(harness);
+    await harness.request('turn.start', {
+      sessionId: 's_1', streamId, turnId: 't_elicit',
+      input: [{ type: 'text', text: 'configure' }], config: {},
+    });
+    const requested = await harness.waitNotificationFor((line) => line.method === 'interaction.requested');
+    const data = (requested.payload.params as { data: Record<string, unknown> }).data;
+    const inputs = data.inputs as Array<{ type: string; required: boolean; choices?: unknown }>;
+    assert.deepEqual(inputs.map(input => input.type), ['text', 'text', 'single_select', 'single_select']);
+    assert.deepEqual(inputs.map(input => input.required), [true, false, true, false]);
+    assert.equal(inputs[0]!.choices, undefined);
+    assert.equal(inputs[1]!.choices, undefined);
+    const responded = await harness.request('interaction.respond', {
+      sessionId: 's_1', streamId, turnId: 't_elicit', responseId: 'resp-elicit',
+      interactionId: data.interactionId as string, actionId: 'accept',
+      values: { q0: ' api.example.test ', q1: '8443', q2: 'false', q3: 'staging' },
+    });
+    assert.equal(responded.kind, 'result', JSON.stringify(responded.payload));
+    let answer: Record<string, unknown> | undefined;
+    for (let i = 0; i < 40 && answer === undefined; i += 1) {
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
+      answer = harness.fakeLog().find((entry) => entry.kind === 'reverse-answer'
+        && (entry.result as { action?: string } | undefined)?.action !== undefined)?.result as Record<string, unknown>;
+    }
+    assert.deepEqual(answer, {
+      action: 'accept',
+      content: { answer_0: ' api.example.test ', answer_1: '8443', answer_2: 'false', answer_3: 'staging' },
+    }, 'native indexed answers preserve both fields with the same question text');
+  } finally {
+    await harness.close();
+  }
+});
+
 const PLAN_TURN = {
   turnId: 'turn_plan',
   userInputRequest: {

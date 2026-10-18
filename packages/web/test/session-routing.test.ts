@@ -254,6 +254,136 @@ describe('approval_resolved reducer behavior for question cards', () => {
   });
 });
 
+describe('approval_resolved reducer behavior for native option outcomes', () => {
+  // Antigravity/ACP: the resolved event carries an opaque nativeOptionId plus
+  // (on the buggy path) no decision at all. The web must derive the outcome
+  // from the native option kind, and an unresolvable outcome must NEVER be
+  // reported as an allow.
+  function pendingNative(): ApprovalItem {
+    return {
+      kind: 'approval',
+      id: 'env-n-1',
+      approvalId: 'perm-1',
+      title: 'Run command',
+      reason: '',
+      cmd: 'make build',
+      risk: 'medium',
+      status: 'pending',
+      nativeOptions: [
+        { optionId: 'opt-allow', label: 'Allow', kind: 'allow_once' },
+        { optionId: 'opt-deny', label: 'Deny', kind: 'reject_once' },
+      ],
+      ts: Date.UTC(2026, 5, 1, 0, 0, 0),
+      turn: 1,
+    };
+  }
+
+  function nativeResolve(
+    nativeOptionId: string,
+    extra: Record<string, unknown> = {},
+  ): EventEnvelope {
+    return {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'perm-1',
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 5),
+      data: { approvalId: 'perm-1', nativeOptionId, auto: false, ...extra },
+    };
+  }
+
+  it('a reject-kind native option resolves to declined even without a decision', () => {
+    const items = applyEnvelope([pendingNative()], nativeResolve('opt-deny'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('declined');
+  });
+
+  it('an allow_once native option resolves to approved-once', () => {
+    const items = applyEnvelope([pendingNative()], nativeResolve('opt-allow'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('approved-once');
+  });
+
+  it('an unknown native option with no decision is neutral, never allowed', () => {
+    // The reported bug: rejecting showed "Allowed once" because an unmatched
+    // nativeOptionId plus an empty decision fell through to the old
+    // approved-once default.
+    const items = applyEnvelope([pendingNative()], nativeResolve('opaque-unmapped-id'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('an empty resolve (no option id, no decision) is neutral, never allowed', () => {
+    const items = applyEnvelope([pendingNative()], {
+      session_id: 'sess-1',
+      turn: 0,
+      call_id: 'perm-1',
+      event: 'approval_resolved',
+      ts: Date.UTC(2026, 5, 1, 0, 0, 5),
+      data: { approvalId: 'perm-1', auto: false },
+    }, 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('a neutral resolve stays neutral on reload replay (idempotent, no allow upgrade)', () => {
+    let items = applyEnvelope([pendingNative()], nativeResolve('opaque-unmapped-id'), 'claude');
+    items = applyEnvelope(items, nativeResolve('opaque-unmapped-id'), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('an explicit decline decision survives an unmappable native option id', () => {
+    // The safe direction is kept: the legacy projection only invented ALLOWS
+    // (outcome submitted → allow_once), never declines.
+    const items = applyEnvelope(
+      [pendingNative()],
+      nativeResolve('opaque-unmapped-id', { decision: 'decline' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('declined');
+  });
+
+  it('legacy Antigravity shape: opaque id + projected allow_once is neutral, not allowed', () => {
+    // The reported bug: permission.requested carried no permissionOptionKinds,
+    // so the card's nativeOptions repeat the OPAQUE ids as kinds, and the old
+    // Host projection stamped decision=allow_once for any submitted outcome —
+    // including a rejection. The web must not trust that fallback: without a
+    // verifiable native kind the outcome is neutral. Live event…
+    const legacyCard: ApprovalItem = {
+      ...pendingNative(),
+      nativeOptions: [
+        { optionId: 'opaque-allow', label: 'Allow', kind: 'opaque-allow' },
+        { optionId: 'opaque-deny', label: 'Deny', kind: 'opaque-deny' },
+      ],
+    };
+    const items = applyEnvelope(
+      [legacyCard],
+      nativeResolve('opaque-deny', { decision: 'allow_once' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('legacy Antigravity shape stays neutral on history replay (idempotent)', () => {
+    let items = applyEnvelope(
+      [pendingNative()],
+      nativeResolve('opaque-deny', { decision: 'allow_once' }),
+      'claude',
+    );
+    // …and the same envelope replayed from the database on reload.
+    items = applyEnvelope(items, nativeResolve('opaque-deny', { decision: 'allow_once' }), 'claude');
+    expect((items[0] as ApprovalItem).status).toBe('resolved');
+  });
+
+  it('a plan accept action id keeps its known decision semantics', () => {
+    // Gian's own plan-action enum is not opaque: the card itself advertises
+    // accept_with_ask/accept_with_auto, so the id is self-describing and must
+    // keep settling the plan card as accepted.
+    const items = applyEnvelope(
+      [{ ...pendingNative(), nativeOptions: undefined, category: 'exit_plan_mode' }],
+      nativeResolve('accept_with_ask', { decision: 'allow_once' }),
+      'claude',
+    );
+    expect((items[0] as ApprovalItem).status).toBe('approved-once');
+  });
+});
+
 describe('sortSessionsForRail: pinned first, then recent activity', () => {
   function row(pinned_at: string | null, updated_at: string) {
     return { pinned_at, updated_at };

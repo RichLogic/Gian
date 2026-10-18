@@ -9,10 +9,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { Hono } from 'hono';
+import { validateBindingConfig } from '@gian/proxy-protocol';
 import type {
   Executor,
   AgentRuntimeProfile,
   OpenRuntimeProfile,
+  ProxyCatalog,
+  ConfigValue,
+  AgentProxyDefaults,
+  Session,
   ProxyNotification,
   ServerToClientMessage,
   SessionProxyBinding,
@@ -29,7 +35,11 @@ import type { WSContext } from 'hono/ws';
 import { openDatabase } from '../src/storage/db.js';
 import { SessionManager, type SessionAgentResolver } from '../src/session/manager.js';
 import type { ProxyManager } from '../src/proxy/manager.js';
-import type { NotificationHandler } from '../src/proxy/types.js';
+import type { NotificationHandler, StartTurnParams } from '../src/proxy/types.js';
+import { normalizeProtocolCatalog } from '../src/proxy/protocol-v2-session-client.js';
+import { SessionBindingPlanner } from '../src/session/binding-planner.js';
+import { TaskManager } from '../src/task/manager.js';
+import { registerTaskRoutes } from '../src/web/routes/tasks.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
@@ -63,12 +73,14 @@ class FakeClient {
   lastForkParams: Record<string, unknown> | null = null;
   notificationHandlers: NotificationHandler[] = [];
   ownSessionId: string | null = null;
+  startTurnCalls: StartTurnParams[] = [];
 
   constructor(
     readonly executor: Executor,
     readonly cliPath: string | null,
     private readonly injectHostServices = false,
     private readonly failCreate = false,
+    private readonly modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> },
   ) {}
 
   isExited() { return false; }
@@ -76,13 +88,15 @@ class FakeClient {
   async initialize() {
     return {
       ...stubInitialize(this.executor),
+      ...(this.modeFixture ? { protocol: { name: 'gian.proxy' as const, version: '2.3' } } : {}),
       capabilities: {
         'session.fork': true,
         ...(this.injectHostServices ? { 'integration.mcp.streamableHttp': true } : {}),
+        ...this.modeFixture?.capabilities,
       },
     };
   }
-  async catalog() { return EMPTY_CATALOG; }
+  async catalog() { return this.modeFixture?.catalog ?? EMPTY_CATALOG; }
   streamId() { return this.stream; }
   runtimeHost() {
     return {
@@ -92,6 +106,7 @@ class FakeClient {
           this.cliPath,
           this.injectHostServices,
           this.failCreate,
+          this.modeFixture,
         );
         child.stream = `stream-${sessionId}`;
         child.ownSessionId = sessionId;
@@ -101,6 +116,8 @@ class FakeClient {
   }
   async createSession(params: Record<string, unknown>) {
     this.lastCreateParams = params;
+    if (this.modeFixture) validateBindingConfig(this.modeFixture.catalog.configOptions,
+      (params.sessionConfig ?? {}) as Record<string, ConfigValue>, 'session');
     if (this.failCreate) throw new Error('controlled create failure');
     const nativeSessionId = `native-${randomUUID()}`;
     return {
@@ -109,6 +126,10 @@ class FakeClient {
         nativeSession: { id: nativeSessionId },
       },
       nativeSessionId,
+      ...(this.modeFixture ? {
+        turnConfigOptions: this.modeFixture.catalog.configOptions.filter(option => option.binding === 'turn'),
+        turnConfigRevision: this.modeFixture.catalog.catalogRevision,
+      } : {}),
     };
   }
   async forkSession(params: { sessionId: string; [key: string]: unknown }) {
@@ -131,7 +152,9 @@ class FakeClient {
       replayEvents: [],
     };
   }
-  async startTurn() {
+  async startTurn(params: StartTurnParams) {
+    if (this.modeFixture) validateBindingConfig(this.modeFixture.catalog.configOptions, params.config ?? {}, 'turn');
+    this.startTurnCalls.push(params);
     return {
       session: stubSession('native-x', '/tmp', 'running'),
       turn: { id: `turn-${randomUUID()}` },
@@ -158,10 +181,13 @@ class FakeProxyManager {
     cliPath: string | null;
     proxyVersion: string | null;
   }> = [];
+  createdClients: FakeClient[] = [];
+  disposed: string[] = [];
 
   constructor(
     private readonly injectHostServices = false,
     private readonly failCreate = false,
+    private readonly modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> },
   ) {}
 
   async acquireWithBinding(sessionId: string, binding: { pluginId: string }, options?: {
@@ -184,9 +210,10 @@ class FakeProxyManager {
     });
     const existing = this.clients.get(sessionId);
     if (existing) return existing;
-    const client = new FakeClient(executor, cliPath, this.injectHostServices, this.failCreate);
+    const client = new FakeClient(executor, cliPath, this.injectHostServices, this.failCreate, this.modeFixture);
     client.ownSessionId = sessionId;
     this.clients.set(sessionId, client);
+    this.createdClients.push(client);
     return client;
   }
   get(sessionId: string) {
@@ -199,6 +226,7 @@ class FakeProxyManager {
     this.clients.delete(sessionId);
   }
   async dispose(sessionId: string) {
+    this.disposed.push(sessionId);
     this.clients.delete(sessionId);
   }
   async closeAll() {}
@@ -220,6 +248,9 @@ function setup(options?: {
   injectHostServices?: boolean;
   failCreate?: boolean;
   dir?: string;
+  bindingPlanner?: SessionBindingPlanner;
+  modeFixture?: { catalog: ProxyCatalog; capabilities: Record<string, number> };
+  proxyDefaults?: (executor: Executor) => AgentProxyDefaults;
 }) {
   const dir = options?.dir ?? mkdtempSync(join(tmpdir(), 'gian-agent-binding-'));
   const db = openDatabase(dir);
@@ -286,6 +317,7 @@ function setup(options?: {
   const proxyMgr = new FakeProxyManager(
     options?.injectHostServices === true,
     options?.failCreate === true,
+    options?.modeFixture,
   );
   const broadcaster = new CapturingBroadcaster();
   const approvals = new ApprovalManager(broadcaster as unknown as WsBroadcaster);
@@ -302,13 +334,352 @@ function setup(options?: {
     queue,
     dir,
     null,
-    undefined,
+    options?.proxyDefaults,
     undefined,
     resolver,
     hostServices,
+    options?.bindingPlanner,
   );
   return { dir, db, wsId, proxyMgr, broadcaster, sessions, credentials, resolution };
 }
+
+function nativeModeFixture(binding: 'session' | 'turn' = 'turn') {
+  const catalog: ProxyCatalog = normalizeProtocolCatalog({
+    catalogRevision: 'open-native-mode', input: [{ type: 'text' }], slashCommands: [],
+    specialCatalogs: { model: 'model', thinking: 'effort', approvalMode: 'permission_mode' },
+    configOptions: [{
+      id: 'model', displayName: 'Model', binding: 'turn', control: 'select', required: false,
+      defaultValue: 'fixture-model', choices: [{ value: 'fixture-model', displayName: 'Fixture' }],
+    }, {
+      id: 'effort', displayName: 'Thinking', binding: 'turn', control: 'select', required: false,
+      defaultValue: 'high', choices: [{ value: 'high', displayName: 'High' }],
+    }, {
+      id: 'permission_mode', displayName: 'Mode', binding, modeKind: 'provider-native',
+      control: 'select', required: false, defaultValue: 'default',
+      choices: ['default', 'auto_edit', 'yolo'].map(value => ({ value, displayName: value })),
+    }, {
+      id: 'workspace_policy', displayName: 'Workspace policy', binding: 'session',
+      control: 'select', required: false, defaultValue: 'strict',
+      choices: ['strict', 'relaxed'].map(value => ({ value, displayName: value })),
+    }],
+  });
+  return { catalog, capabilities: { 'catalog.modeSemantics': 1 } as Record<string, number> };
+}
+
+function setupOpenNativeMode(mode: string, binding: 'session' | 'turn' = 'turn', modeFixture = nativeModeFixture(binding)) {
+  const agent: UserAgent = {
+    id: randomUUID(), name: 'Open native-mode fixture', pluginId: parseProxyPluginId('io.acme.native-mode'),
+    proxy: null, cliPath: null,
+    defaults: { model: 'fixture-model', thinking: 'high', mode, options: {} },
+  };
+  const launch = {
+    pluginId: agent.pluginId, pluginVersion: '0.2.0', manifestSha256: 'a'.repeat(64),
+    entryPath: '/fixtures/native-mode-proxy.mjs', protocolRange: '^2.2',
+    schemaVersion: 4 as const, processScope: 'session' as const,
+    runtime: { kind: 'none' as const }, source: 'plugin-store' as const,
+  };
+  const planner = new SessionBindingPlanner({
+    resolveCurrent: async () => launch,
+    resolveExact: async () => launch,
+  });
+  const ownership = { prepared: 0, releasedUnused: 0 };
+  const prepare = planner.prepareCurrent.bind(planner);
+  planner.prepareCurrent = async input => {
+    ownership.prepared += 1;
+    const prepared = await prepare(input);
+    return { ...prepared, releaseUnusedLease: async () => {
+      ownership.releasedUnused += 1;
+      await prepared.releaseUnusedLease();
+    } };
+  };
+  return { ...setup({ agents: [agent], bindingPlanner: planner, modeFixture }), agent, ownership };
+}
+
+async function createThroughWs(sessions: SessionManager, input: Record<string, unknown>) {
+  const sent: ServerToClientMessage[] = [];
+  const ws = {
+    send: (value: string) => { sent.push(JSON.parse(value) as ServerToClientMessage); },
+    close: () => {},
+  } as unknown as WSContext;
+  const handlers = makeWsHandlers({ sessions, broadcaster: new RealWsBroadcaster() });
+  handlers.onOpen(new Event('open'), ws);
+  await handlers.onMessage({ data: JSON.stringify({ type: 'auth', token: 'dev' }) }, ws);
+  await handlers.onMessage({ data: JSON.stringify({ type: 'session:create', request_id: 'native-mode-create', ...input }) }, ws);
+  return sent;
+}
+
+for (const entry of ['ws', 'tasks'] as const) {
+  for (const binding of ['session', 'turn'] as const) {
+    test(`${entry} creates open-plugin native ${binding} modes and preserves explicit override priority`, async () => {
+      const cases = [
+        { saved: 'default', explicit: undefined },
+        { saved: 'auto_edit', explicit: undefined },
+        { saved: 'yolo', explicit: undefined },
+        { saved: 'yolo', explicit: 'default' },
+        { saved: 'yolo', explicit: 'auto_edit' },
+      ];
+      for (const { saved, explicit } of cases) {
+        const h = setupOpenNativeMode(saved, binding);
+        try {
+          const expected = explicit ?? saved;
+          const config = {
+            session_config: { workspace_policy: 'relaxed',
+              ...(binding === 'session' && explicit ? { permission_mode: explicit } : {}) },
+            turn_config: { model: 'fixture-model', effort: 'high',
+              ...(binding === 'turn' && explicit ? { permission_mode: explicit } : {}) },
+          };
+          let session: Session;
+          if (entry === 'ws') {
+            const sent = await createThroughWs(h.sessions, { workspace_id: h.wsId, agent_id: h.agent.id, ...config });
+            const created = sent.find(message => message.type === 'session:created');
+            assert.ok(created?.type === 'session:created', JSON.stringify(sent));
+            session = created.session;
+            assert.ok(sent.some(message => message.type === 'operation:result' && message.ok));
+          } else {
+            const app = new Hono();
+            const tasks = new TaskManager(h.db);
+            const task = tasks.createTask({ name: 'Native mode create' });
+            registerTaskRoutes(app, { tasks, sessions: h.sessions, broadcaster: h.broadcaster as unknown as WsBroadcaster });
+            const response = await app.request(`/api/tasks/${task.id}/subtasks`, {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ workspace_id: h.wsId, agent_id: h.agent.id, ...config }),
+            });
+            assert.equal(response.status, 200, await response.clone().text());
+            session = (await response.json() as { session: Session }).session;
+            assert.equal(session.task_id, task.id);
+            assert.equal(session.type, 'subtask');
+          }
+          const stored = h.sessions.getSession(session.id);
+          assert.equal(stored.approval_mode, null);
+          assert.equal(stored.proxy_binding?.pluginId, h.agent.pluginId);
+          assert.equal(stored.agent_id, h.agent.id);
+          assert.equal(stored.executor_config.values.workspace_policy, 'relaxed');
+          assert.equal(binding === 'turn' ? stored.turn_config?.permission_mode
+            : stored.executor_config.values.permission_mode, expected);
+          const client = h.proxyMgr.get(session.id)!;
+          assert.deepEqual(client.lastCreateParams?.sessionConfig, {
+            workspace_policy: 'relaxed', ...(binding === 'session' ? { permission_mode: expected } : {}),
+          });
+          await h.sessions.sendMessage(session.id, 'first prompt');
+          assert.deepEqual(client.startTurnCalls[0]?.config, {
+            model: 'fixture-model', effort: 'high', ...(binding === 'turn' ? { permission_mode: expected } : {}),
+          });
+          assert.equal(h.agent.defaults.mode, saved, 'creation must not mutate saved Agent defaults');
+          assert.deepEqual(h.ownership, { prepared: 1, releasedUnused: 1 });
+        } finally {
+          h.db.close();
+          rmSync(h.dir, { recursive: true, force: true });
+        }
+      }
+    });
+  }
+}
+
+test('create rejects unadvertised modes, missing selectors and wrong bindings before native create or publication', async () => {
+  for (const scenario of ['saved-invalid', 'explicit-invalid', 'wrong-binding', 'missing-role', 'empty-catalog', 'retired-yolo', 'invalid-default', 'legacy-approval'] as const) {
+    const fixture = nativeModeFixture();
+    if (scenario === 'missing-role') {
+      fixture.catalog.specialCatalogs = {};
+      fixture.catalog.configOptions = fixture.catalog.configOptions.map(({ role: _role, ...option }) => option);
+    }
+    if (scenario === 'empty-catalog') fixture.catalog = { ...EMPTY_CATALOG };
+    if (scenario === 'retired-yolo') fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+      ? { ...option, choices: option.choices!.filter(choice => choice.value !== 'yolo') } : option);
+    if (scenario === 'invalid-default') fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+      ? { ...option, defaultValue: 'unadvertised' } : option);
+    const h = setupOpenNativeMode(scenario === 'saved-invalid' ? 'unadvertised' : scenario === 'invalid-default' ? '' : 'yolo', 'turn', fixture);
+    try {
+      const sent = await createThroughWs(h.sessions, {
+        workspace_id: h.wsId, agent_id: h.agent.id,
+        ...(scenario === 'explicit-invalid' ? { turn_config: { permission_mode: 'unadvertised' } } : {}),
+        ...(scenario === 'wrong-binding' ? { session_config: { permission_mode: 'default' } } : {}),
+        ...(scenario === 'legacy-approval' ? { approval_mode: 'ask' } : {}),
+      });
+      const failure = sent.find(message => message.type === 'error');
+      assert.ok(failure?.type === 'error', scenario);
+      assert.match(failure.message, scenario === 'wrong-binding' ? /wrong config binding/
+        : scenario === 'legacy-approval' ? /approval_mode must be omitted/
+          : ['missing-role', 'empty-catalog'].includes(scenario) ? /advertise one mode selector/
+            : /not advertised/);
+      assert.equal(h.proxyMgr.createdClients.length, 1, 'validate only after the exact connection supplies its catalog');
+      assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null, 'reject before native create');
+      assert.equal(h.proxyMgr.createdClients[0]?.startTurnCalls.length, 0);
+      assert.equal(h.proxyMgr.disposed.length, 1);
+      assert.equal(h.proxyMgr.clients.size, 0);
+      assert.deepEqual(h.ownership, { prepared: 1, releasedUnused: 1 });
+      assert.equal((h.db.prepare('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }).count, 0);
+      assert.equal(sent.some(message => message.type === 'session:created'), false);
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+for (const binding of ['session', 'turn'] as const) {
+  test(`open-plugin non-native ${binding} mode values/defaults come only from its catalog`, async () => {
+    for (const selection of ['saved', 'explicit-map', 'legacy-field', 'proxy-default'] as const) {
+      const fixture = nativeModeFixture(binding);
+      fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+        ? { ...option, modeKind: 'gian-preset' as const, defaultValue: 'review-first',
+          choices: ['review-first', 'execute-owned', 'full-access'].map(value => ({ value, displayName: value })) }
+        : option);
+      const h = setupOpenNativeMode(selection === 'proxy-default' ? '' : 'review-first', binding, fixture);
+      try {
+        const expected = selection === 'explicit-map' ? 'execute-owned' : selection === 'legacy-field' ? 'full-access' : 'review-first';
+        const sent = await createThroughWs(h.sessions, {
+          workspace_id: h.wsId, agent_id: h.agent.id,
+          ...(selection === 'explicit-map' ? { [binding === 'turn' ? 'turn_config' : 'session_config']: { permission_mode: expected } } : {}),
+          ...(selection === 'legacy-field' ? { approval_mode: expected } : {}),
+        });
+        const created = sent.find(message => message.type === 'session:created');
+        assert.ok(created?.type === 'session:created', JSON.stringify(sent));
+        const session = h.sessions.getSession(created.session.id);
+        assert.equal(session.approval_mode, expected, 'compatibility column must echo a declared choice, not interpret it');
+        assert.equal(binding === 'turn' ? session.turn_config?.permission_mode : session.executor_config.values.permission_mode, expected);
+        await h.sessions.sendMessage(session.id, 'opaque preset');
+        const client = h.proxyMgr.get(session.id)!;
+        assert.equal(binding === 'turn' ? client.startTurnCalls[0]?.config?.permission_mode
+          : (client.lastCreateParams?.sessionConfig as Record<string, ConfigValue>).permission_mode, expected);
+      } finally {
+        h.db.close();
+        rmSync(h.dir, { recursive: true, force: true });
+      }
+    }
+    for (const rejected of ['plan', 'ask', 'yolo', 'unknown']) {
+      const fixture = nativeModeFixture(binding);
+      fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+        ? { ...option, modeKind: 'gian-preset' as const, defaultValue: 'review-first', choices: [{ value: 'review-first', displayName: 'Review first' }] }
+        : option);
+      const h = setupOpenNativeMode(rejected, binding, fixture);
+      try {
+        await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id }), /not advertised/);
+        assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+        assert.equal(h.proxyMgr.disposed.length, 1);
+      } finally {
+        h.db.close();
+        rmSync(h.dir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+
+test('mode metadata changes only the compatibility route, never the allowed values', async () => {
+  const fixture = nativeModeFixture();
+  fixture.capabilities = {};
+  fixture.catalog.configOptions = fixture.catalog.configOptions.map(({ modeKind: _kind, ...option }) => option);
+  const h = setupOpenNativeMode('yolo', 'turn', fixture);
+  try {
+    const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id });
+    assert.equal(session.approval_mode, 'yolo');
+    assert.equal(session.turn_config?.permission_mode, 'yolo');
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude and Codex mode creation follows their advertised choices, not a Host enum', async () => {
+  const advertisements = [
+    { proxy: 'claude' as const, values: ['manual', 'default', 'auto', 'plan'], defaultValue: 'manual' },
+    { proxy: 'codex' as const, values: ['ask', 'auto', 'full-access', 'custom'], defaultValue: 'ask' },
+  ];
+  for (const { proxy, values, defaultValue } of advertisements) {
+    for (const selected of ['', ...values, 'unadvertised']) {
+      const fixture = nativeModeFixture();
+      fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+        ? { ...option, modeKind: 'gian-preset' as const, defaultValue, choices: values.map(value => ({ value, displayName: value })) }
+        : option);
+      const agent = makeAgent({ proxy, defaults: { model: 'fixture-model', thinking: 'high', mode: selected } });
+      const h = setup({ agents: [agent], modeFixture: fixture });
+      try {
+        if (selected === 'unadvertised') {
+          await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, agent_id: agent.id }), /not advertised/);
+          assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+        } else {
+          const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: agent.id });
+          assert.equal(session.approval_mode, selected || defaultValue);
+          assert.equal(session.turn_config?.permission_mode, selected || defaultValue);
+        }
+      } finally {
+        h.db.close();
+        rmSync(h.dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test('legacy native Kimi/Grok/DSH routing still echoes only advertised native choices', async () => {
+  for (const proxy of ['kimi', 'grok', 'dsh'] as const) {
+    const fixture = nativeModeFixture();
+    fixture.capabilities = {};
+    fixture.catalog.configOptions = fixture.catalog.configOptions.map(({ modeKind: _kind, ...option }) => option);
+    const agent = makeAgent({ proxy, defaults: { model: 'fixture-model', thinking: 'high', mode: 'auto_edit' } });
+    const h = setup({ agents: [agent], modeFixture: fixture });
+    try {
+      const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: agent.id });
+      assert.equal(session.approval_mode, null);
+      assert.equal(session.turn_config?.permission_mode, 'auto_edit');
+      await h.sessions.sendMessage(session.id, 'legacy native');
+      assert.equal(h.proxyMgr.get(session.id)?.startTurnCalls[0]?.config?.permission_mode, 'auto_edit');
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('empty native default uses the advertised choice, never a Host default or mode enum', async () => {
+  for (const defaultValue of ['default', 'provider-owned-mode']) {
+    const fixture = nativeModeFixture();
+    fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+      ? { ...option, defaultValue, choices: [...option.choices!, { value: 'provider-owned-mode', displayName: 'Provider-owned mode' }] }
+      : option);
+    const h = setupOpenNativeMode('', 'turn', fixture);
+    try {
+      const session = await h.sessions.createSession({ workspace_id: h.wsId, agent_id: h.agent.id });
+      assert.equal(session.approval_mode, null);
+      assert.equal(session.turn_config?.permission_mode, defaultValue);
+      await h.sessions.sendMessage(session.id, 'native default');
+      assert.equal(h.proxyMgr.get(session.id)?.startTurnCalls[0]?.config?.permission_mode, defaultValue);
+    } finally {
+      h.db.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('legacy kind defaults are not translated into a different advertised native mode', async () => {
+  const fixture = nativeModeFixture();
+  fixture.capabilities = {};
+  fixture.catalog.configOptions = fixture.catalog.configOptions.map(({ modeKind: _kind, ...option }) => option);
+  const h = setup({ modeFixture: fixture, proxyDefaults: () => ({ model: '', thinking: '', mode: 'plan' }) });
+  try {
+    await assert.rejects(h.sessions.createSession({ workspace_id: h.wsId, executor: 'grok' }), /not advertised/);
+    assert.equal(h.proxyMgr.createdClients[0]?.lastCreateParams, null);
+    assert.equal(h.proxyMgr.disposed.length, 1);
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('an explicitly advertised null native session mode is echoed, not replaced by saved YOLO', async () => {
+  const fixture = nativeModeFixture('session');
+  fixture.catalog.configOptions = fixture.catalog.configOptions.map(option => option.id === 'permission_mode'
+    ? { ...option, choices: [...option.choices!, { value: null, displayName: 'Configured policy' }] } : option);
+  const h = setupOpenNativeMode('yolo', 'session', fixture);
+  try {
+    const session = await h.sessions.createSession({
+      workspace_id: h.wsId, agent_id: h.agent.id, session_config: { permission_mode: null },
+    });
+    assert.equal(session.executor_config.values.permission_mode, null);
+    assert.equal((h.proxyMgr.get(session.id)?.lastCreateParams?.sessionConfig as Record<string, ConfigValue>).permission_mode, null);
+  } finally {
+    h.db.close();
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
 
 test('session:create binds the Agent: kind, defaults, CLI path, snapshots', async () => {
   const agent = makeAgent({

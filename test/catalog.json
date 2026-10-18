@@ -14,6 +14,7 @@
     "packages/proxies/codex-proxy/test",
     "packages/proxies/kimi-proxy/test",
     "packages/proxies/grok-proxy/test",
+    "packages/proxies/antigravity-proxy/test",
     "packages/tool-cli/test",
     "packages/tool-mcp/test",
     "e2e/specs",
@@ -41,7 +42,7 @@
   "groups": [
     {
       "id": "catalog-documentation-policy",
-      "patterns": ["delivery/proxies/scripts/catalog-docs-policy.test.mjs"],
+      "patterns": ["delivery/proxies/scripts/catalog-docs-policy.test.mjs", "delivery/proxies/scripts/runtime-qualification.test.mjs"],
       "module": "scripts",
       "scope": "unit",
       "purposes": ["regression", "contract"],
@@ -107,6 +108,7 @@
         "packages/host/test/protocol-v2-projector.test.ts",
         "packages/host/test/proxy-shutdown-state.test.ts",
         "packages/host/test/redact.test.ts",
+        "packages/host/test/resolve-send-catalog.test.ts",
         "packages/host/test/runtime-guardian.test.ts",
         "packages/host/test/runtime-lead-review-unit.test.ts",
         "packages/host/test/schedule-trigger.test.ts",
@@ -123,7 +125,9 @@
         "packages/host/test/ws-broadcast.test.ts",
         "packages/host/test/ws-operation-result.test.ts",
         "packages/host/test/customization-inventory.test.ts",
-        "packages/host/test/customizations-routes.test.ts"
+        "packages/host/test/customizations-routes.test.ts",
+        "packages/host/test/search-contract.test.ts",
+        "packages/host/test/search-text.test.ts"
       ],
       "module": "host",
       "scope": "unit",
@@ -145,6 +149,7 @@
         "packages/host/test/remote-translation.test.ts",
         "packages/host/test/agent-instructions.test.ts",
         "packages/host/test/agent-home.test.ts",
+        "packages/host/test/agent-proxy-default-home.test.ts",
         "packages/host/test/ai-scaffold.test.ts",
         "packages/host/test/ai-views.test.ts",
         "packages/host/test/auto-title.test.ts",
@@ -158,6 +163,7 @@
         "packages/host/test/config-sanitize.test.ts",
         "packages/host/test/development-proxy-source.test.ts",
         "packages/host/test/dev-runtime-provision.test.ts",
+        "packages/host/test/dev-runtime-probe*.test.ts",
         "packages/host/test/contract-001-client-message-parity.test.ts",
         "packages/host/test/contract-002-server-message-parity.test.ts",
         "packages/host/test/contract-003-proxy-methods.test.ts",
@@ -260,11 +266,18 @@
         "packages/host/test/remote-web-crypto-interop.test.ts",
         "packages/host/test/remote-web-upload.test.ts",
         "packages/host/test/inbox-service.test.ts",
+        "packages/host/test/pairing-inbox.test.ts",
+        "packages/host/test/catalog-update-inbox.test.ts",
+        "packages/host/test/schedule-confirmation-inbox.test.ts",
+        "packages/host/test/account-repair-inbox.test.ts",
         "packages/host/test/inbox-routes.test.ts",
         "packages/host/test/session-inbox-adapter.test.ts",
         "packages/host/test/approval-scope.test.ts",
         "packages/host/test/approval-response-scope.test.ts",
-        "packages/host/test/remote-interaction-scope.test.ts"
+        "packages/host/test/remote-interaction-scope.test.ts",
+        "packages/host/test/search-index.test.ts",
+        "packages/host/test/search-repair.test.ts",
+        "packages/host/test/search-assembly.test.ts"
       ],
       "module": "host",
       "scope": "integration",
@@ -310,6 +323,7 @@
         "packages/host/test/protocol-v2-client.test.ts",
         "packages/host/test/protocol-v2-mock-integration.test.ts",
         "packages/host/test/proxy-client.test.ts",
+        "packages/host/test/resolve-send-catalog-host.test.ts",
         "packages/host/test/sec-014-ext-tree.test.ts",
         "packages/host/test/session-manager.test.ts",
         "packages/host/test/sidechat-fork-system.test.ts",
@@ -740,6 +754,45 @@
       "runner": "kimi-proxy-node"
     },
     {
+      "id": "antigravity-proxy-unit",
+      "patterns": [
+        "packages/proxies/antigravity-proxy/test/catalog.test.ts",
+        "packages/proxies/antigravity-proxy/test/events.test.ts",
+        "packages/proxies/antigravity-proxy/test/mcp.test.ts",
+        "packages/proxies/antigravity-proxy/test/input*.test.ts"
+      ],
+      "module": "antigravity-proxy",
+      "scope": "unit",
+      "purposes": ["regression", "contract"],
+      "sideEffects": ["none"],
+      "platforms": ["any"],
+      "runner": "antigravity-proxy-node"
+    },
+    {
+      "id": "antigravity-proxy-integration",
+      "patterns": [
+        "packages/proxies/antigravity-proxy/test/service*.test.ts",
+        "packages/proxies/antigravity-proxy/test/protocol.test.ts",
+        "packages/proxies/antigravity-proxy/test/runtime-*.test.ts"
+      ],
+      "module": "antigravity-proxy",
+      "scope": "integration",
+      "purposes": ["regression", "contract"],
+      "sideEffects": ["temporary-filesystem", "child-process", "fake-provider"],
+      "platforms": ["any"],
+      "runner": "antigravity-proxy-node"
+    },
+    {
+      "id": "antigravity-proxy-system",
+      "patterns": ["packages/proxies/antigravity-proxy/test/stdio.test.ts"],
+      "module": "antigravity-proxy",
+      "scope": "system",
+      "purposes": ["regression", "contract"],
+      "sideEffects": ["temporary-filesystem", "child-process", "fake-provider"],
+      "platforms": ["any"],
+      "runner": "antigravity-proxy-node"
+    },
+    {
       "id": "grok-proxy-unit",
       "patterns": [
         "packages/proxies/grok-proxy/test/acp-wire.test.ts",
@@ -817,6 +870,7 @@
         "scripts/check-version-consistency.test.mjs",
         "scripts/catalog-release.test.mjs",
         "scripts/build-managed-runtime-candidates.test.mjs",
+        "scripts/verify-antigravity-runtime.test.mjs",
         "scripts/dev-runtime-source-assets.test.mjs",
         "scripts/desktop-runtime-portability.test.mjs",
         "scripts/docs-adr.test.mjs",
@@ -853,6 +907,7 @@
     {
       "id": "scripts-integration",
       "patterns": [
+        "scripts/build-antigravity-runtime.test.mjs",
         "scripts/ci-workflow.test.mjs",
         "scripts/dev.test.mjs",
         "scripts/delivery-policy.test.mjs",

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { Executor, Session } from '@gian/shared';
 import {
   EventHistoryLoadError,
   loadEvents,
+  loadSearchContext,
   type EventHistoryLoadErrorKind,
+  type SearchContextQuery,
 } from '../api.js';
 import {
   applyEnvelope,
@@ -32,9 +34,22 @@ export interface TranscriptHistoryState {
   loadingOlder: boolean;
   cursor: number | null;
   error: TranscriptHistoryError | null;
+  /** True when the loaded window is a bounded context window around a search
+   *  target instead of the live tail. Live events must not fold into it; the
+   *  user returns to latest explicitly. */
+  detachedFromLatest?: boolean;
+  /** True when the Host reports this session's cold history as still
+   *  incomplete (SearchContextPage.history_complete === false) — surfaces
+   *  label it; from_turn never claims full-history coverage. */
+  historyIncomplete?: boolean;
+  /** Explicit Back-to-latest command identity. Increments only there, and
+   *  stays on later tail updates so Find and Transcript can invalidate the
+   *  locate request that was in flight. Detached-flag transitions are not
+   *  this command. */
+  returnToLatestGeneration?: number;
 }
 
-export type TranscriptHistoryLoadOperation = 'initial' | 'refresh' | 'rebuild' | 'older';
+export type TranscriptHistoryLoadOperation = 'initial' | 'refresh' | 'rebuild' | 'older' | 'context';
 
 export interface TranscriptHistoryError {
   kind: EventHistoryLoadErrorKind;
@@ -49,6 +64,17 @@ interface TranscriptHydrationResult {
   retry: (sessionId: string, executor: Executor) => void;
   markLive: (sessionId: string) => void;
   rebuild: (sessionId: string, executor: Executor) => void;
+  /** Load one bounded context window around a search target (0.6.7 contract
+   *  GET /api/sessions/:id/context). Replaces the loaded window and detaches
+   *  from the live tail; never walks the whole history into the DOM. */
+  loadContextWindow: (
+    sessionId: string,
+    executor: Executor,
+    query: SearchContextQuery,
+  ) => Promise<boolean>;
+  /** Explicit return to the live tail: clears the detached window and
+   *  rehydrates the latest page. */
+  returnToLatest: (sessionId: string, executor: Executor) => void;
 }
 
 export function historyIsHydrated(state: TranscriptHistoryState | undefined): boolean {
@@ -102,6 +128,22 @@ export function useTranscriptHydration({
   const rebuildBaselineRef = useRef(new Map<string, Map<string, TranscriptItem>>());
   const previousActiveRef = useRef<string | null>(null);
   const previousConnectionReadyRef = useRef(connectionReady);
+  /** Per-session navigation generation: a return-to-latest (or a newer
+   *  window) supersedes an in-flight context load, whose late response is
+   *  discarded and must not clear the newer load's busy marker. */
+  const navTokenRef = useRef(new Map<string, number>());
+  /** Last context locator per session, so a failed window load retries the
+   *  SAME bounded query instead of falling through to a full-page reload. */
+  const contextQueryRef = useRef(new Map<string, { executor: Executor; query: SearchContextQuery }>());
+  /** Explicit return-to-latest identity. Independent of the nav token, which
+   *  also moves for ordinary page and context loads. */
+  const returnGenerationRef = useRef(new Map<string, number>());
+  const [returnGenerationEpoch, setReturnGenerationEpoch] = useState(0);
+  const bumpNavToken = (sessionId: string): number => {
+    const next = (navTokenRef.current.get(sessionId) ?? 0) + 1;
+    navTokenRef.current.set(sessionId, next);
+    return next;
+  };
 
   const loadFirstPage = useCallback((
     sessionId: string,
@@ -114,6 +156,7 @@ export function useTranscriptHydration({
     const rebuildBaseline = operation === 'rebuild'
       ? rebuildBaselineRef.current.get(sessionId)
       : undefined;
+    const navToken = bumpNavToken(sessionId);
     loadingRef.current.add(sessionId);
     setHistoryBySession(previous => {
       const current = previous[sessionId] ?? unloadedHistoryState();
@@ -123,6 +166,9 @@ export function useTranscriptHydration({
       };
     });
     void loadEvents(sessionId).then(page => {
+      // A newer navigation intent (return-to-latest, context window, another
+      // first page) supersedes this response entirely.
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       const items = page.events.reduce<TranscriptItem[]>(
         (current, event) => applyEnvelope(current, event, executor),
         [],
@@ -200,6 +246,7 @@ export function useTranscriptHydration({
             },
       }));
     }).catch(error => {
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       setHistoryBySession(previous => {
         const current = previous[sessionId] ?? unloadedHistoryState();
         return {
@@ -212,7 +259,12 @@ export function useTranscriptHydration({
         };
       });
     }).finally(() => {
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       loadingRef.current.delete(sessionId);
+      // The rebuild queue drains only into a live-tail window: a detached
+      // context window (or a stale load) leaves it for the next tail load —
+      // firing it now would replace the window with the tail.
+      if (historyRef.current[sessionId]?.detachedFromLatest) return;
       const pendingRebuild = pendingRebuildRef.current.get(sessionId);
       if (pendingRebuild) {
         pendingRebuildRef.current.delete(sessionId);
@@ -224,12 +276,18 @@ export function useTranscriptHydration({
   const loadOlder = useCallback((sessionId: string, executor: Executor) => {
     const state = historyRef.current[sessionId];
     if (!state?.hasMore || state.cursor == null || loadingRef.current.has(sessionId)) return;
+    // Captured, never bumped: older paging continues the current window. A
+    // return-to-latest bumps the token and this late response is discarded.
+    const navToken = navTokenRef.current.get(sessionId) ?? 0;
     loadingRef.current.add(sessionId);
     setHistoryBySession(previous => ({
       ...previous,
       [sessionId]: { ...previous[sessionId]!, loadingOlder: true, error: null },
     }));
     void loadEvents(sessionId, state.cursor).then(page => {
+      // A newer navigation intent (return-to-latest, a fresh window) owns the
+      // token; this late page must not prepend into it.
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       const olderItems = page.events.reduce<TranscriptItem[]>(
         (current, event) => applyEnvelope(current, event, executor),
         [],
@@ -247,6 +305,11 @@ export function useTranscriptHydration({
       setHistoryBySession(previous => ({
         ...previous,
         [sessionId]: {
+          // Older paging from a detached context window stays detached —
+          // dropping the flag would let the next live frame fold into a
+          // non-contiguous window. The cold-history marker rides along too.
+          ...(previous[sessionId]?.detachedFromLatest ? { detachedFromLatest: true as const } : {}),
+          ...(previous[sessionId]?.historyIncomplete ? { historyIncomplete: true as const } : {}),
           phase: page.hasMore ? 'page' : 'complete',
           hasMore: page.hasMore,
           loading: false,
@@ -256,6 +319,7 @@ export function useTranscriptHydration({
         },
       }));
     }).catch(error => {
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       setHistoryBySession(previous => {
         const current = previous[sessionId];
         if (!current) return previous;
@@ -269,6 +333,7 @@ export function useTranscriptHydration({
         };
       });
     }).finally(() => {
+      if (navTokenRef.current.get(sessionId) !== navToken) return;
       loadingRef.current.delete(sessionId);
       setHistoryBySession(previous => {
         const current = previous[sessionId];
@@ -276,6 +341,9 @@ export function useTranscriptHydration({
           ? previous
           : { ...previous, [sessionId]: { ...current, loadingOlder: false } };
       });
+      // Same deferred-rebuild rule as first pages: the queue drains only
+      // into a live-tail window owned by this token.
+      if (historyRef.current[sessionId]?.detachedFromLatest) return;
       const pendingRebuild = pendingRebuildRef.current.get(sessionId);
       if (pendingRebuild) {
         pendingRebuildRef.current.delete(sessionId);
@@ -283,16 +351,6 @@ export function useTranscriptHydration({
       }
     });
   }, [setItemsBySession]);
-
-  const retry = useCallback((sessionId: string, executor: Executor) => {
-    const state = historyRef.current[sessionId];
-    if (!state?.error || loadingRef.current.has(sessionId)) return;
-    if (state.error.operation === 'older') {
-      loadOlder(sessionId, executor);
-      return;
-    }
-    loadFirstPage(sessionId, executor, state.error.operation);
-  }, [loadFirstPage, loadOlder]);
 
   const markLive = useCallback((sessionId: string) => {
     setHistoryBySession(previous => {
@@ -321,6 +379,114 @@ export function useTranscriptHydration({
     loadFirstPage(sessionId, executor, 'rebuild');
   }, [itemsBySession, loadFirstPage]);
 
+  const loadContextWindow = useCallback(async (
+    sessionId: string,
+    executor: Executor,
+    query: SearchContextQuery,
+  ): Promise<boolean> => {
+    // A new context window supersedes ANY in-flight load for the session
+    // (the older response is discarded by the token; its finally cannot
+    // clear this load's busy marker).
+    const navToken = bumpNavToken(sessionId);
+    loadingRef.current.add(sessionId);
+    contextQueryRef.current.set(sessionId, { executor, query });
+    setHistoryBySession(previous => ({
+      ...previous,
+      [sessionId]: { ...(previous[sessionId] ?? unloadedHistoryState()), loading: true, error: null },
+    }));
+    try {
+      const page = await loadSearchContext(sessionId, query);
+      if (navTokenRef.current.get(sessionId) !== navToken) return false;
+      const items = page.events.reduce<TranscriptItem[]>(
+        (current, event) => applyEnvelope(current, event, executor),
+        [],
+      );
+      // Replace the loaded window wholesale. Older paging continues before
+      // the window's first turn; the live tail is rehydrated explicitly via
+      // returnToLatest.
+      setItemsBySession(previous => ({ ...previous, [sessionId]: items }));
+      setHistoryBySession(previous => ({
+        ...previous,
+        [sessionId]: {
+          phase: 'page',
+          hasMore: page.window.from_turn > 1,
+          loading: false,
+          loadingOlder: false,
+          cursor: page.window.from_turn > 1 ? page.window.from_turn : null,
+          error: null,
+          detachedFromLatest: true,
+          ...(page.history_complete === false ? { historyIncomplete: true as const } : {}),
+        },
+      }));
+      return true;
+    } catch (error) {
+      if (navTokenRef.current.get(sessionId) !== navToken) return false;
+      setHistoryBySession(previous => {
+        const current = previous[sessionId];
+        if (!current) return previous;
+        return {
+          ...previous,
+          [sessionId]: {
+            ...current,
+            loading: false,
+            error: structuredHistoryError(error, 'context'),
+          },
+        };
+      });
+      return false;
+    } finally {
+      // Only the load that still owns the navigation token may release the
+      // busy marker — a superseded late response must not clear the newer
+      // load's flag.
+      if (navTokenRef.current.get(sessionId) === navToken) {
+        loadingRef.current.delete(sessionId);
+      }
+    }
+  }, [setItemsBySession]);
+
+  const returnToLatest = useCallback((sessionId: string, executor: Executor) => {
+    // The user's return-to-latest wins over any in-flight load: a superseded
+    // context response is discarded by the token, and its finally must not
+    // touch the busy marker. Never swallowed by a busy marker.
+    bumpNavToken(sessionId);
+    const returnGeneration = (returnGenerationRef.current.get(sessionId) ?? 0) + 1;
+    returnGenerationRef.current.set(sessionId, returnGeneration);
+    setReturnGenerationEpoch(epoch => epoch + 1);
+    contextQueryRef.current.delete(sessionId);
+    loadingRef.current.delete(sessionId);
+    // The detached window's items are not contiguous with the live tail —
+    // clear both the window and its history state, then rehydrate. The ref
+    // is updated synchronously: loadFirstPage's initial guard reads it.
+    historyRef.current = { ...historyRef.current, [sessionId]: unloadedHistoryState() };
+    setItemsBySession(previous => ({ ...previous, [sessionId]: [] }));
+    setHistoryBySession(previous => ({
+      ...previous,
+      [sessionId]: unloadedHistoryState(),
+    }));
+    loadFirstPage(sessionId, executor, 'initial');
+  }, [loadFirstPage, setItemsBySession]);
+
+  const retry = useCallback((sessionId: string, executor: Executor) => {
+    const state = historyRef.current[sessionId];
+    if (!state?.error || loadingRef.current.has(sessionId)) return;
+    if (state.error.operation === 'older') {
+      loadOlder(sessionId, executor);
+      return;
+    }
+    if (state.error.operation === 'context') {
+      // A failed context window retries the SAME bounded locator; it is not
+      // a first-page operation.
+      const stored = contextQueryRef.current.get(sessionId);
+      if (stored) {
+        void loadContextWindow(sessionId, stored.executor, stored.query);
+        return;
+      }
+      loadFirstPage(sessionId, executor, 'initial');
+      return;
+    }
+    loadFirstPage(sessionId, executor, state.error.operation);
+  }, [loadFirstPage, loadOlder, loadContextWindow]);
+
   useEffect(() => {
     const previousActive = previousActiveRef.current;
     previousActiveRef.current = activeSessionId;
@@ -341,10 +507,37 @@ export function useTranscriptHydration({
       return;
     }
     if (!reentered || history?.loading) return;
+    // A detached context window survives re-entry: refreshing the latest
+    // page would merge non-contiguous items into it. The user returns to
+    // the tail explicitly.
+    if (history?.detachedFromLatest) return;
     loadFirstPage(activeSessionId, executor, 'refresh');
   }, [activeSessionId, connectionReady, historyBySession, loadFirstPage, retry, sessions]);
 
-  return { historyBySession, loadOlder, retry, markLive, rebuild };
+  const historyForView = useMemo(() => {
+    let changed = false;
+    const next: Record<string, TranscriptHistoryState> = {};
+    for (const [sessionId, state] of Object.entries(historyBySession)) {
+      const generation = returnGenerationRef.current.get(sessionId);
+      if (generation !== undefined && state.returnToLatestGeneration !== generation) {
+        next[sessionId] = { ...state, returnToLatestGeneration: generation };
+        changed = true;
+      } else {
+        next[sessionId] = state;
+      }
+    }
+    return changed ? next : historyBySession;
+  }, [historyBySession, returnGenerationEpoch]);
+
+  return {
+    historyBySession: historyForView,
+    loadOlder,
+    retry,
+    markLive,
+    rebuild,
+    loadContextWindow,
+    returnToLatest,
+  };
 }
 
 /** Historical first page arrives after live events in reconnect races. */

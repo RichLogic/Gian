@@ -829,8 +829,8 @@ test('claude AskUserQuestion tool_use is mirrored as a question approval card an
           message.type === 'attention'
         ))
         .map(message => message.kind),
-      ['question'],
-      'a live external AskUserQuestion emits exactly one question attention',
+      [],
+      'a live external AskUserQuestion keeps the card and waits for a fresh inbox occurrence',
     );
   } finally {
     h.cleanup();
@@ -890,8 +890,8 @@ test('claude AskUserQuestion appended after watcher restart is attached to lates
           message.type === 'attention'
         ))
         .map(message => message.kind),
-      ['question'],
-      'new tail content after watcher restart remains live and actionable',
+      [],
+      'new tail content after watcher restart stays pending without an OS attention',
     );
   } finally {
     h.cleanup();

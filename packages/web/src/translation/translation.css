@@ -27,9 +27,13 @@
 /* A zero-width portal span can sit between the chip and the nav buttons,
    so this must be a general-sibling override, not adjacent (+). */
 .translation-auto ~ .transcript-navbtns { margin-left: 0; flex-shrink: 0; }
-.translation-block { margin-top: 12px; min-width: 0; font-size: 0.9em; color: var(--text); }
+/* The reading translation is 90% of the transcript body size — expressed
+   off --fz-13 so the chat 字号 setting (--chat-zone-scale) reaches it; a
+   bare em never saw the zone scale and pinned the bubble at 12.6px
+   (2026-10-18 fix). */
+.translation-block { margin-top: 12px; min-width: 0; font-size: calc(var(--fz-13) * 0.9); color: var(--text); }
 .translation-heading { display: flex; align-items: center; gap: 6px; color: var(--muted); padding: 4px 0; }
-.translation-label { color: var(--muted); margin-bottom: 6px; font-size: 12px; }
+.translation-label { color: var(--muted); margin-bottom: 6px; font-size: var(--fz-11); }
 .translation-bubble { border-left: 2px solid var(--hairline); padding: 8px 12px; overflow-wrap: anywhere; min-width: 0; }
 .translation-bubble pre { overflow: auto; max-width: 100%; }
 .translation-bubble > :first-child { margin-top: 0; }
@@ -39,8 +43,8 @@
 .translation-sent { max-width: 88%; }
 .translation-sent .translation-bubble { background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; }
 .translation-action { width: 28px; height: 28px; padding: 0; flex: 0 0 28px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
-.translation-action > span { display: inline-flex; align-items: baseline; gap: 1px; font-size: 13px; }
-.translation-action > span > span { font-size: 10px; }
+.translation-action > span { display: inline-flex; align-items: baseline; gap: 1px; font-size: var(--fz-12); }
+.translation-action > span > span { font-size: var(--fz-10); }
 .translation-action:hover { color: var(--text); background: var(--surface); }
 .translation-action:disabled { opacity: .5; cursor: default; }
 /* 文A toggle's expanded state gets the accent highlight (it owns the
@@ -52,7 +56,7 @@
 .translation-send-row {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;
   gap: 8px; max-width: 88%; margin-top: 6px;
-  font-size: 12px; color: var(--muted);
+  font-size: var(--fz-11); color: var(--muted);
 }
 /* "Translating" + three permanent dots running a staggered wave (delays
    0 / .15s / .3s). Shared by the send row and the assistant toggle. */
@@ -79,7 +83,7 @@
   color: var(--accent-text); font: inherit; cursor: pointer;
 }
 .translation-link:hover { text-decoration: underline; }
-.translation-error { color: var(--danger, #b94141); overflow-wrap: anywhere; font-size: 12px; }
+.translation-error { color: var(--danger, #b94141); overflow-wrap: anywhere; font-size: var(--fz-11); }
 .translation-error button { margin-left: 8px; }
 .translation-settings select { width: 100%; min-width: 0; max-width: 100%; }
 .translation-popover { position: fixed; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: min(60vh, 480px); overflow: auto; transform: translateX(-50%); padding: 12px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 30px #0002; }

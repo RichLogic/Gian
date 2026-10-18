@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { Db } from '../../storage/db.js';
 import { detectDefaultBranchAsync, listGitWorktreesAsync } from '../../workspace/git.js';
+import type { GitWorktreeInfo } from '../../workspace/git.js';
 import {
   GIT_MAX_CONCURRENCY,
   mapWithConcurrency,
@@ -29,6 +30,30 @@ import {
   extTreeId,
 } from '../working-tree-git.js';
 
+/** Structural match for search `SearchWorkingTreeSource`. `path` is index text. */
+export interface WorkingTreeListItem {
+  id: string;
+  kind: 'workspace' | 'worktree';
+  label: string;
+  path: string;
+  branch: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  session_id: string | null;
+  session_name: string | null;
+}
+
+export interface WorkingTreeInventory {
+  /**
+   * Canonical inventory behind GET /api/working_trees.
+   * `{ includeArchived: true }` adds archived `wt:` rows from the same git
+   * discovery cache. It does not start another `git worktree list`.
+   */
+  listWorkingTrees(
+    options?: { includeArchived?: boolean },
+  ): Promise<readonly WorkingTreeListItem[]>;
+}
+
 export function registerWorkingTreeRoutes(
   app: Hono,
   db: Db,
@@ -37,7 +62,7 @@ export function registerWorkingTreeRoutes(
     listGitWorktreesAsync?: typeof listGitWorktreesAsync;
     applicationRoutes?: ApplicationRouteOptions;
   } = {},
-): void {
+): WorkingTreeInventory {
   // Working trees — the right unit for "files I can see and edit right now".
   //
   // A working tree = one git working directory. A workspace's primary checkout
@@ -48,22 +73,27 @@ export function registerWorkingTreeRoutes(
   // -------------------------------------------------------------------------
 
   registerWorkspaceGitRoutes(app, db, broadcaster);
-  type WorkingTreeListItem = {
+  interface WorkspaceRow { id: string; name: string; path: string }
+  interface SessionRow {
     id: string;
-    kind: 'workspace' | 'worktree';
-    label: string;
-    path: string;
-    branch: string | null;
+    name: string | null;
     workspace_id: string;
-    workspace_name: string;
-    session_id: string | null;
-    session_name: string | null;
-  };
-  let workingTreeCache: { signature: string; expiresAt: number; value: WorkingTreeListItem[] } | null = null;
-  let workingTreeScan: {
+    worktree_path: string;
+    branch: string | null;
+  }
+  interface WorkingTreeDiscovery {
+    signature: string;
+    expiresAt: number;
+    byWorkspace: ReadonlyMap<string, readonly GitWorktreeInfo[]>;
+    branchByPath: ReadonlyMap<string, string | null>;
+  }
+  // Git discovery is keyed only by workspace rows. Archived and live session
+  // filters reuse one scan; `refresh=1` still refuses an older ordinary scan.
+  let discoveryCache: WorkingTreeDiscovery | null = null;
+  let discoveryScan: {
     signature: string;
     forced: boolean;
-    promise: Promise<WorkingTreeListItem[]>;
+    promise: Promise<WorkingTreeDiscovery>;
   } | null = null;
   async function resolveWorkingTree(id: string): Promise<{ path: string; workspace_id: string; session_id: string | null } | null> {
     if (id.startsWith('ws:')) {
@@ -568,107 +598,139 @@ export function registerWorkingTreeRoutes(
       : 'all';
   }
 
-  app.get('/api/working_trees', async c => {
-    const wsRows = db.prepare('SELECT id, name, path FROM workspaces ORDER BY sort_order ASC').all() as
-      Array<{ id: string; name: string; path: string }>;
-    const sessRows = db.prepare(`
-      SELECT id, name, workspace_id, worktree_path, branch
-      FROM sessions
-      WHERE worktree_path IS NOT NULL AND archived = 0
-      ORDER BY updated_at DESC
-    `).all() as Array<{ id: string; name: string | null; workspace_id: string; worktree_path: string; branch: string | null }>;
-
-    const signature = JSON.stringify({ wsRows, sessRows });
-    const refresh = c.req.query('refresh') === '1';
-    if (!refresh && workingTreeCache?.signature === signature
-      && workingTreeCache.expiresAt > Date.now()) {
-      return c.json(workingTreeCache.value);
+  async function discoverWorktrees(
+    wsRows: readonly WorkspaceRow[],
+    refresh: boolean,
+  ): Promise<WorkingTreeDiscovery> {
+    const signature = JSON.stringify(wsRows);
+    if (!refresh && discoveryCache?.signature === signature && discoveryCache.expiresAt > Date.now()) {
+      return discoveryCache;
     }
-    const inFlight = workingTreeScan?.signature === signature ? workingTreeScan : null;
+    const inFlight = discoveryScan?.signature === signature ? discoveryScan : null;
     if (inFlight) {
       // Ordinary callers may share any current scan. A forced refresh may
       // share a scan that is already forced, but must never accept an ordinary
       // scan that started before the refresh request: wait for it to settle,
       // then scan once more so the old result cannot finish late and replace
       // the refreshed cache.
-      if (!refresh || inFlight.forced) return c.json(await inFlight.promise);
+      if (!refresh || inFlight.forced) return inFlight.promise;
       await inFlight.promise;
-      const successor = workingTreeScan?.signature === signature ? workingTreeScan : null;
-      if (successor && successor.promise !== inFlight.promise) {
-        return c.json(await successor.promise);
-      }
+      const successor = discoveryScan?.signature === signature ? discoveryScan : null;
+      if (successor && successor.promise !== inFlight.promise) return successor.promise;
     }
 
-    const promise = (async (): Promise<WorkingTreeListItem[]> => {
+    const promise = (async (): Promise<WorkingTreeDiscovery> => {
       const scanWorktrees = options.listGitWorktreesAsync ?? listGitWorktreesAsync;
       const discoveredEntries = await mapWithConcurrency(wsRows, GIT_MAX_CONCURRENCY, async ws => (
         [ws.id, await scanWorktrees(ws.path)] as const
       ));
-      const discoveredByWorkspace = new Map(discoveredEntries);
-      const branchByPath = new Map(
-        discoveredEntries.flatMap(([, trees]) => trees.map(tree => [tree.path, tree.branch] as const)),
-      );
-      const out: WorkingTreeListItem[] = [];
-      for (const ws of wsRows) {
+      const discovery: WorkingTreeDiscovery = {
+        signature,
+        expiresAt: Date.now() + 5_000,
+        byWorkspace: new Map(discoveredEntries),
+        branchByPath: new Map(
+          discoveredEntries.flatMap(([, trees]) => trees.map(tree => [tree.path, tree.branch] as const)),
+        ),
+      };
+      discoveryCache = discovery;
+      return discovery;
+    })();
+    discoveryScan = { signature, forced: refresh, promise };
+    try {
+      return await promise;
+    } finally {
+      if (discoveryScan?.promise === promise) discoveryScan = null;
+    }
+  }
+
+  function buildWorkingTreeItems(
+    wsRows: readonly WorkspaceRow[],
+    sessRows: readonly SessionRow[],
+    discovery: WorkingTreeDiscovery,
+  ): WorkingTreeListItem[] {
+    const out: WorkingTreeListItem[] = [];
+    for (const ws of wsRows) {
+      out.push({
+        id: `ws:${ws.id}`,
+        kind: 'workspace',
+        label: ws.name,
+        path: ws.path,
+        branch: discovery.branchByPath.get(ws.path) ?? null,
+        workspace_id: ws.id,
+        workspace_name: ws.name,
+        session_id: null,
+        session_name: null,
+      });
+    }
+    for (const s of sessRows) {
+      const ws = wsRows.find(w => w.id === s.workspace_id);
+      out.push({
+        id: `wt:${s.id}`,
+        kind: 'worktree',
+        label: s.name || `session ${s.id.slice(0, 6)}`,
+        path: s.worktree_path,
+        branch: s.branch ?? discovery.branchByPath.get(s.worktree_path) ?? null,
+        workspace_id: s.workspace_id,
+        workspace_name: ws?.name ?? '',
+        session_id: s.id,
+        session_name: s.name,
+      });
+    }
+    const sessionPathsByWs = new Map<string, Set<string>>();
+    for (const s of sessRows) {
+      let set = sessionPathsByWs.get(s.workspace_id);
+      if (!set) sessionPathsByWs.set(s.workspace_id, set = new Set());
+      set.add(s.worktree_path);
+    }
+    for (const ws of wsRows) {
+      const known = sessionPathsByWs.get(ws.id) ?? new Set<string>();
+      known.add(ws.path);
+      for (const wt of discovery.byWorkspace.get(ws.id) ?? []) {
+        if (known.has(wt.path)) continue;
         out.push({
-          id: `ws:${ws.id}`,
-          kind: 'workspace',
-          label: ws.name,
-          path: ws.path,
-          branch: branchByPath.get(ws.path) ?? null,
+          id: extTreeId(ws.id, wt.path),
+          kind: 'worktree',
+          label: basename(wt.path),
+          path: wt.path,
+          branch: wt.branch,
           workspace_id: ws.id,
           workspace_name: ws.name,
           session_id: null,
           session_name: null,
         });
       }
-      for (const s of sessRows) {
-        const ws = wsRows.find(w => w.id === s.workspace_id);
-        out.push({
-          id: `wt:${s.id}`,
-          kind: 'worktree',
-          label: s.name || `session ${s.id.slice(0, 6)}`,
-          path: s.worktree_path,
-          branch: s.branch ?? branchByPath.get(s.worktree_path) ?? null,
-          workspace_id: s.workspace_id,
-          workspace_name: ws?.name ?? '',
-          session_id: s.id,
-          session_name: s.name,
-        });
-      }
-      const sessionPathsByWs = new Map<string, Set<string>>();
-      for (const s of sessRows) {
-        let set = sessionPathsByWs.get(s.workspace_id);
-        if (!set) sessionPathsByWs.set(s.workspace_id, set = new Set());
-        set.add(s.worktree_path);
-      }
-      for (const ws of wsRows) {
-        const known = sessionPathsByWs.get(ws.id) ?? new Set<string>();
-        known.add(ws.path);
-        for (const wt of discoveredByWorkspace.get(ws.id) ?? []) {
-          if (known.has(wt.path)) continue;
-          out.push({
-            id: extTreeId(ws.id, wt.path),
-            kind: 'worktree',
-            label: basename(wt.path),
-            path: wt.path,
-            branch: wt.branch,
-            workspace_id: ws.id,
-            workspace_name: ws.name,
-            session_id: null,
-            session_name: null,
-          });
-        }
-      }
-      workingTreeCache = { signature, expiresAt: Date.now() + 5_000, value: out };
-      return out;
-    })();
-    workingTreeScan = { signature, forced: refresh, promise };
-    try {
-      return c.json(await promise);
-    } finally {
-      if (workingTreeScan?.promise === promise) workingTreeScan = null;
     }
+    return out;
+  }
+
+  async function listWorkingTrees(request?: {
+    includeArchived?: boolean;
+    refresh?: boolean;
+  }): Promise<WorkingTreeListItem[]> {
+    const includeArchived = request?.includeArchived === true;
+    const wsRows = db.prepare(
+      'SELECT id, name, path FROM workspaces ORDER BY sort_order ASC',
+    ).all() as WorkspaceRow[];
+    const sessRows = (includeArchived
+      ? db.prepare(`
+          SELECT id, name, workspace_id, worktree_path, branch
+          FROM sessions
+          WHERE worktree_path IS NOT NULL
+          ORDER BY updated_at DESC
+        `)
+      : db.prepare(`
+          SELECT id, name, workspace_id, worktree_path, branch
+          FROM sessions
+          WHERE worktree_path IS NOT NULL AND archived = 0
+          ORDER BY updated_at DESC
+        `)
+    ).all() as SessionRow[];
+    const discovery = await discoverWorktrees(wsRows, request?.refresh === true);
+    return buildWorkingTreeItems(wsRows, sessRows, discovery);
+  }
+
+  app.get('/api/working_trees', async c => {
+    return c.json(await listWorkingTrees({ refresh: c.req.query('refresh') === '1' }));
   });
 
   app.get('/api/working_trees/:id/tree', async c => {
@@ -1072,4 +1134,9 @@ export function registerWorkingTreeRoutes(
   });
 
   registerApplicationRoutes(app, db, resolveWorkingTree, options.applicationRoutes);
+  return {
+    listWorkingTrees: request => listWorkingTrees({
+      includeArchived: request?.includeArchived === true,
+    }),
+  };
 }

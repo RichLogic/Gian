@@ -9,6 +9,7 @@ import {
   type AgentHomeBinding,
   type ProxyPluginId,
 } from '@gian/shared';
+import { assertAuthorizedFilesystemIdentity, isAuthorizedConfigHome } from '../runtime/config-home.js';
 
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -125,6 +126,20 @@ export class AgentHomeManager {
     await mkdir(path, { recursive: true, mode: 0o700 }).catch(error => {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     });
+    return this.validateCustom(path, used, undefined, pluginId);
+  }
+
+  async useRuntimeDefault(
+    pluginId: ProxyPluginId,
+    path: string,
+    executable: string,
+    used: readonly { agentId: string; path: string }[],
+  ): Promise<AgentHomeBinding> {
+    if (!isAuthorizedConfigHome(path, executable, this.userHome)) {
+      throw new AgentHomeError('AGENT_HOME_INVALID', 'Runtime default HOME is outside authorized configuration locations.');
+    }
+    await assertAuthorizedFilesystemIdentity(path, executable, this.userHome);
+    await mkdir(path, { recursive: true, mode: 0o700 });
     return this.validateCustom(path, used, undefined, pluginId);
   }
 

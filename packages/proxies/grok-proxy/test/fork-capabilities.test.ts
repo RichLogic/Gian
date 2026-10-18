@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { resultSchemas } from '@gian/proxy-protocol';
@@ -7,6 +10,12 @@ import { resultSchemas } from '@gian/proxy-protocol';
 import { GrokProxyService } from '../src/core/service.js';
 import { GrokProtocolV2Adapter } from '../src/protocol/v2-adapter.js';
 import type { GrokAcpClient } from '../src/runtime/grok-acp-client.js';
+
+// The default turn-identity store persists under GIAN_PLUGIN_DATA_DIR; pin it
+// to a scratch dir so a leaked Agent-session env (and any identities recorded
+// there by earlier runs) cannot flip ordinal proofs. This file runs in its own
+// process under node --test.
+process.env.GIAN_PLUGIN_DATA_DIR = mkdtempSync(join(tmpdir(), 'grok-fork-capabilities-'));
 
 interface RecordedEvent {
   method: string;

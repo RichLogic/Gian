@@ -43,6 +43,7 @@ import { deriveTraceSnapshot } from '../trace/derive.js';
 import { TraceView } from '../trace/TraceView.js';
 import type { TraceSnapshot } from '../trace/types.js';
 import { Transcript } from '../transcript/Transcript.js';
+import { ConversationFind } from '../transcript/ConversationFind.js';
 import {
   TranscriptMinimap,
   TranscriptNavigation,
@@ -133,6 +134,27 @@ export interface SessionMainProps {
    *  reports consumption. */
   scheduleFocus?: { runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  /** Exact message navigation (Issue #168): reveal one transcript identity,
+   *  loading its bounded context window first when it is not mounted. */
+  messageFocus?: {
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  /** Bounded context-window load around a search/find target. */
+  onLoadMessageContext?: (focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => Promise<boolean>;
+  /** Explicit "back to latest" while a detached context window is shown. */
+  onReturnToLatest?: () => void;
 }
 
 export function SessionMain({
@@ -172,9 +194,24 @@ export function SessionMain({
   sideChatControl,
   scheduleFocus,
   onConsumeScheduleFocus,
+  messageFocus,
+  onConsumeMessageFocus,
+  onLoadMessageContext,
+  onReturnToLatest,
 }: SessionMainProps) {
   const t = useT();
   const translation = useTranslation(session.id);
+  const mainScrollRef = useRef<HTMLDivElement>(null);
+  // Conversation find (Issue #168): while the find bar owns navigation, the
+  // transcript must not re-pin to the bottom on streaming/new messages.
+  const [findActive, setFindActive] = useState(false);
+  // Find-drift signal: item count + trailing message text length (streams
+  // grow the last bubble in place).
+  const contentSignal = useMemo(() => {
+    const tail = items[items.length - 1];
+    const tailText = tail && 'text' in tail ? (tail as { text?: string }).text?.length ?? 0 : 0;
+    return `${items.length}:${tailText}`;
+  }, [items]);
   const dispatch = useOperationDispatchOptional();
   const openChatPanel = useContext(ChatPanelOpenContext);
   const [selectionCreate, setSelectionCreate] = useState<{
@@ -269,7 +306,10 @@ export function SessionMain({
     }
   }, [selectionCreate, selectionCreateRun, t]);
 
-  const transcriptReadOnly = sessionCompleted || agentDeleted || agentDisabled;
+  // Archived sessions open read-only (Issue #168): never unarchive, never
+  // enable send/queue/approval affordances.
+  const archivedReadOnly = session.archived === 1;
+  const transcriptReadOnly = sessionCompleted || agentDeleted || agentDisabled || archivedReadOnly;
   const selectionCreatePending = selectionCreateRun?.phase === 'pending'
     || selectionCreateRun?.phase === 'optimistic';
   const askSelectionEnabled = !transcriptReadOnly
@@ -405,6 +445,11 @@ export function SessionMain({
           )}
         </div>
       )}
+      {archivedReadOnly && (
+        <div className="session-banner" role="status" data-testid="archived-readonly-banner">
+          <span>{t('coding.banner.archivedReadOnly')}</span>
+        </div>
+      )}
       {remoteUnavailable && <div className="session-banner" role="status">
         <span>{remoteStatus === 'auth_required' ? t('remote.execution.authRequired')
           : remoteStatus === 'unavailable' ? t('remote.execution.unavailable')
@@ -417,7 +462,7 @@ export function SessionMain({
           <span className="session-banner-spacer" />
         </div>
       )}
-      <div className="main-scroll">
+      <div className="main-scroll" ref={mainScrollRef}>
         {sessionView === 'trace' ? (
           <TraceView snapshot={traceSnapshot} />
         ) : (
@@ -433,6 +478,14 @@ export function SessionMain({
             pending={running}
             onApprove={onApprove}
             translation={translation}
+            findActive={findActive}
+            messageFocus={messageFocus}
+            onConsumeMessageFocus={onConsumeMessageFocus}
+            onLoadMessageContext={onLoadMessageContext}
+            returnToLatestGeneration={history?.returnToLatestGeneration ?? 0}
+            approvalsLockedReason={transcriptReadOnly
+              ? (archivedReadOnly ? t('coding.banner.archivedReadOnly') : t('transcript.selection.readOnly'))
+              : null}
             selectionActions={{
               translate: {
                 label: t('translation.to').replace('{language}', languageName(translation.state.preferences.reading_language)),
@@ -458,22 +511,43 @@ export function SessionMain({
           />
         )}
       </div>
+      {sessionView === 'chat' && (
+        <ConversationFind
+          sessionId={session.id}
+          scopeRef={mainScrollRef}
+          items={items}
+          history={history}
+          contentSignal={contentSignal}
+          onLoadMessageContext={onLoadMessageContext}
+          onActiveChange={setFindActive}
+        />
+      )}
+      {sessionView === 'chat' && history?.detachedFromLatest && onReturnToLatest && (
+        <button
+          type="button"
+          className="conv-return-latest"
+          data-testid="return-to-latest"
+          onClick={onReturnToLatest}
+        >
+          {t('find.returnToLatest')}
+        </button>
+      )}
       {sessionView === 'chat' && <TranscriptMinimap items={items} />}
       {sessionView === 'chat' && (
         <>
           <QueueList
             sessionId={session.id}
             queue={queue}
-            onRemove={sessionCompleted || remoteUnavailable ? undefined : onQueueRemove}
-            onUpdate={sessionCompleted || remoteUnavailable ? undefined : onQueueUpdate}
-            onClear={sessionCompleted || remoteUnavailable ? undefined : onQueueClear}
+            onRemove={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueRemove}
+            onUpdate={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueUpdate}
+            onClear={sessionCompleted || remoteUnavailable || archivedReadOnly ? undefined : onQueueClear}
             onSendNow={queueSendNowEnabled({
               executor: session.executor,
               steerAdvertised: advertisedSteer,
-              completed: sessionCompleted,
+              completed: sessionCompleted || archivedReadOnly,
               remoteUnavailable,
             }) ? onQueueSendNow : undefined}
-            readOnly={sessionCompleted || remoteUnavailable}
+            readOnly={sessionCompleted || remoteUnavailable || archivedReadOnly}
           />
           <UnderbarPanelGroup sessionId={session.id}>
             <PlanChip
@@ -549,9 +623,9 @@ export function SessionMain({
             onSetServiceTier={onSetServiceTier}
             onSetNativeConfig={onSetNativeConfig}
             onSetTurnConfig={onSetTurnConfig}
-            disabled={pending || sessionCompleted || agentDeleted || agentDisabled || remoteUnavailable}
+            disabled={pending || sessionCompleted || agentDeleted || agentDisabled || remoteUnavailable || archivedReadOnly}
             running={isTurnRunning(session.status, pending)}
-            disabledSubmitBehavior={sessionCompleted || remoteUnavailable ? 'block' : 'queue'}
+            disabledSubmitBehavior={sessionCompleted || remoteUnavailable || archivedReadOnly ? 'block' : 'queue'}
             executor={session.executor}
             agentId={session.agent_id ?? null}
             workspaceId={workspace?.id}

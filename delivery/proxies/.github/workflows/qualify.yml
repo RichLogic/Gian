@@ -1,6 +1,12 @@
 name: Qualify Proxy Artifacts
 on:
   workflow_dispatch:
+    inputs:
+      owner_no_tests:
+        description: Owner-selected direct Claude fixes build without any tests
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -24,7 +30,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Qualify the independently buildable product
         env:
+          GH_TOKEN: ${{ github.token }}
           GIAN_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GIAN_PROXY_OWNER_NO_TESTS: ${{ inputs.owner_no_tests }}
         run: pnpm qualify
       - uses: actions/upload-artifact@v4
         with:

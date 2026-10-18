@@ -671,29 +671,29 @@ test('Claude result usage prefers whole-tree modelUsage over the top-level fallb
   });
 });
 
-test('capabilities discovery does not run claude -p unless explicitly opted in', async () => {
+test('capabilities discovery never submits a prompt or user frame without opting in', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cc-proxy-billing-safe-'));
   const fakeClaude = join(dir, 'claude');
-  const marker = join(dir, 'print-mode-called');
+  const marker = join(dir, 'paid-turn-requested');
   writeFileSync(fakeClaude, [
-    '#!/bin/sh',
-    `MARKER='${marker}'`,
-    'for arg in "$@"; do',
-    '  if [ "$arg" = "-p" ] || [ "$arg" = "--print" ]; then',
-    '    echo hit > "$MARKER"',
-    '    echo "unexpected print mode" >&2',
-    '    exit 42',
-    '  fi',
-    'done',
-    'if [ "$1" = "--help" ]; then',
-    '  cat <<EOF',
-    'Options:',
-    '  --effort <level>                      Effort level for the current session',
-    '                                        (low, medium, max)',
-    'EOF',
-    '  exit 0',
-    'fi',
-    'exit 0',
+    `#!${process.execPath}`,
+    "const { writeFileSync } = require('node:fs');",
+    "const { createInterface } = require('node:readline');",
+    'if (process.argv.includes("--help")) {',
+    '  console.log("--effort <level> (low, medium, max)");',
+    '  process.exit(0);',
+    '}',
+    `const unsafe = () => { writeFileSync(${JSON.stringify(marker)}, 'hit'); process.exit(42); };`,
+    'if (process.argv.includes("-p")) unsafe();',
+    'const input = createInterface({ input: process.stdin });',
+    'input.on("line", (line) => {',
+    '  const request = JSON.parse(line);',
+    '  if (request.type !== "control_request" || request.request.subtype !== "initialize") unsafe();',
+    '  console.log(JSON.stringify({ type: "control_response", response: {',
+    '    subtype: "error", request_id: request.request_id, error: "initialize unsupported in this fixture"',
+    '  }}));',
+    '});',
+    'input.on("close", () => process.exit(0));',
     '',
   ].join('\n'));
   chmodSync(fakeClaude, 0o755);
@@ -705,7 +705,8 @@ test('capabilities discovery does not run claude -p unless explicitly opted in',
   process.env.CLAUDE_BIN = fakeClaude;
   delete process.env.GIAN_ALLOW_CLAUDE_PRINT_PROBE;
   // Hermetic settings discovery: no CLAUDE_CONFIG_DIR and a tmp HOME with no
-  // ~/.claude/settings.json, so discovery must land on the static alias menu.
+  // ~/.claude/settings.json. The native fixture reports an unsupported
+  // metadata handshake, so discovery must land on the static alias menu.
   delete process.env.CLAUDE_CONFIG_DIR;
   process.env.HOME = dir;
 
@@ -713,7 +714,7 @@ test('capabilities discovery does not run claude -p unless explicitly opted in',
   try {
     await service.initialize();
     const caps = await service.listCapabilities();
-    assert.equal(existsSync(marker), false, 'capabilities.list must not invoke claude print mode');
+    assert.equal(existsSync(marker), false, 'capabilities.list must not submit an inference prompt or user frame');
     // Static alias menu: Default (no --model) + opus/sonnet/haiku aliases.
     assert.equal(caps.models.length, 4);
     assert.equal(caps.models[0]!.id, 'claude-default');
@@ -1376,6 +1377,24 @@ test('interrupt resumes the same Claude session instead of exiting 0', async () 
       "  console.log('                                        (low, high)');",
       '  process.exit(0);',
       '}',
+      // The native model-catalog discovery probe (--input-format stream-json +
+      // an initialize control frame) is metadata-only: answer it without
+      // touching the argv log or the session marker, so only real turn spawns
+      // count there.
+      "if (args.includes('--input-format')) {",
+      "  const rl = require(\"node:readline\").createInterface({ input: process.stdin });",
+      "  rl.on(\"line\", (line) => {",
+      '    try {',
+      '      const request = JSON.parse(line);',
+      "      if (request.type === \"control_request\" && request.request?.subtype === \"initialize\") {",
+      "        process.stdout.write(JSON.stringify({ type: \"control_response\", response: { subtype: \"success\", request_id: request.request_id, response: { models: [",
+      "          { value: \"opus\", displayName: \"Opus\", description: \"Opus model\", supportsEffort: true, supportedEffortLevels: [\"low\", \"high\"] },",
+      "        ] } } }) + \"\\n\");",
+      '      }',
+      '    } catch { /* ignore malformed probe input */ }',
+      '  });',
+      "  rl.on(\"close\", () => process.exit(0));",
+      '} else {',
       'const log = process.env.CLAUDE_ARGV_LOG;',
       "if (log) fs.appendFileSync(log, args.join('\\0') + '\\n');",
       "fs.writeSync(1, JSON.stringify({ type: 'system', subtype: 'init', model: 'opus' }) + '\\n');",
@@ -1391,6 +1410,7 @@ test('interrupt resumes the same Claude session instead of exiting 0', async () 
       '  process.exit(0);',
       '}',
       'setInterval(() => undefined, 1000);',
+      '}',
       '',
     ].join('\n'));
     chmodSync(fake, 0o755);
@@ -1473,12 +1493,30 @@ test('interrupt before Claude init keeps --session-id for the next turn', async 
       "  console.log('                                        (low, high)');",
       '  process.exit(0);',
       '}',
+      // Same metadata-only discovery-probe branch as the companion test: the
+      // native catalog handshake must not create the boot marker or an argv
+      // record; only real turn spawns may.
+      "if (args.includes('--input-format')) {",
+      "  const rl = require(\"node:readline\").createInterface({ input: process.stdin });",
+      "  rl.on(\"line\", (line) => {",
+      '    try {',
+      '      const request = JSON.parse(line);',
+      "      if (request.type === \"control_request\" && request.request?.subtype === \"initialize\") {",
+      "        process.stdout.write(JSON.stringify({ type: \"control_response\", response: { subtype: \"success\", request_id: request.request_id, response: { models: [",
+      "          { value: \"opus\", displayName: \"Opus\", description: \"Opus model\", supportsEffort: true, supportedEffortLevels: [\"low\", \"high\"] },",
+      "        ] } } }) + \"\\n\");",
+      '      }',
+      '    } catch { /* ignore malformed probe input */ }',
+      '  });',
+      "  rl.on(\"close\", () => process.exit(0));",
+      '} else {',
       'const log = process.env.CLAUDE_ARGV_LOG;',
       "if (log) fs.appendFileSync(log, args.join('\\0') + '\\n');",
       "process.on('SIGTERM', () => { setTimeout(() => process.exit(0), 50); });",
       'const marker = process.env.CLAUDE_SESSION_MARKER;',
       "if (marker) fs.writeFileSync(marker, '1');",
       'setInterval(() => undefined, 1000);',
+      '}',
       '',
     ].join('\n'));
     chmodSync(fake, 0o755);

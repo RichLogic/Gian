@@ -6,6 +6,7 @@ import type {
   ConfigValue,
   Executor,
   NativeConfigOption,
+  ProxyCatalog,
   Session,
   SessionType,
   ThinkingEffort,
@@ -13,11 +14,11 @@ import type {
   WorktreeOutcome,
 } from '@gian/shared';
 import {
-  migrateLegacyGrokProxyDefaults,
+  catalogModeSemantics,
   sessionRuntimeCliPath,
   sessionRuntimeProxyVersion,
-  usesNativeExecutorConfig,
 } from '@gian/shared';
+import { requestViolation } from '@gian/proxy-protocol';
 import {
   compatibilityExecutorColumn,
   officialKindForSession,
@@ -72,6 +73,8 @@ interface BringUpInput {
   preparedLaunch?: PreparedSessionLaunch;
   executorDefaults?: AgentProxyDefaults;
   sessionConfig?: Record<string, ConfigValue>;
+  /** Runs on the acquired connection, after its catalog and before native create. */
+  validateCatalog: (catalog: ProxyCatalog, capabilities: Record<string, unknown>) => void;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
 }
 
@@ -98,7 +101,6 @@ function initialTurnConfigFromCreate(
   roles: {
     model: string | null;
     effort: ThinkingEffort | null;
-    mode: string | null;
     serviceTier: 'fast' | null;
   },
   agentOptions?: Record<string, ConfigValue>,
@@ -108,10 +110,7 @@ function initialTurnConfigFromCreate(
     if (option.scope !== 'turn' || config[option.id] !== undefined) continue;
     if (option.category === 'model' && roles.model) config[option.id] = roles.model;
     else if (option.category === 'effort' && roles.effort) config[option.id] = roles.effort;
-    else if (option.category === 'approval_mode' && roles.mode
-      && (!option.choices || option.choices.some(choice => Object.is(choice.value, roles.mode)))) {
-      config[option.id] = roles.mode;
-    } else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
+    else if (option.category === 'fast') config[option.id] = roles.serviceTier === 'fast';
     else if (!option.category && agentOptions?.[option.id] !== undefined) {
       // Role-less Agent option defaults (e.g. provider) seed the initial turn
       // config; explicit create values already won above. Ids absent from the
@@ -123,16 +122,6 @@ function initialTurnConfigFromCreate(
     }
   }
   return config;
-}
-
-function assertApprovalModeAllowed(executor: Executor, mode: ApprovalMode): void {
-  const allowedModes = new Set<ApprovalMode>(['plan', 'ask', 'auto', 'custom', 'full-access']);
-  if (!allowedModes.has(mode)) {
-    throw new Error(`unsupported approval mode: ${mode}`);
-  }
-  if ((mode === 'custom' || mode === 'full-access') && executor !== 'codex') {
-    throw new Error(`${mode} approval mode is codex-only`);
-  }
 }
 
 export class WorktreeLifecycleConflictError extends Error {
@@ -236,25 +225,14 @@ export class SessionLifecycleService {
       throw new Error('service_tier is codex-only');
     }
     const serviceTier = officialKind === 'codex' ? input.service_tier ?? null : null;
-    if (officialKind && usesNativeExecutorConfig(officialKind) && input.approval_mode !== undefined) {
-      throw new Error(`${officialKind} uses executor-native mode; approval_mode must be omitted`);
-    }
     const managedDefaults = resolvedAgent
       ? resolvedAgent.agent.defaults
-      : executor === 'grok'
-        ? migrateLegacyGrokProxyDefaults(this.proxyDefaults?.(executor) ?? {
-          model: '',
-          thinking: '',
-          mode: '',
-          options: {},
-        })
-        : this.proxyDefaults?.(executor);
-    const configuredMode = managedDefaults?.mode.trim() ?? '';
-    const fallbackMode: ApprovalMode = managedDefaults ? 'ask' : 'auto';
-    const approvalMode: ApprovalMode | null = officialKind && usesNativeExecutorConfig(officialKind)
-      ? null
-      : (input.approval_mode ?? (configuredMode || fallbackMode) as ApprovalMode);
-    if (approvalMode) assertApprovalModeAllowed(officialKind ?? executor, approvalMode);
+      : this.proxyDefaults?.(executor);
+    const configuredMode = managedDefaults?.mode ?? '';
+    let approvalMode: ApprovalMode | null = null;
+    let catalogValidated = false;
+    const modeTurnConfig: Record<string, ConfigValue> = {};
+    const sessionConfig: Record<string, ConfigValue> = { ...input.session_config };
 
     const cfg = loadConfig(this.db);
     const defaultModel = managedDefaults
@@ -307,6 +285,44 @@ export class SessionLifecycleService {
         ...(selectedPath !== null ? { cliPath: selectedPath } : {}),
         ...(proxyVersion ? { proxyVersion } : {}),
         ...(preparedLaunch ? { preparedLaunch } : {}),
+        validateCatalog: (catalog, capabilities) => {
+          // Semantics select the compatibility route, never a vocabulary.
+          // The exact connection's choices/defaults/binding own every value.
+          const nativeMode = catalogModeSemantics(executor,
+            capabilities['catalog.modeSemantics'] !== undefined ? catalog : null,
+          ) === 'provider-native';
+          const legacyExplicit = input.approval_mode !== undefined;
+          if (nativeMode && legacyExplicit) {
+            throw requestViolation('CONFIG_BINDING_INVALID', 'Proxy uses executor-native mode; approval_mode must be omitted.');
+          }
+          const modes = catalog.configOptions.filter(option => option.role === 'approval_mode' || option.role === 'execution_mode');
+          if ((configuredMode !== '' || legacyExplicit) && modes.length !== 1) {
+            throw requestViolation('CONFIG_VALUE_INVALID', 'Proxy must advertise one mode selector to resolve a saved or legacy mode choice.');
+          }
+          for (const option of modes) {
+            const explicit = option.binding === 'session' ? input.session_config : input.turn_config;
+            const other = option.binding === 'session' ? input.turn_config : input.session_config;
+            if (other && Object.hasOwn(other, option.id)) {
+              throw requestViolation('CONFIG_BINDING_INVALID', 'Mode was supplied with the wrong config binding.');
+            }
+            const hasExplicit = explicit !== undefined && Object.hasOwn(explicit, option.id);
+            if (hasExplicit && legacyExplicit && !Object.is(explicit[option.id], input.approval_mode)) {
+              throw requestViolation('CONFIG_VALUE_INVALID', 'Explicit mode choices conflict.');
+            }
+            const value = hasExplicit ? explicit[option.id] : legacyExplicit ? input.approval_mode
+              : configuredMode !== '' ? configuredMode : option.defaultValue;
+            const advertised = option.choices?.some(choice => Object.is(choice.value, value));
+            if (!hasExplicit && !legacyExplicit && configuredMode === '' && value === null && !advertised && !option.required) continue;
+            if (!advertised) {
+              throw requestViolation('CONFIG_VALUE_INVALID', 'Mode is not advertised by the Proxy.');
+            }
+            (option.binding === 'turn' ? modeTurnConfig : sessionConfig)[option.id] = value!;
+            // The old column is a compatibility projection of a declared
+            // string choice, not an independent permission policy.
+            if (!nativeMode && modes.length === 1 && typeof value === 'string') approvalMode = value as ApprovalMode;
+          }
+          catalogValidated = true;
+        },
         // Semantic roles owned by Gian Settings. The coordinator resolves
         // each role against this session's catalog before sending config.
         ...(managedDefaults
@@ -319,7 +335,7 @@ export class SessionLifecycleService {
               },
             }
           : {}),
-        ...(input.session_config ? { sessionConfig: input.session_config } : {}),
+        sessionConfig,
         ...(officialKind === 'codex'
           ? {
               hostServiceIdentity: {
@@ -331,20 +347,18 @@ export class SessionLifecycleService {
             }
           : {}),
       });
+      if (!catalogValidated) throw new Error('Session creation requires a validated Proxy catalog.');
     } catch (error) {
       await this.runtime.discardProxy(id);
       throw error;
     }
 
     const initialTurnConfig = initialTurnConfigFromCreate(
-      input.turn_config,
+      { ...modeTurnConfig, ...input.turn_config },
       proxyResult.configOptions,
       {
         model: effectiveModel,
         effort: effectiveEffort,
-        mode: officialKind && usesNativeExecutorConfig(officialKind)
-          ? configuredMode || null
-          : approvalMode,
         serviceTier,
       },
       managedDefaults?.options ?? undefined,

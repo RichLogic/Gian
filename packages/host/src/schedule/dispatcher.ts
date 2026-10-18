@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_CONCURRENT_SCHEDULE_RUNS, SCHEDULE_RUN_SUMMARY_MAX_CHARS } from '@gian/shared';
-import type { AttentionMessage, Executor, ScheduleForkAnchor } from '@gian/shared';
+import type { ScheduleForkAnchor } from '@gian/shared';
 import { resolveForkAnchor } from '../session/fork.js';
 import type { ScheduledTaskOrigin, SessionManager } from '../session/manager.js';
 import type { Db } from '../storage/db.js';
-import type { WsBroadcaster } from '../web/ws-broadcast.js';
 import { markScheduleLog, markScheduleWarn } from './log.js';
 import { scheduleFailure } from './errors.js';
 import type { ScheduleService } from './service.js';
@@ -55,15 +54,6 @@ function trimMessage(error: unknown): string {
 export interface DispatcherOptions {
   now?: () => { ms: number; iso: string };
   maxConcurrentRuns?: number;
-  /** Required: broadcasts Host→Desktop error attention for Run failures that
-   *  happen before any Turn exists (fork failures, lifecycle fail-closed,
-   *  unknown). Making it non-optional keeps production assembly honest — the
-   *  compiler rejects a dispatcher constructed without it. */
-  broadcaster: WsBroadcaster;
-  /** Same user-level gate the session AttentionDispatcher applies: failure
-   *  attention (kind `error`) must not broadcast when the master switch or
-   *  the errors category is off. */
-  attentionGate?: import('../session/attention.js').AttentionGate;
 }
 
 export class ScheduleRunDispatcher {
@@ -148,10 +138,9 @@ export class ScheduleRunDispatcher {
       markScheduleWarn(`run ${run.id} control session not ready: ${code}`);
       const message = trimMessage(error);
       // Atomic: Run failed + Schedule paused/lifecycle_blocked together.
-      const settled = repo.settleRunFailedAndPauseLifecycle(run.id, code, message, now.iso);
+      repo.settleRunFailedAndPauseLifecycle(run.id, code, message, now.iso);
       this.service.broadcastScheduleStateChanged(current.id);
       this.service.broadcastRunUpdated(current.id, run.id);
-      if (settled) this.broadcastFailureAttention(settled, code, message);
       return;
     }
 
@@ -199,12 +188,11 @@ export class ScheduleRunDispatcher {
       const message = escalation
         ? 'main conversation turned busy during dispatch and no stable fork point exists'
         : 'control conversation is busy and no stable fork point exists';
-      const settled = repo.settleRun(run.id, 'failed', {
+      repo.settleRun(run.id, 'failed', {
         errorCode: 'SCHEDULE_NO_STABLE_FORK_POINT',
         errorMessage: message,
       }, now.iso);
       this.service.broadcastRunUpdated(schedule.id, run.id);
-      if (settled) this.broadcastFailureAttention(settled, 'SCHEDULE_NO_STABLE_FORK_POINT', message);
       return;
     }
 
@@ -228,12 +216,11 @@ export class ScheduleRunDispatcher {
       markScheduleWarn(`run ${run.id} fork failed`, error);
       const code = this.forkErrorCode(error);
       const message = trimMessage(error);
-      const settled = repo.settleRun(run.id, 'failed', {
+      repo.settleRun(run.id, 'failed', {
         errorCode: code,
         errorMessage: message,
       }, now.iso);
       this.service.broadcastRunUpdated(schedule.id, run.id);
-      if (settled) this.broadcastFailureAttention(settled, code, message);
       return;
     }
 
@@ -324,12 +311,11 @@ export class ScheduleRunDispatcher {
 
     if (isDeterministicSendFailure(error)) {
       const message = trimMessage(error);
-      const settled = repo.settleRun(run.id, 'failed', {
+      repo.settleRun(run.id, 'failed', {
         errorCode: 'SCHEDULE_SEND_FAILED',
         errorMessage: message,
       }, now.iso);
       this.service.broadcastRunUpdated(schedule.id, run.id);
-      if (settled) this.broadcastFailureAttention(settled, 'SCHEDULE_SEND_FAILED', message);
       return;
     }
     this.markUnknown(run.id, 'SCHEDULE_DISPATCH_UNKNOWN', trimMessage(error));
@@ -367,56 +353,6 @@ export class ScheduleRunDispatcher {
     if (settled) {
       this.service.broadcastScheduleStateChanged(settled.schedule_id);
       this.service.broadcastRunUpdated(settled.schedule_id, runId);
-      this.broadcastFailureAttention(settled, errorCode, errorMessage);
-    }
-  }
-
-  /** Stable Host→Desktop attention for a Run that failed before any Turn
-   *  exists (or entered unknown). NOTIFY-001 privacy projection: the OS
-   *  notification carries only a generic bounded title and the stable error
-   *  CODE — never the raw error, paths, commands, secrets, or the Schedule
-   *  name. The full message stays in the durable run log. The id derives
-   *  from the run id so the message de-duplicates across restarts.
-   *  Navigation target: the `schedule` field points at this Run — clicking
-   *  the notification opens the Timer detail whose run log matches the body. */
-  private broadcastFailureAttention(
-    run: ScheduleRunRow,
-    errorCode: string,
-    _errorMessage: string | undefined,
-  ): void {
-    if (this.options.attentionGate && !this.options.attentionGate('error')) return;
-    const schedule = this.service.repository.scheduleRow(run.schedule_id);
-    const session = schedule
-      ? this.db.prepare(
-          'SELECT executor FROM sessions WHERE id = ?',
-        ).get(schedule.control_session_id) as { executor: Executor } | undefined
-      : undefined;
-    if (!schedule || !session) return;
-    // AttentionMessage.turn is required by the wire contract; schedule
-    // navigation uses the `schedule` field instead, so a control conversation
-    // without any Turn yet still produces a deliverable message.
-    const turnRow = this.db.prepare(
-      'SELECT COALESCE(MAX(turn_number), 0) AS n FROM turns WHERE session_id = ?',
-    ).get(schedule.control_session_id) as { n: number };
-    const unknown = run.status === 'unknown';
-    const message: AttentionMessage = {
-      type: 'attention',
-      id: `gian:attention:schedule-run-${run.id}`,
-      session_id: schedule.control_session_id,
-      turn: Math.max(1, turnRow.n),
-      kind: 'error',
-      timestamp: Date.parse(this.now().iso),
-      title: unknown ? 'Scheduled run outcome unknown' : 'Scheduled run failed',
-      body: unknown
-        ? `A scheduled run ended with an unknown outcome (${errorCode}). Open the schedule run log for details.`
-        : `A scheduled run failed (${errorCode}). Open the schedule run log for details.`,
-      provider: session.executor,
-      schedule: { schedule_id: schedule.id, run_id: run.id },
-    };
-    try {
-      this.options.broadcaster.broadcast(message);
-    } catch (error) {
-      markScheduleWarn(`failed to broadcast attention for run ${run.id}`, error);
     }
   }
 
@@ -500,14 +436,11 @@ export class ScheduleRunDispatcher {
         await this.sendPrompt(run, schedule, targetSessionId);
         return;
       }
-      const settled = repo.settleRun(run.id, 'failed', {
+      repo.settleRun(run.id, 'failed', {
         errorCode: 'SCHEDULE_SEND_FAILED',
         errorMessage: 'target session turned busy before the scheduled prompt could be sent after recovery',
       }, now.iso);
       this.service.broadcastRunUpdated(schedule.id, run.id);
-      if (settled) {
-        this.broadcastFailureAttention(settled, 'SCHEDULE_SEND_FAILED', 'target session turned busy before the scheduled prompt could be sent after recovery');
-      }
       return;
     }
 
@@ -564,10 +497,7 @@ export class ScheduleRunDispatcher {
         errorCode: 'SCHEDULE_DISPATCH_UNKNOWN',
         errorMessage: 'canonical Turn evidence contradicts the run state',
       }, now.iso);
-      if (settled) {
-        this.service.broadcastScheduleStateChanged(settled.schedule_id);
-        this.broadcastFailureAttention(settled, 'SCHEDULE_DISPATCH_UNKNOWN', 'canonical Turn evidence contradicts the run state');
-      }
+      if (settled) this.service.broadcastScheduleStateChanged(settled.schedule_id);
       return settled ? 'changed' : 'unchanged';
     }
     if (TERMINAL_RUN_MAPPED.has(next)) {

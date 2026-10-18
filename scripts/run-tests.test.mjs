@@ -119,6 +119,7 @@ test('Host integration runs after compiled Proxy package runners', async () => {
   const source = await readFile(new URL('./run-tests.mjs', import.meta.url), 'utf8');
   const hostRun = source.lastIndexOf("entriesForRunner(selected, 'host-node-tsx')");
   for (const runner of [
+    'antigravity-proxy-node',
     'cc-proxy-node',
     'codex-proxy-node',
     'kimi-proxy-node',

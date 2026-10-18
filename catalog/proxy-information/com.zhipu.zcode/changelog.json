@@ -1,8 +1,50 @@
 {
   "schemaVersion": 1,
   "pluginId": "com.zhipu.zcode",
-  "currentVersion": "0.4.2",
+  "currentVersion": "0.4.4",
   "entries": [
+    {
+      "version": "0.4.4",
+      "firstPublishedAt": "2026-10-15T02:24:58Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-zcode-v0.4.4",
+          "publishedAt": "2026-10-15T02:24:58Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.4",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.4.4/gian-proxy-zcode-0.4.4-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "55541ee2c920bd5d10718c4b267fb182ca493ea42d7f88f97da2b9e67474b315",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-zcode-v0.4.4/gian-proxy-zcode-0.4.4-darwin-arm64.tar.gz",
+            "sha256": "b2b85d193d3689da105bd8e0967faf0df00a4cbf31caaa8ef3aa674a4ce9863d",
+            "size": 143298
+          },
+          "runtimeDeclaration": {
+            "id": "zcode",
+            "versions": [
+              "0.16.9"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "托管 Runtime 更新至已审查的 ZCode v3.15.1 源码 aac4755（上游 CLI 版本仍为 0.16.9），保留独立认证与模型目录集成。修复新版 MCP 表单提问：自由文本正常输入、可选字段保持可选、重复题目使用索引答案避免覆盖，并原样保留字符串。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.4",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.4.4/packages/proxies/zcode-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.4.2",
       "firstPublishedAt": "2026-09-26T14:05:47Z",

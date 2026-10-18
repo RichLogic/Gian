@@ -174,6 +174,7 @@ function executeSelected(selected, options, env) {
 
   const proxyRunners = new Set([
     'proxy-protocol-node',
+    'antigravity-proxy-node',
     'cc-proxy-node',
     'codex-proxy-node',
     'kimi-proxy-node',
@@ -270,6 +271,13 @@ function executeSelected(selected, options, env) {
   );
   runBuiltPackageTests(
     selected,
+    'antigravity-proxy-node',
+    '@gian/antigravity-proxy',
+    join(rootDir, 'packages', 'proxies', 'antigravity-proxy'),
+    env,
+  );
+  runBuiltPackageTests(
+    selected,
     'grok-proxy-node',
     '@gian/grok-proxy',
     join(rootDir, 'packages', 'proxies', 'grok-proxy'),
@@ -320,6 +328,7 @@ function executeSelected(selected, options, env) {
   const hostPaths = entriesForRunner(selected, 'host-node-tsx')
     .map(path => relative(hostRoot, join(rootDir, path)));
   const compiledProxyRunners = [
+    'antigravity-proxy-node',
     'cc-proxy-node',
     'codex-proxy-node',
     'kimi-proxy-node',

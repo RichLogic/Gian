@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AttentionControlItem,
+  AttentionControlMessage,
   InboxAction,
   InboxChangedMessage,
   InboxDisplay,
@@ -10,7 +12,7 @@ import type {
   InboxSyncSnapshot,
   InboxTarget,
 } from '@gian/shared';
-import { isInboxDisplay, isInboxTarget } from '@gian/shared';
+import { isAttentionLookupMessage, isInboxDisplay, isInboxTarget } from '@gian/shared';
 import type { Db } from '../storage/db.js';
 import { compareSemver } from '../plugin-store/semver.js';
 import {
@@ -109,6 +111,8 @@ export interface InboxServiceOptions {
   now?: () => string;
   createId?: () => string;
   broadcast?: (message: InboxChangedMessage | InboxInvalidatedMessage) => void;
+  /** Attention-socket withdraw/read frame. Never includes Inbox title or summary. */
+  onAttentionControl?: (message: AttentionControlMessage) => void;
   /** Pending rows included in `state_sync`. Defaults to 200. */
   syncLimit?: number;
 }
@@ -150,6 +154,7 @@ export class InboxService {
   private readonly now: () => string;
   private readonly createId: () => string;
   private readonly broadcast?: InboxServiceOptions['broadcast'];
+  private readonly onAttentionControl?: InboxServiceOptions['onAttentionControl'];
   private readonly syncLimit: number;
 
   constructor(db: Db, options: InboxServiceOptions = {}) {
@@ -158,6 +163,7 @@ export class InboxService {
     this.now = options.now ?? (() => new Date().toISOString());
     this.createId = options.createId ?? (() => randomUUID());
     this.broadcast = options.broadcast;
+    this.onAttentionControl = options.onAttentionControl;
     this.syncLimit = options.syncLimit && options.syncLimit > 0 ? options.syncLimit : DEFAULT_SYNC_LIMIT;
   }
 
@@ -354,6 +360,30 @@ export class InboxService {
     return this.repo.collectionRevision();
   }
 
+  /**
+   * Exact read/terminal state for attention-socket refs.
+   * A missing or different generation is terminal and unread, so Desktop
+   * withdraws that OS notification without claiming the user read it.
+   */
+  attentionControl(refs: readonly { id: string; generation: number }[]): AttentionControlItem[] {
+    if (!isAttentionLookupMessage({ type: 'attention:lookup', refs: [...refs] })) {
+      throw new InboxError('INVALID_ARGUMENT', 'attention lookup is invalid');
+    }
+    return refs.map(ref => {
+      const row = this.repo.getById(ref.id);
+      if (!row || row.generation !== ref.generation) {
+        return {
+          id: ref.id,
+          generation: ref.generation,
+          revision: 0,
+          read: false,
+          terminal: true,
+        };
+      }
+      return attentionControlItem(row);
+    });
+  }
+
   markRead(id: string, generation: number): InboxItemPublic {
     this.assertGeneration(generation);
     const result = this.db.transaction(() => {
@@ -521,7 +551,12 @@ export class InboxService {
           title: clip(signal.title, TITLE_MAX),
           summary: clip(signal.summary, SUMMARY_MAX),
           target: { type: 'system_repair', repair: signal.scope, subject_id: signal.subject_id },
-          display: { kind: 'system.repair', scope: signal.scope, subject_id: signal.subject_id },
+          display: {
+            kind: 'system.repair',
+            scope: signal.scope,
+            subject_id: signal.subject_id,
+            ...(signal.entry ? { entry: signal.entry } : {}),
+          },
           candidate_version: null,
           candidate_channel: null,
           source_epoch: null,
@@ -541,6 +576,23 @@ export class InboxService {
         });
       case 'product.update':
         return this.writeUpdate(signal);
+      case 'schedule.confirmation':
+        return this.writeGeneration({
+          source_key: `schedule.confirmation:${signal.confirmation_id}`,
+          source_kind: 'schedule.confirmation',
+          generation: signal.generation,
+          title: clip(signal.title, TITLE_MAX),
+          summary: clip(signal.summary, SUMMARY_MAX),
+          target: { type: 'schedule_confirmation', confirmation_id: signal.confirmation_id },
+          display: {
+            kind: 'schedule.confirmation',
+            confirmation_id: signal.confirmation_id,
+            control_session_id: signal.control_session_id,
+          },
+          candidate_version: null,
+          candidate_channel: null,
+          source_epoch: null,
+        });
       default:
         throw new InboxError('INVALID_ARGUMENT', 'upsert accepts a live inbox item');
     }
@@ -652,6 +704,13 @@ export class InboxService {
 
   private writeClose(signal: InboxSignal): Internal {
     if (signal.kind === 'product.update.closed') return this.writeUpdateClose(signal);
+    if (signal.kind === 'schedule.confirmation.closed') {
+      const row = this.repo.getBySourceKey(`schedule.confirmation:${signal.confirmation_id}`);
+      if (!row) {
+        throw new InboxError('INVALID_ARGUMENT', 'schedule confirmation close needs an open inbox row');
+      }
+      return this.finish(row, signal.generation, signal.outcome, signal.actor, null);
+    }
     const located = locateClosed(signal);
     if (!located) throw new InboxError('INVALID_ARGUMENT', 'resolve accepts a closed inbox signal');
     const row = this.repo.getBySourceKey(located.source_key);
@@ -897,7 +956,9 @@ export class InboxService {
   }
 
   private emitSingle(result: Internal): void {
-    if (!result.changed || !this.broadcast) return;
+    if (!result.changed) return;
+    this.emitControl([result.row]);
+    if (!this.broadcast) return;
     this.broadcast({
       type: 'inbox:changed',
       inbox_revision: this.repo.revision(),
@@ -906,7 +967,9 @@ export class InboxService {
   }
 
   private emitMany(rows: readonly InboxRow[]): void {
-    if (!this.broadcast || rows.length === 0) return;
+    if (rows.length === 0) return;
+    this.emitControl(rows);
+    if (!this.broadcast) return;
     const inbox_revision = this.repo.revision();
     if (rows.length === 1) {
       this.broadcast({
@@ -917,6 +980,17 @@ export class InboxService {
       return;
     }
     this.broadcast({ type: 'inbox:invalidated', inbox_revision });
+  }
+
+  private emitControl(rows: readonly InboxRow[]): void {
+    if (!this.onAttentionControl) return;
+    const items = rows.map(attentionControlItem);
+    for (let index = 0; index < items.length; index += 32) {
+      this.onAttentionControl({
+        type: 'attention:control',
+        items: items.slice(index, index + 32),
+      });
+    }
   }
 
   private mustGet(id: string): InboxRow {
@@ -1049,9 +1123,27 @@ function locateClosed(signal: InboxSignal): {
         outcome: signal.outcome,
         actor: signal.actor,
       };
+    case 'schedule.confirmation.closed':
+      return {
+        source_key: `schedule.confirmation:${signal.confirmation_id}`,
+        generation: signal.generation,
+        outcome: signal.outcome,
+        actor: signal.actor,
+      };
     default:
       return null;
   }
+}
+
+function attentionControlItem(row: InboxRow): AttentionControlItem {
+  const read = row.read_at !== null && row.read_generation === row.generation;
+  return {
+    id: row.id,
+    generation: row.generation,
+    revision: row.revision,
+    read,
+    terminal: row.status !== 'pending',
+  };
 }
 
 function updateTarget(signal: Extract<InboxSignal, { kind: 'product.update' }>): InboxTarget {
@@ -1121,6 +1213,8 @@ function actionsFor(row: InboxRow, target: InboxTarget, display: InboxDisplay): 
       if (display.kind === 'product.update' && display.phase === 'failed') actions.push('retry');
       return actions;
     }
+    case 'schedule.confirmation':
+      return ['open', 'approve', 'reject'];
     default:
       return ['open'];
   }

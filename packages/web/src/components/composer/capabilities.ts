@@ -519,19 +519,25 @@ export function getCatalogCached(
 export function fetchCatalogCached(
   executor: Executor,
   agentId?: string | null,
+  options: { refresh?: boolean } = {},
 ): Promise<ComposerCatalog> {
   const key = scopeKey(executor, agentId);
   const hit = catalogCache.get(key);
-  if (hit) return Promise.resolve(hit);
+  if (hit && !options.refresh) return Promise.resolve(hit);
   const inflight = catalogPromises.get(key);
-  if (inflight) return inflight;
-  const request = Promise.resolve()
+  if (inflight && !options.refresh) return inflight;
+  const request: Promise<ComposerCatalog> = Promise.resolve()
     .then(() => loadProxyCapabilities(executor, agentId))
     .then(raw => {
       const catalog = catalogFromCapabilities(raw);
+      // A forced refresh supersedes an older request for the same Agent.
+      // Late responses must not restore the pre-update catalog cache.
+      if (catalogPromises.get(key) !== request) return catalog;
       catalogCache.set(key, catalog);
       catalogPromises.delete(key);
       if (executor === 'claude' || executor === 'codex') {
+        const model = optionByRole(catalog.configOptions, 'model');
+        if (model) modelCache.set(key, modelsFromCatalog(model));
         const modes = modesFromCapabilities(raw);
         if (modes.length > 0) modeCache.set(key, modes);
       }
@@ -540,7 +546,7 @@ export function fetchCatalogCached(
       return catalog;
     })
     .catch(error => {
-      catalogPromises.delete(key);
+      if (catalogPromises.get(key) === request) catalogPromises.delete(key);
       throw error;
     });
   catalogPromises.set(key, request);

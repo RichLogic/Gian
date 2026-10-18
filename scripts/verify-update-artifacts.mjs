@@ -117,12 +117,50 @@ async function sha256Hex(path) {
   return hash.digest('hex');
 }
 
+/** Verify the actual App bundle's flat electron-builder feed, not just source metadata. */
+export async function verifyEmbeddedAppUpdateConfig(path) {
+  const desktopPackage = JSON.parse(await readFile(new URL('../packages/desktop/package.json', import.meta.url), 'utf8'));
+  const feeds = desktopPackage.build.publish;
+  if (!Array.isArray(feeds) || feeds.length !== 1 || feeds[0]?.provider !== 'github') {
+    throw new Error('build.publish must declare exactly one GitHub App update feed');
+  }
+  const expected = feeds[0];
+  const config = {};
+  const source = await readFile(path, 'utf8');
+  if (source.includes('\t')) throw new Error('app-update.yml must not contain tabs');
+  // Like latest-mac.yml, accept only the deterministic scalar subset emitted
+  // by the pinned builder. Reject duplicate/nested entries and feed overrides.
+  for (const [index, line] of source.split(/\r?\n/u).entries()) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const context = `app-update.yml line ${index + 1}`;
+    const match = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.+)$/u.exec(line);
+    if (!match) throw new Error(`${context} must be a flat scalar entry`);
+    const [, key, raw] = match;
+    const rawValue = raw.trim();
+    const value = rawValue === 'true' ? true : rawValue === 'false' ? false : scalar(rawValue, context);
+    setOnce(config, key, value, context);
+  }
+  for (const [key, value] of Object.entries(expected)) {
+    if (config[key] !== value) throw new Error(`app-update.yml ${key} does not match build.publish`);
+  }
+  if (typeof config.updaterCacheDirName !== 'string' || !config.updaterCacheDirName.trim()) {
+    throw new Error('app-update.yml is missing updaterCacheDirName');
+  }
+  for (const key of Object.keys(config)) {
+    if (key !== 'updaterCacheDirName' && !Object.hasOwn(expected, key)) {
+      throw new Error(`app-update.yml contains unexpected ${key}`);
+    }
+  }
+  return { provider: config.provider, owner: config.owner, repo: config.repo, channel: config.channel };
+}
+
 export async function verifyUpdateArtifacts({
   releaseDir,
   version,
   productName = 'Gian',
   arch = 'arm64',
   manifestName = 'latest-mac.yml',
+  appUpdateConfigPath,
 }) {
   if (!releaseDir) throw new Error('releaseDir is required');
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version ?? '')) {
@@ -184,7 +222,8 @@ export async function verifyUpdateArtifacts({
     verified.push({ name: expectedName, size: metadata.size, sha512: digest });
   }
 
-  return { version, manifest: manifestName, artifacts: verified };
+  const updateFeed = appUpdateConfigPath === undefined ? undefined : await verifyEmbeddedAppUpdateConfig(appUpdateConfigPath);
+  return { version, manifest: manifestName, artifacts: verified, ...(updateFeed ? { updateFeed } : {}) };
 }
 
 export async function verifyGithubReleaseAssets({
@@ -280,6 +319,7 @@ function parseArgs(argv) {
       '--arch',
       '--manifest',
       '--github-release-json',
+      '--app-update-config',
     ].includes(flag)) {
       throw new Error(`unknown argument: ${flag}`);
     }
@@ -292,6 +332,7 @@ function parseArgs(argv) {
     if (flag === '--arch') options.arch = value;
     if (flag === '--manifest') options.manifestName = value;
     if (flag === '--github-release-json') options.releaseJsonPath = value;
+    if (flag === '--app-update-config') options.appUpdateConfigPath = value;
   }
   return options;
 }

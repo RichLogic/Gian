@@ -144,6 +144,67 @@ describe('maybeNotifyForAttention', () => {
     });
   });
 
+  it('localizes semantic events with the UI language and the safe session name', () => {
+    const message = attention({
+      kind: 'question',
+      event: 'answer_needed',
+      session_name: 'Release planning',
+      // A semantic message's legacy fields mirror the English contract
+      // (attention.ts validators require it); the client must not render them.
+      title: 'Release planning',
+      body: 'Answer needed',
+    });
+    const sent = maybeNotifyForAttention(message, {
+      visibleSessionId: null,
+      localizeEvent: event => (event === 'answer_needed' ? '需要回答' : event),
+      untitledLabel: '未命名会话',
+    });
+    expect(sent).toBe(true);
+    expect(FakeNotification.instances[0]!.title).toBe('Release planning');
+    expect(FakeNotification.instances[0]!.options?.body).toBe('需要回答');
+  });
+
+  it('an empty semantic session name falls back to the localized untitled label', () => {
+    const message = attention({
+      kind: 'turn-completed',
+      event: 'turn_complete',
+      session_name: '',
+      title: '',
+      body: 'Turn complete',
+    });
+    maybeNotifyForAttention(message, {
+      visibleSessionId: null,
+      localizeEvent: () => 'Turn complete',
+      untitledLabel: 'Untitled conversation',
+    });
+    expect(FakeNotification.instances[0]!.title).toBe('Untitled conversation');
+  });
+
+  it('localizes the schedule-confirmation arm without a turn', () => {
+    const message: import('@gian/shared').ScheduleConfirmationAttentionMessage = {
+      type: 'attention',
+      id: 'gian:attention:conf1',
+      session_id: 'sess-1',
+      kind: 'approval',
+      timestamp: Date.now(),
+      title: 'Release watch',
+      body: 'Approval needed',
+      provider: 'codex',
+      event: 'approval_needed',
+      session_name: 'Release watch',
+      target: { type: 'schedule_confirmation', confirmation_id: 'conf-1' },
+      inbox_ref: { id: 'inbox-1', generation: 1 },
+    };
+    const sent = maybeNotifyForAttention(message, {
+      visibleSessionId: null,
+      localizeEvent: event => (event === 'approval_needed' ? '需要审批' : event),
+      untitledLabel: '未命名会话',
+    });
+    expect(sent).toBe(true);
+    expect(FakeNotification.instances[0]!.title).toBe('Release watch');
+    expect(FakeNotification.instances[0]!.options?.body).toBe('需要审批');
+  });
+
   it('delivers the Host text verbatim with the attention id as the tag', () => {
     const message = attention();
     const sent = maybeNotifyForAttention(message, { visibleSessionId: null });

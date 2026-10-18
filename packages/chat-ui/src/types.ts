@@ -178,7 +178,7 @@ export interface ApprovalItem {
   reason: string;
   cmd: string;
   risk: 'low' | 'medium' | 'high';
-  status: 'pending' | 'approved-once' | 'approved-session' | 'declined';
+  status: 'pending' | 'approved-once' | 'approved-session' | 'declined' | 'resolved';
   /** 'question' = AskUserQuestion-flavored approval; UI renders structured
    *  options instead of generic allow/decline. Otherwise undefined. */
   category?: import('@gian/shared').ApprovalCategory;

@@ -427,6 +427,59 @@ test('allow_always resolves to allow_session before persistence, live and replay
   assert.equal(drained.lookup('session-1', 'ix-kimi'), undefined);
 });
 
+const antigravityPermissionRequest = v2Notification('interaction.requested', {
+  interactionId: 'ix-agy-reject',
+  title: 'Run command',
+  presentation: { kind: 'permission', tone: 'warning' },
+  inputs: [],
+  actions: [
+    { id: 'agy-opt-allow-17', label: 'Allow once', style: 'primary' },
+    { id: 'agy-opt-reject-9c', label: 'Reject', style: 'danger' },
+    { id: 'agy-opt-reject-always-3', label: 'Reject always', style: 'danger' },
+  ],
+  context: {
+    toolCall: { toolCallId: 'tool-reject', title: 'Run command' },
+    permissionOptionKinds: {
+      'agy-opt-allow-17': 'allow_once',
+      'agy-opt-reject-9c': 'reject_once',
+      'agy-opt-reject-always-3': 'reject_always',
+    },
+  },
+});
+
+test('antigravity opaque reject ids decline on live and replay', () => {
+  const requestedKinds = [
+    ['agy-opt-allow-17', 'allow_once'],
+    ['agy-opt-reject-9c', 'reject_once'],
+    ['agy-opt-reject-always-3', 'reject_always'],
+  ];
+  for (const actionId of ['agy-opt-reject-9c', 'agy-opt-reject-always-3'] as const) {
+    for (const label of ['live', 'replay'] as const) {
+      const registry = new InteractionKindRegistry();
+      const [requested] = projectWithKindTracking(antigravityPermissionRequest, registry);
+      const native = (requested?.display?.data as Record<string, unknown>).nativeOptions as Array<Record<string, unknown>>;
+      assert.deepEqual(native.map((option) => [option.optionId, option.kind]), requestedKinds, `${label} requested`);
+      const [resolved] = projectWithKindTracking(v2Notification('interaction.resolved', {
+        interactionId: 'ix-agy-reject',
+        outcome: 'submitted',
+        actionId,
+      }), registry);
+      const data = resolved?.display?.data as Record<string, unknown>;
+      assert.equal(data.decision, 'decline', `${label} ${actionId}`);
+      assert.equal(data.nativeOptionId, actionId);
+    }
+  }
+  const registry = new InteractionKindRegistry();
+  projectWithKindTracking(antigravityPermissionRequest, registry);
+  const [allowed] = projectWithKindTracking(v2Notification('interaction.resolved', {
+    interactionId: 'ix-agy-reject',
+    outcome: 'submitted',
+    actionId: 'agy-opt-allow-17',
+  }), registry);
+  assert.equal((allowed?.display?.data as Record<string, unknown>).decision, 'allow_once');
+  assert.equal((allowed?.display?.data as Record<string, unknown>).nativeOptionId, 'agy-opt-allow-17');
+});
+
 test('interaction kind registry is session-scoped against id collisions (Finding 5)', () => {
   const registry = new InteractionKindRegistry();
   const allowRequest = v2Notification('interaction.requested', {

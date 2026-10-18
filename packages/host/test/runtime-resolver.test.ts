@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, mkdtemp, open, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,11 +9,13 @@ import { test } from 'node:test';
 import { SUPPORTED_PROTOCOL_VERSIONS } from '@gian/proxy-protocol';
 import { parseProxyPluginId } from '@gian/shared';
 
+import { recordRuntimeArtifact } from '../src/runtime/artifact-reuse.js';
 import { classifyRuntimeVersion } from '../src/runtime/classify-version.js';
 import {
   hostRuntimeFingerprint,
   RuntimeFingerprintError,
   MAX_RUNTIME_FINGERPRINT_BYTES,
+  MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES,
   MAX_RUNTIME_LAUNCHER_BYTES,
   MAX_RUNTIME_FINGERPRINT_DEPTH,
   MAX_RUNTIME_FINGERPRINT_FILES,
@@ -1010,4 +1012,177 @@ test('standalone CLI budget accepts files above the directory budget and hashes 
   } finally {
     await handle.close();
   }
+});
+
+const MANAGED_SHA = 'ab'.repeat(32);
+
+function receiptFile(path: string, size: number) {
+  return { path, sha256: 'cd'.repeat(32), size, executable: false };
+}
+
+async function sparseFile(path: string, size: number): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const handle = await open(path, 'w');
+  try {
+    await handle.truncate(size);
+  } finally {
+    await handle.close();
+  }
+}
+
+function fileFingerprint(
+  homeDir: string,
+  selected: string,
+  roots: string[],
+  store?: string,
+) {
+  return {
+    selectedPath: selected,
+    configHome: null,
+    contentRoots: roots.map(path => ({ path, mode: 'file' as const })),
+    homeDir,
+    ...(store ? { managedStoreRoot: store } : {}),
+  };
+}
+
+async function expectFingerprintCode(
+  input: Parameters<typeof hostRuntimeFingerprint>[0],
+  code: string,
+): Promise<void> {
+  await assert.rejects(
+    () => hostRuntimeFingerprint(input),
+    (error: unknown) => {
+      assert.ok(error instanceof RuntimeFingerprintError);
+      assert.equal(error.code, code);
+      return true;
+    },
+  );
+}
+
+test('receipt-backed managed files share one fingerprint and track each file', async (t) => {
+  const root = await tempRoot(t);
+  const store = join(root, 'runtimes');
+  const generation = join(store, 'managed-files', '1.2.3', MANAGED_SHA);
+  const server = join(generation, 'server.par');
+  const harness = join(generation, 'harness.bin');
+  await mkdir(generation, { recursive: true });
+  await writeFile(server, 'server-a');
+  await writeFile(harness, 'harness-a');
+  await recordRuntimeArtifact(store, generation, MANAGED_SHA, 'server.par', [
+    receiptFile('server.par', 8),
+    receiptFile('harness.bin', 9),
+  ]);
+  const input = fileFingerprint(root, server, [server, harness], store);
+  const first = await hostRuntimeFingerprint(input);
+  await writeFile(server, 'server-b');
+  const second = await hostRuntimeFingerprint(input);
+  assert.notEqual(second, first);
+  await writeFile(harness, 'harness-b');
+  assert.notEqual(await hostRuntimeFingerprint(input), second);
+});
+
+test('a verified managed sibling above 64MiB is fingerprinted inside the aggregate budget', async (t) => {
+  const root = await tempRoot(t);
+  const store = join(root, 'runtimes');
+  const generation = join(store, 'managed-files', '1.2.3', MANAGED_SHA);
+  const server = join(generation, 'server.par');
+  const harness = join(generation, 'harness.bin');
+  await mkdir(dirname(server), { recursive: true });
+  await writeFile(server, 'server');
+  const handle = await open(harness, 'w+');
+  await handle.truncate(MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  try {
+    await recordRuntimeArtifact(store, generation, MANAGED_SHA, 'server.par', [
+      receiptFile('server.par', 6),
+      receiptFile('harness.bin', MAX_RUNTIME_FINGERPRINT_BYTES + 1),
+    ]);
+    const input = fileFingerprint(root, server, [server, harness], store);
+    const first = await hostRuntimeFingerprint(input);
+    assert.match(first, /^[a-f0-9]{64}$/);
+    await handle.write(Buffer.from('Z'), 0, 1, MAX_RUNTIME_FINGERPRINT_BYTES);
+    assert.notEqual(await hostRuntimeFingerprint(input), first);
+  } finally {
+    await handle.close();
+  }
+});
+
+test('managed file fingerprints keep the external limit unless every root is one receipt', async (t) => {
+  const root = await tempRoot(t);
+  const store = join(root, 'runtimes');
+  const generation = join(store, 'managed-files', '1.2.3', MANAGED_SHA);
+  const server = join(generation, 'server.par');
+  const harness = join(generation, 'harness.bin');
+  await mkdir(generation, { recursive: true });
+  await writeFile(server, 'server');
+  // Sparse. The size check must reject this before the file is read.
+  await sparseFile(harness, MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  const pair = [server, harness];
+  await expectFingerprintCode(fileFingerprint(root, server, pair, store), 'RUNTIME_FINGERPRINT_BUDGET');
+  await mkdir(join(root, 'other'), { recursive: true });
+  await expectFingerprintCode(
+    fileFingerprint(root, server, pair, join(root, 'other')),
+    'RUNTIME_FINGERPRINT_BUDGET',
+  );
+  await expectFingerprintCode(fileFingerprint(root, server, pair), 'RUNTIME_FINGERPRINT_BUDGET');
+
+  await recordRuntimeArtifact(store, generation, MANAGED_SHA, 'server.par', [
+    receiptFile('server.par', 6),
+  ]);
+  await expectFingerprintCode(fileFingerprint(root, server, pair, store), 'RUNTIME_FINGERPRINT_BUDGET');
+  await recordRuntimeArtifact(store, generation, 'ff'.repeat(32), 'server.par', [
+    receiptFile('server.par', 6),
+    receiptFile('harness.bin', MAX_RUNTIME_FINGERPRINT_BYTES + 1),
+  ]);
+  await expectFingerprintCode(fileFingerprint(root, server, pair, store), 'RUNTIME_FINGERPRINT_BUDGET');
+
+  const otherSha = 'cd'.repeat(32);
+  const other = join(store, 'managed-files', '1.2.3', otherSha, 'other.bin');
+  await mkdir(dirname(other), { recursive: true });
+  await writeFile(other, 'other');
+  await recordRuntimeArtifact(store, generation, MANAGED_SHA, 'server.par', [
+    receiptFile('server.par', 6),
+    receiptFile('harness.bin', 6),
+  ]);
+  await expectFingerprintCode(fileFingerprint(root, server, [server, other], store), 'RUNTIME_ROOT_ESCAPE');
+  const escaped = join(root, 'escaped.bin');
+  await writeFile(escaped, 'escaped');
+  await expectFingerprintCode(fileFingerprint(root, server, [server, escaped], store), 'RUNTIME_ROOT_ESCAPE');
+
+  const linked = join(generation, 'linked.bin');
+  await symlink(server, linked);
+  await recordRuntimeArtifact(store, generation, MANAGED_SHA, 'server.par', [
+    receiptFile('server.par', 6),
+    receiptFile('linked.bin', 6),
+  ]);
+  await expectFingerprintCode(fileFingerprint(root, server, [server, linked], store), 'RUNTIME_ROOT_INVALID');
+
+  const staging = join(store, '.staging-123', '1.2.3', MANAGED_SHA);
+  const stagedServer = join(staging, 'server.par');
+  const stagedHarness = join(staging, 'harness.bin');
+  await mkdir(staging, { recursive: true });
+  await writeFile(stagedServer, 'server');
+  await sparseFile(stagedHarness, MAX_RUNTIME_FINGERPRINT_BYTES + 1);
+  await recordRuntimeArtifact(store, staging, MANAGED_SHA, 'server.par', [
+    receiptFile('server.par', 6),
+    receiptFile('harness.bin', MAX_RUNTIME_FINGERPRINT_BYTES + 1),
+  ]);
+  await expectFingerprintCode(
+    fileFingerprint(root, stagedServer, [stagedServer, stagedHarness], store),
+    'RUNTIME_FINGERPRINT_BUDGET',
+  );
+
+  const capped = join(store, 'capped-files', '1.2.3', MANAGED_SHA);
+  const small = join(capped, 'a.bin');
+  const huge = join(capped, 'b.bin');
+  await mkdir(capped, { recursive: true });
+  await writeFile(small, 'x');
+  await sparseFile(huge, MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES);
+  await recordRuntimeArtifact(store, capped, MANAGED_SHA, 'a.bin', [
+    receiptFile('a.bin', 1),
+    receiptFile('b.bin', MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES),
+  ]);
+  await expectFingerprintCode(
+    fileFingerprint(root, small, [small, huge], store),
+    'RUNTIME_FINGERPRINT_BUDGET',
+  );
 });

@@ -82,6 +82,18 @@ export function sessionInboxMayNotify(notice: SessionInboxNotice | undefined): b
   return notice?.delivery === 'fresh';
 }
 
+/** A live Inbox occurrence that may become one OS notification. Recovery is never included. */
+export interface FreshSessionAttention {
+  sessionId: string;
+  interactionId: string;
+  turnId: string;
+  turn: number | null;
+  generation: number;
+  itemId: string;
+  sourceKind: 'session.question' | 'session.approval';
+  category: 'command' | 'permission' | 'browser' | 'plan' | null;
+}
+
 /**
  * The durable local decision fact could not be written. The guarded action
  * must stay pending; the failure is safe for the caller to retry.
@@ -154,6 +166,7 @@ export class SessionInboxAdapter implements SessionInboxMirror {
     private readonly db: Db,
     private readonly store: SessionInboxStore,
     generation?: string,
+    private readonly onFreshAttention?: (notice: FreshSessionAttention) => void,
   ) {
     this.generation = generation ?? HOST_PROCESS_GENERATION;
     this.retryQuiet();
@@ -779,7 +792,7 @@ export class SessionInboxAdapter implements SessionInboxMirror {
     }
     const stored = this.store.storedSessionItem(fact.sessionId, fact.interactionId);
     const sameRow = stored?.generation === fact.generation;
-    this.store.upsert(open);
+    const written = this.store.upsert(open);
     markInboxProjectionApplied(this.db, fact.sessionId, fact.providerEventId, fact.source, fact.writer);
     const key = mirrorKey(fact.sessionId, fact.interactionId);
     const notice = this.notices.get(key);
@@ -793,6 +806,7 @@ export class SessionInboxAdapter implements SessionInboxMirror {
       delivery: this.deliveryFor(fact, sameRow),
       joinCount: notice?.joinCount ?? 0,
     });
+    this.noteFreshOpen(key, written, open);
     return false;
   }
 
@@ -949,14 +963,56 @@ export class SessionInboxAdapter implements SessionInboxMirror {
     const desired = this.pendingMirrors.get(key);
     if (!desired) return;
     if (desired.open) {
-      this.store.upsert(desired.open);
+      const open = desired.open;
+      const written = this.store.upsert(open);
       desired.open = undefined;
+      this.noteFreshOpen(key, written, open);
     }
     if (desired.close) {
       this.store.closeExisting(desired.close);
       desired.close = undefined;
     }
     if (!desired.open && !desired.close) this.pendingMirrors.delete(key);
+  }
+
+  /** Fresh only. Replay, recovery, and a repeated occurrence do not call the publisher. */
+  private noteFreshOpen(key: string, written: InboxWriteResult, open: Record<string, unknown>): void {
+    if (!this.onFreshAttention) return;
+    const notice = this.notices.get(key);
+    const item = written.item;
+    if (!notice || notice.delivery !== 'fresh' || !item) return;
+    if (item.status !== 'pending' || item.generation !== notice.generation) return;
+    const sourceKind = open.kind === 'session.question'
+      ? 'session.question'
+      : open.kind === 'session.approval'
+        ? 'session.approval'
+        : null;
+    if (!sourceKind) return;
+    const category = sourceKind === 'session.approval' && (
+      open.category === 'command'
+      || open.category === 'permission'
+      || open.category === 'browser'
+      || open.category === 'plan'
+    )
+      ? open.category
+      : null;
+    const turn = typeof open.turn === 'number' && Number.isInteger(open.turn) && open.turn >= 1
+      ? open.turn
+      : null;
+    try {
+      this.onFreshAttention({
+        sessionId: notice.sessionId,
+        interactionId: notice.interactionId,
+        turnId: notice.turnId,
+        turn,
+        generation: notice.generation,
+        itemId: item.id,
+        sourceKind,
+        category,
+      });
+    } catch (error) {
+      console.error('[inbox] fresh attention publish failed', error);
+    }
   }
 
   private skip(record: ApprovalRecord, reason: string): void {

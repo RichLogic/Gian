@@ -2,7 +2,18 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.4.2**，Runtime **0.16.9**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.4.4**，Runtime **0.16.9**。这是发布目标，不表示当前机器已安装。
+
+## 0.4.4
+
+首次公开发布：2026-10-15T02:24:58Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.4)：2026-10-15T02:24:58Z。
+- 对应 CLI：0.16.9（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 托管 Runtime 更新至已审查的 ZCode v3.15.1 源码 aac4755（上游 CLI 版本仍为 0.16.9），保留独立认证与模型目录集成。修复新版 MCP 表单提问：自由文本正常输入、可选字段保持可选、重复题目使用索引答案避免覆盖，并原样保留字符串。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-zcode-v0.4.4) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-zcode-v0.4.4/packages/proxies/zcode-proxy/README.md)
 
 ## 0.4.2
 

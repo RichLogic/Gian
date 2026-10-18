@@ -31,6 +31,12 @@ export function isTurnRunning(status: SessionStatus, pending: boolean): boolean 
   return pending || status === 'running';
 }
 
+/** Sessions that created at least one child via the Gian MCP session.create
+ *  tool — the CALLER side of created_by_session_id (which sits on the child). */
+export function delegatedCallerIds(sessions: Session[]): Set<string> {
+  return new Set(sessions.map(s => s.created_by_session_id).filter((id): id is string => id != null));
+}
+
 /** A session needs the user's attention when it is waiting for input, or when
  * its completed/failed turn has not been read yet. */
 export function sessionNeedsAttention(

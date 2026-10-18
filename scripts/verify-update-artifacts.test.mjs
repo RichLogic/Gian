@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
   parseLatestMacManifest,
+  main,
   verifyGithubReleaseAssets,
   verifyUpdateArtifacts,
 } from './verify-update-artifacts.mjs';
@@ -55,6 +56,74 @@ async function withReleaseFixture(run) {
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+function appUpdateConfig() {
+  return [
+    'owner: RichToyo',
+    'repo: Gian',
+    'provider: github',
+    'private: false',
+    'channel: latest',
+    'releaseType: release',
+    'publishAutoUpdate: true',
+    "updaterCacheDirName: '@giandesktop-updater'",
+    '',
+  ].join('\n');
+}
+
+async function writeAppUpdateConfig(directory, source = appUpdateConfig()) {
+  const path = join(directory, 'mac-arm64', 'Gian.app', 'Contents', 'Resources', 'app-update.yml');
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, source);
+  return path;
+}
+
+test('verifies the actual App bundle feed alongside valid update metadata', async () => {
+  await withReleaseFixture(async ({ directory }) => {
+    const appUpdateConfigPath = await writeAppUpdateConfig(directory);
+    const result = await verifyUpdateArtifacts({ releaseDir: directory, version, appUpdateConfigPath });
+    assert.deepEqual(result.updateFeed, { provider: 'github', owner: 'RichToyo', repo: 'Gian', channel: 'latest' });
+    assert.equal(result.artifacts.length, 2);
+  });
+});
+
+test('a stale embedded RichLogic feed fails even when artifact hashes and latest metadata pass', async () => {
+  await withReleaseFixture(async ({ directory }) => {
+    const appUpdateConfigPath = await writeAppUpdateConfig(directory, appUpdateConfig().replace('owner: RichToyo', 'owner: RichLogic'));
+    assert.equal((await verifyUpdateArtifacts({ releaseDir: directory, version })).artifacts.length, 2);
+    await assert.rejects(
+      verifyUpdateArtifacts({ releaseDir: directory, version, appUpdateConfigPath }),
+      /app-update.yml owner does not match build.publish/,
+    );
+    await assert.rejects(
+      main(['--release-dir', directory, '--version', version, '--app-update-config', appUpdateConfigPath]),
+      /app-update.yml owner does not match build.publish/,
+    );
+  });
+});
+
+test('embedded feed verification rejects missing, malformed and overridden configurations', async () => {
+  await withReleaseFixture(async ({ directory }) => {
+    const invalid = [
+      appUpdateConfig().replace('repo: Gian', 'repo: Gian-Proxies'),
+      appUpdateConfig().replace('private: false', 'private: true'),
+      appUpdateConfig().replace('provider: github', 'provider: generic'),
+      appUpdateConfig().replace('channel: latest', 'channel: beta'),
+      appUpdateConfig().replace('owner: RichToyo\n', ''),
+      `${appUpdateConfig()}owner: RichToyo\n`,
+      appUpdateConfig().replace('owner: RichToyo', ' owner: RichToyo'),
+      `${appUpdateConfig()}host: example.invalid\n`,
+    ];
+    for (const source of invalid) {
+      const appUpdateConfigPath = await writeAppUpdateConfig(directory, source);
+      await assert.rejects(verifyUpdateArtifacts({ releaseDir: directory, version, appUpdateConfigPath }), /app-update.yml/);
+    }
+    await assert.rejects(
+      verifyUpdateArtifacts({ releaseDir: directory, version, appUpdateConfigPath: join(directory, 'missing-app-update.yml') }),
+      { code: 'ENOENT' },
+    );
+  });
+});
 
 test('parses the electron-builder latest-mac.yml subset without a YAML dependency', () => {
   const zip = Buffer.from('zip');
@@ -159,6 +228,10 @@ test('desktop release build requires credentials and generates public latest met
   assert.match(command, /--publish never/);
   assert.match(command, /verify:update-artifacts/);
   assert.match(command, /extraMetadata\.gianReleaseChannel=stable/);
+  assert.match(desktopPackage.scripts['verify:update-artifacts'], /--app-update-config release\/mac-arm64\/Gian.app\/Contents\/Resources\/app-update.yml/);
+  assert.equal(desktopPackage.build.appId, 'com.gian.desktop');
+  assert.equal(desktopPackage.author, 'RichLogic');
+  assert.equal(desktopPackage.build.publish.length, 1);
 
   for (const localBuild of ['package:mac', 'make:mac']) {
     assert.match(desktopPackage.scripts[localBuild], /--publish never/);
@@ -177,7 +250,7 @@ test('desktop release build requires credentials and generates public latest met
     },
     {
       provider: 'github',
-      owner: 'RichLogic',
+      owner: 'RichToyo',
       repo: 'Gian',
       private: false,
       channel: 'latest',
@@ -185,6 +258,22 @@ test('desktop release build requires credentials and generates public latest met
       publishAutoUpdate: true,
     },
   );
+});
+
+test('RichToyo embedded feed does not move this release publication or the metadata broker', async () => {
+  const release = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const promote = await readFile(new URL('../.github/workflows/release-promote.yml', import.meta.url), 'utf8');
+  for (const workflow of [release, promote]) {
+    assert.match(workflow, /github.repository == 'RichLogic\/Gian' && github.ref == 'refs\/heads\/main'/);
+    assert.doesNotMatch(workflow, /RichToyo|build\.publish/);
+  }
+  assert.match(release, /gh release create/);
+  assert.match(release, /gh release upload/);
+  assert.match(release, /--app-update-config packages\/desktop\/release\/mac-arm64\/Gian.app\/Contents\/Resources\/app-update.yml/);
+  assert.match(promote, /gh release edit "\$TAG" --draft=false --latest/);
+  const mainSource = await readFile(new URL('../packages/desktop/src/main.ts', import.meta.url), 'utf8');
+  assert.match(mainSource, /function releaseRepository\(\): string \{\s*return process.env\['GIAN_RELEASE_REPOSITORY'\]\?\.trim\(\) \|\| 'RichLogic\/Gian';/);
+  assert.doesNotMatch(mainSource, /setFeedURL\(/);
 });
 
 async function withDraftReleaseFixture(run) {

@@ -15,6 +15,14 @@ if (!assetsDir || !proxiesDir || !verificationData) throw new Error('Runtime pre
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const entries = await discoverDevelopmentProxyEntries({ proxiesDir });
 const declarations = await declarationsFromProxyEntries(entries);
+if (declarations.some((item) => (
+  typeof item.entryPath !== 'string'
+  || typeof item.pluginVersion !== 'string'
+  || typeof item.processScope !== 'string'
+  || typeof item.displayName !== 'string'
+))) {
+  throw new Error('Every source Proxy declaration must keep its exact entry binding.');
+}
 const coordinates = selectDevRuntimeCoordinates(declarations);
 if (coordinates.length === 0 || coordinates.length !== declarations.length) {
   throw new Error('Every source Proxy must have one pinned Runtime coordinate.');

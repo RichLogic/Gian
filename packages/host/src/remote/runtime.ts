@@ -21,6 +21,7 @@ import {
   verifyBytes,
 } from '@gian/remote-protocol';
 import type { ServerToClientMessage, RemoteSettingsSnapshot, RemoteSettingsPairing } from '@gian/shared';
+import { loadConfig } from '../storage/config.js';
 import { PeerCryptoSession } from './crypto-session.js';
 import type { GianToolAccessController } from '../tool/access.js';
 import type { GianToolService } from '../tool/service.js';
@@ -63,6 +64,8 @@ export interface RemoteRuntimeDeps {
   hostVersion: string;
   hostName?: string;
   now?: () => Date;
+  /** Host UI locale for state snapshots; defaults to the stored config. */
+  locale?: () => 'en' | 'zh-CN';
   listAgents?: () => Array<{
     id: string;
     name?: string;
@@ -214,7 +217,7 @@ export class RemoteRuntime {
         await this.connectors.get(deviceId)?.sendControl(part);
       },
       listAgents: deps.listAgents,
-      snapshot: (device) => {
+      snapshot: (device, options) => {
         // Cards delivered by a snapshot never passed publishInteraction, so
         // register their exact turn-bound ids here as well — otherwise a
         // pending that predates this runtime could never be removed precisely.
@@ -228,6 +231,11 @@ export class RemoteRuntime {
           attention: this.attention,
           deviceId: device.id,
           eventSequence: this.replay.eventSequence,
+          // `locale` rides the snapshot only for connections that negotiated
+          // `wire.host_locale`; older clients parse the snapshot closed.
+          ...(options.wireFeatures.includes('wire.host_locale')
+            ? { locale: (deps.locale ?? (() => loadConfig(deps.db).locale))() }
+            : {}),
         });
       },
       onSubscribe: (deviceId, sessionId) => this.subscriptions.set(deviceId, sessionId),

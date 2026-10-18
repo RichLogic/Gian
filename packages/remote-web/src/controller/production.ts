@@ -2167,6 +2167,7 @@ function emptyUiState(): RemoteUiState {
     connection: { kind: 'browser_offline' },
     hosts: [],
     currentHostId: null,
+    locale: 'en',
     workspaces: [],
     tasks: [],
     sessions: [],

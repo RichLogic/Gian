@@ -134,6 +134,27 @@ export interface CodingViewProps {
    *  Run id; forwarded to the Transcript of the matching active session. */
   scheduleFocus?: { sessionId: string; runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  /** Exact message navigation (Issue #168): sessionId + transcript identity
+   *  (message, interaction card, or turn); forwarded to the matching active
+   *  session's Transcript. */
+  messageFocus?: {
+    sessionId: string;
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  onLoadMessageContext?: (sessionId: string, focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => Promise<boolean>;
+  onReturnToLatest?: (sessionId: string) => void;
   /** App-owned four-panel layout. Optional for isolated component renders. */
   railLayout?: RailLayoutController;
 }
@@ -363,6 +384,24 @@ export function CodingView(p: CodingViewProps) {
             ? { runId: p.scheduleFocus.runId }
             : null}
           onConsumeScheduleFocus={p.onConsumeScheduleFocus}
+          messageFocus={p.messageFocus && p.messageFocus.sessionId === p.activeSession.id
+            ? {
+                messageId: p.messageFocus.messageId,
+                interactionId: p.messageFocus.interactionId,
+                turn: p.messageFocus.turn,
+                nonce: p.messageFocus.nonce,
+                turnId: p.messageFocus.turnId,
+                documentId: p.messageFocus.documentId,
+                textRevision: p.messageFocus.textRevision,
+              }
+            : null}
+          onConsumeMessageFocus={p.onConsumeMessageFocus}
+          onLoadMessageContext={p.onLoadMessageContext
+            ? focus => p.onLoadMessageContext!(p.activeSession!.id, focus)
+            : undefined}
+          onReturnToLatest={p.onReturnToLatest
+            ? () => p.onReturnToLatest!(p.activeSession!.id)
+            : undefined}
           sideChatControl={p.sideChatControl}
         />
       ) : (

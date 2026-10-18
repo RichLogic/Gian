@@ -1,0 +1,120 @@
+/* ============================================================
+   Conversation find (Issue #168 / 0.6.7) — browser-like find bar floating
+   over the transcript, CSS Custom Highlight API ranges, and the explicit
+   "back to latest" affordance for detached context windows.
+   ============================================================ */
+
+.conv-find {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.375rem 0.25rem 0.625rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-2);
+  max-width: calc(100% - 1.5rem);
+}
+
+.conv-find-input {
+  width: 12rem;
+  min-width: 6rem;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: var(--fz-13);
+  color: var(--text);
+  line-height: 1.4;
+}
+.conv-find-input::placeholder { color: var(--text-3); }
+
+.conv-find-count {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  color: var(--text-3);
+  min-width: 2.5rem;
+  text-align: center;
+}
+
+.conv-find-partial {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 0.3125rem;
+  border-radius: var(--r-1);
+  background: oklch(from var(--warn, #f0a500) l c h / 0.12);
+  color: var(--warn, #f0a500);
+}
+
+.conv-find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.625rem;
+  min-height: 1.625rem;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.conv-find-btn:hover { background: var(--surface-2); color: var(--text); }
+.conv-find-btn:disabled { opacity: 0.4; cursor: default; }
+
+.conv-return-latest {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  min-height: 1.75rem;
+  padding: 0.25rem 0.875rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--accent-text);
+  font-size: var(--fz-12);
+  font-weight: 500;
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+}
+.conv-return-latest:hover { background: var(--surface-2); }
+
+/* The exact-navigation flash on the message body (chat-ui owns the node;
+ * the class is added/removed by its messageFocus effect). */
+.find-target-flash {
+  animation: find-target-flash 1600ms var(--ease);
+  border-radius: var(--r-2);
+}
+@keyframes find-target-flash {
+  0% { box-shadow: 0 0 0 2px var(--accent); background: var(--accent-soft); }
+  100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+}
+
+::highlight(gian-find) {
+  background: oklch(from var(--warn, #f0a500) l c h / 0.35);
+  color: inherit;
+}
+::highlight(gian-find-active) {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Atomic find hit (math / image): explicit component-owned outline overlay
+   over the visible element — never touches message DOM or copy. */
+.find-atomic-active {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--r-2);
+  background: var(--accent-soft);
+}

@@ -184,6 +184,13 @@ const NAV_GROUPS: Array<{
 // Settings keeps only Archive and Adopt as standalone management pages.
 const STANDALONE_SECTIONS = new Set<NavKey>(['archive', 'adopt']);
 
+/** Standalone sections render their own page — there is no
+ *  `settings-section-*` anchor to scroll to. Deep links must not spin a
+ *  scroll retry against an anchor that never exists. */
+export function settingsSectionHasAnchor(key: NavKey): boolean {
+  return !STANDALONE_SECTIONS.has(key);
+}
+
 function newEditorId(): string {
   return (globalThis.crypto?.randomUUID?.() ?? `ed-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
@@ -415,7 +422,7 @@ function SettingsBodyInner({
           <div className="s2-card">
             <dl className="kv-grid">
               <dt>{t('settings.appearance.theme')}</dt>
-              <dd>
+              <dd id="settings-control-appearance.theme">
                 <select
                   className="select"
                   aria-label={t('settings.appearance.theme')}
@@ -452,7 +459,7 @@ function SettingsBodyInner({
                 </>
               )}
               <dt>{t('settings.appearance.accent')}</dt>
-              <dd>
+              <dd id="settings-control-appearance.accent">
                 <div className="accent-row">
                   {([
                     ['rose',   'Rose',   'oklch(0.55 0.15   5)'],
@@ -474,7 +481,7 @@ function SettingsBodyInner({
                 </div>
               </dd>
               <dt>{t('settings.appearance.frameOpacity')}</dt>
-              <dd>
+              <dd id="settings-control-appearance.frameOpacity">
                 <label className="switch" data-testid="frame-opacity-switch">
                   <input
                     type="checkbox"
@@ -494,7 +501,7 @@ function SettingsBodyInner({
                 )}
               </dd>
               <dt>{t('settings.appearance.language')}</dt>
-              <dd>
+              <dd id="settings-control-appearance.language">
                 <select
                   className="select"
                   aria-label={t('settings.appearance.language')}
@@ -506,7 +513,7 @@ function SettingsBodyInner({
                 </select>
               </dd>
               <dt>{t('settings.appearance.zoom')}</dt>
-              <dd>
+              <dd id="settings-control-appearance.zoom">
                 <select
                   className="select"
                   aria-label={t('settings.appearance.zoom')}
@@ -533,7 +540,7 @@ function SettingsBodyInner({
           <div className="s2-card">
             <dl className="kv-grid">
               <dt>{t('settings.chat.fontSize')}</dt>
-              <dd>
+              <dd id="settings-control-chat.fontSize">
                 <select
                   className="select"
                   aria-label={t('settings.chat.fontSize')}
@@ -546,7 +553,7 @@ function SettingsBodyInner({
                 </select>
               </dd>
               <dt>{t('settings.chat.fontFamily')}</dt>
-              <dd>
+              <dd id="settings-control-chat.fontFamily">
                 <select
                   className="select"
                   aria-label={t('settings.chat.fontFamily')}
@@ -561,7 +568,7 @@ function SettingsBodyInner({
                 </select>
               </dd>
               <dt className="settings-toggle-spacer" aria-hidden="true" />
-              <dd className="settings-toggle-row">
+              <dd className="settings-toggle-row" id="settings-control-chat.minimap">
                 <label className="switch">
                   <input
                     type="checkbox"
@@ -1102,7 +1109,8 @@ function NotificationsBlock({
   const [supported, setSupported] = useState(
     browserNotificationPermission() !== 'unsupported',
   );
-  const [lastError, setLastError] = useState<'delivery_failed' | null>(null);
+  const [lastError, setLastError] = useState<'delivery_failed' | 'withdraw_failed' | null>(null);
+  const [registryError, setRegistryError] = useState<'persist_failed' | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -1118,6 +1126,7 @@ function NotificationsBlock({
       setDevice(state.preferences);
       setSupported(state.supported);
       setLastError(state.lastError);
+      setRegistryError(state.registryError ?? null);
     };
     const unsubscribe = notifications.onStateChanged(applyState);
     void notifications.getState().then(applyState);
@@ -1135,6 +1144,7 @@ function NotificationsBlock({
     setDevice(state.preferences);
     setSupported(state.supported);
     setLastError(state.lastError);
+    setRegistryError(state.registryError ?? null);
   }
 
   async function setMasterEnabled(enabled: boolean) {
@@ -1249,6 +1259,18 @@ function NotificationsBlock({
         <>
           <dt>{t('settings.notifications.delivery')}</dt>
           <dd className="s2-help">{t('settings.notifications.deliveryFailed')}</dd>
+        </>
+      )}
+      {lastError === 'withdraw_failed' && (
+        <>
+          <dt>{t('settings.notifications.delivery')}</dt>
+          <dd className="s2-help">{t('settings.notifications.withdrawFailed')}</dd>
+        </>
+      )}
+      {registryError === 'persist_failed' && (
+        <>
+          <dt>{t('settings.notifications.delivery')}</dt>
+          <dd className="s2-help">{t('settings.notifications.registryFailed')}</dd>
         </>
       )}
       <dt>{t('settings.notifications.lifecycle')}</dt>

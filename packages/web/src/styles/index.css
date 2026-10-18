@@ -36,6 +36,10 @@
 @import url('./timer.css');
 /* Custom — read-only Customization Inventory page (Issue #50). */
 @import url('./custom.css');
+/* Inbox panel + topbar badge (Issue #53, 0.6.7). */
+@import url('./inbox.css');
+/* Conversation find bar + highlights (Issue #168, 0.6.7). */
+@import url('./conversation-find.css');
 /* Drag-reorder indicators (sidebar lists + settings rows); loaded last — the
    rules carry no layout properties, only the insertion-line shadow. */
 @import url('./dnd.css');

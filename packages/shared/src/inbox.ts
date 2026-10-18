@@ -6,6 +6,7 @@ export const INBOX_SOURCE_KINDS = [
   'system.repair',
   'system.pairing',
   'product.update',
+  'schedule.confirmation',
 ] as const;
 
 export type InboxSourceKind = typeof INBOX_SOURCE_KINDS[number];
@@ -36,6 +37,18 @@ export type InboxApprovalCategory = 'command' | 'permission' | 'browser' | 'plan
 
 export type InboxRepairScope = 'account' | 'runtime' | 'schedule';
 
+/**
+ * Existing Agents surface for one account fault.
+ * `agent_login` is the Agent login terminal (`term:spawn` target
+ * `{ kind: 'agent_cli', agent_id, action: 'login' }`).
+ * `agent_settings` is that Agent's detail panel.
+ * Opening either one does not run login or repair.
+ */
+export type AccountRepairEntry = {
+  kind: 'agent_login' | 'agent_settings';
+  agent_id: string;
+};
+
 export type InboxUpdatePhase = 'available' | 'downloaded' | 'failed';
 
 /** Navigation target. An unknown shape is rejected; it is never coerced to the current session. */
@@ -63,6 +76,10 @@ export type InboxTarget =
       channel: string;
     }
   | {
+      type: 'schedule_confirmation';
+      confirmation_id: string;
+    }
+  | {
       type: 'unavailable';
       reason: 'missing' | 'revoked' | 'unknown';
     };
@@ -70,7 +87,13 @@ export type InboxTarget =
 export type InboxDisplay =
   | { kind: 'session.question'; interaction_id: string }
   | { kind: 'session.approval'; interaction_id: string; category: InboxApprovalCategory }
-  | { kind: 'system.repair'; scope: InboxRepairScope; subject_id: string }
+  | {
+      kind: 'system.repair';
+      scope: InboxRepairScope;
+      subject_id: string;
+      /** Account faults name the existing Agent surface. Login is not executed. */
+      entry?: AccountRepairEntry;
+    }
   | { kind: 'system.pairing'; request_id: string }
   | {
       kind: 'product.update';
@@ -80,6 +103,11 @@ export type InboxDisplay =
       channel: string;
       phase: InboxUpdatePhase;
       skipped_version: string | null;
+    }
+  | {
+      kind: 'schedule.confirmation';
+      confirmation_id: string;
+      control_session_id: string;
     };
 
 export interface InboxItemPublic {
@@ -114,6 +142,13 @@ export interface InboxPage {
   next_cursor: string | null;
   pending_count: number;
   inbox_revision: number;
+}
+
+function isAccountRepairEntry(value: unknown, subjectId: string): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return (value.kind === 'agent_login' || value.kind === 'agent_settings')
+    && value.agent_id === subjectId;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -152,6 +187,9 @@ export function isInboxTarget(value: unknown): value is InboxTarget {
       && isString(value.version) && value.version.length > 0
       && isString(value.channel) && value.channel.length > 0;
   }
+  if (value.type === 'schedule_confirmation') {
+    return isString(value.confirmation_id) && value.confirmation_id.length > 0;
+  }
   if (value.type === 'unavailable') {
     return isOneOf(value.reason, ['missing', 'revoked', 'unknown']);
   }
@@ -167,7 +205,9 @@ export function isInboxDisplay(value: unknown): value is InboxDisplay {
   }
   if (value.kind === 'system.repair') {
     return isOneOf(value.scope, ['account', 'runtime', 'schedule'])
-      && isString(value.subject_id) && value.subject_id.length > 0;
+      && isString(value.subject_id) && value.subject_id.length > 0
+      && (value.scope === 'account' || value.entry === undefined)
+      && isAccountRepairEntry(value.entry, value.subject_id);
   }
   if (value.kind === 'system.pairing') return isString(value.request_id) && value.request_id.length > 0;
   if (value.kind === 'product.update') {
@@ -177,6 +217,10 @@ export function isInboxDisplay(value: unknown): value is InboxDisplay {
       && isString(value.channel) && value.channel.length > 0
       && isOneOf(value.phase, ['available', 'downloaded', 'failed'])
       && (value.skipped_version === null || isString(value.skipped_version));
+  }
+  if (value.kind === 'schedule.confirmation') {
+    return isString(value.confirmation_id) && value.confirmation_id.length > 0
+      && isString(value.control_session_id) && value.control_session_id.length > 0;
   }
   return false;
 }

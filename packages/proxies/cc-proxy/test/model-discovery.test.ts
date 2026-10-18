@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +17,7 @@ import {
   resolveClaudeSettingsPath,
   ClaudeMcpRuntime,
 } from '../src/runtime/claude-mcp-runtime.js';
+import { parseClaudeNativeModels, probeClaudeNativeModels } from '../src/runtime/native-model-catalog.js';
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'cc-proxy-model-discovery-'));
@@ -385,9 +386,8 @@ test('an empty explicit Agent HOME never borrows another HOME model list', () =>
 // discoverModels end-to-end (via the runtime's public surface)
 // ---------------------------------------------------------------------------
 
-/** Discover models with env hermetically pointed at tmp dirs: a fake
- *  `claude` that answers --help with nothing, a tmp HOME, and no print
- *  probe. `configDir` (when given) is exported as CLAUDE_CONFIG_DIR. */
+/** Discover models in an isolated HOME with a fake CLI. By default that
+ * CLI has no native control response. Never enable a paid prompt probe. */
 async function discoverModelsWith(configDir: string | null, claudeScript?: string) {
   const root = makeTmpDir();
   const home = join(root, 'home');
@@ -733,6 +733,148 @@ const WRAPPER_GATEWAY_SCRIPT = [
 const CURRENT_SETTINGS_MODEL_DESCRIPTION = 'From the current Claude settings configuration.';
 const FALLBACK_MODEL_ERROR_PREFIX =
   'This model is an unverified alias from the built-in fallback list; the current CLI may not support it.';
+
+// initialize.models shape observed on Claude Code 2.1.285, without account data.
+const NATIVE_MODELS = [
+  { value: 'default', displayName: 'Default (recommended)', description: 'Default model',
+    supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'opus', displayName: 'Opus', description: 'Opus model',
+    supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'claude-fable-5-1[1m]', displayName: 'Fable', description: 'Long context model',
+    supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+  { value: 'sonnet', displayName: 'Sonnet', description: 'Sonnet model',
+    supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh'] },
+  { value: 'haiku', displayName: 'Haiku', description: 'Haiku model' },
+];
+
+function nativeCatalogScript(capturePath: string, models: unknown = NATIVE_MODELS): string {
+  return `#!${process.execPath}
+const { writeFileSync } = require('node:fs');
+const { createInterface } = require('node:readline');
+if (process.argv.includes('--help')) {
+  console.log('--effort <level> (low, medium, high, xhigh, max)');
+  process.exit(0);
+}
+const requests = [];
+const input = createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  const request = JSON.parse(line);
+  requests.push(request);
+  if (request.type !== 'control_request' || request.request.subtype !== 'initialize') process.exit(2);
+  console.log(JSON.stringify({type: 'control_response', response: {
+    subtype: 'success', request_id: 'unrelated', response: {models: []}
+  }}));
+  console.log(JSON.stringify({type: 'control_response', response: {
+    subtype: 'success', request_id: request.request_id, response: {models: ${JSON.stringify(models)}}
+  }}));
+});
+input.on('close', () => {
+  writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({
+    args: process.argv.slice(2), requests, cwd: process.cwd(), pid: process.pid,
+    configDir: process.env.CLAUDE_CONFIG_DIR
+  }));
+  process.exit(0);
+});
+`;
+}
+
+test('settings.model does not hide the native /model catalog or model-specific efforts', async () => {
+  const root = makeTmpDir();
+  try {
+    writeSettings(root, '{"model":"opus"}');
+    const capturePath = join(root, 'control.json');
+    const models = await discoverModelsWith(root, nativeCatalogScript(capturePath));
+    assert.deepEqual(models.map((model) => model.model), ['', 'opus', 'claude-fable-5-1[1m]', 'sonnet', 'haiku']);
+    assert.deepEqual(models.map((model) => model.displayName), ['Default (recommended)', 'Opus', 'Fable', 'Sonnet', 'Haiku']);
+    assert.equal(models[0]?.id, 'claude-default');
+    assert.equal(models[1]?.id, 'claude-settings-opus', 'preserve the previously selected configuration id');
+    assert.equal(models[3]?.id, 'claude-alias-sonnet', 'keep existing native alias configuration ids');
+    assert.deepEqual(models[2]?.supportedEfforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.deepEqual(models[3]?.supportedEfforts, ['low', 'medium', 'high', 'xhigh']);
+    assert.deepEqual(models[4]?.supportedEfforts, [], 'Haiku must not borrow Opus effort choices');
+    const capture = JSON.parse(readFileSync(capturePath, 'utf8'));
+    assert.equal(capture.requests.length, 1);
+    assert.equal(capture.requests[0].type, 'control_request');
+    assert.deepEqual(capture.requests[0].request, { subtype: 'initialize', hooks: {} });
+    assert.equal(capture.args[0], '--print');
+    assert.equal(capture.args.length, 14, 'no extra positional prompt may be appended');
+    assert.equal(capture.args[capture.args.indexOf('--input-format') + 1], 'stream-json');
+    assert.ok(capture.args.includes('--no-session-persistence'));
+    assert.ok(capture.args.includes('--strict-mcp-config'));
+    assert.deepEqual(JSON.parse(capture.args[capture.args.indexOf('--mcp-config') + 1]), { mcpServers: {} });
+    assert.deepEqual(JSON.parse(capture.args[capture.args.indexOf('--settings') + 1]), { disableAllHooks: true });
+    assert.equal(capture.args[capture.args.indexOf('--tools') + 1], '');
+    assert.equal(capture.configDir, root);
+    assert.equal(existsSync(capture.cwd), false, 'the isolated probe cwd is cleaned before discovery returns');
+    assert.throws(() => process.kill(capture.pid, 0), { code: 'ESRCH' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an explicit availableModels menu takes precedence without starting a native probe', async () => {
+  const root = makeTmpDir();
+  try {
+    writeSettings(root, '{"model":"router-model","availableModels":["router-model","another-model"]}');
+    const capturePath = join(root, 'control.json');
+    const models = await discoverModelsWith(root, nativeCatalogScript(capturePath));
+    assert.deepEqual(models.map((model) => model.model), ['', 'router-model', 'another-model']);
+    assert.equal(existsSync(capturePath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a current custom model remains selectable alongside the native model menu', async () => {
+  const root = makeTmpDir();
+  try {
+    writeSettings(root, '{"model":"custom-current"}');
+    const models = await discoverModelsWith(root, nativeCatalogScript(join(root, 'control.json')));
+    assert.equal(models.at(-1)?.model, 'custom-current');
+    assert.equal(models.at(-1)?.id, 'claude-settings-custom-current');
+    assert.equal(models.filter((model) => model.model === '').length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a malformed native catalog falls back to the configured model', async () => {
+  const root = makeTmpDir();
+  try {
+    writeSettings(root, '{"model":"opus"}');
+    const models = await discoverModelsWith(root, nativeCatalogScript(join(root, 'control.json'), [
+      { value: 'bad\nmodel', displayName: 'Bad' },
+    ]));
+    assert.deepEqual(models.map((model) => model.model), ['', 'opus']);
+    assert.deepEqual(parseClaudeNativeModels([...NATIVE_MODELS, NATIVE_MODELS[1]]).map((model) => model.value),
+      NATIVE_MODELS.map((model) => model.value));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a stalled native probe times out and reaps a child that ignores SIGTERM', async () => {
+  const root = makeTmpDir();
+  try {
+    const capturePath = join(root, 'pid');
+    const executable = join(root, 'stalled.mjs');
+    writeFileSync(executable, `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(capturePath)}, String(process.pid));
+process.on('SIGTERM', () => {});
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`);
+    chmodSync(executable, 0o755);
+    const started = Date.now();
+    assert.deepEqual(await probeClaudeNativeModels(executable, { timeoutMs: 500 }), []);
+    assert.ok(Date.now() - started < 4000, 'timeout and forced cleanup must be bounded');
+    const pid = Number(readFileSync(capturePath, 'utf8'));
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('discoverModels includes settings.model when availableModels is absent', async () => {
   const confRoot = makeTmpDir();

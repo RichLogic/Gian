@@ -103,6 +103,9 @@ test(`production controller pairs through real Server+Host (${silentHelloPeer ? 
     assert.equal(controller.state.currentHostId, enrollBody.host_id);
     assert.equal(controller.state.hosts[0]?.id, enrollBody.host_id);
     assert.notEqual(controller.state.snapshotReceivedAt, null);
+    // The snapshot carries the Host UI locale on the negotiated protocol; the
+    // silent-hello Host also negotiated it (its hello.ok was only dropped).
+    assert.equal(controller.state.locale, 'zh-CN');
     assert.equal(relays.at(-1)?.protocolMode, silentHelloPeer ? 'legacy' : 'negotiated');
   } finally {
     controller?.close();

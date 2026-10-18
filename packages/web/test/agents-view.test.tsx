@@ -7,10 +7,13 @@ import type {
   ProxyCatalogEntry,
   ProxyCatalogItem,
   ProxyCatalogList,
+  CcCapabilities,
   ProxyCapabilities,
   UserAgentStatus,
 } from '@gian/shared';
+import { AgentDetailPanel } from '../src/agents/AgentDetailPanel.js';
 import { AgentsView, __resetIntegrationInstallTerminals } from '../src/views/AgentsView.js';
+import { AgentDialog } from '../src/views/agent-dialog.js';
 import { __resetCatalogDocCache } from '../src/agents/ProxyDetailPanel.js';
 import { renderWithOperations } from './operation-test-utils.js';
 import { Toaster } from '../src/components/Toaster.js';
@@ -19,6 +22,7 @@ import { LocaleProvider } from '../src/i18n/index.js';
 import { localizeCatalogItem } from '../src/agents/catalog-model.js';
 import * as api from '../src/api.js';
 import type { GianWs } from '../src/ws.js';
+import { projectedCatalog } from '../../proxies/antigravity-proxy/test/fixtures/config-options.js';
 
 // Agents page = My Agents + shared Agent Integrations, driven by the
 // Host catalog projection (catalog.items) and the open pluginId contract.
@@ -867,6 +871,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
     expect(within(dialog).queryByLabelText('Name')).toBeNull();
     expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeTruthy();
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
     fireEvent.click(within(dialog).getByTestId('agent-create-save'));
     await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
       name: 'Acme Ready',
@@ -897,6 +904,7 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(within(dialog).getByTestId('agent-create-save'));
     await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
       name: 'Claude Code', pluginId: 'claude',
+      home: { kind: 'default', expectedPath: '/Users/test/.claude' },
     }));
   });
 
@@ -929,8 +937,384 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(within(dialog).getByTestId('agent-create-save'));
     await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
       name: occupied ? 'Grok Build 2' : 'Grok Build', pluginId: 'grok',
-      ...(occupied ? { home: { kind: 'managed' } } : {}),
+      home: occupied ? { kind: 'managed' } : { kind: 'default', expectedPath: home },
     }));
+  });
+
+  it('shows an unknown plugin default HOME from its pluginId and submits that choice', async () => {
+    const home = '/Users/test/.provider-default';
+    mockApi([], catalogList([catalogItem({
+      pluginId: 'io.acme.ready', displayName: 'Acme Ready',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      availableActions: ['create_agent'],
+    })]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme',
+      home: { kind: 'default', path: home },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const nativeHome = await within(dialog).findByLabelText(/Use default HOME/);
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledWith('io.acme.ready');
+    expect(within(dialog).getByText(home)).toBeTruthy();
+    expect(nativeHome).toHaveProperty('checked', true);
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready',
+      home: { kind: 'default', expectedPath: home },
+    }));
+  });
+
+  it('keeps an occupied unknown-plugin default HOME from being submitted', async () => {
+    const home = '/Users/test/.provider-default';
+    mockApi([agent({
+      id: 'acme-existing', name: 'Acme Ready', pluginId: 'io.acme.ready', proxy: null,
+      home: { kind: 'custom', path: home },
+    })], catalogList([READY]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready 2', cliPath: null,
+      home: { kind: 'default', path: home },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const nativeHome = await within(dialog).findByLabelText(/Use default HOME/);
+    expect(nativeHome).toHaveProperty('checked', false);
+    expect(nativeHome).toHaveProperty('disabled', true);
+    expect(within(dialog).getByText(/belongs to another Agent/)).toBeTruthy();
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready 2', pluginId: 'io.acme.ready',
+      home: { kind: 'managed' },
+    }));
+  });
+
+  it('ignores a stale default HOME response after the Integration changes', async () => {
+    let resolveFirst: (value: Awaited<ReturnType<typeof api.loadAgentDraftDefaults>>) => void = () => undefined;
+    const first = new Promise<Awaited<ReturnType<typeof api.loadAgentDraftDefaults>>>(resolve => {
+      resolveFirst = resolve;
+    });
+    const firstItem = catalogItem({
+      pluginId: 'io.acme.first', displayName: 'First Plugin',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      availableActions: ['create_agent'],
+    });
+    const secondItem = catalogItem({
+      pluginId: 'io.acme.second', displayName: 'Second Plugin',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      availableActions: ['create_agent'],
+    });
+    mockApi([], catalogList([firstItem, secondItem]));
+    vi.mocked(api.loadAgentDraftDefaults).mockImplementation(async pluginId => {
+      if (pluginId === 'io.acme.first') return first;
+      return {
+        name: 'Second Plugin', cliPath: null,
+        home: { kind: 'default', path: '/Users/test/.second' },
+      };
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const save = within(dialog).getByTestId('agent-create-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(api.createAgent).not.toHaveBeenCalled();
+
+    fireEvent.change(within(dialog).getByLabelText('Agent Integration'), {
+      target: { value: 'io.acme.second' },
+    });
+    expect(await within(dialog).findByText('/Users/test/.second')).toBeTruthy();
+    await act(async () => {
+      resolveFirst({
+        name: 'First Plugin', cliPath: null,
+        home: { kind: 'default', path: '/Users/test/.first' },
+      });
+      await first;
+    });
+    expect(within(dialog).queryByText('/Users/test/.first')).toBeNull();
+    expect((within(dialog).getByLabelText(/Use default HOME/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Second Plugin', pluginId: 'io.acme.second',
+      home: { kind: 'default', expectedPath: '/Users/test/.second' },
+    }));
+  });
+
+  it.each(['unavailable', 'error'] as const)('keeps managed and custom HOME when the default is %s', async (mode) => {
+    mockApi([], catalogList([READY]));
+    if (mode === 'unavailable') {
+      vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+        name: 'Acme Ready', cliPath: null, home: { kind: 'unavailable' },
+      });
+    } else {
+      vi.mocked(api.loadAgentDraftDefaults).mockRejectedValue(new Error('draft failed'));
+    }
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(await within(dialog).findByText('Default HOME is unavailable for this Integration.')).toBeTruthy();
+    expect(within(dialog).queryByLabelText(/Use default HOME/)).toBeNull();
+    expect(within(dialog).queryByText('/Users/test/.provider-default')).toBeNull();
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+    expect(within(dialog).getByLabelText('Use an existing HOME')).toBeTruthy();
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready',
+      home: { kind: 'managed' },
+    }));
+  });
+
+  it('replaces an unavailable default HOME when the open dialog runtime becomes ready', async () => {
+    const plugin = (state: 'setup_required' | 'ready') => catalogItem({
+      pluginId: 'io.acme.ready', displayName: 'Acme Ready',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state, displayName: 'Acme Runtime' },
+      availableActions: ['create_agent'],
+    });
+    const onSubmit = vi.fn();
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: null, home: { kind: 'unavailable' },
+    });
+    const dialogProps = {
+      agents: [],
+      busy: false,
+      error: '',
+      onPickHome: async () => null,
+      onPickRuntime: async () => null,
+      onSubmit,
+      onClose: () => undefined,
+    };
+    const view = render(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('setup_required')]} />
+      </LocaleProvider>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(await within(dialog).findByText('Default HOME is unavailable for this Integration.')).toBeTruthy();
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(1);
+
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.provider-default' },
+    });
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('ready')]} />
+      </LocaleProvider>,
+    );
+    expect(await within(dialog).findByText('/Users/test/.provider-default')).toBeTruthy();
+    expect(within(dialog).queryByText('Default HOME is unavailable for this Integration.')).toBeNull();
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(2);
+    expect((within(dialog).getByLabelText(/Use default HOME/) as HTMLInputElement).checked).toBe(true);
+
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('ready')]} />
+      </LocaleProvider>,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready',
+      home: { kind: 'default', expectedPath: '/Users/test/.provider-default' },
+    });
+  });
+
+  it('keeps an explicit managed HOME when the same plugin runtime path changes', async () => {
+    const plugin = (path: string, version: string, displayName = 'Acme Runtime') => catalogItem({
+      pluginId: 'io.acme.ready', displayName: 'Acme Ready',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state: 'ready', displayName, path, version },
+      availableActions: ['create_agent'],
+    });
+    const onSubmit = vi.fn();
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.provider-default' },
+    });
+    const dialogProps = {
+      agents: [], busy: false, error: '',
+      onPickHome: async () => null, onPickRuntime: async () => null,
+      onSubmit, onClose: () => undefined,
+    };
+    const view = render(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('/managed/acme', '1.0.0')]} />
+      </LocaleProvider>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(await within(dialog).findByLabelText(/Use default HOME/)).toBeChecked();
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('/managed/acme', '1.0.0', 'Renamed runtime')]} />
+      </LocaleProvider>,
+    );
+    await act(async () => { await Promise.resolve(); });
+    expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(dialog).getByLabelText('Create a new Gian-managed HOME'));
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('/managed/acme-2', '1.0.1')]} />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(2));
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+    expect(within(dialog).getByLabelText(/Use default HOME/)).not.toBeChecked();
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready', home: { kind: 'managed' },
+    });
+  });
+
+  it('keeps a typed existing HOME when the same plugin runtime version changes', async () => {
+    const plugin = (version: string) => catalogItem({
+      pluginId: 'io.acme.ready', displayName: 'Acme Ready',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state: 'ready', displayName: 'Acme Runtime', path: '/managed/acme', version },
+      availableActions: ['create_agent'],
+    });
+    const onSubmit = vi.fn();
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.provider-default' },
+    });
+    const dialogProps = {
+      agents: [], busy: false, error: '',
+      onPickHome: async () => null, onPickRuntime: async () => null,
+      onSubmit, onClose: () => undefined,
+    };
+    const view = render(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('1.0.0')]} />
+      </LocaleProvider>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => expect(
+      (within(dialog).getByLabelText('Use an existing HOME') as HTMLInputElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/custom-home' },
+    });
+
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('1.0.1')]} />
+      </LocaleProvider>,
+    );
+    await waitFor(() => expect(api.loadAgentDraftDefaults).toHaveBeenCalledTimes(2));
+    expect((within(dialog).getByLabelText('HOME Path') as HTMLInputElement).value)
+      .toBe('/Users/test/custom-home');
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).not.toBeChecked();
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready',
+      home: { kind: 'custom', path: '/Users/test/custom-home' },
+    });
+  });
+
+  it('blocks submit when a selected default HOME becomes unavailable', async () => {
+    const plugin = (version: string) => catalogItem({
+      pluginId: 'io.acme.ready', displayName: 'Acme Ready',
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state: 'ready', displayName: 'Acme Runtime', path: '/managed/acme', version },
+      availableActions: ['create_agent'],
+    });
+    const onSubmit = vi.fn();
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.provider-default' },
+    });
+    const dialogProps = {
+      agents: [], busy: false, error: '',
+      onPickHome: async () => null, onPickRuntime: async () => null,
+      onSubmit, onClose: () => undefined,
+    };
+    const view = render(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('1.0.0')]} />
+      </LocaleProvider>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect(await within(dialog).findByLabelText(/Use default HOME/)).toBeChecked();
+
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready', cliPath: '/managed/acme', home: { kind: 'unavailable' },
+    });
+    view.rerender(
+      <LocaleProvider locale="en">
+        <AgentDialog {...dialogProps} integrations={[plugin('1.0.1')]} />
+      </LocaleProvider>,
+    );
+    expect(await within(dialog).findByText('Default HOME is unavailable for this Integration.')).toBeTruthy();
+    await waitFor(() => expect(
+      (within(dialog).getByLabelText('Create a new Gian-managed HOME') as HTMLInputElement).disabled,
+    ).toBe(false));
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).not.toBeChecked();
+    expect(within(dialog).getByLabelText('Use an existing HOME')).not.toBeChecked();
+    const save = within(dialog).getByTestId('agent-create-save') as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('clears a typed HOME when the Integration changes', async () => {
+    const item = (pluginId: string, displayName: string) => catalogItem({
+      pluginId, displayName,
+      installation: { state: 'installed', installedVersion: '1.0.0', latestVersion: '1.0.0', source: 'gian-official' },
+      runtime: { state: 'ready', displayName, path: `/managed/${pluginId}`, version: '1.0.0' },
+      availableActions: ['create_agent'],
+    });
+    vi.mocked(api.loadAgentDraftDefaults).mockImplementation(async pluginId => ({
+      name: pluginId === 'io.acme.second' ? 'Second Plugin' : 'First Plugin',
+      cliPath: null,
+      home: { kind: 'default', path: pluginId === 'io.acme.second' ? '/Users/test/.second' : '/Users/test/.first' },
+    }));
+    const onSubmit = vi.fn();
+    render(
+      <LocaleProvider locale="en">
+        <AgentDialog
+          integrations={[item('io.acme.first', 'First Plugin'), item('io.acme.second', 'Second Plugin')]}
+          agents={[]} busy={false} error=""
+          onPickHome={async () => null} onPickRuntime={async () => null}
+          onSubmit={onSubmit} onClose={() => undefined}
+        />
+      </LocaleProvider>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => expect(
+      (within(dialog).getByLabelText('Use an existing HOME') as HTMLInputElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/typed-home' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Agent Integration'), {
+      target: { value: 'io.acme.second' },
+    });
+    expect(await within(dialog).findByText('/Users/test/.second')).toBeTruthy();
+    expect(within(dialog).queryByDisplayValue('/Users/test/typed-home')).toBeNull();
+    expect(within(dialog).getByLabelText(/Use default HOME/)).toBeChecked();
+    fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
+    expect((within(dialog).getByLabelText('HOME Path') as HTMLInputElement).value).toBe('');
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('opens the login terminal for the selected Agent HOME', async () => {
@@ -964,6 +1348,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     renderAgents();
     fireEvent.click(await screen.findByTestId('agents-add'));
     const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => expect(
+      (within(dialog).getByLabelText('Use an existing HOME') as HTMLInputElement).disabled,
+    ).toBe(false));
     fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
     const home = within(dialog).getByLabelText('HOME Path') as HTMLInputElement;
     expect(home.value).toBe('');
@@ -1151,6 +1538,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     fireEvent.click(await screen.findByTestId('agents-add'));
     const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
     expect(within(dialog).queryByLabelText('Name')).toBeNull();
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
     fireEvent.click(within(dialog).getByTestId('agent-create-save'));
     await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
       name: 'Acme Ready 2',
@@ -1492,6 +1882,9 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
 
     fireEvent.click(await screen.findByTestId('agents-add'));
     const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
     fireEvent.click(within(dialog).getByTestId('agent-create-save'));
 
     // No restart dialog, no relaunch: the create goes straight to the Host.
@@ -1678,5 +2071,460 @@ describe('AgentsView (My Agents + Agent Integrations)', () => {
     expect(panel.querySelector('[data-testid="agent-runtime-action"]')).toBeNull();
     expect(panel.textContent).not.toContain('Agent Integration');
     expect(panel.textContent).toContain('HOME');
+  });
+
+  it('shows the budget probe reason and ignores a raw provider message', async () => {
+    const leaked = 'login failed https://accounts.example/oauth?code=sekret-token GEMINI_API_KEY=do-not-log';
+    mockApi([], catalogList([EXTERNAL_READY]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready',
+      cliPath: '/managed/acme',
+      home: {
+        kind: 'unavailable',
+        reason: { code: 'RUNTIME_FINGERPRINT_BUDGET', message: leaked },
+      },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    const reason = await within(dialog).findByTestId('agent-default-probe-reason');
+    expect(reason.textContent).toBe('Runtime files exceed the allowed fingerprint size.');
+    expect(dialog.textContent).not.toContain('sekret-token');
+    expect(dialog.textContent).not.toContain('No HOME binding');
+    expect(within(dialog).queryByText('Default HOME is unavailable for this Integration.')).toBeNull();
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+    expect(within(dialog).getByLabelText('Use an existing HOME')).toBeTruthy();
+    await waitFor(() => expect(
+      (within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    await waitFor(() => expect(api.createAgent).toHaveBeenCalledWith({
+      name: 'Acme Ready', pluginId: 'io.acme.ready', home: { kind: 'managed' },
+    }));
+  });
+
+  it('shows a fixed probe failure for an unknown provider draft reason', async () => {
+    mockApi([], catalogList([EXTERNAL_READY]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready',
+      cliPath: '/managed/acme',
+      home: {
+        kind: 'unavailable',
+        reason: {
+          code: 'RUNTIME_PROBE_FAILED',
+          message: 'login failed https://accounts.example/oauth?code=sekret-token',
+        },
+      },
+    });
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    expect((await within(dialog).findByTestId('agent-default-probe-reason')).textContent)
+      .toBe('Runtime probe failed.');
+    expect(dialog.textContent).not.toContain('sekret-token');
+    expect(within(dialog).queryByText('No HOME binding')).toBeNull();
+    expect(within(dialog).getByLabelText('Create a new Gian-managed HOME')).toBeChecked();
+  });
+
+  it('shows a normal Integration runtime budget error and leaves the dialog usable', async () => {
+    mockApi([], catalogList([EXTERNAL_READY]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready',
+      cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.acme' },
+    });
+    vi.mocked(api.createAgent).mockRejectedValue(new api.AgentApiError(
+      'login failed https://accounts.example/oauth?code=sekret-token',
+      'RUNTIME_FINGERPRINT_BUDGET',
+    ));
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => {
+      const radio = within(dialog).getByLabelText(/Use default HOME/) as HTMLInputElement;
+      expect(radio.checked).toBe(true);
+      expect(radio.disabled).toBe(false);
+    });
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    const runtime = await within(dialog).findByTestId('agent-runtime-error');
+    expect(runtime.textContent).toBe('Runtime files exceed the allowed fingerprint size.');
+    expect(dialog.textContent).not.toContain('sekret-token');
+    expect(within(dialog).queryByLabelText('Runtime Path')).toBeNull();
+    expect(within(dialog).queryByText('Agent creation failed')).toBeNull();
+    expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole('dialog', { name: 'New Agent' })).toBeTruthy();
+  });
+
+  it('shows an existing HOME failure on a normal Integration', async () => {
+    mockApi([], catalogList([EXTERNAL_READY]));
+    vi.mocked(api.loadAgentDraftDefaults).mockResolvedValue({
+      name: 'Acme Ready',
+      cliPath: '/managed/acme',
+      home: { kind: 'default', path: '/Users/test/.acme' },
+    });
+    vi.mocked(api.createAgent).mockRejectedValue(
+      new api.AgentApiError('HOME directory does not exist.', 'AGENT_HOME_MISSING'),
+    );
+    renderAgents();
+    fireEvent.click(await screen.findByTestId('agents-add'));
+    const dialog = await screen.findByRole('dialog', { name: 'New Agent' });
+    await waitFor(() => expect(
+      (within(dialog).getByLabelText('Use an existing HOME') as HTMLInputElement).disabled,
+    ).toBe(false));
+    fireEvent.click(within(dialog).getByLabelText('Use an existing HOME'));
+    fireEvent.change(within(dialog).getByLabelText('HOME Path'), {
+      target: { value: '/Users/test/missing-home' },
+    });
+    fireEvent.click(within(dialog).getByTestId('agent-create-save'));
+    const home = await within(dialog).findByTestId('agent-home-error');
+    expect(home.textContent).toMatch(/does not exist/);
+    expect((within(dialog).getByLabelText('HOME Path') as HTMLInputElement).value)
+      .toBe('/Users/test/missing-home');
+    expect((within(dialog).getByTestId('agent-create-save') as HTMLButtonElement).disabled).toBe(false);
+    expect(within(dialog).queryByText('Agent creation failed')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'New Agent' })).toBeTruthy();
+  });
+
+  // ── Agent defaults retry. Render the panel directly so a defaults or Agent
+  //  change is a prop update, not a remount. ──────────────────────────────
+
+  const LEAKED = 'https://secret.example/leak';
+  const PANEL_DISPLAY = { name: 'Claude Code', tagline: '', logo: null };
+
+  type ListedCapabilities = Awaited<ReturnType<typeof api.loadProxyCapabilities>>;
+  type ResolvedCatalog = Awaited<ReturnType<typeof api.loadResolvedProxyCatalog>>;
+  type AgentCatalog = CcCapabilities & ResolvedCatalog & {
+    capabilities: { 'catalog.resolve': Record<string, never> };
+  };
+
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+  } {
+    let resolve: (value: T) => void = () => undefined;
+    let reject: (error: unknown) => void = () => undefined;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function agentCatalog(modelName: string, modelId = 'kept-model'): AgentCatalog {
+    return {
+      protocolVersion: '2.1',
+      models: [{
+        id: modelId,
+        model: modelId,
+        displayName: modelName,
+        description: '',
+        hidden: false,
+        isDefault: true,
+        defaultEffort: null,
+        supportedEfforts: [],
+      }],
+      modes: [{ id: 'ask', label: 'Ask', description: '', isDefault: true }],
+      slashCommands: [],
+      catalogRevision: 'rev-1',
+      input: [{ type: 'text' }],
+      configOptions: [{
+        id: 'model',
+        displayName: 'Model',
+        binding: 'turn',
+        role: 'model',
+        control: 'select',
+        required: true,
+        defaultValue: modelId,
+        choices: [{ value: modelId, displayName: modelName }],
+      }],
+      capabilities: { 'catalog.resolve': {} },
+      resolvedDefaults: { sessionConfig: {}, turnConfig: {} },
+    };
+  }
+
+  function detailAgent(id: string, model: string): UserAgentStatus {
+    return agent({
+      id,
+      name: 'Writer',
+      defaults: { model, thinking: '', mode: 'ask' },
+    });
+  }
+
+  function renderDetail(
+    status: UserAgentStatus,
+    onSetDefaults = vi.fn(async () => true),
+  ) {
+    const panel = (next: UserAgentStatus) => (
+      <AgentDetailPanel
+        agent={next}
+        display={PANEL_DISPLAY}
+        showBack={false}
+        errorNotice={null}
+        onRename={async () => true}
+        onSetDefaults={onSetDefaults}
+        onSetEnabled={async () => true}
+        onDelete={() => undefined}
+        onClose={() => undefined}
+      />
+    );
+    const view = renderWithOperations(panel(status));
+    return {
+      onSetDefaults,
+      rerenderAgent(next: UserAgentStatus) {
+        view.rerender(panel(next));
+      },
+      unmount: view.unmount,
+    };
+  }
+
+  function resetCatalogMocks(): void {
+    vi.mocked(api.loadProxyCapabilities).mockReset();
+    vi.mocked(api.loadResolvedProxyCatalog).mockReset();
+  }
+
+  function timeoutError(reason: string): api.AgentApiError {
+    return new api.AgentApiError(
+      `Antigravity CLI model query timed out. ${LEAKED}`,
+      'RUNTIME_ERROR',
+      reason,
+    );
+  }
+
+  it('renders the real Antigravity triplet through generic catalogs and retains explicit defaults on reopen', async () => {
+    resetCatalogMocks();
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(projectedCatalog({}, '') as unknown as ListedCapabilities);
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(async (_pluginId, request) => (
+      projectedCatalog(request.turnConfig, '') as unknown as ResolvedCatalog
+    ));
+    const initial = agent({
+      id: 'agy-defaults', pluginId: 'io.gian.antigravity', proxy: null,
+      defaults: { model: 'gemini-3.8-flash', thinking: 'high', mode: 'default' },
+    });
+    const view = renderDetail(initial);
+    const model = await screen.findByRole('combobox', { name: 'Model' });
+    await waitFor(() => expect(model).toBeEnabled());
+    expect(model).toHaveValue('gemini-3.8-flash');
+    expect(screen.getByRole('combobox', { name: 'Effort' })).toHaveValue('high');
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('default');
+    expect(within(model).queryByRole('option', { name: 'Gemini 3.8 Flash (High)' })).toBeNull();
+    expect(view.onSetDefaults).not.toHaveBeenCalled();
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Effort' }), 'low');
+    expect(view.onSetDefaults).toHaveBeenLastCalledWith({ thinking: 'low' });
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode' }), 'auto_edit');
+    expect(view.onSetDefaults).toHaveBeenLastCalledWith({ mode: 'auto_edit' });
+    const stored = { ...initial, defaults: { model: 'gemini-3.8-flash', thinking: 'low', mode: 'auto_edit' } };
+    view.unmount();
+    const reopened = renderDetail(stored);
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Model' })).toBeEnabled());
+    expect(screen.getByRole('combobox', { name: 'Effort' })).toHaveValue('low');
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toHaveValue('auto_edit');
+    expect(reopened.onSetDefaults).not.toHaveBeenCalled();
+    expect(api.loadResolvedProxyCatalog).toHaveBeenLastCalledWith('io.gian.antigravity', expect.objectContaining({
+      sessionConfig: {}, turnConfig: { model: 'gemini-3.8-flash', thinking: 'low', mode: 'auto_edit' },
+    }), 'agy-defaults');
+  });
+
+  it('shows the safe timeout notice with retry and no Mode field', async () => {
+    resetCatalogMocks();
+    vi.mocked(api.loadProxyCapabilities).mockRejectedValue(timeoutError('timeout'));
+    const { onSetDefaults } = renderDetail(detailAgent('timeout-agent', 'stale'));
+
+    expect((await screen.findByTestId('agent-defaults-error')).textContent)
+      .toBe('The model list query timed out.');
+    expect(screen.getByTestId('agent-defaults-retry')).toBeTruthy();
+    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole('combobox', { name: 'Mode' })).toBeNull();
+    expect(screen.queryByText('proxy unavailable')).toBeNull();
+    expect(document.body.textContent).not.toContain(LEAKED);
+    expect(document.body.textContent).not.toContain('Antigravity');
+    expect(onSetDefaults).not.toHaveBeenCalled();
+  });
+
+  it('keeps retry busy until the recovered catalog renders and does not write defaults', async () => {
+    resetCatalogMocks();
+    const caps = deferred<ListedCapabilities>();
+    const resolved = deferred<ResolvedCatalog>();
+    vi.mocked(api.loadProxyCapabilities)
+      .mockRejectedValueOnce(timeoutError('timeout'))
+      .mockImplementationOnce(() => caps.promise);
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => resolved.promise);
+    const { onSetDefaults } = renderDetail(detailAgent('retry-agent', 'stale'));
+    const button = await screen.findByTestId('agent-defaults-retry');
+
+    fireEvent.click(button);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    fireEvent.click(button);
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
+
+    caps.resolve(agentCatalog('Kept Model'));
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('stale');
+    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-defaults-retry').getAttribute('aria-busy')).toBe('true');
+
+    resolved.resolve(agentCatalog('Recovered Model'));
+    expect(await screen.findByRole('option', { name: 'Recovered Model' })).toBeTruthy();
+    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toBeTruthy();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain(LEAKED);
+  });
+
+  it('does not write when defaults change while resolve is pending', async () => {
+    resetCatalogMocks();
+    const gate = deferred<ResolvedCatalog>();
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => gate.promise);
+    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('pending-agent', 'kept-model'));
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('kept-model');
+
+    rerenderAgent(detailAgent('pending-agent', 'other-model'));
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[1]?.[1].turnConfig.model).toBe('other-model');
+    await act(async () => {
+      gate.resolve(agentCatalog('Resolved After Change'));
+      await gate.promise;
+    });
+    expect(screen.getByRole('option', { name: 'Resolved After Change' })).toBeTruthy();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+  });
+
+  it('keeps retry busy through resolve when defaults become set during the capability request', async () => {
+    resetCatalogMocks();
+    const caps = deferred<ListedCapabilities>();
+    const resolved = deferred<ResolvedCatalog>();
+    vi.mocked(api.loadProxyCapabilities)
+      .mockRejectedValueOnce(timeoutError('timeout'))
+      .mockImplementationOnce(() => caps.promise);
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => resolved.promise);
+    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('fill-agent', ''));
+    const button = await screen.findByTestId('agent-defaults-retry');
+
+    fireEvent.click(button);
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
+    rerenderAgent(detailAgent('fill-agent', 'kept-model'));
+    caps.resolve(agentCatalog('Kept Model'));
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.loadResolvedProxyCatalog).mock.calls[0]?.[1].turnConfig.model).toBe('kept-model');
+    const retry = screen.getByTestId('agent-defaults-retry');
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+    expect(retry.getAttribute('aria-busy')).toBe('true');
+    expect(onSetDefaults).not.toHaveBeenCalled();
+
+    resolved.resolve(agentCatalog('Filled Model'));
+    expect(await screen.findByRole('option', { name: 'Filled Model' })).toBeTruthy();
+    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+  });
+
+  it('drops a pending resolve when defaults become empty and ends loading', async () => {
+    resetCatalogMocks();
+    const gate = deferred<ResolvedCatalog>();
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => gate.promise);
+    const { onSetDefaults, rerenderAgent } = renderDetail(detailAgent('empty-agent', 'kept-model'));
+    await waitFor(() => expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1));
+
+    rerenderAgent(detailAgent('empty-agent', ''));
+    expect((screen.getByLabelText('Model') as HTMLSelectElement).disabled).toBe(false);
+    await act(async () => {
+      gate.resolve(agentCatalog('Stale Resolved'));
+      await gate.promise;
+    });
+    expect(screen.queryByRole('option', { name: 'Stale Resolved' })).toBeNull();
+    expect(screen.getByRole('option', { name: 'Kept Model' })).toBeTruthy();
+    expect(api.loadResolvedProxyCatalog).toHaveBeenCalledTimes(1);
+    expect(onSetDefaults).not.toHaveBeenCalled();
+  });
+
+  it('discards a late capability success and a late error when the Agent changes', async () => {
+    resetCatalogMocks();
+    const pending = new Map<string, ReturnType<typeof deferred<ListedCapabilities>>>();
+    vi.mocked(api.loadProxyCapabilities).mockImplementation(async (_plugin, agentId) => {
+      const box = deferred<ListedCapabilities>();
+      pending.set(String(agentId), box);
+      return box.promise;
+    });
+    const { onSetDefaults, rerenderAgent, unmount } = renderDetail(detailAgent('agent-a', ''));
+    await waitFor(() => expect(pending.has('agent-a')).toBe(true));
+
+    rerenderAgent(detailAgent('agent-b', ''));
+    expect(pending.has('agent-b')).toBe(true);
+    expect(screen.queryByRole('option', { name: 'Alpha Model' })).toBeNull();
+    await act(async () => {
+      pending.get('agent-a')!.resolve(agentCatalog('Alpha Model'));
+      await pending.get('agent-a')!.promise;
+    });
+    expect(screen.queryByRole('option', { name: 'Alpha Model' })).toBeNull();
+    pending.get('agent-b')!.resolve(agentCatalog('Bee Model'));
+    expect(await screen.findByRole('option', { name: 'Bee Model' })).toBeTruthy();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+
+    unmount();
+    const next = renderDetail(detailAgent('agent-c', ''));
+    await waitFor(() => expect(pending.has('agent-c')).toBe(true));
+    next.rerenderAgent(detailAgent('agent-d', ''));
+    await act(async () => {
+      pending.get('agent-c')!.reject(timeoutError('constructor'));
+      await pending.get('agent-c')!.promise.catch(() => undefined);
+    });
+    expect(screen.queryByTestId('agent-defaults-error')).toBeNull();
+    expect(document.body.textContent).not.toContain(LEAKED);
+    pending.get('agent-d')!.resolve(agentCatalog('Next Model'));
+    expect(await screen.findByRole('option', { name: 'Next Model' })).toBeTruthy();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    expect(next.onSetDefaults).not.toHaveBeenCalled();
+  });
+
+  it('shows retry after a read-only resolve failure and recovers without writing', async () => {
+    resetCatalogMocks();
+    const recovery = deferred<ResolvedCatalog>();
+    let resolves = 0;
+    vi.mocked(api.loadProxyCapabilities).mockResolvedValue(agentCatalog('Kept Model'));
+    vi.mocked(api.loadResolvedProxyCatalog).mockImplementation(() => {
+      resolves += 1;
+      if (resolves === 1) return Promise.reject(new Error(`resolve failed ${LEAKED}`));
+      return recovery.promise;
+    });
+    const { onSetDefaults } = renderDetail(detailAgent('resolve-agent', 'stale'));
+
+    expect((await screen.findByTestId('agent-defaults-error')).textContent)
+      .toBe('Agent defaults are unavailable.');
+    expect(document.body.textContent).not.toContain(LEAKED);
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    const button = screen.getByTestId('agent-defaults-retry');
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(button);
+    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('agent-defaults-retry'));
+    expect(api.loadProxyCapabilities).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(resolves).toBe(2));
+    expect((screen.getByTestId('agent-defaults-retry') as HTMLButtonElement).disabled).toBe(true);
+
+    recovery.resolve(agentCatalog('Recovered Model'));
+    await waitFor(() => expect(screen.queryByTestId('agent-defaults-error')).toBeNull());
+    expect(screen.getByRole('option', { name: 'Recovered Model' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Mode' })).toBeTruthy();
+    expect(onSetDefaults).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain(LEAKED);
+  });
+
+  it('hides raw text for constructor, __proto__, and unknown capability reasons', async () => {
+    for (const reason of ['constructor', '__proto__', 'not-a-reason']) {
+      resetCatalogMocks();
+      vi.mocked(api.loadProxyCapabilities).mockRejectedValue(timeoutError(reason));
+      const view = renderDetail(detailAgent(`reason-${reason}`, 'stale'));
+      expect((await screen.findByTestId('agent-defaults-error')).textContent)
+        .toBe('Agent defaults are unavailable.');
+      expect(screen.queryByRole('combobox', { name: 'Mode' })).toBeNull();
+      expect(document.body.textContent).not.toContain(LEAKED);
+      expect(document.body.textContent).not.toContain('Antigravity');
+      expect(document.body.textContent).not.toContain(reason);
+      view.unmount();
+    }
   });
 });

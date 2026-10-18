@@ -2,7 +2,81 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.2**，Runtime **2.1.280**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.8**，Runtime **2.1.302**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.8
+
+首次公开发布：2026-10-17T18:11:15Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.8)：2026-10-17T18:11:15Z。
+- 对应 CLI：2.1.302（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Claude Code Runtime 更新至 2.1.302（2026-10-16 已晋升至 /latest、npm latest 与 GitHub latest；SHA-256 与大小经官方清单校验）。上游 2.1.302 变更不涉及线协议或启动面，全部相关命令行标志已在新二进制上复验。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.8) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.8/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.7
+
+首次公开发布：2026-10-16T18:19:53Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.7)：2026-10-16T18:19:53Z。
+- 对应 CLI：2.1.301（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Claude Code Runtime 更新至 2.1.301（2026-10-15 已晋升至 /latest、npm latest 与 GitHub latest；SHA-256 与大小经官方清单校验）。上游 2.1.301 变更不涉及线协议或启动面，全部相关命令行标志已在新二进制上复验。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.7) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.7/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.6
+
+首次公开发布：2026-10-15T10:55:19Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.6)：2026-10-15T10:55:19Z。
+- 对应 CLI：2.1.300（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Claude Code Runtime 更新至 2.1.300（SHA-256 与大小经官方 2.1.300 清单校验）。适配器不变：2.1.297–2.1.300 没有线协议或启动面变更，适配器使用的全部命令行标志均已在新二进制上确认。线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.6) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.6/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+## 0.3.5
+
+首次公开发布：2026-10-11T16:22:19Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.5)：2026-10-11T16:22:19Z。
+- 对应 CLI：2.1.296（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- Fix session-creation effort resolution: apply the default model before checking conditions, omit disabled effort defaults and retain model-specific choices on the live connection. Update the managed Claude Code Runtime to 2.1.296. The wire protocol range is unchanged. Owner-selected direct publication: all tests, Runtime probes and archive self-tests were not run. [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.5) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.5/packages/proxies/cc-proxy/src/protocol/v2-adapter.ts)
+
+### 历史证据边界
+
+- All tests, Runtime probes and archive self-tests are NOT_RUN by Owner instruction.
+
+## 0.3.4
+
+首次公开发布：2026-10-11T15:03:28Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.4)：2026-10-11T15:03:28Z。
+- 对应 CLI：2.1.285（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 通过仅含 initialize 的控制握手读取 Claude 原生 /model 目录及每个模型的思考强度，当前默认模型不再遮蔽其余选择；保留现有配置 ID 与网关清单优先级，探测超时和关闭时清理子进程。Claude Code Runtime 仍为 2.1.285，线协议范围不变。Owner 指定直接发布，本次未运行任何测试、Runtime 探测或包自检。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.4) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.4/packages/proxies/cc-proxy/src/runtime/native-model-catalog.ts)
+
+### 历史证据边界
+
+- Owner 指定未运行任何测试、Runtime 探测或包自检。
+
+## 0.3.3
+
+首次公开发布：2026-10-11T05:51:28Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.3)：2026-10-11T05:51:28Z。
+- 对应 CLI：2.1.285（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 受管 Claude Code 升至 2.1.285；中断后保留并恢复 Claude 会话，Turn 内的 CLI 退出按退出码与信号如实失败；模型目录改从 wrapper 自身 HOME 与 settings 发现。线协议范围不变。本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-claude-v0.3.3) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-claude-v0.3.3/packages/proxies/claude-proxy/README.md)
 
 ## 0.3.2
 

@@ -21,6 +21,7 @@ import {
   type RemoteSession,
   type RemoteTask,
 } from '@gian/remote-protocol';
+import type { Locale } from '../i18n/messages.js';
 import type {
   AuthState,
   ConnectionState,
@@ -53,6 +54,8 @@ export interface FixtureScenario {
   connection?: ConnectionState;
   hosts?: RemoteHostEntry[];
   currentHostId?: string | null;
+  /** UI locale the (fixture) Host snapshot delivered; defaults to 'en'. */
+  locale?: Locale;
   /** Per-Host partitioned state; keyed by host id. Hosts without an entry
    *  get a default empty workspace. */
   hostData?: Record<string, HostData>;
@@ -384,6 +387,7 @@ export function createFixtureController(scenario: FixtureScenario = {}): Fixture
     connection: scenario.connection ?? { kind: 'online' },
     hosts,
     currentHostId,
+    locale: scenario.locale ?? 'en',
     workspaces: initial.workspaces ?? [],
     tasks: initial.tasks ?? [],
     sessions: initial.sessions ?? [],

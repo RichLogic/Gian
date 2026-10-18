@@ -104,13 +104,13 @@ export function ToolSettingsPage({
           <ToggleRow label={t('settings.tool.files.hidden')} value={tools.files.show_hidden_files} onChange={show_hidden_files => update('files', { show_hidden_files })} />
           <ToggleRow label={t('settings.tool.files.ignored')} value={tools.files.show_ignored_files} onChange={show_ignored_files => update('files', { show_ignored_files })} />
           <ToggleRow label={t('settings.tool.files.reveal')} value={tools.files.reveal_active_file} onChange={reveal_active_file => update('files', { reveal_active_file })} />
-          <SelectRow label={t('settings.tool.files.openOn')} value={tools.files.open_on}
+          <SelectRow label={t('settings.tool.files.openOn')} value={tools.files.open_on} anchor="files.openOn"
                      options={[['single-click', t('settings.tool.files.single')], ['double-click', t('settings.tool.files.double')]]}
                      onChange={open_on => update('files', { open_on: open_on as ToolPreferences['files']['open_on'] })} />
           <ToggleRow label={t('settings.tool.files.wrap')} value={tools.files.word_wrap} onChange={word_wrap => update('files', { word_wrap })} />
         </>}
         {tool === 'diffs' && <>
-          <SelectRow label={t('settings.tool.diffs.layout')} value={tools.diffs.layout}
+          <SelectRow label={t('settings.tool.diffs.layout')} value={tools.diffs.layout} anchor="diffs.layout"
                      options={[['split', t('settings.tool.diffs.split')], ['stacked', t('settings.tool.diffs.stacked')]]}
                      onChange={layout => update('diffs', { layout: layout as ToolPreferences['diffs']['layout'] })} />
           <ToggleRow label={t('settings.tool.diffs.wrap')} value={tools.diffs.word_wrap} onChange={word_wrap => update('diffs', { word_wrap })} />
@@ -158,17 +158,20 @@ export function ToolSettingsPage({
   return showTitle ? <Page title={t(`settings.tool.${tool}.title`)}>{content}</Page> : content;
 }
 
-function ToggleRow({ label, value, onChange }: { label: string; value: boolean; onChange(value: boolean): void }) {
-  return <><dt className="settings-toggle-spacer" aria-hidden="true" /><dd className="settings-toggle-row"><Switch checked={value} onChange={onChange} label={label} /></dd></>;
+function ToggleRow({ label, value, onChange, anchor }: { label: string; value: boolean; onChange(value: boolean): void; anchor?: string }) {
+  return <><dt className="settings-toggle-spacer" aria-hidden="true" /><dd className="settings-toggle-row" id={anchor ? `settings-control-${anchor}` : undefined}><Switch checked={value} onChange={onChange} label={label} /></dd></>;
 }
 
-function SelectRow({ label, value, options, onChange }: {
+function SelectRow({ label, value, options, onChange, anchor }: {
   label: string;
   value: string;
   options: Array<[string, string]>;
   onChange(value: string): void;
+  /** Search deep-link anchor (search/registry.ts): renders the real
+   *  `settings-control-<anchor>` DOM id with the control. */
+  anchor?: string;
 }) {
-  return <><dt>{label}</dt><dd><select className="select" aria-label={label} value={value} onChange={event => onChange(event.target.value)}>
+  return <><dt>{label}</dt><dd id={anchor ? `settings-control-${anchor}` : undefined}><select className="select" aria-label={label} value={value} onChange={event => onChange(event.target.value)}>
     {options.map(([option, text]) => <option value={option} key={option}>{text}</option>)}
   </select></dd></>;
 }

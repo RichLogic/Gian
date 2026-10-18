@@ -1125,6 +1125,10 @@ export class SessionProjector {
 
     const questions = (request.questions ?? []).filter((question) => typeof question.question === 'string' && question.question !== '');
     const isPlanApproval = request.schema?.interaction === 'plan_approval';
+    const isMcpElicitation = request.schema?.interaction === 'mcp_elicitation';
+    const mcpRequired = isMcpElicitation
+      ? mcpElicitationRequiredFields(request.schema?.requestedSchema)
+      : [];
     const inputs: Array<Record<string, unknown>> = [];
     const actions: Array<{ id: string; label: string; style: string }> = [];
     for (const [index, question] of questions.entries()) {
@@ -1134,12 +1138,16 @@ export class SessionProjector {
           value: option.value as string,
           displayName: typeof option.label === 'string' && option.label !== '' ? option.label : option.value as string,
         }));
+      // Upstream's legacy question channel encodes free text as a sentinel
+      // choice. Sending that choice back makes the native MCP mapper omit it.
+      const freeText = isMcpElicitation && choices.length === 1
+        && choices[0]!.value === '__zcode_free_text__';
       inputs.push({
         id: `q${index}`,
-        type: question.multiSelect === true ? 'multi_select' : 'single_select',
+        type: freeText ? 'text' : question.multiSelect === true ? 'multi_select' : 'single_select',
         label: question.question as string,
-        required: true,
-        ...(choices.length > 0 ? { choices } : {}),
+        required: isMcpElicitation ? (mcpRequired[index] ?? true) : true,
+        ...(!freeText && choices.length > 0 ? { choices } : {}),
       });
     }
     if (isPlanApproval) {
@@ -1196,7 +1204,7 @@ export class SessionProjector {
           payload: {
             nativeMethod: 'interaction/requestUserInput',
             requestId: request.requestId,
-            interaction: isPlanApproval ? 'plan_approval' : 'askUserQuestion',
+            interaction: isPlanApproval ? 'plan_approval' : isMcpElicitation ? 'mcp_elicitation' : 'askUserQuestion',
           },
         },
       },
@@ -1230,6 +1238,18 @@ export class SessionProjector {
           throw new SessionInteractionActionError(actionId);
         }
         if (actionId === 'accept') {
+          if (isMcpElicitation) {
+            // Native mcpElicitationContentFromAnswers reads indexed keys first;
+            // question text is not unique when schema descriptions repeat.
+            const content: Record<string, string> = {};
+            for (const index of questions.keys()) {
+              const answer = values[`q${index}`];
+              // MCP strings are payload data, not AskUserQuestion selections.
+              // Keep whitespace/empty strings for the native schema validator.
+              if (typeof answer === 'string') content[`answer_${index}`] = answer;
+            }
+            return { action: 'accept', content };
+          }
           const answers: Record<string, string> = {};
           for (const [index, question] of questions.entries()) {
             const raw = values[`q${index}`];
@@ -1285,6 +1305,21 @@ export class SessionInteractionActionError extends Error {
     super(message);
     this.name = 'SessionInteractionActionError';
   }
+}
+
+/** Keep the same field order/filter as the pinned upstream
+ * readMcpElicitationFields; questions themselves remain native-owned. */
+function mcpElicitationRequiredFields(schema: unknown): boolean[] {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
+  const value = schema as Record<string, unknown>;
+  if (!value.properties || typeof value.properties !== 'object' || Array.isArray(value.properties)) return [];
+  const required = new Set(Array.isArray(value.required) ? value.required : []);
+  return Object.entries(value.properties).flatMap(([name, property]) => {
+    if (!property || typeof property !== 'object' || Array.isArray(property)) return [];
+    const field = property as Record<string, unknown>;
+    return Array.isArray(field.enum) || ['string', 'number', 'integer', 'boolean'].includes(String(field.type))
+      ? [required.has(name)] : [];
+  });
 }
 
 /** Mirror of upstream normalizeAnswerValue

@@ -10,7 +10,7 @@ The process bridges two newline-delimited JSON protocols:
 
 Codex CLI 0.100.0 is the minimum version with the umbrella
 `codex app-server --listen stdio://` form. Gian's managed Proxy manifest
-verifies 0.161.0. Other CLI versions are not certified by this release.
+verifies 0.163.0. Other CLI versions are not certified by this release.
 
 The entry point may take an absolute managed binary path:
 

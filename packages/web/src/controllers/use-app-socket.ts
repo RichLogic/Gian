@@ -14,6 +14,8 @@ import type {
 } from '@gian/shared';
 import { loadSessions, loadTasks, loadWorkspaces } from '../api.js';
 import { hydrateScheduleConfirmations, upsertScheduleConfirmation } from './schedule-confirmations.js';
+import { applyInboxItemChanged, applyInboxSyncSnapshot, invalidateInbox } from './inbox.js';
+import { syncPendingApprovals, upsertPendingApproval } from './pending-approvals.js';
 import { notifyScheduleChanged, notifyScheduleResync } from '../presentation/schedule-sync.js';
 import {
   applyRemoteEnvironmentsSnapshot,
@@ -27,7 +29,8 @@ import { invalidateAllChangesDiffs } from './use-changes-diff.js';
 import { toast } from '../feedback.js';
 import type { OperationDispatcher } from '../operations/dispatcher.js';
 import { beginTranslationEcho, dispatchAttachmentUpload, dispatchMessageSend, removeTranslationEcho } from '../operations/message.js';
-import { setAutoTranslation, translateText } from '../operations/translation.js';
+import { cancelTranslation, setAutoTranslation, translateText } from '../operations/translation.js';
+import { withSendTimeout } from '../translation/send-timeout.js';
 import { sessionEntityKey } from '../operations/session.js';
 import { sidechatEntityKey } from '../operations/sidechat.js';
 import { taskEntityKey } from '../operations/task.js';
@@ -140,6 +143,10 @@ interface UseAppSocketInput {
    *  already in `sessionsRef`. The handler compares the stored fork sequence
    *  with later user navigation and consumes the stored intent. */
   onRecoveredForkSession?: (sessionId: string) => void;
+  /** Detached transcript windows (bounded search/find context, 0.6.7): live
+   *  deltas must not fold into them — they belong to the live tail, which
+   *  rehydrates on the explicit return. */
+  isTranscriptDetached?: (sessionId: string) => boolean;
 }
 
 async function deliverCreatedSessionFirstMessage(
@@ -153,12 +160,24 @@ async function deliverCreatedSessionFirstMessage(
       await setAutoTranslation(session.id, true, current.ops.dispatch);
       window.dispatchEvent(new Event('gian:translation-settings'));
       if (!pending.text.trim()) return undefined;
-      return await translateText(session.id, {
-        requestId: crypto.randomUUID(),
-        text: pending.text.trim(),
-        purpose: 'send',
-        ...(pending.composerDocument ? { document: pending.composerDocument } : {}),
-      }, new AbortController().signal, current.ops.dispatch);
+      const requestId = crypto.randomUUID();
+      // Same 45s hard timeout as the composer's translated send: a hung
+      // provider aborts + cancels the request and lands in the existing
+      // failure path (draft restore + toast + echo removal).
+      const timeout = withSendTimeout(controller => {
+        controller.abort();
+        void cancelTranslation(session.id, requestId, current.ops.dispatch).catch(() => undefined);
+      });
+      try {
+        return await translateText(session.id, {
+          requestId,
+          text: pending.text.trim(),
+          purpose: 'send',
+          ...(pending.composerDocument ? { document: pending.composerDocument } : {}),
+        }, timeout.controller.signal, current.ops.dispatch);
+      } finally {
+        timeout.clear();
+      }
     } catch (error) {
       restoreDraft();
       toast({
@@ -324,6 +343,7 @@ export function useAppSocket(input: UseAppSocketInput): void {
         });
       }
       current.markSessionHistoryLive(envelope.session_id);
+      if (current.isTranscriptDetached?.(envelope.session_id)) return;
       current.setItemsBySession(previous => {
         const list = previous[envelope.session_id] ?? [];
         const next = applyEnvelope(list, envelope, executor);
@@ -489,6 +509,8 @@ export function useAppSocket(input: UseAppSocketInput): void {
           });
           current.setTasks(message.tasks);
           for (const approval of message.approvals) projectLocalBrowserApproval(approval);
+          // Canonical native-option store for Inbox decisions (issue #1).
+          syncPendingApprovals(message.approvals);
           // Complete replacement of the Side Chat read-model set (proposal
           // §10.5.2/§10.5.3); Hosts predating the amendment omit the field.
           const syncSideChats = message.sidechats ?? [];
@@ -513,6 +535,11 @@ export function useAppSocket(input: UseAppSocketInput): void {
           });
           current.setSystemConfig(message.config);
           current.setRunner(message.runner);
+          // Inbox snapshot rides state_sync (Issue #53): it is the reconnect
+          // authority for the pending badge/list. Hosts predating the field
+          // fall back to a REST pull of the same canonical state.
+          if (message.inbox) applyInboxSyncSnapshot(message.inbox);
+          else invalidateInbox();
           // state_sync is the reconnect authority — schedule views re-pull
           // their REST state even if schedule:changed frames were missed.
           notifyScheduleResync();
@@ -845,6 +872,14 @@ export function useAppSocket(input: UseAppSocketInput): void {
           // controllers re-fetch via the schedules REST API.
           notifyScheduleChanged(message);
           return;
+        case 'inbox:changed':
+          // One-row upsert; the badge is a PENDING count, never unread.
+          applyInboxItemChanged(message.item, message.inbox_revision);
+          return;
+        case 'inbox:invalidated':
+          // Bulk change — the frame carries no rows; re-pull canonically.
+          invalidateInbox();
+          return;
         case 'schedule:confirmation':
           // Host-enforced create confirmation (contract L) — upsert into the
           // persistent pending store; never routed through proxy approvals.
@@ -856,9 +891,11 @@ export function useAppSocket(input: UseAppSocketInput): void {
           applyRemoteEnvironmentsSnapshot(message.environments);
           return;
         case 'approval:created':
+          upsertPendingApproval(message.approval);
           projectLocalBrowserApproval(message.approval);
           return;
         case 'approval:updated':
+          upsertPendingApproval(message.approval);
           resolveLocalBrowserApproval(message.approval);
           return;
         case 'event': {

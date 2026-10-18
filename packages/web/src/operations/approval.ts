@@ -15,7 +15,7 @@
  * approvals never trips the duplicate pending guard; re-clicking the SAME
  * approval while in flight is blocked.
  */
-import type { ApprovalDecision } from '@gian/shared';
+import type { ApprovalDecision, NativeApprovalOption } from '@gian/shared';
 
 import { registry } from './registry.js';
 import type { OperationDefinition } from './types.js';
@@ -32,6 +32,31 @@ export interface ApprovalResolveInput {
   answers?: Record<string, string | boolean | string[]>;
   /** Exact executor option for ACP-native approvals. */
   nativeOptionId?: string;
+  /** Inbox-originated decisions carry the exact occurrence the user saw
+   *  (0.6.7): the Host checks that row/session/interaction/turn before any
+   *  resolve and answers a mismatch with PRECONDITION_FAILED. Non-Inbox
+   *  callers omit it, preserving the existing contract. */
+  expectedInbox?: { id: string; generation: number };
+}
+
+/** Map a Gian decision intent to the exact native option for ACP-native
+ *  approvals: ONLY allow_once → allow_once and decline → reject_once (plan
+ *  decisions and everything else never map). Opaque ids are never guessed,
+ *  nothing widens to allow_always, and multiple same-kind options are never
+ *  picked arbitrarily — null means the caller shows the canonical card. */
+export function nativeOptionForDecision(
+  options: NativeApprovalOption[] | undefined,
+  decision: ApprovalDecision,
+): NativeApprovalOption | null {
+  if (!options || options.length === 0) return null;
+  const wanted = decision === 'allow_once'
+    ? 'allow_once'
+    : decision === 'decline'
+      ? 'reject_once'
+      : null;
+  if (!wanted) return null;
+  const matches = options.filter(option => option.kind === wanted);
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 const approvalResolve: OperationDefinition<ApprovalResolveInput> = {
@@ -44,6 +69,7 @@ const approvalResolve: OperationDefinition<ApprovalResolveInput> = {
     decision: input.decision,
     ...(input.answers ? { answers: input.answers } : {}),
     ...(input.nativeOptionId ? { native_option_id: input.nativeOptionId } : {}),
+    ...(input.expectedInbox ? { expected_inbox: input.expectedInbox } : {}),
   }),
   timeoutMs: WS_TIMEOUT_MS,
 };

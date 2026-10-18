@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
@@ -8,11 +8,16 @@ import test from 'node:test';
 
 import {
   assertGianDevRuntimeDataDir,
+  bundledDevProxyDirectory,
+  declarationsFromProxyDirectory,
+  declarationsFromProxyEntries,
+  devRuntimeDeclarationsForCoordinates,
   preferProvisionedRuntime,
   provisionDevRuntimes,
   selectDevRuntimeCoordinates,
   shouldProvisionDevRuntimes,
 } from '../src/runtime/dev-runtime-provision.js';
+import type { DevRuntimeCoordinate } from '../src/runtime/dev-runtime-coordinates.js';
 import { downloadDevRuntimeAsset, prepareDevRuntimeAssets, readBundledDevRuntimeAsset } from '../src/runtime/dev-runtime-assets.js';
 
 const coordinate = {
@@ -176,5 +181,179 @@ test('host provisioning keeps a successful CLI when a later coordinate fails', a
     assert.equal(installed[0]?.artifactSha256, digest);
   } finally {
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a proxy coordinate probes through its exact entry and a missing binding fails before download', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gian-dev-runtime-proxy-'));
+  try {
+    const body = Buffer.from('proxy-runtime\n');
+    const digest = createHash('sha256').update(body).digest('hex');
+    const pinned = {
+      ...coordinate,
+      probe: { kind: 'proxy' as const },
+      asset: { url: 'https://example.invalid/example', sha256: digest, size: body.length },
+    };
+    const unbound = [{ pluginId: pinned.pluginId, runtimeId: pinned.runtimeId, versions: [pinned.version] }];
+    let downloads = 0;
+    await assert.rejects(provisionDevRuntimes({
+      dataDir: join(home, 'isolated'),
+      homeDir: home,
+      mode: 'isolated',
+      declarations: unbound,
+      coordinates: [pinned],
+      download: async () => {
+        downloads += 1;
+        return body;
+      },
+      probe: async () => { throw new Error('cli probe'); },
+      probeProxy: async () => { throw new Error('proxy probe'); },
+    }), /exact Proxy entry binding/);
+    assert.equal(downloads, 0);
+
+    let cliProbes = 0;
+    let seenExecutable = '';
+    const installed = await provisionDevRuntimes({
+      dataDir: join(home, 'isolated'),
+      homeDir: home,
+      mode: 'isolated',
+      hostVersion: '9.9.9-test',
+      declarations: [{
+        ...unbound[0]!,
+        pluginVersion: '1.0.0',
+        processScope: 'session',
+        displayName: 'Example Runtime',
+        entryPath: '/exact/proxy.mjs',
+      }],
+      coordinates: [pinned],
+      download: async () => body,
+      probe: async () => {
+        cliProbes += 1;
+        return pinned.version;
+      },
+      probeProxy: async (request) => {
+        seenExecutable = request.executable;
+        assert.equal(request.hostVersion, '9.9.9-test');
+        assert.equal(request.declaration.entryPath, '/exact/proxy.mjs');
+        assert.equal(request.declaration.displayName, 'Example Runtime');
+        assert.equal(request.declaration.pluginVersion, '1.0.0');
+        assert.equal(request.coordinate.probe?.kind, 'proxy');
+        return pinned.version;
+      },
+    });
+    assert.equal(cliProbes, 0);
+    assert.match(seenExecutable, /[/]bin[/]example$/);
+    assert.equal(installed[0]?.version, pinned.version);
+
+    let proxyProbes = 0;
+    await provisionDevRuntimes({
+      dataDir: join(home, 'cli'),
+      homeDir: home,
+      mode: 'isolated',
+      declarations: unbound,
+      coordinates: [{ ...pinned, probe: undefined }],
+      download: async () => body,
+      probe: async () => pinned.version,
+      probeProxy: async () => {
+        proxyProbes += 1;
+        return pinned.version;
+      },
+    });
+    assert.equal(proxyProbes, 0);
+
+    await assert.rejects(provisionDevRuntimes({
+      dataDir: join(home, 'bad-kind'),
+      homeDir: home,
+      mode: 'isolated',
+      declarations: unbound,
+      coordinates: [{ ...pinned, probe: { kind: 'cli' } } as DevRuntimeCoordinate],
+      download: async () => {
+        throw new Error('downloaded');
+      },
+    }), /unsupported Dev Runtime probe/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('proxy declarations keep Manifest binding fields and packaged proxies stay beside assets', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'gian-dev-proxy-binding-'));
+  try {
+    assert.equal(
+      bundledDevProxyDirectory('/Applications/GianDev.app/Contents/Resources/giandev/runtime-assets'),
+      '/Applications/GianDev.app/Contents/Resources/giandev/proxies',
+    );
+    await assert.rejects(declarationsFromProxyDirectory(join(root, 'missing')), /Refusing to guess a Proxy path/);
+
+    const directory = join(root, 'proxies', 'example-proxy');
+    await mkdir(join(directory, 'assets'), { recursive: true });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    await writeFile(join(directory, 'assets/logo.png'), png);
+    const entry = join(directory, 'proxy.mjs');
+    await writeFile(entry, 'export {}\n');
+    await writeFile(join(directory, 'package.json'), `${JSON.stringify({
+      name: '@gian/example-proxy', version: '1.0.0', type: 'module', main: './proxy.mjs',
+    })}\n`);
+    await writeFile(join(directory, 'manifest.json'), `${JSON.stringify({
+      schemaVersion: 4,
+      id: 'example.proxy',
+      displayName: 'Example',
+      pluginVersion: '1.0.0',
+      entry: 'proxy.mjs',
+      protocol: { name: 'gian.proxy', range: '>=2.2 <3.0' },
+      process: { scope: 'session' },
+      runtime: {
+        kind: 'external',
+        id: 'example',
+        displayName: 'Example Runtime',
+        verifiedVersions: ['1.2.3'],
+      },
+      branding: {
+        logo: {
+          light: {
+            path: 'assets/logo.png',
+            mediaType: 'image/png',
+            sha256: createHash('sha256').update(png).digest('hex'),
+          },
+        },
+      },
+    })}\n`);
+    const declarations = await declarationsFromProxyEntries({ 'example.proxy': entry });
+    assert.equal(declarations[0]?.pluginVersion, '1.0.0');
+    assert.equal(declarations[0]?.processScope, 'session');
+    assert.equal(declarations[0]?.displayName, 'Example Runtime');
+    assert.equal(declarations[0]?.entryPath, entry);
+    assert.deepEqual(declarations[0]?.versions, ['1.2.3']);
+    const bundled = await declarationsFromProxyDirectory(join(root, 'proxies'));
+    assert.equal(bundled[0]?.entryPath, await realpath(entry));
+    assert.equal(bundled[0]?.entryPath.includes(`${join('packages', 'proxies')}`), false);
+
+    await assert.rejects(
+      declarationsFromProxyEntries({ 'example.proxy': 'proxy.mjs' }),
+      /exact absolute path/,
+    );
+    const link = join(root, 'linked.mjs');
+    await symlink(entry, link);
+    await assert.rejects(declarationsFromProxyEntries({ 'example.proxy': link }), /regular file/);
+    await assert.rejects(
+      declarationsFromProxyEntries({ 'other.proxy': entry }),
+      /does not match Manifest id/,
+    );
+    const pinned = { ...coordinate, asset: { ...coordinate.asset, sha256: 'abc', size: 1 } };
+    const bound = declarations[0]!;
+    const covered = devRuntimeDeclarationsForCoordinates([
+      bound,
+      { ...bound, pluginId: 'io.gian.extra', runtimeId: 'extra', versions: ['9.9.9'] },
+    ], [pinned, { ...pinned, pluginId: 'missing.proxy', runtimeId: 'missing', version: '4.5.6' }]);
+    assert.deepEqual(covered.map((item) => item.runtimeId), ['example', 'missing']);
+    assert.equal(covered[0]?.entryPath, entry);
+    assert.equal(covered[1]?.entryPath, undefined);
+    assert.throws(() => devRuntimeDeclarationsForCoordinates([bound], [{
+      ...pinned,
+      probe: { kind: 'proxy' },
+      version: '9.9.9',
+    }]), /no Proxy declaration binding/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

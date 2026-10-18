@@ -2,7 +2,40 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.3.3**，Runtime **0.159.2**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.3.6**，Runtime **0.163.0**。这是发布目标，不表示当前机器已安装。
+
+## 0.3.6
+
+首次公开发布：2026-10-16T18:19:57Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.6)：2026-10-16T18:19:57Z。
+- 对应 CLI：0.163.0（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Codex CLI 更新至 0.163.0（0.163 系列首个稳定版，2026-10-15 发布；与官方 rust-v0.163.0 GitHub 资产摘要一致）。逐文件比对 app-server 协议 schema：Proxy 使用的全部协议面仅为增量可选字段，ServerRequest 逐字节一致，Proxy 调用的方法无删除或变更（未使用的实时语音枚举另有变化）；0.162.1 与 0.163.0 的无凭证 initialize 握手一致。线协议不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.6) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.6/packages/proxies/codex-proxy/README.md)
+
+## 0.3.5
+
+首次公开发布：2026-10-15T10:55:23Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.5)：2026-10-15T10:55:23Z。
+- 对应 CLI：0.162.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Codex CLI 更新至 0.162.1（与官方 rust-v0.162.1 GitHub 资产摘要一致）。上游 0.162.x 对 app-server 桥接面均为增量改动，适配器与 gian.proxy 线协议不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.5) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.5/packages/proxies/codex-proxy/README.md)
+
+## 0.3.4
+
+首次公开发布：2026-10-11T05:51:31Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.4)：2026-10-11T05:51:31Z。
+- 对应 CLI：0.161.0（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将受管 Codex CLI 更新至 0.161.0；长原生历史改为磁盘分页，Fork 祖先与事件身份保持稳定；Proxy 向 Runtime 报告真实包版本。Proxy 的 app-server 桥接和 gian.proxy 线协议不变。本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.4) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.4/packages/proxies/codex-proxy/README.md)
 
 ## 0.3.3
 

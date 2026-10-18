@@ -72,3 +72,13 @@
   min-width: 240px;
   max-width: 60%;
 }
+
+/* Search deep link: the focused working-tree row flashes once. */
+.wt-focus-flash {
+  animation: wt-focus-flash 1600ms var(--ease);
+  border-radius: var(--r-2);
+}
+@keyframes wt-focus-flash {
+  0% { box-shadow: 0 0 0 2px var(--accent); background: var(--accent-soft); }
+  100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+}

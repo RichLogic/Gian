@@ -22,8 +22,31 @@ import {
   useOperationRun,
 } from '../operations/use-operations.js';
 import type { OperationName } from '../operations/types.js';
+import { elementIsLayoutHidden } from '../components/sheet-model.js';
 import { useT } from '../i18n/index.js';
 import type { GianWs } from '../ws.js';
+
+/** The working-tree inventory id (search contract shared/search.ts) for a
+ *  tree row: main → ws:<workspace>, session-linked → wt:<session>, external
+ *  → ext:<workspace>:base64url(path). The ext id is ENCODED from the row's
+ *  own known path — the target's path is never decoded for navigation. */
+function base64UrlPath(path: string): string {
+  const bytes = new TextEncoder().encode(path);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+export function inventoryTreeId(
+  workspaceId: string,
+  tree: WorkspaceTree | null,
+  branchWorktreePath: string | null,
+): string | null {
+  if (tree?.kind === 'main') return `ws:${workspaceId}`;
+  if (tree?.session?.id) return `wt:${tree.session.id}`;
+  const path = tree?.kind === 'worktree' ? tree.path : branchWorktreePath;
+  return path ? `ext:${workspaceId}:${base64UrlPath(path)}` : null;
+}
 
 const I = {
   kebabV: 'M12 5.01v-.02 M12 12.01v-.02 M12 19.01v-.02',
@@ -83,15 +106,26 @@ export function GitPane({
   ws,
   onOpenClaudeMd,
   onChange,
+  focusTreeId,
+  focusNonce = 0,
+  focusVisible = true,
 }: {
   workspace: Workspace;
   ws: GianWs;
   onOpenClaudeMd: () => void;
   onChange: () => void;
+  /** Search deep link (Issue #168): the working-tree inventory id
+   *  (ws:/wt:/ext:) to scroll to and flash once the tree list loads. */
+  focusTreeId?: string | null;
+  /** Changes on every deep link, including a repeat of the same tree. */
+  focusNonce?: number;
+  /** False while the sheet is hidden. Do not scroll a row that is not on screen. */
+  focusVisible?: boolean;
 }) {
   const [repo, setRepo] = useState<RepoInfo | null>(null);
   const [branches, setBranches] = useState<LocalBranch[]>([]);
   const [trees, setTrees] = useState<WorkspaceTree[]>([]);
+  const paneRef = useRef<HTMLDivElement>(null);
   const [branchesLoaded, setBranchesLoaded] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
@@ -131,6 +165,20 @@ export function GitPane({
     });
     return off;
   }, [ws, workspace.id, refresh]);
+
+  // Search deep link: scroll+flash only once the row exists AND the pane is
+  // actually visible. A repeat of the same tree bumps focusNonce so the
+  // effect runs again. A hidden sheet (display:none / hidden) must not
+  // consume the request.
+  useEffect(() => {
+    if (!focusTreeId || !branchesLoaded || !focusVisible) return;
+    const row = paneRef.current?.querySelector(`[data-wt-id="${CSS.escape(focusTreeId)}"]`);
+    if (!(row instanceof HTMLElement) || elementIsLayoutHidden(row)) return;
+    row.scrollIntoView({ block: 'center' });
+    row.classList.add('wt-focus-flash');
+    const timer = window.setTimeout(() => row.classList.remove('wt-focus-flash'), 1600);
+    return () => window.clearTimeout(timer);
+  }, [focusTreeId, focusNonce, branchesLoaded, trees, focusVisible]);
 
   // Worktree-side info (dirty count, CLAUDE.md) lives in `trees`; key by path.
   const treesByPath = useMemo(() => {
@@ -179,7 +227,7 @@ export function GitPane({
     : null;
 
   return (
-    <>
+    <div ref={paneRef}>
       {repo?.git.pendingOp && (
         <PendingOpBanner
           op={repo.git.pendingOp}
@@ -229,6 +277,11 @@ export function GitPane({
               tree={b.worktreePath ? treesByPath.get(b.worktreePath) ?? null : null}
               isMainTree={b.worktreePath === workspace.path}
               workspacePath={workspace.path}
+              inventoryId={inventoryTreeId(
+                workspace.id,
+                b.worktreePath ? treesByPath.get(b.worktreePath) ?? null : null,
+                b.worktreePath,
+              )}
               onOpenClaudeMd={b.worktreePath === workspace.path ? onOpenClaudeMd : undefined}
               onRefresh={() => { void refresh(); onChange(); }}
             />
@@ -246,7 +299,7 @@ export function GitPane({
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -338,6 +391,7 @@ function BranchRow({
   tree,
   isMainTree,
   workspacePath,
+  inventoryId,
   onOpenClaudeMd,
   onRefresh,
 }: {
@@ -345,6 +399,8 @@ function BranchRow({
   tree: WorkspaceTree | null;
   isMainTree: boolean;
   workspacePath: string;
+  /** Working-tree inventory id (ws:/wt:/ext:) — search deep-link anchor. */
+  inventoryId?: string | null;
   onOpenClaudeMd?: () => void;
   onRefresh: () => void;
 }) {
@@ -355,7 +411,7 @@ function BranchRow({
   const state = isDirty ? 'dirty' : 'clean';
   const modifiedCount = tree?.modifiedCount ?? 0;
   return (
-    <div className="wt-row">
+    <div className="wt-row" data-wt-id={inventoryId ?? undefined}>
       <span className="wt-ico">
         <BranchIcon size={14} />
       </span>

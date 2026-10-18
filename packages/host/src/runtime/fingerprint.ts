@@ -5,12 +5,17 @@ import { dirname, relative, resolve, sep } from 'node:path';
 
 import { isCanonicalAbsolutePath } from '@gian/shared';
 
+import { readRuntimeArtifactReceipt } from './artifact-reuse.js';
 import {
   assertAuthorizedFilesystemIdentity,
   authorizedConfigHomeDir,
   ConfigHomeIdentityError,
   isAuthorizedConfigHome,
 } from './config-home.js';
+
+const MANAGED_COMPONENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MANAGED_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const MANAGED_SHA256 = /^[0-9a-f]{64}$/;
 
 export const MAX_RUNTIME_FINGERPRINT_FILES = 4_096;
 export const MAX_RUNTIME_FINGERPRINT_BYTES = 64 * 1024 * 1024;
@@ -22,6 +27,9 @@ export const MAX_RUNTIME_FINGERPRINT_ENTRIES = 8_192;
 export const MAX_RUNTIME_FINGERPRINT_DEPTH = 8;
 // Host-owned managed archives are already bounded and inventoried at install.
 // Their complete execution closure can exceed the smaller external-CLI guard.
+// A receipt for runtimes/<id>/<version>/<sha256> may name several regular
+// files. Those files share one managed aggregate budget. Anything else keeps
+// the external limit, including a path that merely contains "runtimes".
 export const MAX_MANAGED_RUNTIME_FINGERPRINT_FILES = 65_536;
 export const MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES = 768 * 1024 * 1024;
 export const MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES = 100_000;
@@ -93,6 +101,57 @@ function isManagedPackageRoot(rootPath: string, selectedPath: string, managedSto
   // A published generation has runtimeId/version/artifactSha256 before its
   // package root. Its launcher may be one or more directories below it.
   return segments.length >= 4 && rootPath !== dirname(selectedPath);
+}
+
+function posixRelative(from: string, to: string): string {
+  return relative(from, to).split(sep).join('/');
+}
+
+/** File roots that all belong to one receipt-backed generation directory.
+ * Staging directories, mixed packages, and unlisted paths return null so the
+ * caller keeps the external budget or the existing escape check. */
+async function verifiedManagedFileRoots(input: {
+  selectedPath: string;
+  contentRoots: readonly RuntimeContentRoot[];
+  managedStoreRoot?: string;
+}): Promise<Set<string> | null> {
+  const store = input.managedStoreRoot;
+  if (!store || !isCanonicalAbsolutePath(store)) return null;
+  if (input.contentRoots.length < 2 || input.contentRoots.some(root => root.mode !== 'file')) return null;
+  const selectedSegments = relative(store, input.selectedPath).split(sep).filter(Boolean);
+  if (selectedSegments.length < 4) return null;
+  const [runtimeId, version, sha] = selectedSegments;
+  if (!runtimeId || runtimeId.startsWith('.') || !MANAGED_COMPONENT_ID.test(runtimeId)) return null;
+  if (!version || !MANAGED_SEMVER.test(version) || !sha || !MANAGED_SHA256.test(sha)) return null;
+  const generation = resolve(store, runtimeId, version, sha);
+  if (!isContained(store, generation) || generation === store || !isContained(generation, input.selectedPath)) {
+    return null;
+  }
+  const entryRelative = posixRelative(generation, input.selectedPath);
+  const relatives = new Map<string, string>();
+  for (const root of input.contentRoots) {
+    if (!isContained(generation, root.path)) return null;
+    const rel = posixRelative(generation, root.path);
+    if (!rel || rel.startsWith('..')) return null;
+    relatives.set(root.path, rel);
+  }
+  if (relatives.get(input.selectedPath) !== entryRelative) return null;
+  const receipt = await readRuntimeArtifactReceipt(store, generation);
+  if (!receipt || receipt.artifactSha256 !== sha || receipt.entryRelativePath !== entryRelative) return null;
+  const allowed = new Set(receipt.files.map(file => file.path));
+  for (const rel of relatives.values()) {
+    if (!allowed.has(rel)) return null;
+  }
+  for (const root of input.contentRoots) {
+    let info: Stats;
+    try {
+      info = await lstat(root.path);
+    } catch {
+      return null;
+    }
+    if (!info.isFile() || info.isSymbolicLink()) return null;
+  }
+  return new Set(relatives.keys());
 }
 
 function countEntry(budget: FingerprintBudget): void {
@@ -286,10 +345,11 @@ async function fingerprintRoot(
         );
       }
       budget.files += 1;
-      if (budget.files > MAX_RUNTIME_FINGERPRINT_FILES) {
+      const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
+      if (budget.files > maxFiles) {
         throw new RuntimeFingerprintError(
           'RUNTIME_FINGERPRINT_BUDGET',
-          `Runtime content exceeded the ${MAX_RUNTIME_FINGERPRINT_FILES} file budget.`,
+          `Runtime content exceeded the ${maxFiles} file budget.`,
         );
       }
       const { digest, bytes } = await hashRegularFile(resolved, resolvedInfo, budget);
@@ -303,10 +363,11 @@ async function fingerprintRoot(
       );
     }
     budget.files += 1;
-    if (budget.files > MAX_RUNTIME_FINGERPRINT_FILES) {
+    const maxFiles = budget.maxFiles ?? MAX_RUNTIME_FINGERPRINT_FILES;
+    if (budget.files > maxFiles) {
       throw new RuntimeFingerprintError(
         'RUNTIME_FINGERPRINT_BUDGET',
-        `Runtime content exceeded the ${MAX_RUNTIME_FINGERPRINT_FILES} file budget.`,
+        `Runtime content exceeded the ${maxFiles} file budget.`,
       );
     }
     countEntry(budget);
@@ -361,15 +422,28 @@ export async function hostRuntimeFingerprint(input: {
   const sorted = [...input.contentRoots].sort((left, right) => left.path.localeCompare(right.path));
   const parts: string[] = [];
   const budget = { files: 0, bytes: 0, entries: 0 };
+  const managedFiles = await verifiedManagedFileRoots(input);
+  const managedFileBudget: FingerprintBudget | null = managedFiles
+    ? {
+      files: 0,
+      bytes: 0,
+      entries: 0,
+      maxFiles: MAX_MANAGED_RUNTIME_FINGERPRINT_FILES,
+      maxBytes: MAX_MANAGED_RUNTIME_FINGERPRINT_BYTES,
+      maxEntries: MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES,
+      maxDepth: MAX_MANAGED_RUNTIME_FINGERPRINT_DEPTH,
+    }
+    : null;
   for (const root of sorted) {
     assertCanonicalPath(root.path, 'content root');
     if (seen.has(root.path)) {
       throw new RuntimeFingerprintError('RUNTIME_ROOT_INVALID', `Duplicate Runtime content root: ${root.path}`);
     }
     seen.add(root.path);
-    const managedPackageRoot = sorted.length === 1 && root.mode === 'directory'
+    const managedFile = managedFiles?.has(root.path) === true;
+    const managedPackageRoot = !managedFile && sorted.length === 1 && root.mode === 'directory'
       && isManagedPackageRoot(root.path, input.selectedPath, input.managedStoreRoot);
-    if (!managedPackageRoot && !isAnchored(root.path, input.selectedPath, input.configHome)) {
+    if (!managedPackageRoot && !managedFile && !isAnchored(root.path, input.selectedPath, input.configHome)) {
       throw new RuntimeFingerprintError(
         'RUNTIME_ROOT_ESCAPE',
         `Runtime content root is not anchored to the selected Runtime or config home: ${root.path}`,
@@ -396,10 +470,12 @@ export async function hostRuntimeFingerprint(input: {
         maxEntries: MAX_MANAGED_RUNTIME_FINGERPRINT_ENTRIES,
         maxDepth: MAX_MANAGED_RUNTIME_FINGERPRINT_DEPTH,
       }
+      : managedFile && managedFileBudget
+      ? managedFileBudget
       : isSelectedLauncher
       ? { files: 0, bytes: 0, entries: 0, maxBytes: MAX_RUNTIME_LAUNCHER_BYTES }
       : budget;
-    parts.push(...await fingerprintRoot(root, input.selectedPath, true, rootBudget));
+    parts.push(...await fingerprintRoot(root, input.selectedPath, !managedFile, rootBudget));
   }
   return createHash('sha256').update(parts.join('\n')).digest('hex');
 }

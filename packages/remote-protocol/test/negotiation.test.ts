@@ -6,8 +6,9 @@ test('business hello is bound to the authenticated device, connection and genera
   const identity = { deviceId: generateCanonicalId(), connectionId: generateCanonicalId(), hostGeneration: generateCanonicalId(), hostVersion: 'test-host' };
   const offer = createRemoteHello(identity.deviceId, 'test-web');
   const reply = acceptRemoteHello(offer, identity, 123);
-  assert.equal(reply.negotiated_minor_version, 1);
+  assert.equal(reply.negotiated_minor_version, 2);
   assert.ok(reply.negotiated_capabilities.includes('wire.transcript_page'));
+  assert.ok(reply.negotiated_capabilities.includes('wire.host_locale'));
   assert.deepEqual(validateRemoteHelloReply(reply, offer, identity.connectionId, identity.hostGeneration), reply);
   assert.throws(() => acceptRemoteHello({ ...offer, device_id: generateCanonicalId() }, identity), /authenticated route/);
   assert.throws(() => validateRemoteHelloReply(reply, offer, generateCanonicalId(), identity.hostGeneration), /authenticated connection/);
@@ -22,4 +23,17 @@ test('unsupported versions reject and feature negotiation never invents a capabi
   assert.throws(() => acceptRemoteHello({ ...offer, min_minor_version: 9, max_minor_version: 9 }, identity), /do not overlap/);
   assert.throws(() => validateRemoteHelloReply({ ...reply, negotiated_minor_version: 9 }, offer, identity.connectionId, identity.hostGeneration), /offered protocol/);
   assert.throws(() => validateRemoteHelloReply({ ...reply, negotiated_capabilities: ['wire.content_resume'] }, offer, identity.connectionId, identity.hostGeneration), /offered protocol/);
+});
+
+test('a minor-1 client without wire.host_locale negotiates minor 1 and no locale feature', () => {
+  const identity = { deviceId: generateCanonicalId(), connectionId: generateCanonicalId(), hostGeneration: generateCanonicalId(), hostVersion: 'test-host' };
+  const offer = {
+    ...createRemoteHello(identity.deviceId, 'test-web'),
+    min_minor_version: 1,
+    max_minor_version: 1,
+    capabilities: ['wire.snapshot_parts', 'wire.content_resume', 'wire.transcript_page', 'wire.execution_v1'],
+  };
+  const reply = acceptRemoteHello(offer, identity);
+  assert.equal(reply.negotiated_minor_version, 1);
+  assert.ok(!reply.negotiated_capabilities.includes('wire.host_locale'));
 });

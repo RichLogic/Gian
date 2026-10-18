@@ -1716,6 +1716,110 @@ button.proxy-pop-row:hover { background: var(--surface-2); }
   padding: 4px 0;
 }
 
+.pal-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.875rem 0.5rem;
+  flex-shrink: 0;
+}
+.pal-chip {
+  min-height: 1.375rem;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+.pal-chip:hover { background: var(--surface-2); }
+.pal-chip.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-text);
+}
+.pal-ws-select {
+  min-height: 1.375rem;
+  max-width: 10rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 0.6875rem;
+  padding: 0 0.375rem;
+}
+
+.pal-error,
+.pal-partial {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0.875rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: var(--r-2);
+  font-size: var(--fz-12);
+}
+.pal-error {
+  border: 1px solid oklch(from var(--danger) l c h / 0.3);
+  background: oklch(from var(--danger) l c h / 0.06);
+  color: var(--danger);
+}
+.pal-partial {
+  border: 1px solid oklch(from var(--warn, #f0a500) l c h / 0.3);
+  background: oklch(from var(--warn, #f0a500) l c h / 0.08);
+  color: var(--text-3);
+}
+.pal-retry {
+  margin-left: auto;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+
+.pal-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+.pal-row-main .pal-row-label { flex-shrink: 1; }
+.pal-snippet {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pal-snippet mark {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-radius: 2px;
+}
+
+.pal-list.pal-stale .pal-row { opacity: 0.5; }
+
+.pal-more {
+  display: block;
+  margin: 0.25rem auto;
+  min-height: 1.75rem;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fz-12);
+  cursor: pointer;
+}
+.pal-more:hover { background: var(--surface-2); }
+.pal-more:disabled { opacity: 0.5; cursor: default; }
+
 .pal-empty {
   padding: 20px 16px;
   font-size: var(--fz-13);

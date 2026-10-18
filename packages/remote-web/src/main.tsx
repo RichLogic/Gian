@@ -14,7 +14,7 @@ import { createFixtureController } from './controller/fixture.js';
 import type { FixtureScenario } from './controller/fixture.js';
 import { createProductionController, resolveRemoteWebBoot } from './controller/create.js';
 import { ControllerProvider } from './ui/controller-context.js';
-import { LocaleProvider, resolveRemoteWebLocale } from './i18n/index.js';
+import { LocaleProvider } from './i18n/index.js';
 import { ViewportProvider } from './ui/viewport.js';
 import { FIXTURE_SCENARIOS } from './scenarios.js';
 import { preparePairingLink } from './pairing-link.js';
@@ -42,7 +42,6 @@ function BootGate({ reason }: { reason: string }) {
 }
 
 const boot = resolveRemoteWebBoot(window.location.search);
-const locale = resolveRemoteWebLocale(window.location.search);
 
 let content: React.ReactNode;
 if (window.location.pathname === '/enrollment') {
@@ -79,7 +78,9 @@ if (window.location.pathname === '/enrollment') {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <LocaleProvider locale={locale}>
+    {/* 'en' covers the controller-less boot/pairing surfaces; App re-binds
+        the provider to the Host snapshot locale once a controller mounts. */}
+    <LocaleProvider locale="en">
       <ViewportProvider>{content}</ViewportProvider>
     </LocaleProvider>
   </StrictMode>,

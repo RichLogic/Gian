@@ -86,6 +86,7 @@ export class ProtocolV2Host {
   private readonly exitHandlers = new Set<(code: number | null) => void>();
   private initialized: Promise<InitializeResult> | null = null;
   private catalogResult: Promise<ProxyCatalog> | null = null;
+  private catalogReload: Promise<ProxyCatalog> | null = null;
   private exitNotified = false;
   private exitCode: number | null | undefined;
 
@@ -126,6 +127,25 @@ export class ProtocolV2Host {
       normalizeProtocolCatalog(value as ProxyCatalog)
     ));
     return this.catalogResult;
+  }
+
+  /** One canonical list shared by every session on this process. */
+  reloadCatalog(): Promise<ProxyCatalog> {
+    if (this.catalogReload) return this.catalogReload;
+    this.catalogResult = null;
+    const listed = this.catalog();
+    const pending = listed.then(
+      (catalog) => catalog,
+      (error: unknown) => {
+        // A failed list must not stick. The next catalog() has to try again.
+        if (this.catalogResult === listed) this.catalogResult = null;
+        throw error;
+      },
+    ).finally(() => {
+      if (this.catalogReload === pending) this.catalogReload = null;
+    });
+    this.catalogReload = pending;
+    return pending;
   }
 
   async request<T>(
@@ -244,6 +264,7 @@ export class ProtocolV2SessionClient implements ProxyClient {
   private nativeSessionId: string | null = null;
   private cwd: string | null = null;
   private catalogCache: ProxyCatalog | null = null;
+  private catalogReload: Promise<ProxyCatalog> | null = null;
   private catalogStale = false;
   private activeTurnId: string | null = null;
   private closed = false;
@@ -300,6 +321,38 @@ export class ProtocolV2SessionClient implements ProxyClient {
       this.turnConfigOptions = this.normalizeTurnConfigOptions(this.turnConfigOptions);
     }
     return this.catalogCache;
+  }
+
+  /**
+   * Attached catalog fence, when this proxy publishes one.
+   *
+   * gian.proxy `turnConfigRevision` is the options-pair revision. The schema
+   * does not define it as `catalog.catalogRevision`. Antigravity is the
+   * producer that stores the session catalog fingerprint in that field.
+   * Other proxies omit it or forward an options revision. The Host UI
+   * revision (`turn-config-...`) is never a catalog fence.
+   */
+  sessionCatalogRevision(): string | undefined {
+    if (this.stream === null || this.pluginId !== 'io.gian.antigravity') return undefined;
+    const revision = this.turnConfigRevision;
+    if (!revision || revision.startsWith('turn-config-')) return undefined;
+    return revision;
+  }
+
+  reloadCatalog(): Promise<ProxyCatalog> {
+    if (this.catalogReload) return this.catalogReload;
+    this.catalogCache = null;
+    // Clear only the flag we already observed. A catalog.changed during the
+    // await sets it again and must still force the next catalog() to refetch.
+    this.catalogStale = false;
+    const pending = this.host.reloadCatalog().then((catalog) => {
+      this.catalogCache = catalog;
+      return catalog;
+    }).finally(() => {
+      if (this.catalogReload === pending) this.catalogReload = null;
+    });
+    this.catalogReload = pending;
+    return pending;
   }
 
   private normalizeTurnConfigOptions(

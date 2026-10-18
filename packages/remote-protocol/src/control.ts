@@ -229,6 +229,8 @@ export const remoteFileRefSchema = z.strictObject({
   expires_at: boundedStringSchema,
 });
 
+export const remoteLocaleSchema = z.enum(['en', 'zh-CN']);
+
 export const remoteStateSnapshotSchema = z.strictObject({
   type: z.literal('state.snapshot'),
   snapshot_id: canonicalIdSchema,
@@ -240,6 +242,9 @@ export const remoteStateSnapshotSchema = z.strictObject({
     name: nameSchema,
     online: z.literal(true),
     version: boundedStringSchema,
+    /** Host-configured UI locale. Sent only when `wire.host_locale` was
+     *  negotiated; receivers treat an absent value as 'en'. */
+    locale: remoteLocaleSchema.optional(),
   }),
   workspaces: z.array(z.strictObject({
     id: canonicalIdSchema,
@@ -927,6 +932,7 @@ export type RemoteMethod = (typeof REMOTE_METHODS)[number];
 export type Hello = z.infer<typeof helloSchema>;
 export type HelloOk = z.infer<typeof helloOkSchema>;
 export type RemoteStateSnapshot = z.infer<typeof remoteStateSnapshotSchema>;
+export type RemoteLocale = z.infer<typeof remoteLocaleSchema>;
 export type StateSnapshotPart = z.infer<typeof stateSnapshotPartSchema>;
 export type ResumeRequest = z.infer<typeof resumeRequestSchema>;
 export type ResumeOk = z.infer<typeof resumeOkSchema>;

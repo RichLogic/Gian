@@ -1,8 +1,134 @@
 {
   "schemaVersion": 1,
   "pluginId": "codex",
-  "currentVersion": "0.3.3",
+  "currentVersion": "0.3.6",
   "entries": [
+    {
+      "version": "0.3.6",
+      "firstPublishedAt": "2026-10-16T18:19:57Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-codex-v0.3.6",
+          "publishedAt": "2026-10-16T18:19:57Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.6/gian-proxy-codex-0.3.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "8245ba35bffc2b86beec08aa86fb698083091fa45a4dde136fc8cdecbcc4c041",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.6/gian-proxy-codex-0.3.6-darwin-arm64.tar.gz",
+            "sha256": "73477ffab5d30a29d57f7b71352d70bcd190c56ce94ee8fea959aa140ad3c5e8",
+            "size": 197835
+          },
+          "runtimeDeclaration": {
+            "id": "codex",
+            "versions": [
+              "0.163.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Codex CLI 更新至 0.163.0（0.163 系列首个稳定版，2026-10-15 发布；与官方 rust-v0.163.0 GitHub 资产摘要一致）。逐文件比对 app-server 协议 schema：Proxy 使用的全部协议面仅为增量可选字段，ServerRequest 逐字节一致，Proxy 调用的方法无删除或变更（未使用的实时语音枚举另有变化）；0.162.1 与 0.163.0 的无凭证 initialize 握手一致。线协议不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.6",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.6/packages/proxies/codex-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.5",
+      "firstPublishedAt": "2026-10-15T10:55:23Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-codex-v0.3.5",
+          "publishedAt": "2026-10-15T10:55:23Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.5/gian-proxy-codex-0.3.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "536fc09a3c14d8f1b7ea56a36e449c924b0f7a8b8a86ca2b7d9442ac47ee5f75",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.5/gian-proxy-codex-0.3.5-darwin-arm64.tar.gz",
+            "sha256": "ddacc70e29561c0dd527db67b0f1ef71c65e21e8ea133cbc58e4eae4d15c41f3",
+            "size": 197834
+          },
+          "runtimeDeclaration": {
+            "id": "codex",
+            "versions": [
+              "0.162.1"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Codex CLI 更新至 0.162.1（与官方 rust-v0.162.1 GitHub 资产摘要一致）。上游 0.162.x 对 app-server 桥接面均为增量改动，适配器与 gian.proxy 线协议不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.5",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.5/packages/proxies/codex-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.3.4",
+      "firstPublishedAt": "2026-10-11T05:51:31Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-codex-v0.3.4",
+          "publishedAt": "2026-10-11T05:51:31Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.4",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.4/gian-proxy-codex-0.3.4-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "6a7d94776fd340603dba64125cf324cfcc9e0a174e50c0f89faf060cecd73498",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-codex-v0.3.4/gian-proxy-codex-0.3.4-darwin-arm64.tar.gz",
+            "sha256": "16d87b20ead3f7746e2ca8e1d50a48b51b2a4138515f67751650eda8e41b634f",
+            "size": 197832
+          },
+          "runtimeDeclaration": {
+            "id": "codex",
+            "versions": [
+              "0.161.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将受管 Codex CLI 更新至 0.161.0；长原生历史改为磁盘分页，Fork 祖先与事件身份保持稳定；Proxy 向 Runtime 报告真实包版本。Proxy 的 app-server 桥接和 gian.proxy 线协议不变。本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-codex-v0.3.4",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-codex-v0.3.4/packages/proxies/codex-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.3",
       "firstPublishedAt": "2026-09-30T07:54:56Z",

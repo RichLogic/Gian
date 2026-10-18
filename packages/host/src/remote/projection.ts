@@ -246,6 +246,9 @@ export class RemoteProjector {
     attention: RemoteAttention[];
     deviceId?: string;
     eventSequence?: number;
+    /** Host UI locale; included only when the connection negotiated
+     *  `wire.host_locale` (older clients parse the snapshot closed). */
+    locale?: 'en' | 'zh-CN';
   }): RemoteStateSnapshot {
     const tasks = this.openTasks();
     const sessions = this.visibleSessions(input.deviceId);
@@ -261,6 +264,7 @@ export class RemoteProjector {
         name: this.deps.host.name,
         online: true,
         version: this.deps.host.version,
+        ...(input.locale ? { locale: input.locale } : {}),
       },
       workspaces: this.workspaces(sessions),
       tasks,

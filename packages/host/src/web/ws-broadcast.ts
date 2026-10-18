@@ -39,6 +39,7 @@ export class WsBroadcaster {
       this.clientModes.get(client) === 'attention'
       && message.type !== 'auth_ok'
       && message.type !== 'attention'
+      && message.type !== 'attention:control'
     ) {
       return;
     }
@@ -55,7 +56,7 @@ export class WsBroadcaster {
     }
     const clients = Array.from(this.clients).filter(client => {
       if (this.clientModes.get(client) === 'attention') {
-        return message.type === 'attention';
+        return message.type === 'attention' || message.type === 'attention:control';
       }
       if (message.type === 'event') {
         const subscription = this.eventSubscriptions.get(client);

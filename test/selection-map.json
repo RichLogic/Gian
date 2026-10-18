@@ -26,7 +26,7 @@
     },
     {
       "id": "conversation-translation",
-      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx"],
+      "patterns": ["packages/shared/src/translation.ts", "packages/host/src/translation/**", "packages/host/src/web/routes/translation.ts", "packages/host/migrations/082_translation.sql", "packages/host/migrations/083_remote_translation.sql", "packages/host/test/translation.test.ts", "packages/host/test/remote-translation.test.ts", "packages/web/src/translation/**", "packages/web/src/operations/translation.ts", "packages/web/test/translation.test.tsx", "packages/web/test/remote-translation.test.tsx", "packages/web/test/translation-font-scale.test.ts", "packages/web/test/translation-send-flow.test.tsx"],
       "modules": ["shared", "host", "web", "chat-ui", "codex-proxy"],
       "scopes": ["unit", "integration"],
       "checks": ["typecheck", "quality:test-catalog"],
@@ -375,6 +375,7 @@
       "id": "host-process-git-runtime",
       "patterns": [
         "packages/host/test/runtime-install-fixtures.ts",
+        "packages/host/test/fixtures/send-catalog-protocol-stub.mjs",
         "packages/host/src/proxy/**",
         "packages/host/src/runtime/**",
         "packages/host/src/term/**",
@@ -463,9 +464,14 @@
         "packages/host/src/inbox/signal.ts",
         "packages/host/src/inbox/service.ts",
         "packages/host/src/approval/manager.ts",
+        "packages/host/src/session/attention.ts",
         "packages/host/src/session/event-coordinator.ts",
+        "packages/host/src/native/watcher.ts",
         "packages/host/src/session/manager.ts",
         "packages/host/src/web/app.ts",
+        "packages/host/src/web/ws-handler.ts",
+        "packages/host/test/attention-broadcast.test.ts",
+        "packages/host/test/jsonl-watcher.test.ts",
         "packages/host/test/session-inbox-adapter.test.ts"
       ],
       "modules": [
@@ -476,6 +482,57 @@
       ],
       "checks": [],
       "reason": "Main-session questions and approvals mirror into Inbox only after a real pending registration, and close only after the domain accepts the outcome."
+    },
+    {
+      "id": "attention-inbox-contract",
+      "patterns": [
+        "packages/shared/src/attention.ts",
+        "packages/shared/src/inbox.ts",
+        "packages/shared/src/index.ts",
+        "packages/shared/src/web.ts",
+        "packages/shared/src/runtime-contracts.ts",
+        "packages/shared/test/attention-contract.test.mjs",
+        "packages/desktop/src/attention-client.ts",
+        "packages/desktop/test/attention-client.test.ts",
+        "packages/desktop/src/main.ts",
+        "packages/desktop/src/native-notifications.ts",
+        "packages/desktop/test/native-notifications.test.ts",
+        "packages/host/src/web/routes/inbox.ts",
+        "packages/host/test/inbox-routes.test.ts",
+        "packages/host/src/schedule/dispatcher.ts",
+        "packages/host/test/schedule-dispatcher.test.ts",
+        "packages/host/src/inbox/service.ts",
+        "packages/host/src/inbox/pairing-producer.ts",
+        "packages/host/src/inbox/catalog-update-producer.ts",
+        "packages/host/src/catalog/service.ts",
+        "packages/host/migrations/089_inbox_source_epoch.sql",
+        "packages/host/migrations/090_inbox_schedule_confirmation.sql",
+        "packages/host/migrations/091_inbox_repair_source.sql",
+        "packages/host/src/inbox/account-repair-producer.ts",
+        "packages/host/test/account-repair-inbox.test.ts",
+        "packages/host/src/inbox/schedule-confirmation-producer.ts",
+        "packages/host/src/schedule/confirmation-attention.ts",
+        "packages/host/test/schedule-confirmation-inbox.test.ts",
+        "packages/host/src/remote/pairing.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/test/pairing-inbox.test.ts",
+        "packages/host/test/catalog-update-inbox.test.ts",
+        "packages/host/src/web/ws-broadcast.ts",
+        "packages/host/src/web/ws-handler.ts",
+        "packages/host/test/inbox-service.test.ts",
+        "packages/host/test/ws-broadcast.test.ts"
+      ],
+      "modules": [
+        "shared",
+        "host",
+        "desktop"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [],
+      "reason": "Attention semantic events, safe names, typed targets, and exact-generation read/withdraw frames stay on the attention socket."
     },
     {
       "id": "host-migrations",
@@ -630,6 +687,15 @@
         "real-provider-canaries"
       ],
       "reason": "Kimi proxy changes expand to proxy contracts, Host clients, and deferred real-provider compatibility."
+    },
+    {
+      "id": "antigravity-proxy",
+      "patterns": ["packages/proxies/antigravity-proxy/**", "scripts/build-antigravity-runtime*"],
+      "modules": ["antigravity-proxy", "host", "scripts"],
+      "scopes": ["unit", "integration", "system"],
+      "checks": ["typecheck"],
+      "specialEntrypoints": ["real-provider-canaries"],
+      "reason": "Antigravity changes require focused ACP transport, session, permission and Host protocol regression; real Gemini acceptance is separately selected."
     },
     {
       "id": "grok-proxy",
@@ -940,6 +1006,35 @@
         "quality:test-catalog"
       ],
       "reason": "Custom Agent Runtime binding (ADR-0094) spans the Agent model, Host probing and session binding, REST routes, and the Agents dialog."
+    },
+    {
+      "id": "search-backend",
+      "patterns": [
+        "packages/shared/src/search.ts",
+        "packages/shared/src/search-text.ts",
+        "packages/host/src/search/**",
+        "packages/host/src/web/routes/search.ts",
+        "packages/host/src/web/app.ts",
+        "packages/host/migrations/088_search_index.sql",
+        "packages/host/test/search-contract.test.ts",
+        "packages/host/test/search-text.test.ts",
+        "packages/host/test/search-index.test.ts",
+        "packages/host/test/search-repair.test.ts",
+        "packages/host/test/search-assembly.test.ts"
+      ],
+      "modules": [
+        "shared",
+        "host"
+      ],
+      "scopes": [
+        "unit",
+        "integration"
+      ],
+      "checks": [
+        "typecheck",
+        "quality:test-catalog"
+      ],
+      "reason": "0.6.7 search DTOs, persistent index, and query APIs stay on the Host side of the Web static command registry."
     }
   ]
 }

@@ -66,6 +66,8 @@ export type InboxSignal =
       fault_generation: number;
       title: string;
       summary: string;
+      /** Present for an account fault. Absent on runtime and schedule repair. */
+      entry?: { kind: 'agent_login' | 'agent_settings'; agent_id: string };
     }
   | {
       kind: 'system.repair.closed';
@@ -111,6 +113,21 @@ export type InboxSignal =
       generation: number;
       epoch: number;
       outcome: 'resolved' | 'cancelled' | 'expired';
+      actor: InboxActor;
+    }
+  | {
+      kind: 'schedule.confirmation';
+      confirmation_id: string;
+      control_session_id: string;
+      generation: number;
+      title: string;
+      summary: string;
+    }
+  | {
+      kind: 'schedule.confirmation.closed';
+      confirmation_id: string;
+      generation: number;
+      outcome: 'resolved' | 'rejected' | 'expired';
       actor: InboxActor;
     };
 
@@ -167,6 +184,18 @@ function generation(value: unknown, field: string): number {
     fail(`${field} must be a positive integer`);
   }
   return value;
+}
+
+function repairEntry(
+  value: unknown,
+  subjectId: string,
+): { kind: 'agent_login' | 'agent_settings'; agent_id: string } | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('repair entry is not allowed');
+  const record = value as { kind?: unknown; agent_id?: unknown };
+  if (record.kind !== 'agent_login' && record.kind !== 'agent_settings') fail('repair entry is not allowed');
+  if (record.agent_id !== subjectId) fail('repair entry is not allowed');
+  return { kind: record.kind, agent_id: subjectId };
 }
 
 function text(value: unknown, field: string): string {
@@ -266,13 +295,17 @@ export function parseInboxSignal(value: unknown): InboxSignal {
   }
   if (kind === 'system.repair') {
     if (typeof body.scope !== 'string' || !REPAIR_SCOPES.has(body.scope)) fail('repair scope is not allowed');
+    if (body.scope !== 'account' && body.entry !== undefined) fail('repair entry is not allowed');
+    const subject_id = ident(body.subject_id, 'subject_id');
+    const entry = repairEntry(body.entry, subject_id);
     return {
       kind,
       scope: body.scope as InboxRepairScope,
-      subject_id: ident(body.subject_id, 'subject_id'),
+      subject_id,
       fault_generation: generation(body.fault_generation, 'fault_generation'),
       title: text(body.title, 'title'),
       summary: text(body.summary, 'summary'),
+      ...(entry ? { entry } : {}),
     };
   }
   if (kind === 'system.repair.closed') {
@@ -305,6 +338,32 @@ export function parseInboxSignal(value: unknown): InboxSignal {
       request_id: ident(body.request_id, 'request_id'),
       generation: generation(body.generation, 'generation'),
       outcome: outcome as InboxTerminalOutcome,
+      actor: actor(body.actor),
+    };
+  }
+  if (kind === 'schedule.confirmation' || kind === 'schedule.confirmation.closed') {
+    const fixed = generation(body.generation, 'generation');
+    if (fixed !== 1) fail('schedule confirmation generation is fixed');
+    const confirmationId = ident(body.confirmation_id, 'confirmation_id');
+    if (kind === 'schedule.confirmation') {
+      return {
+        kind,
+        confirmation_id: confirmationId,
+        control_session_id: ident(body.control_session_id, 'control_session_id'),
+        generation: fixed,
+        title: text(body.title, 'title'),
+        summary: text(body.summary, 'summary'),
+      };
+    }
+    const outcome = body.outcome;
+    if (outcome !== 'resolved' && outcome !== 'rejected' && outcome !== 'expired') {
+      fail('outcome is not allowed');
+    }
+    return {
+      kind,
+      confirmation_id: confirmationId,
+      generation: fixed,
+      outcome,
       actor: actor(body.actor),
     };
   }

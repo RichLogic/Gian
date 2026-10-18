@@ -10,6 +10,7 @@ import { Hono } from 'hono';
 import { openDatabase } from '../src/storage/db.js';
 import { createSessionToken } from '../src/auth/tokens.js';
 import { requireAuth } from '../src/auth/middleware.js';
+import { DESKTOP_TOKEN_HEADER, requireDesktopClient } from '../src/web/desktop-boundary.js';
 import { InboxService } from '../src/inbox/service.js';
 import { registerInboxRoutes } from '../src/web/routes/inbox.js';
 
@@ -242,6 +243,65 @@ test('a cursor without a revision is rejected, and a stale or cross-status curso
     const refetched = await bodyOf(again);
     const ids = (refetched.items as Array<{ id: string }>).map(item => item.id).sort();
     assert.deepEqual(ids, ['item-1', 'item-2']);
+  } finally {
+    handle.close();
+  }
+});
+
+test('AUTH_REQUIRED inbox read accepts the session cookie and rejects a desktop token alone', async () => {
+  const handle = harness(false);
+  const app = new Hono();
+  app.use('*', requireDesktopClient('desktop-secret'));
+  app.use('*', requireAuth({ required: true }));
+  registerInboxRoutes(app, handle.service);
+  try {
+    handle.service.applySignal(QUESTION);
+    const tokenOnly = await app.request('http://127.0.0.1/api/inbox/item-1/read', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [DESKTOP_TOKEN_HEADER]: 'desktop-secret',
+      },
+      body: JSON.stringify({ generation: 1 }),
+    });
+    assert.equal(tokenOnly.status, 401);
+    assert.equal(handle.service.get('item-1').unread, true);
+
+    const session = await createSessionToken('owner');
+    const stale = await app.request('http://127.0.0.1/api/inbox/item-1/read', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `gian_session=${session}`,
+        [DESKTOP_TOKEN_HEADER]: 'desktop-secret',
+      },
+      body: JSON.stringify({ generation: 9 }),
+    });
+    assert.equal(stale.status, 409);
+    assert.equal(handle.service.get('item-1').unread, true);
+
+    const missingDesktop = await app.request('http://127.0.0.1/api/inbox/item-1/read', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `gian_session=${session}`,
+      },
+      body: JSON.stringify({ generation: 1 }),
+    });
+    assert.equal(missingDesktop.status, 401);
+    assert.equal(handle.service.get('item-1').unread, true);
+
+    const read = await app.request('http://127.0.0.1/api/inbox/item-1/read', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `gian_session=${session}`,
+        [DESKTOP_TOKEN_HEADER]: 'desktop-secret',
+      },
+      body: JSON.stringify({ generation: 1 }),
+    });
+    assert.equal(read.status, 200);
+    assert.equal(handle.service.get('item-1').unread, false);
   } finally {
     handle.close();
   }

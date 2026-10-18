@@ -60,7 +60,7 @@ export interface RemoteCommandAdapterDeps {
   fileRefs: RemoteFileRefService;
   audit: RemoteMutationAudit;
   hostGeneration: string;
-  snapshot: (device: RemoteDeviceRecord) => unknown;
+  snapshot: (device: RemoteDeviceRecord, options: { wireFeatures: readonly string[] }) => unknown;
   /** Oversized state.refresh payloads follow a pending snapshot receipt. */
   pushSnapshotParts?: (deviceId: string, part: StateSnapshotPart) => Promise<void>;
   listAgents?: () => Array<{ id: string; proxy?: string; pluginId?: string }>;
@@ -74,17 +74,23 @@ export interface RemoteCommandAdapterDeps {
   } | null>;
 }
 
+/** Per-connection command execution context. `wireFeatures` carries the
+ *  negotiated feature ids (empty for legacy no-hello clients) so responses
+ *  never carry fields a closed-schema peer would reject. */
+export interface RemoteCommandHooks {
+  snapshotParts?: boolean;
+  wireFeatures?: readonly string[];
+  onAccepted?: () => Promise<void>;
+  onResultSent?: () => Promise<void>;
+}
+
 export class RemoteCommandAdapter {
   constructor(private readonly deps: RemoteCommandAdapterDeps) {}
 
   async execute(
     device: RemoteDeviceRecord,
     command: CommandRequest,
-    hooks?: {
-      snapshotParts?: boolean;
-      onAccepted?: () => Promise<void>;
-      onResultSent?: () => Promise<void>;
-    },
+    hooks?: RemoteCommandHooks,
   ): Promise<{
     ok: boolean;
     data?: unknown;
@@ -139,9 +145,9 @@ export class RemoteCommandAdapter {
   // state and command waiter until every part has been verified.
   private async refresh(
     device: RemoteDeviceRecord,
-    hooks?: { onResultSent?: () => Promise<void>; snapshotParts?: boolean },
+    hooks?: Pick<RemoteCommandHooks, 'onResultSent' | 'snapshotParts' | 'wireFeatures'>,
   ): Promise<unknown> {
-    const snapshot = this.deps.snapshot(device) as RemoteStateSnapshot;
+    const snapshot = this.deps.snapshot(device, { wireFeatures: hooks?.wireFeatures ?? [] }) as RemoteStateSnapshot;
     const payloadBytes = new TextEncoder().encode(canonicalJson(snapshot)).byteLength;
     if (payloadBytes <= SNAPSHOT_SPLIT_THRESHOLD_BYTES) {
       return snapshot;
@@ -165,11 +171,7 @@ export class RemoteCommandAdapter {
     device: RemoteDeviceRecord,
     command: CommandRequest,
     params: unknown,
-    hooks?: {
-      snapshotParts?: boolean;
-      onAccepted?: () => Promise<void>;
-      onResultSent?: () => Promise<void>;
-    },
+    hooks?: RemoteCommandHooks,
   ): Promise<unknown> {
     const method = command.method;
     switch (method) {

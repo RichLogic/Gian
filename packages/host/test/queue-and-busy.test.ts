@@ -831,8 +831,8 @@ test('ERR-005: non-busy startTurn failure rolls back AND marks the turn as error
         .filter((message): message is Extract<ServerToClientMessage, { type: 'attention' }> => (
           message.type === 'attention'
         ))
-        .map(message => ({ kind: message.kind, body: message.body })),
-      [{ kind: 'error', body: 'Open Gian to review the error and retry.' }],
+        .map(message => ({ kind: message.kind, body: message.body, event: message.event })),
+      [{ kind: 'error', body: 'Turn failed', event: 'turn_failed' }],
       'non-busy startTurn rejection emits one generic error attention',
     );
   } finally {

@@ -95,10 +95,13 @@ export function UserMessage({ item, sendStatus }: { item: MsgItem; sendStatus?: 
 export function ApprovalCard({
   item,
   onApprove,
+  lockedReason,
 }: {
   item: ApprovalItem;
   onApprove: OnApprove;
+  /** Read-only transcript (archived): the card renders but cannot submit. */
+  lockedReason?: string;
 }) {
   const resolving = useOperationPending(`approval:${item.approvalId}`, 'approval.resolve');
-  return <ChatApprovalCard item={item} onApprove={onApprove} resolving={resolving} />;
+  return <ChatApprovalCard item={item} onApprove={onApprove} resolving={resolving} lockedReason={lockedReason} />;
 }

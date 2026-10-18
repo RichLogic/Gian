@@ -5,7 +5,6 @@ import type {
   AgentProxyUpdateCheck,
   EventEnvelope,
   Executor,
-  LegacyExecutorId,
   ProductExecutor,
   ProxyCatalogEntry,
   ProxyCatalogList,
@@ -27,7 +26,11 @@ import type {
   ManagedRuntimeStatus,
   ManagedRuntimeGeneration,
 } from '@gian/shared';
-import { parseListNativeSessionsResponse, parseSessionList } from '@gian/shared';
+import {
+  parseListNativeSessionsResponse,
+  parseSessionList,
+  isInboxItemPublic,
+} from '@gian/shared';
 
 export interface TreeEntry {
   name: string;
@@ -586,18 +589,24 @@ export async function loadResolvedProxyCatalog(
  *  returned, so views can map errors to the field that caused them. */
 export class AgentApiError extends Error {
   readonly code?: string;
+  readonly reason?: string;
 
-  constructor(message: string, code?: string) {
+  constructor(message: string, code?: string, reason?: string) {
     super(message);
     this.name = 'AgentApiError';
     if (code !== undefined) this.code = code;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
 async function agentResponse<T>(response: Response): Promise<T> {
-  const body = await response.json() as T & { error?: string; code?: string };
+  const body = await response.json() as T & { error?: string; code?: string; reason?: unknown };
   if (!response.ok) {
-    throw new AgentApiError(body.error ?? `Agent request failed (${response.status})`, body.code);
+    throw new AgentApiError(
+      body.error ?? `Agent request failed (${response.status})`,
+      body.code,
+      typeof body.reason === 'string' ? body.reason : undefined,
+    );
   }
   return body;
 }
@@ -909,14 +918,16 @@ async function readManagedRuntimeInstallStream(
 export interface AgentDraftDefaults {
   name: string;
   cliPath: string | null;
-  home?: { kind: 'default'; path: string } | null;
+  home?: { kind: 'default'; path: string }
+    | { kind: 'unavailable'; reason?: { code: string; message: string } }
+    | null;
 }
 
 /** Prefill for a new draft card: numbered name and the kind's existing path. */
 export async function loadAgentDraftDefaults(
-  proxy: LegacyExecutorId,
+  pluginId: string,
 ): Promise<AgentDraftDefaults> {
-  const response = await fetch(`/api/proxies/${proxy}/draft-defaults`);
+  const response = await fetch(`/api/proxies/${encodeURIComponent(pluginId)}/draft-defaults`);
   return agentResponse<AgentDraftDefaults>(response);
 }
 
@@ -924,7 +935,7 @@ export interface CreateAgentInput {
   name: string;
   pluginId?: string;
   proxy?: ProductExecutor;
-  home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default'; expectedPath: string };
   /** ADR-0102: per-Agent Runtime binding; 'custom' pins a user-provided
    *  Runtime path probed by the Host before the Agent is persisted. */
   runtime?: { kind: 'managed' } | { kind: 'custom'; path: string };
@@ -1884,13 +1895,17 @@ export async function loadScheduleConfirmations(
 export async function resolveScheduleConfirmation(
   confirmationId: string,
   decision: 'approve' | 'reject',
+  expectedInbox?: { id: string; generation: number },
 ): Promise<import('@gian/shared').ScheduleConfirmation> {
   const response = await fetch(
     `/api/schedule-confirmations/${encodeURIComponent(confirmationId)}/resolve`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({
+        decision,
+        ...(expectedInbox ? { expected_inbox: expectedInbox } : {}),
+      } satisfies import('@gian/shared').ScheduleConfirmationResolveRequest),
     },
   );
   return scheduleResponse<import('@gian/shared').ScheduleConfirmation>(response);
@@ -2048,4 +2063,307 @@ export async function loadCustomizationDetail(
 /** Same-origin link preview query; Host owns SSRF validation. */
 export function fetchLinkPreviewResponse(url: string, signal?: AbortSignal): Promise<Response> {
   return fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { signal });
+}
+
+// ---------------------------------------------------------------------------
+// Inbox (Issue #53 / 0.6.7) — the Inbox's own read-state endpoints. Business
+// decisions (approve/answer/…) stay on their domain operation; they are NOT
+// Inbox endpoints. Errors arrive as `{ error, message }` with 404/409/400.
+// ---------------------------------------------------------------------------
+
+export class InboxApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(input: { code: string; message: string; status: number }) {
+    super(input.message);
+    this.name = 'InboxApiError';
+    this.code = input.code;
+    this.status = input.status;
+  }
+}
+
+async function inboxResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: string; message?: string })
+    | null;
+  if (!response.ok) {
+    throw new InboxApiError({
+      code: body?.error ?? 'inbox_request_failed',
+      message: body?.message ?? `Inbox request failed (${response.status})`,
+      status: response.status,
+    });
+  }
+  return body as T;
+}
+
+function isInboxPage(body: unknown): body is import('@gian/shared').InboxPage {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const page = body as Record<string, unknown>;
+  return Array.isArray(page.items)
+    && page.items.every(isInboxItemPublic)
+    && typeof page.pending_count === 'number'
+    && typeof page.inbox_revision === 'number'
+    && (page.next_cursor === null || typeof page.next_cursor === 'string');
+}
+
+function parseInboxPage(body: unknown): import('@gian/shared').InboxPage {
+  if (!isInboxPage(body)) {
+    throw new InboxApiError({
+      code: 'invalid_response',
+      message: 'Inbox list response had an invalid shape.',
+      status: 200,
+    });
+  }
+  return body;
+}
+
+export interface InboxListQuery {
+  status?: 'pending' | 'closed' | 'all';
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function loadInboxPage(
+  query: InboxListQuery = {},
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').InboxPage> {
+  const params = new URLSearchParams();
+  if (query.status) params.set('status', query.status);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const suffix = params.size ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/inbox${suffix}`, { signal });
+  return parseInboxPage(await inboxResponse<unknown>(response));
+}
+
+/** One item's current canonical state — the decision-time freshness re-read. */
+export async function loadInboxItem(
+  id: string,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}`, { signal });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox detail response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+/** Mark exactly the observed generation read. A stale generation is a 409
+ *  `stale` — the caller refreshes canonical state instead of retrying the
+ *  old mutation against the latest item. */
+export async function markInboxRead(
+  id: string,
+  generation: number,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/read`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox read response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+export async function markInboxUnread(
+  id: string,
+  generation: number,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/unread`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox unread response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+/** Version+channel scoped skip for a product/Integration update item. */
+export async function skipInboxVersion(
+  id: string,
+  generation: number,
+  version: string,
+): Promise<import('@gian/shared').InboxItemPublic> {
+  const response = await fetch(`/api/inbox/${encodeURIComponent(id)}/skip-version`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ generation, version }),
+  });
+  const body = await inboxResponse<unknown>(response);
+  if (!isInboxItemPublic(body)) {
+    throw new InboxApiError({ code: 'invalid_response', message: 'Inbox skip-version response had an invalid shape.', status: 200 });
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// Search (Issue #168 / 0.6.7, contract: shared/search.ts). The UI never
+// interpolates query text into anything but URL parameters; ranges are
+// UTF-16 offsets into the returned snippet/original text. A stale cursor is
+// 409 `stale_cursor` — the caller restarts the query from the top.
+// ---------------------------------------------------------------------------
+
+export class SearchApiError extends Error {
+  readonly code: import('@gian/shared').SearchFailureCode | 'invalid_response' | 'http';
+  readonly status: number;
+
+  constructor(input: { code: SearchApiError['code']; message: string; status: number }) {
+    super(input.message);
+    this.name = 'SearchApiError';
+    this.code = input.code;
+    this.status = input.status;
+  }
+}
+
+async function searchResponse<T>(response: Response): Promise<T> {
+  const body = await response.json().catch(() => null) as
+    | (T & { error?: string | { code?: string; message?: string }; message?: string })
+    | null;
+  if (!response.ok) {
+    const raw = body?.error;
+    const code = typeof raw === 'string' ? raw : raw?.code;
+    const message = (typeof raw === 'object' ? raw?.message : undefined) ?? body?.message
+      ?? `Search request failed (${response.status})`;
+    throw new SearchApiError({
+      code: (code as SearchApiError['code']) ?? 'http',
+      message,
+      status: response.status,
+    });
+  }
+  return body as T;
+}
+
+function isSearchCoverage(value: unknown): value is import('@gian/shared').SearchCoverage {
+  if (!value || typeof value !== 'object') return false;
+  const coverage = value as Record<string, unknown>;
+  return ['ready', 'building', 'partial', 'error'].includes(String(coverage.state))
+    && typeof coverage.complete === 'boolean'
+    && typeof coverage.indexed === 'number'
+    && typeof coverage.pending === 'number';
+}
+
+function isSearchResult(value: unknown): value is import('@gian/shared').SearchResult {
+  if (!value || typeof value !== 'object') return false;
+  const result = value as Record<string, unknown>;
+  return typeof result.id === 'string'
+    && typeof result.kind === 'string'
+    && typeof result.title === 'string'
+    && Array.isArray(result.ranges)
+    && !!result.target && typeof result.target === 'object'
+    && typeof result.updated_at === 'string'
+    && typeof result.archived === 'boolean';
+}
+
+export interface GlobalSearchQuery {
+  q: string;
+  types?: import('@gian/shared').SearchBusinessKind[];
+  workspaceId?: string | null;
+  includeArchived?: boolean;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function searchGlobal(
+  query: GlobalSearchQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchPage> {
+  const params = new URLSearchParams({ q: query.q });
+  if (query.types && query.types.length > 0) params.set('types', query.types.join(','));
+  if (query.workspaceId) params.set('workspace_id', query.workspaceId);
+  if (query.includeArchived) params.set('include_archived', '1');
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const response = await fetch(`/api/search?${params.toString()}`, { signal });
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { results?: unknown }).results)
+    || !(body as { results: unknown[] }).results.every(isSearchResult)
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Search response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchPage;
+}
+
+export interface SessionFindQuery {
+  q: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+export async function findInSession(
+  sessionId: string,
+  query: SessionFindQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').FindPage> {
+  const params = new URLSearchParams({ q: query.q });
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.cursor) params.set('cursor', query.cursor);
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/find?${params.toString()}`,
+    { signal },
+  );
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { matches?: unknown }).matches)
+    || typeof (body as { total?: unknown }).total !== 'number'
+    || typeof (body as { total_complete?: unknown }).total_complete !== 'boolean'
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Find response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').FindPage;
+}
+
+export interface SearchContextQuery {
+  turnId?: string | null;
+  turn?: number | null;
+  before?: number;
+  after?: number;
+  documentId?: string | null;
+  textRevision?: string | null;
+}
+
+export async function loadSearchContext(
+  sessionId: string,
+  query: SearchContextQuery,
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchContextPage> {
+  const params = new URLSearchParams();
+  if (query.turnId) params.set('turn_id', query.turnId);
+  if (query.turn !== undefined && query.turn !== null) params.set('turn', String(query.turn));
+  if (query.before !== undefined) params.set('before', String(query.before));
+  if (query.after !== undefined) params.set('after', String(query.after));
+  if (query.documentId) params.set('document_id', query.documentId);
+  if (query.textRevision) params.set('text_revision', query.textRevision);
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/context?${params.toString()}`,
+    { signal },
+  );
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !Array.isArray((body as { events?: unknown }).events)
+    || !(body as { session?: unknown }).session
+    || !(body as { window?: unknown }).window
+    || typeof (body as { history_complete?: unknown }).history_complete !== 'boolean') {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Context response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchContextPage;
+}
+
+export async function loadSearchStatus(
+  signal?: AbortSignal,
+): Promise<import('@gian/shared').SearchStatus> {
+  const response = await fetch('/api/search/status', { signal });
+  const body = await searchResponse<unknown>(response);
+  if (!body || typeof body !== 'object'
+    || !isSearchCoverage((body as { coverage?: unknown }).coverage)) {
+    throw new SearchApiError({ code: 'invalid_response', message: 'Search status response had an invalid shape.', status: 200 });
+  }
+  return body as import('@gian/shared').SearchStatus;
 }

@@ -59,8 +59,10 @@ pnpm release:proxies
 `make:mac:release` builds the Apple Silicon DMG and ZIP with a Developer ID
 Application signature and App Store Connect notarization, then generates
 `latest-mac.yml` for the public
-[`RichLogic/Gian`](https://github.com/RichLogic/Gian) GitHub Releases update
+[`RichToyo/Gian`](https://github.com/RichToyo/Gian) GitHub Releases update
 channel. It uses `--publish never`; running it does not upload an artifact.
+This embedded feed is separate from the 0.6.7 publication target, which remains
+`RichLogic/Gian`; see [App delivery](../../docs/operations/app-delivery.md#app-update-feed-and-publication).
 Release credentials are fail-closed: the command stops before building when
 any signing, notarization, or OAuth value is missing, and Electron Builder also
 requires a real signing identity.

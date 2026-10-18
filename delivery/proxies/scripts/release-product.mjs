@@ -9,7 +9,7 @@ import { proxyDefinitions, assertProxySelfTest, main as buildArtifacts } from '.
 import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
 import { assertZcodeSourceBinding } from './zcode-runtime-source.mjs';
 import { verifySource } from './verify-source.mjs';
-import { assertSameCatalogExecutables, assertSelectedCatalogExecutables, selectReleaseDefinitions } from './catalog-docs-policy.mjs';
+import { assertSameCatalogExecutables, assertSelectedCatalogExecutables, assertSelectedCatalogPlan, assertQualifiedRuntime, certifiedStable, retainedCatalogContent, selectedCatalogRecords, selectReleaseDefinitions } from './catalog-docs-policy.mjs';
 
 const repository = 'RichLogic/Gian-Proxies';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,7 +29,15 @@ const asset = path => ({ name: path.split('/').at(-1), size: readFileSync(path).
 const releaseUrl = (tag, name) => `https://github.com/${repository}/releases/download/${tag}/${name}`;
 
 export function validateCertificate(certificate, expected = {}) {
-  if (certificate?.schema !== 1 || certificate.model !== 'standalone-proxy-artifacts-v1' || certificate.status !== 'PASS'
+  const ownerDirect = certificate?.releaseMode === 'owner-authorized-no-tests';
+  if (ownerDirect && (shipping.length !== 1 || shipping[0].id !== 'claude'
+    || !['0.3.4', '0.3.5'].includes(shipping[0].pluginVersion) || certificate.status !== 'NOT_RUN'
+    || !certificate.authorization?.requestedBy
+    || certificate.authorization.scope !== `Claude Proxy ${shipping[0].pluginVersion} without tests`)) {
+    throw new Error('Invalid Owner-selected Claude publication receipt');
+  }
+  if (certificate?.schema !== 1 || certificate.model !== 'standalone-proxy-artifacts-v1'
+    || certificate.status !== (ownerDirect ? 'NOT_RUN' : 'PASS')
     || certificate.repository !== repository || !/^[a-f0-9]{40}$/.test(certificate.revision ?? '')
     || certificate.runner?.environment !== 'github-hosted' || certificate.runner.os !== 'macOS' || certificate.runner.arch !== 'ARM64'
     || !/^[1-9][0-9]*$/.test(certificate.runner.runId ?? '') || !/^[1-9][0-9]*$/.test(certificate.runner.runAttempt ?? '')
@@ -40,9 +48,12 @@ export function validateCertificate(certificate, expected = {}) {
     const actual = key === 'revision' ? certificate.revision : certificate.runner[key];
     if (actual !== String(value)) throw new Error(`Certificate ${key} mismatch`);
   }
-  const required = ['source', 'build', 'proxy-contracts', 'runtime-artifacts', 'archive-self-tests'];
+  const required = ownerDirect ? ['source', 'build', 'archive-integrity']
+    : ['source', 'build', 'proxy-contracts', 'runtime-artifacts', 'archive-self-tests'];
+  const notRun = ownerDirect ? ['proxy-contracts', 'runtime-artifacts', 'archive-self-tests'] : [];
   if (!Array.isArray(certificate.steps) || required.some(id => certificate.steps.filter(s => s.id === id && s.status === 'PASS').length !== 1)
-    || certificate.steps.some(s => s.status !== 'PASS')) throw new Error('Incomplete Proxy qualification evidence');
+    || notRun.some(id => certificate.steps.filter(s => s.id === id && s.status === 'NOT_RUN').length !== 1)
+    || certificate.steps.some(s => s.status !== (notRun.includes(s.id) ? 'NOT_RUN' : 'PASS'))) throw new Error('Incomplete Proxy artifact evidence');
   if (!Array.isArray(certificate.proxies) || certificate.proxies.length !== shipping.length
     || new Set(certificate.proxies.map(p => p.provider)).size !== shipping.length) throw new Error('Incomplete shipping set');
   for (const definition of shipping) {
@@ -51,6 +62,7 @@ export function validateCertificate(certificate, expected = {}) {
     if (!record || record.pluginId !== metadata.pluginId || record.version !== metadata.version
       || record.tag !== metadata.tag || !isDeepStrictEqual(record.manifest, definition.manifest)
       || !metadata.runtime.verifiedVersions.includes(record.runtime.version)) throw new Error(`Certificate metadata mismatch: ${definition.id}`);
+    assertQualifiedRuntime(record, definition, certificate);
     if (definition.id === 'zcode') {
       assertZcodeSourceBinding({ ...record.runtime, source: record.runtimeSource });
       if (record.runtime.kind !== 'native-binary' || record.publishRuntime !== true
@@ -81,7 +93,7 @@ function validateBytes(certificate, directory) {
 async function build() {
   command('pnpm', ['--filter', '@gian/shared', 'build']);
   command('pnpm', ['--filter', '@gian/proxy-catalog-contract', 'build']);
-  command('pnpm', ['--filter', '@gian/dsh-bridge', 'build']);
+  if (shipping.some(definition => definition.id === 'dsh')) command('pnpm', ['--filter', '@gian/dsh-bridge', 'build']);
   for (const definition of shipping) command('pnpm', ['--filter', definition.packageName, 'build']);
   command('pnpm', ['exec', 'tsc', '-p', 'support/runtime-extractor/tsconfig.json']);
 }
@@ -89,6 +101,7 @@ async function build() {
 async function qualify() {
   if (process.env.GITHUB_REPOSITORY !== repository || process.env.GIAN_RUNNER_ENVIRONMENT !== 'github-hosted'
     || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Qualification requires the GitHub-hosted macOS ARM64 product workflow');
+  if (process.env.GIAN_PROXY_OWNER_NO_TESTS === 'true') return ownerSelectedBuild();
   const steps = [];
   const step = async (id, fn) => { await fn(); steps.push({ id, status: 'PASS' }); };
   await step('source', async () => {
@@ -98,7 +111,8 @@ async function qualify() {
   });
   await step('build', build);
   await step('proxy-contracts', async () => {
-    command(process.execPath, ['--test', 'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs']);
+    command(process.execPath, ['--test', 'scripts/build-managed-runtime-candidates.test.mjs', 'scripts/proxy-release-metadata.test.mjs',
+      'scripts/catalog-docs-policy.test.mjs', 'scripts/runtime-qualification.test.mjs']);
     for (const definition of shipping) command('pnpm', ['--filter', definition.packageName, 'test']);
     command('pnpm', ['--filter', '@gian/dsh-bridge', 'test']);
     command('pnpm', ['--filter', '@gian/proxy-catalog-contract', 'test']);
@@ -154,6 +168,68 @@ async function qualify() {
   console.log(`Qualified ${proxies.length} exact Proxy archives; no App or real Provider acceptance claimed`);
 }
 
+/** One explicit Owner exception, limited to this version. Never manufacture
+ * passing test evidence, and retain all provenance/byte/signature checks. */
+async function ownerSelectedBuild() {
+  if (shipping.length !== 1 || shipping[0].id !== 'claude' || !['0.3.4', '0.3.5'].includes(shipping[0].pluginVersion)
+    || process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch' || !process.env.GITHUB_ACTOR) {
+    throw new Error('Owner-selected build without tests is limited to the approved Claude fixes');
+  }
+  verifySource();
+  if (git('status', '--porcelain', '--untracked-files=no')) throw new Error('Publication source is dirty');
+  command('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/main']);
+  await build();
+  const source = join(root, 'output/owner-base-source');
+  rmSync(source, { recursive: true, force: true });
+  cpSync(join(root, 'catalog/official-source'), source, { recursive: true });
+  const sequence = Number(releaseSelection.baseCatalogTag.split('.')[1]) + 1;
+  const inherited = await inheritCatalogExecutables(source, sequence);
+  const previous = inherited.previous.plugins.find(plugin => plugin.pluginId === 'claude');
+  const metadata = proxyReleaseMetadata('claude');
+  let runtime = previous?.stable.combination?.runtime;
+  if (!runtime || !metadata.runtime.verifiedVersions.includes(runtime.version)) {
+    // The Owner also requested the current official CLI. Download and hash
+    // its pinned bytes without executing a Runtime probe or model turn.
+    const { upstreamRuntimeCandidates } = await import('./build-managed-runtime-candidates.mjs');
+    const candidate = upstreamRuntimeCandidates.claude;
+    if (!metadata.runtime.verifiedVersions.includes(candidate.version) || candidate.format !== 'raw'
+      || !candidate.url.startsWith('https://downloads.claude.ai/claude-code-releases/')) {
+      throw new Error('Unapproved direct-publication Claude Runtime coordinate');
+    }
+    const response = await fetch(candidate.url, { signal: AbortSignal.timeout(120000) });
+    if (!response.ok) throw new Error(`Claude Runtime download failed (${response.status})`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length !== candidate.size || hash(bytes) !== candidate.sha256) throw new Error('Official Claude Runtime digest mismatch');
+    runtime = { kind: 'native-binary', runtimeId: metadata.runtime.id, version: candidate.version,
+      asset: { url: candidate.url, sha256: candidate.sha256, size: candidate.size },
+      format: candidate.format, entryRelativePath: candidate.entryRelativePath };
+  }
+  rmSync(output, { recursive: true, force: true }); mkdirSync(output, { recursive: true });
+  await buildArtifacts(['--plugin', 'claude', '--output', 'artifacts/proxies'], { ownerAuthorizedNoTests: true });
+  for (const suffix of ['', '.sha256', '.manifest.json']) {
+    cpSync(join(root, 'artifacts/proxies', metadata.asset + suffix), join(output, metadata.asset + suffix));
+  }
+  const manifest = json(join(output, metadata.asset + '.manifest.json'));
+  if (!isDeepStrictEqual(manifest, shipping[0].manifest)) throw new Error('Packaged Manifest mismatch');
+  const revision = git('rev-parse', 'HEAD');
+  const runner = { environment: process.env.GIAN_RUNNER_ENVIRONMENT, os: process.env.RUNNER_OS, arch: process.env.RUNNER_ARCH,
+    runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT };
+  const certificate = { schema: 1, model: 'standalone-proxy-artifacts-v1', status: 'NOT_RUN',
+    releaseMode: 'owner-authorized-no-tests', repository, revision, runner,
+    authorization: { requestedBy: process.env.GITHUB_ACTOR, scope: `Claude Proxy ${metadata.version} without tests` },
+    certificateId: `proxies-${revision}-${runner.runId}-${runner.runAttempt}`, completedAt: new Date().toISOString(),
+    steps: [...['source', 'build', 'archive-integrity'].map(id => ({ id, status: 'PASS' })),
+      ...['proxy-contracts', 'runtime-artifacts', 'archive-self-tests'].map(id => ({ id, status: 'NOT_RUN' }))],
+    protocolPackage: json(join(root, 'protocol-package.json')),
+    proxies: [{ provider: 'claude', pluginId: metadata.pluginId, version: metadata.version,
+      tag: metadata.tag, archive: metadata.asset, manifest, runtime, runtimeAsset: null, publishRuntime: false }],
+    assets: readdirSync(output).sort().map(name => asset(join(output, name))),
+    exclusions: ['All test execution', 'Runtime probes', 'archive self-tests', 'App/Desktop acceptance', 'real Provider turns'] };
+  validateCertificate(certificate);
+  put(join(output, 'certificate.json'), certificate);
+  console.log(`Built Claude Proxy ${metadata.version} for Owner-selected direct publication; all tests NOT_RUN`);
+}
+
 function readCertified(directory) {
   const certificate = validateCertificate(json(join(directory, 'certificate.json')), {
     revision: process.env.CERTIFIED_SHA, runId: process.env.CERTIFICATION_RUN_ID, runAttempt: process.env.CERTIFICATION_RUN_ATTEMPT,
@@ -193,7 +269,9 @@ async function publish(directory) {
     const names = [record.archive, `${record.archive}.sha256`, `${record.archive}.manifest.json`, 'certificate.json'];
     if (record.publishRuntime) names.push(record.runtimeAsset);
     publishRelease(record.tag, names.map(name => join(directory, name)),
-      `Independent Proxy ${record.version}. Exact hosted artifacts from ${certificate.certificateId}. DSH includes its Bridge. ZCode includes a managed CLI Runtime built from its pinned upstream Git commit. No App or real-provider acceptance is claimed.`);
+      certificate.releaseMode === 'owner-authorized-no-tests'
+        ? `Claude Proxy ${record.version}: native model metadata and condition-aware model/effort resolution. Owner-selected direct publication; all tests, Runtime probes and archive self-tests NOT_RUN. Declared Claude Code Runtime: ${record.runtime.version}. Artifact hashes and source provenance are bound by ${certificate.certificateId}.`
+        : `Independent Proxy ${record.version}. Exact hosted artifacts from ${certificate.certificateId}. DSH includes its Bridge. ZCode includes a managed CLI Runtime built from its pinned upstream Git commit. No App or real-provider acceptance is claimed.`);
   }
 }
 
@@ -211,6 +289,8 @@ function authorizeCatalogPublication(sequence, issuedAt) {
 
 async function catalog(directory, sequence, issuedAt) {
   const certificate = readCertified(directory);
+  const certificateBytes = readFileSync(join(directory, 'certificate.json'));
+  const proof = { certificate, definitions: shipping, certificateBytes, certificateSha256: hash(certificateBytes) };
   const tag = authorizeCatalogPublication(sequence, issuedAt);
   command('pnpm', ['--filter', '@gian/shared', 'build']);
   command('pnpm', ['--filter', '@gian/proxy-catalog-contract', 'build']);
@@ -218,11 +298,12 @@ async function catalog(directory, sequence, issuedAt) {
   const source = join(root, 'output/catalog-source');
   rmSync(source, { recursive: true, force: true });
   cpSync(join(root, 'catalog/official-source'), source, { recursive: true });
-  const inherited = await inheritCatalogExecutables(source, sequence);
+  const inherited = await inheritCatalogExecutables(source, sequence, proof);
   const { projectInformation } = await import('../catalog/proxy-information/project.mjs');
-  const catalogRecords = inherited.previous.plugins.map(plugin => certificate.proxies.find(record => record.pluginId === plugin.pluginId)
-    ?? { pluginId: plugin.pluginId, version: plugin.stable.pluginVersion, runtime: plugin.stable.combination.runtime });
-  const { localizations } = projectInformation(source, catalogRecords);
+  const catalogRecords = selectedCatalogRecords(inherited.previous, certificate.proxies);
+  const { localizations } = projectInformation(source, catalogRecords, {
+    selectedIds: certificate.proxies.map(record => record.pluginId), inheritedLocalizations: inherited.localizations,
+  });
   for (const record of certificate.proxies) {
     const release = JSON.parse(gh('api', `repos/${repository}/releases/tags/${record.tag}`));
     if (release.draft || release.prerelease) throw new Error('Catalog cannot reference a draft Proxy');
@@ -231,15 +312,9 @@ async function catalog(directory, sequence, issuedAt) {
       const local = asset(join(directory, name));
       if (!remote || remote.size !== local.size || remote.digest !== `sha256:${local.sha256}`) throw new Error(`Catalog source asset differs: ${name}`);
     }
-    const coordinate = name => { const a = asset(join(directory, name)); return { url: releaseUrl(record.tag, name), size: a.size, sha256: a.sha256 }; };
     const entryPath = join(source, 'plugins', record.pluginId, 'entry.json');
     const entry = json(entryPath);
-    entry.channels.stable = { pluginVersion: record.version, manifest: coordinate(`${record.archive}.manifest.json`),
-      artifacts: { 'darwin-arm64': coordinate(record.archive) }, combination: {
-        generationId: `${record.provider}-${record.version}-runtime-${record.runtime.version}`,
-        certificate: { id: certificate.certificateId, sha256: hash(readFileSync(join(directory, 'certificate.json'))) },
-        runtime: record.runtime, companions: [],
-      } };
+    entry.channels.stable = certifiedStable(record, certificate, proof.certificateSha256);
     put(entryPath, entry);
     put(join(source, 'plugins', record.pluginId, 'sidecar.json'), record.manifest);
   }
@@ -251,7 +326,7 @@ async function catalog(directory, sequence, issuedAt) {
     allowedArtifactRepositories: inherited.repositories,
     allowedRuntimeAssetPrefixes: [...policy.runtimeAssetPrefixes, `https://github.com/${repository}/releases/download/`],
   });
-  assertSelectedCatalogExecutables(inherited.previous, bundle.index, certificate.proxies.map(record => record.pluginId));
+  assertSelectedCatalogExecutables(inherited.previous, bundle.index, certificate.proxies.map(record => record.pluginId), proof);
   await writeCompiledCatalogBundle(join(root, 'output/catalog-bundle'), bundle.files);
   const { stageOfficialCatalogRelease } = await import('./stage-official-catalog-release.mjs');
   const target = join(root, 'output/catalog-release');
@@ -260,8 +335,8 @@ async function catalog(directory, sequence, issuedAt) {
     `Signed official Catalog sequence ${sequence}. Updated selected Proxy/Runtime combinations from ${certificate.certificateId}; excluded Proxies retain exact signed coordinates from ${releaseSelection.baseCatalogTag}. No App release.`, true);
 }
 
-async function inheritCatalogExecutables(source, sequence) {
-  const { verifyCatalogBundleFiles, parseGitHubReleaseAssetUrl } = await import('../packages/proxy-catalog-contract/dist/src/index.js');
+async function inheritCatalogExecutables(source, sequence, proof) {
+  const { verifyCatalogBundleFiles, parseGitHubReleaseAssetUrl, readCatalogLocalizations } = await import('../packages/proxy-catalog-contract/dist/src/index.js');
   const { officialCatalogSourcePolicy } = await import('../packages/shared/dist/index.js');
   const policy = officialCatalogSourcePolicy();
   const temporary = mkdtempSync(join(tmpdir(), 'gian-catalog-base-'));
@@ -273,6 +348,9 @@ async function inheritCatalogExecutables(source, sequence) {
     if (files.size !== readdirSync(temporary).length) throw new Error('Duplicate base Catalog asset path');
     const previous = verifyCatalogBundleFiles({ files, pinnedPublicKeys: policy.pinnedPublicKeys, expectedSourceId: policy.sourceId });
     if (`catalog-v1.${previous.sequence}.0` !== releaseSelection.baseCatalogTag || previous.sequence >= sequence) throw new Error('Signed base Catalog identity mismatch');
+    // Reject an unauthorized addition before touching the temporary base copy.
+    if (proof) assertSelectedCatalogPlan(previous, sequence, proof);
+    const retained = retainedCatalogContent(previous, files, shipping.map(definition => definition.pluginId), readCatalogLocalizations(files, previous));
     const repositories = [...new Set([...policy.artifactRepositories, repository])];
     for (const plugin of previous.plugins) {
       const stable = plugin.stable;
@@ -290,6 +368,20 @@ async function inheritCatalogExecutables(source, sequence) {
       const entryPath = join(source, 'plugins', plugin.pluginId, 'entry.json');
       const entry = json(entryPath);
       entry.channels.stable = { pluginVersion: stable.pluginVersion, manifest: stable.manifest, artifacts: stable.artifacts, combination: stable.combination };
+      const content = retained.plugins.find(item => item.pluginId === plugin.pluginId);
+      if (content) {
+        Object.assign(entry, { displayName: content.displayName, tagline: content.tagline, featuredOrder: content.featuredOrder });
+        for (const [key, bytes] of Object.entries(content.documents)) {
+          writeFileSync(join(dirname(entryPath), entry.documentation[key]), bytes);
+        }
+        for (const [key, image] of Object.entries(content.branding)) {
+          const field = key === 'light' ? 'logoLight' : 'logoDark';
+          const path = entry.branding[field].path;
+          mkdirSync(dirname(join(dirname(entryPath), path)), { recursive: true });
+          writeFileSync(join(dirname(entryPath), path), image.bytes);
+          entry.branding[field] = { path, mediaType: image.ref.mediaType };
+        }
+      }
       put(entryPath, entry);
       const sidecarPath = join(source, 'plugins', plugin.pluginId, 'sidecar.json');
       command('gh', ['release', 'download', manifestRelease.coordinate.tag, '--repo', manifestRelease.coordinate.repository,
@@ -297,7 +389,7 @@ async function inheritCatalogExecutables(source, sequence) {
       const bytes = readFileSync(sidecarPath);
       if (bytes.length !== stable.manifest.size || hash(bytes) !== stable.manifest.sha256) throw new Error('Base Manifest bytes changed');
     }
-    return { previous, repositories };
+    return { previous, repositories, localizations: retained.localizations };
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
 

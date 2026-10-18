@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 4,
+  "id": "io.gian.antigravity",
+  "displayName": "Antigravity",
+  "pluginVersion": "0.0.1",
+  "entry": "proxy.mjs",
+  "protocol": { "name": "gian.proxy", "range": ">=2.2 <3.0" },
+  "process": { "scope": "shared" },
+  "runtime": {
+    "kind": "external",
+    "id": "antigravity-acp",
+    "displayName": "Antigravity ACP Server",
+    "verifiedVersions": ["1.3.0"]
+  },
+  "branding": {
+    "logo": {
+      "light": {
+        "path": "assets/logo.png",
+        "mediaType": "image/png",
+        "sha256": "c8ae82dfb8550a772969bfef1a9842124ae22383f8c191572b6d784bc23a83c0"
+      }
+    }
+  }
+}

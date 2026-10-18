@@ -940,8 +940,9 @@ export class ClaudeProtocolV2Adapter {
       const value = explicitTurnConfig[option.id];
       if (isConfigValue(value)) draft[option.id] = value;
     }
-    this.validateEnabledConditions(draft, 'turn');
     const options = this.buildCatalogOptions(capabilities.models, draft);
+    const effective = this.effectiveConfig(options, explicitTurnConfig, 'turn');
+    this.validateEnabledConditions(effective, 'turn', options);
     const payload = await this.catalogPayload(capabilities.models, options);
     const resolvedDefaults: { sessionConfig: Record<string, ConfigValue>; turnConfig: Record<string, ConfigValue> } = {
       sessionConfig: {},
@@ -949,10 +950,14 @@ export class ClaudeProtocolV2Adapter {
     };
     for (const option of options) {
       if (option.binding !== 'turn' || explicitTurnConfig[option.id] !== undefined) continue;
-      const defaultValue = option.defaultValue;
-      if (defaultValue === null) continue;
+      const defaultValue = effective[option.id];
+      if (defaultValue === undefined) continue;
       resolvedDefaults.turnConfig[option.id] = defaultValue;
     }
+    // Subsequent turn.start must validate against the catalog this
+    // connection just resolved, including its model-specific effort choices.
+    this.advertisedOptions = options;
+    this.catalogRevision = payload.catalogRevision;
     return { ...payload, resolvedDefaults };
   }
 
@@ -1005,10 +1010,21 @@ export class ClaudeProtocolV2Adapter {
     const next: Record<string, ConfigValue> = {};
     for (const option of options) {
       if (option.binding !== binding) continue;
-      const value = explicit[option.id] !== undefined
+      let value = explicit[option.id] !== undefined
         ? explicit[option.id]
         : option.defaultValue;
+      // An omitted or cleared model means the configured Claude default.
+      // Other null values (for example effort) remain explicit clears.
+      if (option.role === 'model' && value === null) value = option.defaultValue;
       if (isConfigValue(value) && value !== null) next[option.id] = value;
+    }
+    // An optional default must not enable a control the selected model
+    // does not support. Explicit non-null values still fail validation.
+    for (const option of options) {
+      if (option.binding === binding && explicit[option.id] === undefined
+        && option.enabledWhen && !this.conditionsMatch(option.enabledWhen, next)) {
+        delete next[option.id];
+      }
     }
     return next;
   }
@@ -1016,8 +1032,9 @@ export class ClaudeProtocolV2Adapter {
   private validateEnabledConditions(
     effective: Record<string, ConfigValue>,
     binding: 'session' | 'turn',
+    options = this.advertised(),
   ): void {
-    for (const option of this.advertised()) {
+    for (const option of options) {
       if (option.binding !== binding || effective[option.id] === undefined) continue;
       if (option.enabledWhen && !this.conditionsMatch(option.enabledWhen, effective)) {
         throw new ClaudeProtocolError(

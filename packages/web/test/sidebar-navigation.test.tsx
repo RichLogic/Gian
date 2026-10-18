@@ -139,18 +139,19 @@ describe('persistent primary sidebar', () => {
     expect(badge.nextElementSibling?.classList.contains('ri-title')).toBe(true);
   });
 
-  it('marks MCP-delegated child sessions with a row-start compass badge', async () => {
-    // 2026-10-08 (owner): a session whose created_by_session_id is set was
-    // spawned by another Gian session via the Gian MCP session.create tool;
-    // the rail marks it with the lucide compass glyph (same gutter as the
-    // remote/schedule badges). Plain sessions get no badge.
+  it('marks sessions that created a child via Gian MCP with a row-start compass badge', async () => {
+    // The compass marks the CALLER — the conversation that invoked the Gian
+    // MCP session.create tool. created_by_session_id sits on the CHILD, so the
+    // caller set is derived from the full session list; the child itself and
+    // unrelated sessions get no badge.
     const child = { ...session, id: 'session-child', name: 'Delegated chat', created_by_session_id: session.id } as Session;
     const plain = { ...session, id: 'session-2', name: 'Plain chat' } as Session;
-    renderPage({ sessions: [child, plain] });
+    renderPage({ sessions: [session, child, plain] });
 
-    const badge = await screen.findByTestId('session-delegated-session-child');
+    const badge = await screen.findByTestId('session-delegated-session-1');
     expect(badge).toHaveClass('ri-delegate-badge');
     expect(badge.querySelector('svg')).not.toBeNull();
+    expect(screen.queryByTestId('session-delegated-session-child')).toBeNull();
     expect(screen.queryByTestId('session-delegated-session-2')).toBeNull();
     // Placement: inside .ri-row1, immediately before the title.
     expect(badge.parentElement?.classList.contains('ri-row1')).toBe(true);

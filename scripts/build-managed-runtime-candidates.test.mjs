@@ -26,9 +26,9 @@ test('managed Runtime candidates pin exact official Claude, Codex, Kimi, and Gro
   assert.equal(upstreamRuntimeCandidates.kimi.entryRelativePath, 'kimi');
   assert.equal(upstreamRuntimeCandidates.grok.format, 'raw');
   assert.equal(upstreamRuntimeCandidates.grok.entryRelativePath, 'bin/grok');
-  assert.equal(upstreamRuntimeCandidates.grok.version, '1.0.46');
+  assert.equal(upstreamRuntimeCandidates.grok.version, '1.0.62');
   assert.equal(upstreamRuntimeCandidates.grok.publish, true);
-  assert.match(upstreamRuntimeCandidates.grok.url, /^https:\/\/x\.ai\/cli\/grok-1\.0\.46-macos-aarch64$/);
+  assert.match(upstreamRuntimeCandidates.grok.url, /^https:\/\/x\.ai\/cli\/grok-1\.0\.62-macos-aarch64$/);
   assert.match(upstreamRuntimeCandidates.kimi.url, /^https:\/\/github\.com\/MoonshotAI\/kimi-code\/releases\/download\//);
 });
 
@@ -125,10 +125,24 @@ test('the Runtime integration is anchored to reviewed source and owns standalone
 });
 
 
+test('the reviewed native ZCode entrypoint retains routing and MCP wiring after integration', () => {
+  const original = readFileSync(new URL(
+    '../packages/proxies/zcode-proxy/test/fixtures/upstream/zcode-protocol-entrypoint.ts.txt', import.meta.url,
+  ), 'utf8');
+  const integrated = integrateZcodeEntrypoint(original);
+  assert.match(integrated, /startProcessProviderRegistryRuntime\(runtimeEnv, \{ standalone: \{\} \}\)/);
+  assert.match(integrated, /providerRuntimeHeadersPort: activeProviderRegistryRuntime.providerRuntimeHeadersPort/);
+  assert.match(integrated, /serializeModelCatalog\(modelSelectionFacade.getView\(preferred\)\)/);
+  assert.match(integrated, /resolveProcessProviderEndpointRoutingPort/);
+  assert.match(integrated, /elicitationServer = server;/);
+  assert.match(integrated, /return server.handleMessage\(message\)/);
+});
+
 test('explicit Runtime selection excludes unrelated builds and rejects ambiguous providers', () => {
   assert.deepEqual(selectRuntimeProviders(['kimi', 'grok']), ['kimi', 'grok']);
+  assert.deepEqual(selectRuntimeProviders(['antigravity']), ['antigravity']);
   for (const selection of [[], ['kimi', 'kimi'], ['unknown'], [undefined]]) {
     assert.throws(() => selectRuntimeProviders(selection), /provider selection/);
   }
-  assert.deepEqual(selectRuntimeProviders(), ['claude', 'codex', 'kimi', 'grok', 'dsh', 'zcode']);
+  assert.deepEqual(selectRuntimeProviders(), ['claude', 'codex', 'kimi', 'grok', 'dsh', 'zcode', 'antigravity']);
 });

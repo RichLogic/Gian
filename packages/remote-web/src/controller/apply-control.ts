@@ -34,6 +34,9 @@ export function applySnapshotToState(
     connection: { kind: 'online' },
     hosts: mergeSnapshotHost(state.hosts, snapshot),
     currentHostId: snapshot.host.id,
+    // Hosts predating `wire.host_locale` (and stale encrypted caches) omit the
+    // field; Remote Web falls back to English rather than failing closed.
+    locale: snapshot.host.locale ?? 'en',
     workspaces: snapshot.workspaces,
     tasks: snapshot.tasks,
     sessions: snapshot.sessions,

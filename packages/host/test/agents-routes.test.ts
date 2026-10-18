@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
@@ -496,6 +496,103 @@ test('Grok default HOME creation and subsequent drafts use pluginId without a pr
     home: { kind: 'default', path: join(root, 'home', '.grok') },
     cliPath: grok,
   });
+});
+
+test('explicit default HOME creates a builtin directory and cannot be patched or reused', async t => {
+  const { app, agents, root, bins } = await makeApp(t);
+  const claudeHome = join(root, 'home', '.claude');
+  await assert.rejects(access(claudeHome));
+
+  const kindOnly = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Claude Code', pluginId: 'claude', cliPath: bins.claude, home: { kind: 'default' },
+    }),
+  });
+  assert.equal(kindOnly.status, 400);
+  assert.match((await kindOnly.json() as { error: string }).error, /default home requires kind and expectedPath/);
+  await assert.rejects(access(claudeHome));
+  assert.equal(agents.listAgents().length, 0);
+
+  const withPath = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Claude Code', pluginId: 'claude', cliPath: bins.claude,
+      home: { kind: 'default', path: claudeHome },
+    }),
+  });
+  assert.equal(withPath.status, 400);
+  assert.match((await withPath.json() as { error: string }).error, /default home requires kind and expectedPath/);
+  await assert.rejects(access(claudeHome));
+  assert.equal(agents.listAgents().length, 0);
+
+  const created = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Claude Code', pluginId: 'claude', cliPath: bins.claude,
+      home: { kind: 'default', expectedPath: claudeHome },
+    }),
+  });
+  assert.equal(created.status, 201);
+  const { agent } = await created.json() as { agent: UserAgentStatus };
+  assert.equal(agent.proxy, 'claude');
+  assert.deepEqual(agent.home, { kind: 'custom', path: await realpath(claudeHome) });
+
+  const beforeOccupied = await readFile(join(root, 'data', 'agents.json'), 'utf8');
+  const occupied = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Claude Code 2', pluginId: 'claude', cliPath: bins.claude,
+      home: { kind: 'default', expectedPath: claudeHome },
+    }),
+  });
+  assert.equal(occupied.status, 409);
+  assert.equal((await occupied.json() as { code?: string }).code, 'AGENT_HOME_IN_USE');
+  assert.equal(agents.listAgents().length, 1);
+  assert.equal(await readFile(join(root, 'data', 'agents.json'), 'utf8'), beforeOccupied);
+
+  const extra = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Claude Code 3', pluginId: 'claude', cliPath: bins.claude,
+      home: { kind: 'default', expectedPath: claudeHome, path: claudeHome },
+    }),
+  });
+  assert.equal(extra.status, 400);
+  assert.match((await extra.json() as { error: string }).error, /default home requires kind and expectedPath/);
+  assert.equal(agents.listAgents().length, 1);
+
+  const before = await readFile(join(root, 'data', 'agents.json'), 'utf8');
+  const patched = await app.request(`/api/agents/${agent.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ home: { kind: 'default', expectedPath: claudeHome } }),
+  });
+  assert.equal(patched.status, 400);
+  assert.match((await patched.json() as { error: string }).error, /managed or custom/);
+  assert.equal(await readFile(join(root, 'data', 'agents.json'), 'utf8'), before);
+
+  const grokBin = join(root, 'bin', 'grok');
+  await executable(grokBin, 'grok 1.0.4');
+  const grokHome = join(root, 'home', '.grok');
+  await assert.rejects(access(grokHome));
+  const grok = await app.request('/api/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Grok Build', pluginId: 'grok', cliPath: grokBin,
+      home: { kind: 'default', expectedPath: grokHome },
+    }),
+  });
+  assert.equal(grok.status, 201);
+  const grokAgent = (await grok.json() as { agent: UserAgentStatus }).agent;
+  assert.equal(grokAgent.proxy, null);
+  assert.deepEqual(grokAgent.home, { kind: 'custom', path: await realpath(grokHome) });
 });
 
 test('POST /api/agents rejects an uninstalled reverse-domain pluginId', async t => {

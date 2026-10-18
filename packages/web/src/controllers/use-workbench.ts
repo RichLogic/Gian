@@ -149,6 +149,9 @@ interface UseWorkbenchInput {
   mode: string;
   activeSubtaskId: string | null;
   t(key: string): string;
+  /** User-facing rail, panel, or sheet visibility command. Settings deep-link
+   *  scrolls subscribe so a newer surface command can retire them immediately. */
+  onSurfaceCommand?: () => void;
 }
 
 export function useWorkbench({
@@ -165,7 +168,11 @@ export function useWorkbench({
   mode,
   activeSubtaskId,
   t: appT,
+  onSurfaceCommand,
 }: UseWorkbenchInput) {
+  const onSurfaceCommandRef = useRef(onSurfaceCommand);
+  onSurfaceCommandRef.current = onSurfaceCommand;
+  const noteSurfaceCommand = () => { onSurfaceCommandRef.current?.(); };
   const [wtView, setWtViewState] = useState<{ sessionId: string; wtId: string } | null>(null);
   /** Sets the view-level working-tree override AND persists it per session —
    *  an in-memory-only pick silently reverted to the primary checkout on
@@ -236,6 +243,7 @@ export function useWorkbench({
       ? sessionScene.activeRail
       : null;
   const setActiveRail = useCallback((rail: RailId | null) => {
+    onSurfaceCommandRef.current?.();
     if (rail === null) {
       // A global foreground is only an overlay. Dismissing it must not erase
       // the current Session's remembered Files / Diffs / History scene.
@@ -283,6 +291,7 @@ export function useWorkbench({
     patchSessionScene({ fileReveal: reveal });
   }, [patchSessionScene]);
   const fileRevealSeqRef = useRef(0);
+  const workspaceFocusNonceRef = useRef(0);
   const [chatPanel, setChatPanelState] = useState<ChatPanelTarget | null>(null);
   // Only Side Chat is a durable, Session-owned panel intent. Plan/tool/trace
   // details remain ephemeral and are never restored after navigation.
@@ -746,6 +755,9 @@ export function useWorkbench({
    *  snapshots the scene into railMemory; clicking a rail opens/restores it. */
   function toggleRail(rail: RailId): void {
     if (isSessionRail(rail) && !activeSessionId) return;
+    // Collapsing the active rail never reaches setActiveRail. A pending
+    // settings scroll still has to die with this command.
+    noteSurfaceCommand();
     if (chatPanel) {
       setChatPanelState(null);
       if (activeRail !== rail) activateRail(rail);
@@ -1272,6 +1284,7 @@ export function useWorkbench({
     sessionId: string,
     request: ChatPanelRequest,
   ): void {
+    noteSurfaceCommand();
     if (request.kind === 'sidechat') sideChatOpenSessionsRef.current.add(sessionId);
     setChatPanelState({ ...request, sessionId });
     setViewState(v => v === 'workbench' ? 'both' : v);
@@ -1337,12 +1350,27 @@ export function useWorkbench({
 
   /** Open a workspace's detail as a Workbench tab (zone 3). The list lives in
    *  the Inspector (zone 4); clicking a row replaces the group's single detail
-   *  tab here (singleton — no stacking). */
-  function openWorkspaceInSheet(wsId: string): void {
+   *  tab here (singleton — no stacking). `focusTreeId` deep-links an exact
+   *  working-tree row in the Git pane (search contract inventory id). */
+  function openWorkspaceInSheet(wsId: string, focusTreeId?: string): void {
     const ws = workspaces.find(w => w.id === wsId);
     if (!ws) return;
-    setActiveRail('workspaces');
-    const tab: SheetTab = { id: `tab-ws-${wsId}`, group: 'workspaces', name: ws.name, kind: 'workspace', icoKind: 'grid', ico: '▣', wsId };
+    // Same reveal as a dock rail: clear Side Chat / plan / tool detail, then
+    // show the workspaces sheet. sheetVisible stays false while that detail
+    // panel owns panel 2, so a search target would otherwise remain mounted
+    // and hidden.
+    activateRail('workspaces');
+    const focusNonce = focusTreeId ? (workspaceFocusNonceRef.current += 1) : undefined;
+    const tab: SheetTab = {
+      id: `tab-ws-${wsId}`,
+      group: 'workspaces',
+      name: ws.name,
+      kind: 'workspace',
+      icoKind: 'grid',
+      ico: '▣',
+      wsId,
+      ...(focusTreeId ? { workingTreeId: focusTreeId, focusNonce } : {}),
+    };
     setWbTabs(prev => [...prev.filter(t => t.group !== 'workspaces'), tab]);
     revealSheetTab('workspaces', tab.id);
   }

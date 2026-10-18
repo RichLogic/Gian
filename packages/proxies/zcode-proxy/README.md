@@ -9,9 +9,11 @@ types leak into Host/Web.
 ## Runtime baseline: open-source ZCode CLI 0.16.9
 
 - Upstream repository `https://github.com/zai-org/ZCode`, commit
-  `328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f`, CLI `0.16.9`
+  `aac4755666d09fdcd70272fcf063c077a639015f`, CLI `0.16.9`
   (`runtime.verifiedVersions` / `src/identity.ts`). All capability claims
-  below carry a file:line reference into that tree.
+  below retain their original baseline references where noted; the current
+  upgrade review covers the protocol, standalone authentication, model selection,
+  dependency lock and build entrypoint.
 - The runtime no longer comes from ZCode.app. Hosted qualification builds the
   complete CLI from the pinned Git commit and publishes a certified archive.
   `provider/zcode-builtin.json` must remain next to `zcode.cjs`; provenance,
@@ -74,11 +76,24 @@ types leak into Host/Web.
 |---|---|
 | `sidechat.create` / `sidechat.resume` / `sidechat.close` | Upstream has only "selection side chats" (`createSelectionSideSession`, `session-fork.ts:804-831`): the child always INHERITS the parent's committed context with the transcript rewritten to model-only/hidden (`session-fork.ts:677-693`) and restricts edit/retry/fork/goal commands inside (`commands/executor.ts:10-16`). There is no empty-context side chat and no anchor parameter. Not semantically equal to a Gian Side Chat, so it is refused with `SIDECHAT_UNAVAILABLE` instead of being faked on conversation forks. |
 | `session.native.delete` | v4 `deleteSession` is documented as closeSession: "非真删 record——message 库无删除 API" — it unloads the runtime and never purges persisted history (`session-mgmt.ts:154-158`; the in-memory store drop is all `eventStore.deleteSession` does). The proxy therefore keeps `session.close` = detach, keeps history visible and adoptable, and answers `session.native.delete` with `CAPABILITY_NOT_SUPPORTED` naming that evidence. No database/file deletion is performed to fake a native delete. |
-| MCP elicitation | Not present upstream: greps for `elicitation|elicit|sampling/createMessage` across `apps/zcode-cli/packages/adapters/src/mcp` and `core/src/mcp` return zero hits. The MCP adapter implements tools only. "Elicitation" upstream is the internal AskUserQuestion channel, which the proxy already surfaces as structured questions. |
+| MCP UI/resource/sampling surfaces | The pinned upstream adds MCP UI, resource and sampling methods. Gian does not advertise these new surfaces. Form elicitation is supported separately through the existing native user-input channel (see below). |
 | Hooks inventory | No hook enumeration method exists on the app-server (the only hook method is `workspace/hooks/trustGrant`, `shared/zp/index.ts:3601`; greps for `listHooks|hooks/list` return zero hits). `customization.list kind:"hook"` therefore reports `proxy_unsupported` with `SOURCE_NOT_ENUMERABLE`. Hook RUNS still surface as transcript activities. The proxy never executes a hook. |
 | MCP tool-level detail | `mcp/list` returns statuses + `toolCount` only; no protocol method returns a server's tool list (`McpPort.listTools` is in-process only, `mcp.port.ts:308`). |
 | `session.create.forkBoundaries` (capability) | Fork boundaries are resolved live from the conversation projection at fork time; the create-time boundary list has no upstream source. |
 | Model marketplace beyond observed snapshots | 0.16.9 deliberately keeps the provider registry out of read/setModel snapshots (`session-mapper.ts:215` comment); `catalog.list` before any session therefore shows only the presentation-backed approval mode, and model choices grow from real runtime snapshots. The proxy does not parse `~/.zcode/cli/config.json` to invent a marketplace. |
+
+## Changes in Proxy 0.4.4
+
+- Pin the reviewed ZCode `v3.15.1` source at `aac4755`; upstream still reports
+  CLI `0.16.9`, so the source/lock/integration digests distinguish this Runtime.
+- Preserve the standalone authentication overlay, including upstream credential
+  invalidation and project-token cleanup, endpoint routing, and native MCP wiring.
+- Relay native `mcp_elicitation` form questions through `interaction/requestUserInput`.
+  Free-text sentinel options become text inputs; optional schema fields remain
+  optional; indexed native answers preserve fields with repeated descriptions.
+  Upstream retains ownership of boolean/number conversion and MCP validation.
+- The native entrypoint fixture must pass the hash-bound production integration.
+  Hosted qualification still checks the built, extracted Runtime before publication.
 
 ## Session close semantics (0.16.9)
 

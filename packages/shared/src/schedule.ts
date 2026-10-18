@@ -6,6 +6,7 @@
  * busy → a hidden `session.fork.atTurn` Fork), and no Agent-native or
  * controller-owned schedule exists in v1.
  */
+import { isAttentionInboxRef, type AttentionInboxRef } from './attention.js';
 
 export const MAX_NON_ARCHIVED_SCHEDULES = 200;
 export const MAX_CONCURRENT_SCHEDULE_RUNS = 2;
@@ -167,6 +168,7 @@ export const SCHEDULE_ERROR_CODES = [
   'SCHEDULE_FORK_FAILED',
   'SCHEDULE_CONFIRMATION_NOT_FOUND',
   'SCHEDULE_CONFIRMATION_EXPIRED',
+  'PRECONDITION_FAILED',
   'SCHEDULE_CREATE_REJECTED',
   'AGENT_DELETED',
   'IDEMPOTENCY_CONFLICT',
@@ -246,6 +248,13 @@ export interface ScheduleConfirmation {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+}
+
+/** Body of `POST /api/schedule-confirmations/:id/resolve`. The path id is the
+ *  confirmation id. Omit `expected_inbox` and resolve stays today's callers. */
+export interface ScheduleConfirmationResolveRequest {
+  decision: 'approve' | 'reject';
+  expected_inbox?: AttentionInboxRef;
 }
 
 const SCHEDULE_STATUSES = ['active', 'paused', 'completed', 'archived'] as const;
@@ -403,4 +412,13 @@ export function isScheduleConfirmation(value: unknown): value is ScheduleConfirm
     && typeof value.created_at === 'string'
     && typeof value.updated_at === 'string'
     && (value.resolved_at === null || typeof value.resolved_at === 'string');
+}
+
+export function isScheduleConfirmationResolveRequest(
+  value: unknown,
+): value is ScheduleConfirmationResolveRequest {
+  if (!isRecord(value)) return false;
+  if (value.decision !== 'approve' && value.decision !== 'reject') return false;
+  if (value.expected_inbox === undefined) return true;
+  return isAttentionInboxRef(value.expected_inbox);
 }

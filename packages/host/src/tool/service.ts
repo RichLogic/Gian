@@ -1301,6 +1301,8 @@ export class GianToolService {
         scheduleDomainId: request.domainId,
         toolRequestId: request.id,
       });
+    } else {
+      scheduleService.syncConfirmationInbox(confirmation.id);
     }
     const wait = await scheduleService.waitForConfirmation({
       confirmationId: confirmation.id,

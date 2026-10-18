@@ -5,7 +5,6 @@ import { createProductionController, resolveRemoteWebBoot } from '../src/control
 import { MemoryEncryptedHostCache } from '../src/cache/encrypted-cache.js';
 import { MemoryBrowserIdentityStore } from '../src/transport/identity.js';
 import { ControllerProvider } from '../src/ui/controller-context.js';
-import { LocaleProvider } from '../src/i18n/index.js';
 import { ViewportProvider } from '../src/ui/viewport.js';
 
 describe('production boot wiring', () => {
@@ -28,19 +27,18 @@ describe('production boot wiring', () => {
       }), { status: 401 }),
     });
     render(
-      <LocaleProvider locale="zh-CN">
-        <ViewportProvider>
-          <ControllerProvider controller={controller}>
-            <App />
-          </ControllerProvider>
-        </ViewportProvider>
-      </LocaleProvider>,
+      <ViewportProvider>
+        <ControllerProvider controller={controller}>
+          <App />
+        </ControllerProvider>
+      </ViewportProvider>,
     );
     expect(screen.queryByText('Transport not wired')).toBeNull();
     expect(controller.state.auth.kind).toBe('pairing');
-    expect(screen.getByRole('textbox', { name: '配对短码' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '使用 GitHub 登录' })).toBeNull();
-    expect(screen.getByRole('link', { name: 'Host 注册' })).toHaveAttribute('href', '/enrollment');
+    // No snapshot yet: the pre-snapshot fallback locale is English.
+    expect(screen.getByRole('textbox', { name: 'Pairing code' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign in with GitHub' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Host registration' })).toHaveAttribute('href', '/enrollment');
     controller.close();
   });
 });

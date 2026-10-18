@@ -155,8 +155,15 @@ describe('SessionHoverCard remote repo row', () => {
     const remoteCard = screen.getByTestId(`session-hover-card-${remoteSession.id}`);
     const remoteIcons = remoteCard.querySelectorAll('.shc-repo svg');
     expect(remoteIcons).toHaveLength(2);
+    // Remote sessions have workspace_id = NULL by design — the repo row falls
+    // back to remote_execution.repository_name instead of '—'.
+    const remoteRepo = remoteCard.querySelector('.shc-repo')!;
+    expect(remoteRepo).toHaveTextContent('api');
+    expect(remoteRepo).not.toHaveTextContent('—');
     const localCard = screen.getByTestId(`session-hover-card-${localSession.id}`);
     expect(localCard.querySelectorAll('.shc-repo svg')).toHaveLength(1);
+    // Local sessions keep showing the passed workspaceName.
+    expect(localCard.querySelector('.shc-repo')).toHaveTextContent('Gian-Dev');
   });
 });
 

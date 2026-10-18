@@ -2,6 +2,9 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import { advertisedTurnValue } from '../src/session/advertised-turn-value.js';
+import { normalizeProtocolCatalog } from '../src/proxy/protocol-v2-session-client.js';
+import { validateConfigValues } from '../../proxies/antigravity-proxy/src/core/catalog.js';
+import { configOptions, projectedCatalog } from '../../proxies/antigravity-proxy/test/fixtures/config-options.js';
 
 const model = {
   choices: [
@@ -50,4 +53,20 @@ const nativeApproval = {
 
 test('a null catalog choice is sent when the role value is not advertised', () => {
   assert.equal(advertisedTurnValue(nativeApproval, undefined, 'ask'), null);
+});
+
+test('resolved legacy Antigravity Low is not downgraded to the native High default by send membership checks', () => {
+  // send() resolves its unfiltered draft before calling advertisedTurnValue.
+  // persistTurnConfigOptions writes only options/revision, not stored values.
+  const saved = 'gemini-3.8-flash-low';
+  const resolved = normalizeProtocolCatalog(projectedCatalog({ model: saved }));
+  const model = resolved.configOptions.find(option => option.role === 'model')!;
+  const thinking = resolved.configOptions.find(option => option.role === 'effort')!;
+  const modelValue = advertisedTurnValue(model, saved, saved);
+  const thinkingValue = advertisedTurnValue(thinking, undefined, null);
+  assert.equal(modelValue, saved);
+  assert.equal(thinkingValue, 'low');
+  assert.deepEqual(validateConfigValues(configOptions(), { model: modelValue!, thinking: thinkingValue! }), [
+    { configId: 'model', value: saved },
+  ]);
 });

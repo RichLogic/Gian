@@ -1,11 +1,13 @@
-/** com.zhipu.zcode plugin identity (must match the generated Manifest v3 and
+import packageInfo from '../package.json' with { type: 'json' };
+
+/** com.zhipu.zcode plugin identity (must match the Manifest v4 and
  *  the initialize handshake; Host validates both against the registry). */
 export const PLUGIN_ID = 'com.zhipu.zcode';
 export const PLUGIN_NAME = 'ZCode';
-export const PLUGIN_VERSION = '0.4.3';
+export const PLUGIN_VERSION = packageInfo.version;
 
 /** Inner wire facts for the open-source ZCode CLI 0.16.9
- *  (github.com/zai-org/ZCode @ 328c1a0c0ffaa5a4f65e8fa199af5e4c20706e5f). */
+ *  (github.com/zai-org/ZCode @ aac4755666d09fdcd70272fcf063c077a639015f). */
 export const INNER_PROTOCOL_NAME = 'ZCode Protocol';
 export const INNER_PROTOCOL_VERSION = 1;
 export const VERIFIED_CLI_VERSIONS = ['0.16.9'] as const;

@@ -16,7 +16,10 @@ export interface GianDesktopNotificationPreferences {
 export interface GianDesktopNotificationState {
   supported: boolean;
   preferences: GianDesktopNotificationPreferences;
-  lastError: 'delivery_failed' | null;
+  lastError: 'delivery_failed' | 'withdraw_failed' | null;
+  /** Persistent registry write failure (0.6.7): delivered-notification ids
+   *  could not be persisted; exact withdrawal may degrade until it heals. */
+  registryError: 'persist_failed' | null;
 }
 
 export type GianDesktopNavigationTarget =
@@ -25,11 +28,25 @@ export type GianDesktopNavigationTarget =
       sessionId: string;
       turn: number;
       kind: 'turn-completed' | 'approval' | 'question' | 'error';
+      /** Canonical Inbox occurrence behind the notification (0.6.7 attention
+       *  contract). Carried through untouched — the ack path compares the
+       *  exact object, and main reads precisely this generation itself. */
+      inboxRef?: { id: string; generation: number };
     }
   | {
       type: 'schedule';
       scheduleId: string;
       runId: string;
+    }
+  /** A newly opened schedule confirmation (0.6.7): no turn — the exact
+   *  confirmation id + control session + Inbox ref. The ack path compares
+   *  the full object; Main reads precisely this generation itself. */
+  | {
+      type: 'schedule_confirmation';
+      confirmationId: string;
+      controlSessionId: string;
+      sessionName?: string;
+      inboxRef: { id: string; generation: number };
     }
   | { type: 'settings'; section: 'updates' };
 
@@ -60,7 +77,10 @@ export interface GianDesktopNotificationsApi {
   native: boolean;
   getState: () => Promise<GianDesktopNotificationState>;
   updatePreferences: (preferences: GianDesktopNotificationPreferences) => Promise<GianDesktopNotificationState>;
-  setContext: (context: { visibleSessionId: string | null }) => Promise<boolean>;
+  /** `locale` is the UI-selected language (0.6.7): main localizes the
+   *  semantic attention event with it instead of the OS locale. Additive —
+   *  older main processes ignore the field. */
+  setContext: (context: { visibleSessionId: string | null; locale?: string }) => Promise<boolean>;
   openSystemSettings: () => Promise<boolean>;
   onStateChanged: (listener: (state: GianDesktopNotificationState) => void) => () => void;
 }

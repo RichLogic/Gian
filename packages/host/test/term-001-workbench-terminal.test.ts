@@ -153,12 +153,13 @@ function handleFor(ctx: Ctx, idx: number): FakePtyHandle {
 // TERM-001 — spawn / output / exit
 // ---------------------------------------------------------------------------
 
-test('TERM-001: spawn() creates a PTY, returns empty replay + alive=true', async () => {
+test('TERM-001: spawn() creates a login shell PTY, returns empty replay + alive=true', async () => {
   const ctx = setup();
   const res = await ctx.mgr.spawn({ termId: 't1', cwd: '/tmp', cols: 80, rows: 24 });
   assert.deepEqual(res, { replay: [], alive: true });
   assert.equal(ctx.mgr.size(), 1);
   assert.equal(ctx.spawnCalls.length, 1);
+  assert.deepEqual(ctx.spawnCalls[0]!.args, ['-l']);
   assert.equal(ctx.spawnCalls[0]!.cols, 80);
   assert.equal(ctx.spawnCalls[0]!.rows, 24);
 });
@@ -178,6 +179,7 @@ test('TERM-001: discovered shells include the effective system shell and drive s
     rows: 24,
   });
   assert.equal(ctx.spawnCalls[0]!.shell, options.system_shell);
+  assert.deepEqual(ctx.spawnCalls[0]!.args, ['-l']);
 });
 
 test('TERM-001: spawn rejects executable paths that are not discovered login shells', async () => {

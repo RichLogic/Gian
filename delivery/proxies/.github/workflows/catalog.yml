@@ -14,6 +14,11 @@ on:
         description: Explicit ISO-8601 issue time for reproducible metadata
         required: true
         type: string
+      owner_no_tests:
+        description: Skip documentation tests for Owner-selected Claude fixes publication
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: write
   actions: read
@@ -39,7 +44,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node scripts/verify-source.mjs
       - name: Validate and check documentation projection
-        run: node --test catalog/proxy-information/project.test.mjs
+        if: ${{ !inputs.owner_no_tests }}
+        run: node --test catalog/proxy-information/project.test.mjs scripts/catalog-docs-policy.test.mjs scripts/runtime-qualification.test.mjs
       - name: Authenticate and download the qualification
         id: source
         env:

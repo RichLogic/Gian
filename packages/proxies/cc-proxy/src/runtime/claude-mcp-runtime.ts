@@ -21,6 +21,7 @@ import type { TokenUsageUpdate } from '@gian/shared';
 import { ApprovalServer, APPROVAL_PROMPT_TOOL } from '../mcp/approval-server.js';
 import type { EffortLevel, ModelCapabilities, PermissionMode } from '../core/types.js';
 import type { ClaudeRuntime, ClaudeRuntimeEvents } from './types.js';
+import { probeClaudeNativeModels } from './native-model-catalog.js';
 
 const NO_SESSION_PERSISTENCE_FLAG = '--no-session-persistence';
 const CLAUDE_DEFAULT_MODEL_ID = 'claude-default';
@@ -792,6 +793,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   private builtinFallbackActive = false;
   private discoveredPermissionModes: string[] = [];
   private modelDiscoveryPromise: Promise<void> | null = null;
+  private modelDiscoveryAbort = new AbortController();
   private readonly approvalServer: ApprovalServer;
   private approvalPort = 0;
 
@@ -826,10 +828,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   async start(): Promise<number> {
     this.approvalPort = await this.approvalServer.start();
     this.emit('debug', `[runtime] Approval MCP listening on 127.0.0.1:${this.approvalPort}`);
-    // Kick off billing-safe capability discovery in the background. This
-    // deliberately does not use `claude -p`: after Anthropic split print
-    // mode into Agent SDK credit, model/slash warmup must not spend credit
-    // behind the user's back. We only read local CLI help by default.
+    // Discover metadata without a user turn: local configuration/help and,
+    // when no explicit menu exists, Claude's initialize control response.
+    this.modelDiscoveryAbort = new AbortController();
     this.modelDiscoveryPromise = this.discoverModels().catch((err) => {
       this.emit('debug', `[runtime] Model discovery failed: ${err}`);
     });
@@ -859,8 +860,8 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     ]);
     const supportedEfforts = parseEffortLevelsFromHelp(helpText);
     this.discoveredPermissionModes = parseClaudePermissionModesFromHelp(helpText);
-    // Model menu sources, in priority order. All of them are local file
-    // reads and spend no Agent SDK credit.
+    // Model menu sources, in priority order. The native control handshake
+    // sends no user message and cannot start a model inference turn.
     //  1. `availableModels` from the Claude settings.json the configured CLI
     //     reads, plus `settings.model` when that value is not already listed.
     //  2. The gateway discovery cache from that same profile, when its
@@ -868,8 +869,10 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     //     ANTHROPIC_BASE_URL assignment in the configured CLI wrapper.
     //     `settings.model` is still added when the cache does not contain it.
     //     An explicit discovery disable in settings rejects the cache.
-    //  3. `settings.model` alone, when neither list above is usable.
-    //  4. The static alias menu (opus / sonnet / haiku + Default). Those
+    //  3. Claude's native initialize.models catalog (including variants and
+    //     per-model effort levels), preserving the configured current model.
+    //  4. `settings.model` alone if the native catalog is unavailable.
+    //  5. The static alias menu (opus / sonnet / haiku + Default). Those
     //     aliases are unverified and may be unknown to the current CLI.
     // `probeCurrentModel` (gated off by default) only enriches the Default
     // entry's label with the resolved concrete name; it never changes which
@@ -897,6 +900,14 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     } catch (err) {
       this.emit('debug', `[runtime] Claude settings discovery failed, using static aliases: ${err}`);
     }
+    const nativeModels = settingsModels.length === 0 && gatewayModels.length === 0
+      ? await probeClaudeNativeModels(claudeExecutable(), { signal: this.modelDiscoveryAbort.signal })
+      : [];
+    const nativeEfforts = (model: (typeof nativeModels)[number]): EffortLevel[] => (
+      model.supportsEffort
+        ? model.supportedEffortLevels.length > 0 ? model.supportedEffortLevels : supportedEfforts
+        : []
+    );
     const alias = (
       id: string,
       model: string,
@@ -917,11 +928,18 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       "Uses Claude Code's configured default model.",
       true,
     );
+    const nativeDefault = nativeModels.find((model) => model.value === 'default');
+    if (nativeDefault) {
+      defaultEntry.displayName = nativeDefault.displayName;
+      defaultEntry.description = nativeDefault.description;
+      defaultEntry.supportedEfforts = nativeEfforts(nativeDefault);
+    }
     type MenuEntry = {
       idPrefix: string;
       model: string;
       displayName: string;
       description: string;
+      supportedEfforts?: EffortLevel[];
     };
     const configuredEntry = (model: string): MenuEntry => ({
       idPrefix: 'claude-settings',
@@ -950,6 +968,21 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
       if (configuredModel && !gatewayModels.some((model) => model.id === configuredModel)) {
         menu.push(configuredEntry(configuredModel));
       }
+    } else if (nativeModels.length > 0) {
+      menu = nativeModels.filter((model) => model.value !== 'default').map((model) => ({
+        // Keep the selected 0.3.3 configuration id when it is now native.
+        idPrefix: model.value === configuredModel ? 'claude-settings'
+          : BUILTIN_FALLBACK_ALIAS_MODELS.has(model.value) ? 'claude-alias' : 'claude-native',
+        model: model.value,
+        displayName: model.displayName,
+        description: model.description,
+        supportedEfforts: nativeEfforts(model),
+      }));
+      if (configuredModel && configuredModel !== 'default'
+        && !nativeModels.some((model) => model.value === configuredModel)) {
+        menu.push(configuredEntry(configuredModel));
+      }
+      this.emit('debug', `[runtime] Model menu from Claude initialize (${nativeModels.length} entries)`);
     } else if (configuredModel) {
       menu = [configuredEntry(configuredModel)];
     }
@@ -963,7 +996,9 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
           let id = `${entry.idPrefix}-${slug}`;
           for (let n = 2; usedIds.has(id); n++) id = `${entry.idPrefix}-${slug}-${n}`;
           usedIds.add(id);
-          return alias(id, entry.model, entry.displayName, entry.description);
+          const model = alias(id, entry.model, entry.displayName, entry.description);
+          if (entry.supportedEfforts) model.supportedEfforts = entry.supportedEfforts;
+          return model;
         }),
       ];
     } else {
@@ -1436,6 +1471,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
   }
 
   async stop(): Promise<void> {
+    this.modelDiscoveryAbort.abort();
     for (const session of this.sessions.values()) {
       if (session.activeProcess && !session.activeProcess.killed) {
         session.activeProcess.kill('SIGTERM');
@@ -1444,6 +1480,7 @@ export class ClaudeMcpRuntime extends EventEmitter<ClaudeRuntimeEvents> implemen
     }
     this.sessions.clear();
     await this.approvalServer.stop();
+    await this.modelDiscoveryPromise;
   }
 
   /** Drop per-turn state: deny pending approvals and unlink the temporary

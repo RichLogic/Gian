@@ -131,6 +131,7 @@ test('the REST error surface includes the frozen fork and confirmation codes', (
     'SCHEDULE_FORK_FAILED',
     'SCHEDULE_CONFIRMATION_NOT_FOUND',
     'SCHEDULE_CONFIRMATION_EXPIRED',
+    'PRECONDITION_FAILED',
     'SCHEDULE_CREATE_REJECTED',
     'SCHEDULE_CONTROL_SESSION_BLOCKED',
   ]) {

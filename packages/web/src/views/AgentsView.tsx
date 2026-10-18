@@ -92,9 +92,11 @@ function RefreshIcon() {
   );
 }
 
-export function AgentsView({ ws, terminalPreferences }: {
+export function AgentsView({ ws, terminalPreferences, focusAgent }: {
   ws?: GianWs;
   terminalPreferences?: TerminalPreferences;
+  /** Search deep link (Issue #168): select this exact Agent row. */
+  focusAgent?: { id: string; nonce: number } | null;
 } = {}) {
   const t = useT();
   const locale = useLocale();
@@ -108,6 +110,13 @@ export function AgentsView({ ws, terminalPreferences }: {
   const [catalogLoadError, setCatalogLoadError] = useState('');
   const [error, setError] = useState('');
   const [selection, setSelection] = useState<Selection>(null);
+  // Search deep link: select the exact Agent once the list has loaded.
+  useEffect(() => {
+    if (!focusAgent) return;
+    if (agents.some(agent => agent.id === focusAgent.id)) {
+      setSelection({ kind: 'agent', id: focusAgent.id });
+    }
+  }, [focusAgent, agents]);
   const [addDialogPluginId, setAddDialogPluginId] = useState<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState('');
@@ -374,7 +383,12 @@ export function AgentsView({ ws, terminalPreferences }: {
         // anything else stays a dialog-level error.
         const code = settled.errorCode ?? '';
         const message = settled.error ?? 'Agent creation failed';
-        if (code.startsWith('RUNTIME_')) setAddFieldErrors({ runtime: message });
+        const runtimeMessage = code === 'RUNTIME_FINGERPRINT_BUDGET'
+          ? t('agents.add.dialog.runtimeBudget')
+          : code === 'RUNTIME_PROBE_FAILED'
+            ? t('agents.add.dialog.probeFailed')
+            : message;
+        if (code.startsWith('RUNTIME_')) setAddFieldErrors({ runtime: runtimeMessage });
         else if (code.startsWith('AGENT_HOME_')) setAddFieldErrors({ home: message });
         else setAddError(message);
         return;

@@ -109,6 +109,9 @@ body {
 body,
 .sidebar, .topbar, .inspector,
 .transcript, .composer, .composer-wrap, .approval,
+/* .translation-popover is portaled to <body> (selection translate), so it
+   inherits body's fixed scale — re-declare the chat-zone tokens on it too. */
+.translation-popover,
 .sheet, .gian-terminal, .sheet-file, .md-preview {
   /* Base sizes calibrated 2026-08-03 to match Air's default UI type size
      (pixel-measured on same-resolution screenshots: Gian ran ~6% small).
@@ -144,7 +147,8 @@ body[data-scale-chrome="xl"] .inspector                          { --zone-scale:
 /* Chat zone is driven by concrete settings: --chat-zone-scale (px size /
    14px base, set inline on body) replaces the old data-scale-chat steps,
    and --chat-font-family swaps the transcript/composer typeface. */
-.transcript, .composer, .composer-wrap, .approval            { --zone-scale: var(--chat-zone-scale, 1); }
+.transcript, .composer, .composer-wrap, .approval,
+.translation-popover                                                     { --zone-scale: var(--chat-zone-scale, 1); }
 .transcript, .composer, .composer-wrap {
   font-family: var(--chat-font-family, var(--font-sans));
 }

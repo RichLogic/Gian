@@ -538,6 +538,31 @@ describe('unassigned group (未分配)', () => {
     expect(screen.queryByTestId('session-row-sess-archived')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-row-sess-manager')).not.toBeInTheDocument();
   });
+
+  it('marks delegation callers (not children) with the compass badge on subtask and unassigned rows', async () => {
+    // created_by_session_id sits on the CHILD — the compass badge marks the
+    // CALLER (the session that invoked the Gian MCP session.create tool).
+    renderTasks({
+      tasks: [task()],
+      sessions: [
+        subtask({ id: 'sub-1', name: 'Bound caller' }),
+        subtask({ id: 'sub-2', name: 'Delegated child', created_by_session_id: 'sub-1' }),
+        subtask({ id: 'sess-loose', name: 'Loose caller', type: 'coding', task_id: null }),
+        subtask({ id: 'sess-child', name: 'Loose child', type: 'coding', task_id: null, created_by_session_id: 'sess-loose' }),
+      ],
+    });
+    // Task-bound caller: badge inside .ri-row1, immediately before the title.
+    const badge = await screen.findByTestId('session-delegated-sub-1');
+    expect(badge).toHaveClass('ri-delegate-badge');
+    expect(badge.parentElement?.classList.contains('ri-row1')).toBe(true);
+    expect(badge.nextElementSibling?.classList.contains('ri-title')).toBe(true);
+    // The child itself gets no badge.
+    expect(screen.queryByTestId('session-delegated-sub-2')).toBeNull();
+    // The unassigned group reuses SessionRow — the caller badge shows there too.
+    await screen.findByTestId('tasks-section-unassigned');
+    expect(screen.getByTestId('session-delegated-sess-loose')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-delegated-sess-child')).toBeNull();
+  });
 });
 
 describe('Tasks rail rows (T2/T4)', () => {

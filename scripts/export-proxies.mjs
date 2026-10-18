@@ -9,6 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const common = new Set(['LICENSE', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json',
   'scripts/check-node.js', 'scripts/build-proxy-artifacts.mjs', 'scripts/proxy-release-metadata.mjs',
   'scripts/build-managed-runtime-candidates.mjs', 'scripts/verify-managed-runtime-candidates.mjs',
+  'scripts/build-antigravity-runtime.mjs',
   'scripts/build-zcode-runtime.mjs', 'scripts/zcode-runtime-source.mjs',
   'scripts/verify-zcode-runtime-protocol.mjs',
   'scripts/zcode-runtime-integration.mjs',
@@ -21,6 +22,7 @@ export function proxiesExportPath(path) {
   if (path === 'packages/host/src/runtime/safe-extract.ts' || path === 'packages/host/src/runtime/errors.ts') {
     return `support/runtime-extractor/src/${path.split('/').at(-1)}`;
   }
+  if (path === 'packages/host/src/runtime/dev-runtime-coordinates.json') return 'support/runtime-extractor/dev-runtime-coordinates.json';
   if (common.has(path) || path.startsWith('patches/') || path.startsWith('runtimes/deepseek-harness/')) return path;
   if (path.startsWith('catalog/official-source/')) return /\/(dist|node_modules)\//.test(path) ? null : path;
   if (path.startsWith('catalog/proxy-information/')) return /\/(dist|node_modules)\//.test(path) ? null : path;
@@ -139,7 +141,7 @@ export function exportProxies({ source = root, output, revision = 'HEAD' }) {
   put('pnpm-workspace.yaml', workspace);
   put('support/runtime-extractor/tsconfig.json', { extends: '../../tsconfig.base.json', compilerOptions: { outDir: './dist', rootDir: './src', types: ['node'] }, include: ['src/*.ts'] });
   const runtimeVerifier = files.get('scripts/verify-managed-runtime-candidates.mjs');
-  runtimeVerifier.bytes = Buffer.from(runtimeVerifier.bytes.toString().replace('../packages/host/dist/runtime/safe-extract.js', '../support/runtime-extractor/dist/safe-extract.js'));
+  runtimeVerifier.bytes = Buffer.from(standaloneRuntimeVerifier(runtimeVerifier.bytes.toString()));
   const runtimeBuilder = files.get('scripts/build-managed-runtime-candidates.mjs');
   runtimeBuilder.bytes = Buffer.from(runtimeBuilder.bytes.toString().replaceAll('https://github.com/RichLogic/Gian/releases/download/', 'https://github.com/RichLogic/Gian-Proxies/releases/download/'));
   const provenance = { schema: 1, product: 'Gian-Proxies', sourceRepository: 'RichLogic/Gian-Dev', sourceCommit: commit,
@@ -152,6 +154,11 @@ export function exportProxies({ source = root, output, revision = 'HEAD' }) {
     writeFileSync(join(target, path), file.bytes, { flag: 'wx', mode: file.mode });
   }
   return { output: target, commit, files: files.size };
+}
+
+export function standaloneRuntimeVerifier(source) {
+  return source.replace('../packages/host/dist/runtime/safe-extract.js', '../support/runtime-extractor/dist/safe-extract.js')
+    .replace('../packages/host/src/runtime/dev-runtime-coordinates.json', '../support/runtime-extractor/dev-runtime-coordinates.json');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

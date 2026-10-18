@@ -1,6 +1,6 @@
 {
   "name": "@gian/chat-ui",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,7 @@
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
     "rehype-katex": "^7.0.1",
+    "remark-cjk-friendly": "^2.3.2",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0"
   },

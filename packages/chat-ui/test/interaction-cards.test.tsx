@@ -31,6 +31,32 @@ describe('ApprovalCard — generic permission', () => {
     expect(screen.queryByText('Allow session')).toBeNull();
   });
 
+  it('a locked card disables every action and shows the reason', () => {
+    render(<ApprovalCard item={approval()} onApprove={vi.fn()} lockedReason="Archived read-only" />);
+    expect(screen.getByText('Archived read-only')).toBeInTheDocument();
+    for (const btn of screen.getAllByRole('button')) expect(btn).toBeDisabled();
+  });
+
+  it('carries the stable interaction anchor for deep navigation', () => {
+    const { container } = render(<ApprovalCard item={approval()} onApprove={vi.fn()} />);
+    expect(container.querySelector('[data-transcript-interaction-id="ap-1"]')).not.toBeNull();
+  });
+
+  it('the resolved one-liner keeps the same anchor', () => {
+    const { container } = render(<ApprovalLine item={approval({ status: 'approved-once' })} />);
+    expect(container.querySelector('[data-transcript-interaction-id="ap-1"]')).not.toBeNull();
+  });
+
+  it('an unknown outcome renders a neutral resolved line, never an allow mark', () => {
+    const { container } = render(<ApprovalLine item={approval({ status: 'resolved' })} />);
+    const mark = container.querySelector('.al-mark')!;
+    expect(mark.textContent).toBe('·');
+    expect(mark.classList.contains('ok')).toBe(false);
+    expect(mark.classList.contains('no')).toBe(false);
+    expect(container.querySelector('.approval-line')!.textContent).toContain('Resolved');
+    expect(container.querySelector('.approval-line')!.textContent).not.toContain('Allowed');
+  });
+
   it('decisions report the approval id + decision through onApprove', async () => {
     const user = userEvent.setup();
     const onApprove = vi.fn();

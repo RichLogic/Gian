@@ -52,6 +52,8 @@ import {
   isExecutorId,
   isProductExecutor,
   migrateLegacyGrokProxyDefaults,
+  executorIdForPluginId,
+  isCanonicalAbsolutePath,
   parseProxyPluginId,
   pluginIdForExecutorId,
   PRODUCT_EXECUTORS,
@@ -63,6 +65,9 @@ import type { CatalogService } from '../catalog/service.js';
 import { runNoRuntimeActivationHandshake } from '../plugin-store/initialize.js';
 import { PluginStoreError } from '../plugin-store/errors.js';
 import { isGenericRuntimeProtocol } from '../runtime/launch-mode.js';
+import { integrationProbeMessage, logIntegrationDiagnostic, safeIntegrationDiagnostic } from '../logging/redact.js';
+import { RuntimeBootstrapError } from '../runtime/bootstrap.js';
+import { RuntimeFingerprintError } from '../runtime/fingerprint.js';
 import { openRuntimeIdentity, RuntimeResolver, RuntimeResolverError } from '../runtime/resolver.js';
 import type { PluginStore } from '../plugin-store/store.js';
 import { RuntimeReadinessCache } from '../runtime/readiness-cache.js';
@@ -71,6 +76,7 @@ import {
   preferProvisionedRuntime,
   type ProvisionedDevRuntime,
 } from '../runtime/dev-runtime-provision.js';
+import { assertAuthorizedFilesystemIdentity, isAuthorizedConfigHome } from '../runtime/config-home.js';
 import { assertSavedAbsoluteRuntimePath } from '../runtime/saved-path.js';
 import {
   launchFromPluginStore,
@@ -96,6 +102,43 @@ import {
   type AgentUpdateLease,
 } from './update-lock.js';
 import { AgentHomeError, AgentHomeManager, agentLoginArgs, providerRuntimeEnvironment } from './home.js';
+
+/** Read-only identity for a config home that may not exist yet. realpath the
+ *  path; on ENOENT, realpath the nearest existing parent and append the
+ *  missing suffix. Other filesystem errors propagate. Nothing is created. */
+async function canonicalConfigHome(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const missing: string[] = [];
+  let cursor = path;
+  for (;;) {
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      const error = new Error(`config home has no existing parent: ${path}`) as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      throw error;
+    }
+    missing.push(basename(cursor));
+    cursor = parent;
+    try {
+      return join(await realpath(cursor), ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+async function sameConfigHome(expected: string, candidate: string): Promise<boolean> {
+  if (!isCanonicalAbsolutePath(expected) || !isCanonicalAbsolutePath(candidate)) return false;
+  const [realExpected, realCandidate] = await Promise.all([
+    canonicalConfigHome(expected),
+    canonicalConfigHome(candidate),
+  ]);
+  return realExpected === realCandidate;
+}
 
 const execFileAsync = promisify(execFile);
 const CONFIG_FILE = 'agents.json';
@@ -465,6 +508,15 @@ export class AgentCreateError extends Error {
     this.code = code;
     this.status = status;
   }
+}
+
+function rejectRuntimeProbe(pluginId: string, operation: string, error: unknown): never {
+  const typed = error instanceof RuntimeResolverError
+    || error instanceof RuntimeFingerprintError
+    || error instanceof RuntimeBootstrapError;
+  const code = typed ? safeIntegrationDiagnostic(error).code : 'RUNTIME_INVALID';
+  logIntegrationDiagnostic({ pluginId, operation, stage: 'runtime-probe' }, { code });
+  throw new AgentCreateError(code, integrationProbeMessage(code), 400);
 }
 
 function normalizeCliPathInput(value: string | null | undefined): string | null {
@@ -1629,6 +1681,95 @@ export class AgentManager {
     return this.agentHomes.defaultPath(pluginIdForExecutorId(kind));
   }
 
+  /** Draft prefill. Builtin directories come from the existing table.
+   *  Other plugins report the trusted probe configHome and do not create it. */
+  async integrationDraftDefaults(rawId: string): Promise<{
+    name: string;
+    cliPath: string | null;
+    home: { kind: 'default'; path: string }
+      | { kind: 'unavailable'; reason?: { code: string; message: string } };
+  }> {
+    const pluginId = resolvePluginIdInput(rawId);
+    if (!pluginId) {
+      throw new AgentCreateError('PLUGIN_NOT_FOUND', 'unknown proxy', 404);
+    }
+    const legacy = executorIdForPluginId(pluginId);
+    if (legacy) {
+      const existing = this.listAgents().filter(agent => agent.pluginId === pluginId);
+      const path = this.defaultAgentHomePath(legacy);
+      return {
+        name: this.nextAgentName(legacy),
+        home: path ? { kind: 'default', path } : { kind: 'unavailable' },
+        cliPath: existing.find(agent => agent.cliPath !== null)?.cliPath
+          ?? await this.scannedCliPath(legacy),
+      };
+    }
+    const launch = await this.trustedLaunch(pluginId);
+    if (!launch) {
+      throw new AgentCreateError(
+        'PLUGIN_NOT_FOUND',
+        `No trusted compatible package is available for ${pluginId}.`,
+        404,
+      );
+    }
+    const name = this.nextDraftName(launch.displayName ?? launch.runtime.displayName ?? pluginId);
+    const runtimePath = await this.draftRuntimePath(pluginId);
+    if (!runtimePath) {
+      return { name, cliPath: null, home: { kind: 'unavailable' } };
+    }
+    try {
+      const profile = await this.probeAgentRuntimePath(pluginId, runtimePath);
+      const configHome = profile?.configHome ?? null;
+      // Probe fingerprint already rejects an escaped configHome. Repeat the
+      // read-only identity walk here so a lookup cannot publish a path the
+      // probe would refuse, and so GET never creates the directory.
+      if (!configHome || !isAuthorizedConfigHome(configHome, runtimePath, this.homeDir)) {
+        return { name, cliPath: runtimePath, home: { kind: 'unavailable' } };
+      }
+      await assertAuthorizedFilesystemIdentity(configHome, runtimePath, this.homeDir);
+      return { name, cliPath: runtimePath, home: { kind: 'default', path: configHome } };
+    } catch (error) {
+      const diagnostic = safeIntegrationDiagnostic(error);
+      logIntegrationDiagnostic(
+        { pluginId, operation: 'draft-defaults', stage: 'runtime-probe' },
+        diagnostic,
+      );
+      return {
+        name,
+        cliPath: runtimePath,
+        home: { kind: 'unavailable', reason: { code: diagnostic.code, message: diagnostic.message } },
+      };
+    }
+  }
+
+  /** Runtime path a draft may probe. Dev uses only a launch-ready provisioned
+   *  entry. Managed uses the trusted active generation; a pending activation
+   *  is not usable and contributes no path. */
+  private async draftRuntimePath(pluginId: string): Promise<string | null> {
+    if (this.options.managedProxies) {
+      if (this.options.generationStore?.hasPendingActivation(pluginId)) return null;
+      return this.options.generationStore?.activeCached(pluginId)?.runtime?.entryPath ?? null;
+    }
+    return this.readyProvisionedRuntimePath(pluginId);
+  }
+
+  private nextDraftName(base: string): string {
+    const taken = new Set(this.config.agents.map(agent => agent.name.toLowerCase()));
+    if (!taken.has(base.toLowerCase())) return base;
+    for (let suffix = 2; ; suffix += 1) {
+      const candidate = `${base} ${suffix}`;
+      if (!taken.has(candidate.toLowerCase())) return candidate;
+    }
+  }
+
+  /** Provisioned entry whose launch, version, and artifact receipt already agree. */
+  private async readyProvisionedRuntimePath(pluginId: string): Promise<string | null> {
+    const installed = this.provisionedRuntimes.get(pluginId);
+    if (!installed) return null;
+    const status = await this.provisionedRuntimeStatus(pluginId);
+    return status?.state === 'ready' ? installed.entryPath : null;
+  }
+
   async prepareAgentCliTerminal(agentId: string, action: 'open' | 'login' = 'open'): Promise<{
     executable: string;
     args: string[];
@@ -1789,7 +1930,7 @@ export class AgentManager {
     pluginId?: string;
     proxy?: ProductExecutor;
     cliPath?: string | null;
-    home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+    home?: { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default'; expectedPath: string };
     /** Per-Agent Runtime binding (ADR-0102). Absent/'managed' uses the
      *  certified generation; 'custom' pins a user-provided Runtime path that
      *  is probed before the Agent is persisted. */
@@ -1820,10 +1961,24 @@ export class AgentManager {
       );
     }
     let cliPath = this.options.managedProxies ? null : normalizeCliPathInput(input.cliPath);
-    if (!this.options.managedProxies && cliPath === null && proxy) {
-      // GianDev keeps CLI paths out of the product form too, but may reuse its
-      // explicit development environment path or another saved Agent's path.
-      cliPath = await this.scannedCliPath(proxy);
+    if (!this.options.managedProxies && cliPath === null && input.runtime?.kind !== 'custom') {
+      // Reuse the launch-backed path. A legacy executor keeps scannedCliPath.
+      // An unknown plugin only gets a provisioned runtime that this launch
+      // already marks ready. activeCached is not a substitute.
+      const legacy = executorIdForPluginId(pluginId);
+      if (legacy) {
+        cliPath = await this.scannedCliPath(legacy);
+      } else if (this.provisionedRuntimes.has(pluginId)) {
+        const ready = await this.readyProvisionedRuntimePath(pluginId);
+        if (!ready) {
+          throw new AgentCreateError(
+            'RUNTIME_INVALID',
+            'The provisioned Runtime is missing or does not match this source Proxy.',
+            400,
+          );
+        }
+        cliPath = ready;
+      }
     }
     const runtime: AgentRuntimeBinding | null = input.runtime?.kind === 'custom'
       ? { kind: 'custom', path: input.runtime.path.trim() }
@@ -1832,6 +1987,13 @@ export class AgentManager {
       throw new AgentCreateError(
         'RUNTIME_INVALID',
         'Custom Runtime path must be an absolute path.',
+        400,
+      );
+    }
+    if (runtime?.kind === 'custom' && input.home?.kind === 'default') {
+      throw new AgentCreateError(
+        'AGENT_HOME_INVALID',
+        'A Custom Runtime requires an explicit HOME path.',
         400,
       );
     }
@@ -1910,6 +2072,23 @@ export class AgentManager {
     const kinds = (cliPath !== null || runtime?.kind === 'custom') && proxy ? [proxy] : [];
     const agent = await this.withAgentConfigLock(kinds, 'Agent create', async (current) => {
       assertAgentNameAvailable(current.agents, name);
+      const defaultRuntimePath = runtime?.kind === 'custom' ? runtime.path
+        : this.provisionedRuntimes.get(pluginId)?.entryPath ?? cliPath
+          ?? this.options.generationStore?.activeCached(pluginId)?.runtime?.entryPath ?? null;
+      let defaultRuntimeProfile: OpenRuntimeProfile | null = null;
+      let runtimeAlreadyProbed = false;
+      // External plugins describe their native configuration root through the
+      // trusted probe. Do not silently replace it with a managed HOME just
+      // because the legacy built-in directory table has no entry for them.
+      if ((!input.home || input.home.kind === 'default') && generic && launch?.runtime.kind === 'external'
+        && this.agentHomes.defaultPath(pluginId) === null && defaultRuntimePath) {
+        try {
+          defaultRuntimeProfile = await this.probeAgentRuntimePath(pluginId, defaultRuntimePath);
+          runtimeAlreadyProbed = true;
+        } catch (error) {
+          rejectRuntimeProbe(pluginId, 'agent.create', error);
+        }
+      }
       let home: AgentHomeBinding | null;
       if (!this.agentHomes.supports(pluginId)) {
         if (input.home?.kind === 'custom') {
@@ -1931,6 +2110,49 @@ export class AgentManager {
         );
       } else if (input.home?.kind === 'managed') {
         home = await this.agentHomes.createManaged(pluginId, agentId);
+      } else if (input.home?.kind === 'default') {
+        const used = current.agents.flatMap(agent => agent.home
+          ? [{ agentId: agent.id, path: agent.home.path }]
+          : []);
+        // Resolve the candidate, then compare it with the path the client
+        // displayed. mkdir and Agent persistence both happen after a match.
+        const candidate = this.agentHomes.defaultPath(pluginId)
+          ?? defaultRuntimeProfile?.configHome
+          ?? null;
+        if (!candidate) {
+          throw new AgentCreateError(
+            'AGENT_HOME_UNAVAILABLE',
+            'Default HOME is unavailable for this Integration.',
+            400,
+          );
+        }
+        if (!isCanonicalAbsolutePath(input.home.expectedPath)) {
+          throw new AgentHomeError(
+            'AGENT_HOME_INVALID',
+            'Default HOME must be a canonical absolute path.',
+          );
+        }
+        if (!await sameConfigHome(input.home.expectedPath, candidate)) {
+          throw new AgentHomeError(
+            'AGENT_HOME_CHANGED',
+            'Default HOME changed before the Agent was created.',
+            409,
+          );
+        }
+        let nativeDefault = await this.agentHomes.useDefault(pluginId, used);
+        if (nativeDefault === null && defaultRuntimeProfile?.configHome && defaultRuntimePath) {
+          nativeDefault = await this.agentHomes.useRuntimeDefault(
+            pluginId, defaultRuntimeProfile.configHome, defaultRuntimePath, used,
+          );
+        }
+        if (!nativeDefault) {
+          throw new AgentCreateError(
+            'AGENT_HOME_UNAVAILABLE',
+            'Default HOME is unavailable for this Integration.',
+            400,
+          );
+        }
+        home = nativeDefault;
       } else {
         const used = current.agents.flatMap(agent => agent.home
           ? [{ agentId: agent.id, path: agent.home.path }]
@@ -1938,6 +2160,11 @@ export class AgentManager {
         let nativeDefault: AgentHomeBinding | null;
         try {
           nativeDefault = await this.agentHomes.useDefault(pluginId, used);
+          if (nativeDefault === null && defaultRuntimeProfile?.configHome && defaultRuntimePath) {
+            nativeDefault = await this.agentHomes.useRuntimeDefault(
+              pluginId, defaultRuntimeProfile.configHome, defaultRuntimePath, used,
+            );
+          }
         } catch (error) {
           if (!(error instanceof AgentHomeError && error.code === 'AGENT_HOME_IN_USE')) throw error;
           nativeDefault = null;
@@ -1951,16 +2178,18 @@ export class AgentManager {
         // Agent is persisted. A failed probe aborts the create — there is no
         // fallback to the managed generation.
         try {
-          await this.probeAgentRuntimePath(pluginId, runtime.path);
+          if (!runtimeAlreadyProbed) await this.probeAgentRuntimePath(pluginId, runtime.path);
         } catch (error) {
-          throw new AgentCreateError(
-            'RUNTIME_INVALID',
-            error instanceof Error ? error.message : String(error),
-            400,
-          );
+          rejectRuntimeProbe(pluginId, 'agent.create', error);
         }
-      } else if (cliPath !== null) {
-        await this.probeAgentRuntimePath(pluginId, cliPath);
+      } else if (cliPath !== null && !runtimeAlreadyProbed) {
+        // Managed and existing HOME skip the default-home probe above.
+        // Unmanaged Dev still probes its provisioned Runtime on this path.
+        try {
+          await this.probeAgentRuntimePath(pluginId, cliPath);
+        } catch (error) {
+          rejectRuntimeProbe(pluginId, 'agent.create', error);
+        }
       }
       const agent: UserAgent = {
         id: agentId,
@@ -1992,7 +2221,7 @@ export class AgentManager {
   async updateAgent(id: string, patch: {
     name?: string;
     cliPath?: string | null;
-    home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+    home?: { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default' };
     pluginId?: string;
     proxy?: ProductExecutor;
     defaults?: Partial<AgentProxyDefaults>;
@@ -2005,6 +2234,13 @@ export class AgentManager {
       throw new AgentCreateError(
         'RUNTIME_EDIT_UNSUPPORTED',
         'The Runtime binding is set at Agent creation; delete and recreate the Agent to change it.',
+        400,
+      );
+    }
+    if (patch.home?.kind === 'default') {
+      throw new AgentCreateError(
+        'AGENT_HOME_INVALID',
+        'Default HOME can only be selected when creating an Agent.',
         400,
       );
     }
@@ -2506,7 +2742,7 @@ export class AgentManager {
     }
   }
 
-  private async probeAgentRuntimePath(pluginId: string, path: string): Promise<void> {
+  private async probeAgentRuntimePath(pluginId: string, path: string): Promise<OpenRuntimeProfile | null> {
     const launch = await this.trustedLaunch(pluginId);
     if (!launch) {
       // Onboarding may select an already-installed Runtime before its Proxy
@@ -2514,14 +2750,14 @@ export class AgentManager {
       // nothing is executed until the trusted Manifest is available and the
       // RuntimeResolver can apply its version and fingerprint policy.
       await assertSavedAbsoluteRuntimePath(path);
-      return;
+      return null;
     }
     if (!isGenericRuntimeProtocol({
       schemaVersion: launch.schemaVersion,
       runtimeBootstrap: launch.schemaVersion === 4,
     })) {
       await assertSavedAbsoluteRuntimePath(path);
-      return;
+      return null;
     }
     if (!this.options.runtimeResolver) {
       throw new Error('RuntimeResolver is required for this v4/2.2 package.');
@@ -2569,6 +2805,7 @@ export class AgentManager {
     if (resolved.profile.verification === 'incompatible') {
       throw new Error('Selected Runtime is incompatible with the trusted Manifest.');
     }
+    return resolved.profile;
   }
 
   private async publishNoneRuntime(

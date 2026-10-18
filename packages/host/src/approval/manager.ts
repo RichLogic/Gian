@@ -25,8 +25,7 @@ export interface ApprovalRequest {
   projected?: 'question' | 'approval';
   payload?: Record<string, unknown>;
   nativeOptions?: import('@gian/shared').NativeApprovalOption[];
-  /** Prebuilt generic notification. Broadcast only after the request is known
-   *  to be pending; auto-approved requests intentionally ignore it. */
+  /** Ignored. Actionable OS attention is published after the fresh Inbox occurrence. */
   attention?: AttentionMessage;
 }
 
@@ -273,7 +272,6 @@ export class ApprovalManager {
         ...(record.nativeOptions ? { native_options: record.nativeOptions } : {}),
       },
     });
-    if (req.attention) this.broadcaster.broadcast(req.attention);
     this.observePending(record, 'fresh');
     return pendingDecision;
   }

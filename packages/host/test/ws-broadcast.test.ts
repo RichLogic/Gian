@@ -190,6 +190,56 @@ test('attention auth atomically registers a restricted read-only client', async 
   }
 });
 
+test('attention lookup returns a body-free control frame and stays connected', async () => {
+  const broadcaster = new WsBroadcaster();
+  const handlers = makeWsHandlers({
+    sessions: {} as SessionManager,
+    broadcaster,
+    inbox: {
+      syncSnapshot: () => ({ inbox_revision: 0, pending_count: 0, items: [], truncated: false }),
+      attentionControl: refs => refs.map(ref => ({
+        id: ref.id,
+        generation: ref.generation,
+        revision: 2,
+        read: true,
+        terminal: false,
+      })),
+    },
+  });
+  const messages: string[] = [];
+  let closed = false;
+  const ws = {
+    send: (value: string) => { messages.push(value); },
+    close: () => { closed = true; },
+  } as unknown as WSContext;
+  const token = await createSessionToken('attention-lookup');
+  try {
+    handlers.onOpen(new Event('open'), ws);
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'auth', token, client: 'attention' }) },
+      ws,
+    );
+    messages.length = 0;
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'attention:lookup', refs: [{ id: 'item-01', generation: 4 }] }) },
+      ws,
+    );
+    assert.equal(closed, false);
+    assert.deepEqual(JSON.parse(messages[0]!), {
+      type: 'attention:control',
+      items: [{ id: 'item-01', generation: 4, revision: 2, read: true, terminal: false }],
+    });
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'attention:lookup', refs: [{ id: 'item-01', generation: 4, summary: 'secret' }] }) },
+      ws,
+    );
+    assert.equal(closed, true);
+  } finally {
+    handlers.onClose({ code: 1000, reason: '', wasClean: true }, ws);
+    deleteToken(token);
+  }
+});
+
 test('global broadcasts exclude connected peers until WebSocket authentication succeeds', async () => {
   const broadcaster = new WsBroadcaster();
   const handlers = makeWsHandlers({

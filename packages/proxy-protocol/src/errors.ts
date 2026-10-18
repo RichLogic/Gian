@@ -37,6 +37,8 @@ export class ProxyProtocolError extends Error {
   readonly jsonRpcCode: number;
   readonly sessionId?: string;
   readonly streamId?: string;
+  /** Allowlisted operational token from JSON-RPC `data.details.reason`. */
+  reason?: string;
 
   constructor(
     readonly code: ProtocolErrorName,

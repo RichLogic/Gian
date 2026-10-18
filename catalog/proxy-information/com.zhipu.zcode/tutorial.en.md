@@ -2,11 +2,11 @@
 
 ## 1. What it does in Gian
 
-ZCode Integration brings ZCode CLI coding sessions, model configuration and activity into Gian. Version 0.4.2 uses the pinned and verified ZCode CLI 0.16.9 shipped with the Proxy release. It no longer depends on the Runtime embedded in ZCode.app or reads desktop-process credentials.
+ZCode Integration brings ZCode CLI coding sessions, model configuration and activity into Gian. Version 0.4.4 uses the pinned and verified ZCode CLI 0.16.9 shipped with the Proxy release. It no longer depends on the Runtime embedded in ZCode.app or reads desktop-process credentials.
 
 ## 2. Capabilities and limitations
 
-It supports session creation and resume, history replay, model/configuration snapshots, tool activity, permission interactions, attachments, renaming, forks, current-turn Steer, subagent activity and per-session Gian MCP injection. Available choices come from actual Runtime snapshots. Native history deletion is unsupported; ordinary closure only detaches Gian ownership. Real Provider requests require separate acceptance: installation alone does not certify a model turn.
+It supports session creation and resume, history replay, model/configuration snapshots, tool activity, permission interactions, MCP form questions with free-text and optional fields, attachments, renaming, forks, current-turn Steer, subagent activity and per-session Gian MCP injection. Available choices come from actual Runtime snapshots. Native history deletion is unsupported; ordinary closure only detaches Gian ownership. Real Provider requests require separate acceptance: installation alone does not certify a model turn.
 
 ## 3. Runtime architecture
 
@@ -22,7 +22,7 @@ Install ZCode Integration from Gian's official Catalog. Gian verifies and prepar
 
 ## 5. First use
 
-1. Install and prepare ZCode Integration in Gian; confirm Proxy 0.4.2 and CLI 0.16.9 verification.
+1. Install and prepare ZCode Integration in Gian; confirm Proxy 0.4.4 and CLI 0.16.9 verification.
 2. Configure the Provider through the installed CLI's `zcode login` or ZCode TUI.
 3. Select a model and workspace for the Agent, then try a small text task. Other capabilities depend on the actual model and Provider.
 

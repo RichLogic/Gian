@@ -2,6 +2,7 @@ import { isValidElement, useContext, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 import { useChatUiT } from './i18n.js';
@@ -248,8 +249,8 @@ export function MarkdownText({ children, preserveBoundarySpaces = false, renderS
   return (
     <ReactMarkdown
       remarkPlugins={preserveBoundarySpaces
-        ? [remarkGfm, remarkMath, [remarkBoundarySpaces, { source }]]
-        : [remarkGfm, remarkMath]}
+        ? [remarkGfm, remarkMath, remarkCjkFriendly, [remarkBoundarySpaces, { source }]]
+        : [remarkGfm, remarkMath, remarkCjkFriendly]}
       rehypePlugins={rehypePlugins as never}
       components={components}
     >

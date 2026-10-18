@@ -18,12 +18,20 @@ import {
   useSessionOperationPending,
   useSessionOrderOverlay,
 } from '../operations/use-operations.js';
-import { sessionNeedsAttention, buildRailSections, orderByIds } from '../session-routing.js';
+import { sessionNeedsAttention, buildRailSections, orderByIds, delegatedCallerIds } from '../session-routing.js';
 import { moveById, useDragReorder } from '../dnd-reorder.js';
 import type { DropPlace, RowDragProps } from '../dnd-reorder.js';
 import { relTime, statusGlyphShown, StatusIcon } from '../views/session-list-status.js';
 import { useScheduledSessionIds } from '../controllers/use-schedules.js';
 import { useRemoteEnvironmentConnected } from '../controllers/use-remote-environments.js';
+import {
+  consumeSessionReveal,
+  notifyRevealRowReady,
+  peekSessionReveal,
+  scrollRowIntoContainerView,
+  subscribeRevealRowReady,
+  subscribeSessionReveal,
+} from '../presentation/session-reveal.js';
 
 // ─── V2 inline icons (24-grid, 1.5px stroke, round caps — phase 6 grid) ────
 function SvgIcon({ d, size = 16, stroke = 1.5, filled = false }: { d: string; size?: number; stroke?: number; filled?: boolean }) {
@@ -47,8 +55,8 @@ const ICON = {
   globeX: 'm16 3 5 5 M2 12h20A10 10 0 1 1 12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 4-10 m21 3-5 5',
   // lucide "globe" — neutral remote marker (hover-card repo row, breadcrumb)
   globe: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0 M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20 M2 12h20',
-  // lucide "compass" — session was created by another Gian session through
-  // the Gian MCP child-delegation tool (circle converted to path arcs)
+  // lucide "compass" — session created a child via the Gian MCP
+  // session.create delegation tool (circle converted to path arcs)
   compass: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z M16.24 7.76l-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z',
   folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   folderOpen: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2.5 M3 7v10a2 2 0 0 0 2 2h12.5a2 2 0 0 0 1.9-1.4L21.8 11H7.5a2 2 0 0 0-1.9 1.4L4 17.5',
@@ -150,10 +158,16 @@ export function SessionsSidebar({
     });
   };
 
+  // Delegation callers (2026-10-12): the compass badge marks the session that
+  // CREATED a child via the Gian MCP session.create tool — the caller set is
+  // derived from the children's created_by_session_id FKs.
+  const delegatedCallers = useMemo(() => delegatedCallerIds(sessions), [sessions]);
+
   function makeRowHandlers(s: Session) {
     return {
       active: (mode === 'tasks' || mode === 'sessions') && s.id === activeSessionId,
       workspaceName: s.workspace_id != null ? wsById.get(s.workspace_id)?.name : undefined,
+      delegatedCaller: delegatedCallers.has(s.id),
       onSelect: () => onSelect(s.id),
       onPin: (pinned: boolean) => onPinSession(s.id, pinned),
       onArchive: () => onArchiveSession(s.id),
@@ -221,6 +235,84 @@ export function SessionsSidebar({
     }
   });
 
+  // ── Explicit-navigation reveal (Issue #53/#168) ─────────────────────────
+  // A search/Inbox/notification selection opens the conversation in the main
+  // pane; this rail must also show the row. Only a pending bus intent runs
+  // this pass — background WS refreshes never post one, so the user's own
+  // scroll position is never stolen.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // The pending scroll carries the intent nonce: a newer navigation that
+  // arrives before the row renders invalidates it, and the stale pass clears
+  // itself instead of scrolling back to the old target.
+  const pendingRevealScrollRef = useRef<{ sessionId: string; nonce: number } | null>(null);
+  const [revealTick, setRevealTick] = useState(0);
+  const [revealRowReadyTick, setRevealRowReadyTick] = useState(0);
+  const [revealSessionId, setRevealSessionId] = useState<string | null>(null);
+  useEffect(() => subscribeSessionReveal(() => setRevealTick(tick => tick + 1)), []);
+  // A group child's show-more cap raises in the CHILD's own effect pass; its
+  // re-render alone never re-runs this rail's layout effect, so the child
+  // signals readiness explicitly and the scroll pass re-runs on the tick.
+  useEffect(() => subscribeRevealRowReady(() => setRevealRowReadyTick(tick => tick + 1)), []);
+
+  // Phase 1: make the target row renderable — expand its section and
+  // workspace group, and raise the 无归属 show-more cap when the row is
+  // beyond it. A session missing from the read model keeps the intent
+  // pending until data arrives; an archived read-only target has no rail
+  // row, so the intent is consumed and dropped.
+  useEffect(() => {
+    const request = peekSessionReveal();
+    if (!request || request.surface !== 'sessions') return;
+    const target = sessions.find(s => s.id === request.sessionId);
+    if (!target) return;
+    if (target.archived === 1) {
+      consumeSessionReveal(request.nonce);
+      return;
+    }
+    const pinnedSession = target.pinned_at != null;
+    const workspace = target.workspace_id != null ? wsById.get(target.workspace_id) : undefined;
+    const sectionKey = pinnedSession || workspace?.pinned === 1
+      ? 'pinned'
+      : target.workspace_id == null ? 'unfiled' : 'projects';
+    if (collapsedSections.has(sectionKey)) toggleSection(sectionKey);
+    if (!pinnedSession && target.workspace_id != null && collapsed.has(target.workspace_id)) {
+      toggleGroup(target.workspace_id);
+    }
+    if (sectionKey === 'unfiled') {
+      const index = unfiledRows.findIndex(s => s.id === target.id);
+      if (index >= 0 && index >= unfiledShown) setUnfiledShown(index + 1);
+    }
+    pendingRevealScrollRef.current = { sessionId: target.id, nonce: request.nonce };
+    setRevealSessionId(target.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealTick, sessions, workspaces, collapsedSections, collapsed, unfiledRows, unfiledShown]);
+
+  // Phase 2: once the row is in the DOM (after every expansion render),
+  // scroll it into the rail's own scroll container and consume the intent.
+  // The pass re-runs on parent renders AND on the row-ready tick a capped
+  // group raises after its cap effect grows.
+  useLayoutEffect(() => {
+    const pending = pendingRevealScrollRef.current;
+    if (!pending) return;
+    const request = peekSessionReveal();
+    if (!request || request.nonce !== pending.nonce
+        || request.surface !== 'sessions' || request.sessionId !== pending.sessionId) {
+      // Superseded or retired before the row rendered — never scroll back.
+      pendingRevealScrollRef.current = null;
+      setRevealSessionId(null);
+      return;
+    }
+    const container = scrollRef.current;
+    if (!container) return;
+    const row = container.querySelector(`[data-testid="session-row-${pending.sessionId}"]`);
+    if (!(row instanceof HTMLElement)) return;
+    scrollRowIntoContainerView(container, row);
+    pendingRevealScrollRef.current = null;
+    setRevealSessionId(null);
+    consumeSessionReveal(request.nonce);
+    // revealTick + revealRowReadyTick re-arm the pass; the rest re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealTick, revealRowReadyTick, sessions, collapsedSections, collapsed, unfiledShown, revealSessionId]);
+
   return (
     <aside className="sidebar">
       {/* Pinned chrome above the scroll area — see TasksView for why the nav
@@ -229,7 +321,7 @@ export function SessionsSidebar({
         <SidebarNavRows mode={mode} onSetMode={onSetMode} />
         <SidebarListSwitch listMode={listMode} onSetListMode={onSetListMode} />
       </div>
-      <div className="sb-scroll">
+      <div className="sb-scroll" ref={scrollRef}>
         {/* Section labels only appear once something is pinned — with no
             pinned content the rail looks exactly like before. */}
         {sections.hasPinned && (
@@ -254,6 +346,7 @@ export function SessionsSidebar({
                     onEditWorkspace={onEditWorkspace}
                     onNewForWorkspace={onNewForWorkspace}
                     renderRow={renderRow}
+                    revealSessionId={revealSessionId}
                     groupDrag={{ props: pinnedWsDnd.rowProps(wsId), className: pinnedWsDnd.rowClass(wsId) }}
                   />
                 ))}
@@ -282,6 +375,7 @@ export function SessionsSidebar({
             onEditWorkspace={onEditWorkspace}
             onNewForWorkspace={onNewForWorkspace}
             renderRow={renderRow}
+            revealSessionId={revealSessionId}
             groupDrag={{ props: projectWsDnd.rowProps(wsId), className: projectWsDnd.rowClass(wsId) }}
           />
         ))}
@@ -330,6 +424,7 @@ function SidebarGroup({
   onEditWorkspace,
   onNewForWorkspace,
   renderRow,
+  revealSessionId,
   groupDrag,
 }: {
   wsId: string;
@@ -342,6 +437,9 @@ function SidebarGroup({
   onEditWorkspace: (workspace: Workspace) => void;
   onNewForWorkspace: (workspaceId: string) => void;
   renderRow: (s: Session, drag?: { props: RowDragProps; className: string }) => React.ReactNode;
+  /** Explicit-navigation reveal target: when the row sits beyond the
+   *  show-more cap, raise the cap so the row renders. */
+  revealSessionId?: string | null;
   /** Workspace-level drag (owned by the Sidebar's pinned/projects controller). */
   groupDrag: { props: RowDragProps; className: string };
 }) {
@@ -370,6 +468,18 @@ function SidebarGroup({
   // Display cap: 5 rows up front, 显示更多 reveals 10 more per click
   // (2026-09-06 owner call). View-only; the drag order is unaffected.
   const [shown, setShown] = useState(GROUP_INITIAL_SHOWN);
+  // An explicit-navigation reveal targeting a row beyond the cap raises the
+  // cap so the row actually renders before it is scrolled into view. The
+  // parent's scroll pass re-runs on the row-ready signal — this component's
+  // re-render alone never re-fires the parent's effects.
+  useEffect(() => {
+    if (!revealSessionId) return;
+    const index = rows.findIndex(s => s.id === revealSessionId);
+    if (index >= 0 && index >= shown) {
+      setShown(index + 1);
+      notifyRevealRowReady();
+    }
+  }, [revealSessionId, rows, shown]);
   const visibleRows = rows.slice(0, shown);
   return (
     <div>
@@ -519,7 +629,7 @@ export function SessionHoverCard({
       <div className="shc-repo">
         {session.remote_execution && <SvgIcon d={ICON.globe} size={12} />}
         <SvgIcon d={ICON.folder} size={12} />
-        <span>{workspaceName ?? '—'}</span>
+        <span>{workspaceName ?? session.remote_execution?.repository_name ?? '—'}</span>
       </div>
     </div>,
     document.body,
@@ -527,7 +637,7 @@ export function SessionHoverCard({
 }
 
 export function SessionRow({
-  session, active, hideAge = false, hidePin = false, workspaceName, onSelect, onPin, onArchive, drag,
+  session, active, hideAge = false, hidePin = false, workspaceName, delegatedCaller, onSelect, onPin, onArchive, drag,
 }: {
   session: Session;
   active: boolean;
@@ -537,6 +647,9 @@ export function SessionRow({
   hidePin?: boolean;
   /** Hover-card context — the owning Repo's name. */
   workspaceName?: string;
+  /** This session CREATED at least one child via the Gian MCP session.create
+   *  tool (derived from the children's created_by_session_id FKs). */
+  delegatedCaller?: boolean;
   onSelect: () => void;
   onPin: (pinned: boolean) => void;
   onArchive: () => void;
@@ -588,16 +701,16 @@ export function SessionRow({
               <SvgIcon d={remoteDisconnected ? ICON.globeX : ICON.globeCode} size={13} />
             </span>
           )}
-          {/* Delegation glyph (2026-10-08 owner): this session was created by
-              another Gian session via the Gian MCP child-delegation tool —
-              created_by_session_id is the parent session's FK, set once at
-              insert and carried on every Session payload. Same icon gutter as
-              the remote/schedule badges. */}
-          {session.created_by_session_id && (
+          {/* Delegation glyph: this session CREATED a child conversation via
+              the Gian MCP session.create tool. The badge marks the caller —
+              created_by_session_id sits on the child, so SessionsSidebar
+              derives the caller set and passes it down as a per-row flag.
+              Same icon gutter as the remote/schedule badges. */}
+          {delegatedCaller && (
             <span
               className="ri-delegate-badge"
-              title={t('coding.session.delegatedChild')}
-              aria-label={t('coding.session.delegatedChild')}
+              title={t('coding.session.delegatedCaller')}
+              aria-label={t('coding.session.delegatedCaller')}
               data-testid={`session-delegated-${session.id}`}
             >
               <SvgIcon d={ICON.compass} size={13} />

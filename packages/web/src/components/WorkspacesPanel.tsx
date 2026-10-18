@@ -147,12 +147,20 @@ export function WorkspaceDetailBody({
   systemConfig,
   onChange,
   onSessionAdopted,
+  focusTreeId,
+  focusNonce,
+  focusVisible,
 }: {
   workspace: Workspace | null;
   ws: GianWs;
   systemConfig: SystemConfig | null;
   onChange: () => void;
   onSessionAdopted: (session: Session) => void;
+  /** Search deep link: exact working-tree inventory id for the Git pane. */
+  focusTreeId?: string | null;
+  focusNonce?: number;
+  /** False while the sheet that hosts this detail is hidden. */
+  focusVisible?: boolean;
 }) {
   void systemConfig;
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -176,6 +184,9 @@ export function WorkspaceDetailBody({
         onSessionAdopted={onSessionAdopted}
         onDeleted={onChange}
         onOpenClaudeMd={() => setClaudeMdOpen(true)}
+        focusTreeId={focusTreeId}
+        focusNonce={focusNonce}
+        focusVisible={focusVisible}
       />
       {claudeMdOpen && workspace && (
         <ClaudeMdInspector

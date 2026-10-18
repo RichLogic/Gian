@@ -376,6 +376,45 @@ test('connector negotiates authenticated hello before commands and rejects disjo
   } finally { teardownRemoteHarness(context); }
 });
 
+test('state.refresh carries the Host locale only after negotiating wire.host_locale', async () => {
+  const context = setupRemoteHarness();
+  try {
+    const device = seedDevice(context);
+    const refreshHost = async (hello: object | null) => {
+      const crypto = await pairCrypto();
+      const transports = MemoryDuplexTransport.pair();
+      const replies: unknown[] = [];
+      transports.device.onMessage(frame => replies.push(frame));
+      const connector = new RemoteConnector(
+        transports.host,
+        crypto.host,
+        new RemoteReplayBuffer(),
+        (record, next, hooks) => context.runtime.commands.execute(record, next, hooks),
+        device,
+      );
+      if (hello) await sendDeviceFrame(transports.device, crypto.device, hello);
+      await sendDeviceFrame(transports.device, crypto.device, command('state.refresh', {}));
+      const result = await waitUntil(async () => {
+        const opened = await openHostFrames(crypto.device, replies.splice(0));
+        return opened.find(entry => entry.message.type === 'command.result') ?? null;
+      }, 5_000);
+      connector.close();
+      return (result.message as { data?: { host?: Record<string, unknown> } }).data?.host;
+    };
+    // Harness config leaves the default locale: zh-CN.
+    const negotiated = await refreshHost(createRemoteHello(device.id, 'test'));
+    assert.equal(negotiated?.['locale'], 'zh-CN');
+    const legacy = await refreshHost(null);
+    assert.equal(legacy !== undefined && 'locale' in legacy, false,
+      'a legacy no-hello client parses snapshots closed and must not receive locale');
+    const withoutFeature = await refreshHost({
+      ...createRemoteHello(device.id, 'test'),
+      capabilities: ['wire.snapshot_parts'],
+    });
+    assert.equal(withoutFeature !== undefined && 'locale' in withoutFeature, false);
+  } finally { teardownRemoteHarness(context); }
+});
+
 test('connector heartbeat, generation restart, and exponential backoff stay local', async () => {
   const context = setupRemoteHarness();
   try {

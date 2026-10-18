@@ -132,6 +132,11 @@ export function maybeNotifyForAttention(
   options: {
     visibleSessionId: string | null;
     onClick?: () => void;
+    /** Semantic-event rendering (0.6.7): the client localizes the event and
+     *  uses the safe conversation name; legacy title/body pass through
+     *  unchanged when `event` is absent. */
+    localizeEvent?: (event: NonNullable<AttentionMessage['event']>) => string;
+    untitledLabel?: string;
   },
 ): boolean {
   // Signed desktop builds receive global, privacy-bounded `attention`
@@ -148,9 +153,16 @@ export function maybeNotifyForAttention(
     return false;
   }
 
+  const title = message.event !== undefined
+    ? message.session_name || options.untitledLabel || message.title
+    : message.title;
+  const body = message.event !== undefined && options.localizeEvent
+    ? options.localizeEvent(message.event)
+    : message.body;
+
   try {
-    const notification = new Notification(message.title, {
-      body: message.body,
+    const notification = new Notification(title, {
+      body,
       // The Host id is stable across replay, so the OS itself de-duplicates
       // a re-broadcast of the same display event.
       tag: message.id,

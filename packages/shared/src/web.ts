@@ -16,6 +16,15 @@ import type { InputItem } from './proxy.js';
 import type { MessageContextItem } from './context.js';
 import type { SideChatPublicSnapshot, SessionOrigin } from './sidechat.js';
 import type { SidechatCloseResult } from './operations.js';
+import type {
+  AttentionControlMessage,
+  AttentionInboxRef,
+  AttentionLookupMessage,
+  AttentionMessage,
+} from './attention.js';
+
+/** Kept for `import type { AttentionMessage } from '@gian/shared/web'`. */
+export type { AttentionMessage } from './attention.js';
 
 export interface AuthMessage {
   type: 'auth';
@@ -72,35 +81,8 @@ export interface EventMessage extends EventEnvelope {
   type: 'event';
 }
 
-/**
- * Lightweight, global signal for events that may need the user's attention.
- * Unlike `EventMessage`, this intentionally carries no provider-native/raw
- * payload and is not scoped to the transcript subscription. Desktop clients
- * can therefore observe background sessions without receiving their full
- * transcripts.
- */
-export type AttentionKind = 'turn-completed' | 'approval' | 'question' | 'error';
-
-export interface AttentionMessage {
-  type: 'attention';
-  /** Stable across duplicate delivery attempts for the same display event. */
-  id: string;
-  session_id: string;
-  /** 1-based Host turn number, suitable for navigation. */
-  turn: number;
-  kind: AttentionKind;
-  /** Unix milliseconds copied from the canonical display event. */
-  timestamp: number;
-  /** Short, notification-safe presentation text. */
-  title: string;
-  /** Notification-safe summary, capped by the Host to a small UTF-8 budget. */
-  body: string;
-  provider: Executor;
-  /** Present on scheduled-run failure/unknown attention: the Run whose log
-   *  the notification click must open (Timer detail), instead of the control
-   *  Session's latest Turn. */
-  schedule?: { schedule_id: string; run_id: string };
-}
+/** Preference kind for an attention signal. Plan review uses `approval`. */
+export type AttentionKind = AttentionMessage['kind'];
 
 export interface SessionUpdatedMessage {
   type: 'session:updated';
@@ -307,6 +289,7 @@ export type ServerToClientMessage =
   | StateSyncMessage
   | EventMessage
   | AttentionMessage
+  | AttentionControlMessage
   | SessionUpdatedMessage
   | SessionHistoryRebuiltMessage
   | SessionCreatedMessage
@@ -497,6 +480,14 @@ export interface ApprovalResolveMessage {
   answers?: Record<string, string | boolean | string[]>;
   /** Exact executor option for ACP-native approvals. */
   native_option_id?: string;
+  /**
+   * Inbox occurrence the user acted on: `{ id, generation }`, the same shape
+   * as `AttentionInboxRef`. Omit it and resolve stays the current pending
+   * approval for web, IM, tool, and auto callers. When it is present, the
+   * Host checks that exact row, session, interaction, and Host turn before
+   * any resolve or provider respond. A mismatch is `PRECONDITION_FAILED`.
+   */
+  expected_inbox?: AttentionInboxRef;
   /** Correlation id — see `OperationResultMessage`. */
   request_id?: string;
 }
@@ -804,6 +795,7 @@ export interface TermCloseMessage {
 
 export type ClientToServerMessage =
   | AuthMessage
+  | AttentionLookupMessage
   | EventSubscribeMessage
   | SessionCreateMessage
   | MessageSendMessage

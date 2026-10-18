@@ -78,6 +78,8 @@ export interface SheetTab {
   scrollLine?: number;
   fullPath?: string;
   workingTreeId?: string;
+  /** Increments on every search deep link, including a repeat of the same tree. */
+  focusNonce?: number;
   planBody?: string;
   /** Commit tabs (history group): the FULL sha — selection identity is
    *  {workingTreeId, sha}; the 7-char short sha only ever appears in labels
@@ -178,4 +180,18 @@ export function resolveOpenTarget(
   if (value === '@newtab') return { kind: 'system', name: 'browser' };
   if (value === '@finder') return { kind: 'system', name: 'finder' };
   return { kind: 'app', app: value };
+}
+
+/** True when `element` sits under a `hidden` ancestor or an inline
+ *  `display: none` ancestor. The workbench sheet and inactive tab slots hide
+ *  with inline `display: none`, not the `hidden` attribute, so a scroll that
+ *  only checks `[hidden]` still runs against a panel the user cannot see. */
+export function elementIsLayoutHidden(element: HTMLElement): boolean {
+  if (element.closest('[hidden]')) return true;
+  let node: HTMLElement | null = element;
+  while (node) {
+    if (node.style.display === 'none') return true;
+    node = node.parentElement;
+  }
+  return false;
 }

@@ -3,7 +3,7 @@ import type {
   GianDesktopNavigationApi,
   GianDesktopNavigationTarget,
 } from '../src/desktop-bridge.js';
-import { resolveSessionNavigation, subscribeDesktopNavigation } from '../src/desktop-navigation.js';
+import { resolveSessionNavigation, subscribeDesktopNavigation, workbenchListMode } from '../src/desktop-navigation.js';
 
 const targetA: GianDesktopNavigationTarget = {
   type: 'session',
@@ -187,6 +187,24 @@ describe('resolveSessionNavigation (in-place jump)', () => {
     }
   });
 
+  it('opens an archived session read-only only for deep links that opted in', () => {
+    // Search/Inbox/notification deep links (Issue #168): archived targets
+    // select like active sessions; the transcript renders read-only.
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'sessions', session: { task_id: null, archived: 1 }, allowArchivedReadOnly: true },
+    )).toEqual({ kind: 'select-in-sessions', sessionId: 's1' });
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'tasks', session: { task_id: 'task-9', archived: 1 }, allowArchivedReadOnly: true },
+    )).toEqual({ kind: 'select-subtask-in-tasks', taskId: 'task-9', sessionId: 's1' });
+    // Without the opt-in, archived stays unavailable (existing behavior).
+    expect(resolveSessionNavigation(
+      { sessionId: 's1' },
+      { mode: 'sessions', session: { task_id: null, archived: 1 }, allowArchivedReadOnly: false },
+    )).toEqual({ kind: 'unavailable', sessionId: 's1', reason: 'archived' });
+  });
+
   it('falls back to Repos from non-conversation pages only when no list was chosen', () => {
     for (const mode of ['spaces', 'agents', 'timer', 'custom'] as const) {
       expect(resolveSessionNavigation(
@@ -249,5 +267,24 @@ describe('resolveSessionNavigation (in-place jump)', () => {
         session: { task_id: 'task-9' },
       },
     )).toEqual({ kind: 'select-in-sessions', sessionId: 's1' });
+  });
+});
+
+describe('workbenchListMode', () => {
+  it('uses Repos from Timer, Agents, and Custom when no list was chosen', () => {
+    for (const mode of ['timer', 'agents', 'custom'] as const) {
+      expect(workbenchListMode({ mode, explicitListMode: null })).toBe('sessions');
+    }
+  });
+
+  it('keeps an explicit Tasks or Repos choice from a non-conversation page', () => {
+    expect(workbenchListMode({ mode: 'timer', explicitListMode: 'tasks' })).toBe('tasks');
+    expect(workbenchListMode({ mode: 'timer', explicitListMode: 'sessions' })).toBe('sessions');
+    expect(workbenchListMode({ mode: 'agents', explicitListMode: 'tasks' })).toBe('tasks');
+  });
+
+  it('keeps the current Tasks or Repos page ahead of an older explicit choice', () => {
+    expect(workbenchListMode({ mode: 'tasks', explicitListMode: 'sessions' })).toBe('tasks');
+    expect(workbenchListMode({ mode: 'sessions', explicitListMode: 'tasks' })).toBe('sessions');
   });
 });

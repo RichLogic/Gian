@@ -583,6 +583,11 @@ function SessionCreateForm({
   const selectedAgent = agents?.find(agent => agent.id === agentId) ?? null;
   const executor = selectedAgent?.pluginId ?? null;
   const configuredDefaults = selectedAgent?.defaults;
+  const catalogSourceKey = JSON.stringify([
+    selectedAgent?.plugin.version, selectedAgent?.plugin.path,
+    selectedAgent?.cli.version, selectedAgent?.cli.path,
+    selectedAgent?.cli.contentFingerprint, selectedAgent?.home?.path,
+  ]);
   // Capability chip state holds only explicit per-draft choices. Catalog-backed
   // native executors use the same state now that their options are available
   // before session.create; configured Agent defaults remain display fallbacks.
@@ -601,6 +606,7 @@ function SessionCreateForm({
   );
   const [catalogValues, setCatalogValues] = useState<Record<string, ConfigValue>>({});
   const [catalogResolveError, setCatalogResolveError] = useState<string | null>(null);
+  const [catalogRefreshing, setCatalogRefreshing] = useState(Boolean(executor));
   const [models, setModels] = useState<ProxyModel[]>([]);
   const [proxyModes, setProxyModes] = useState<ProxyModeCapabilities[]>([]);
   const [wsQuery, setWsQuery] = useState('');
@@ -716,25 +722,29 @@ function SessionCreateForm({
     setCatalogValues({});
     catalogResolveSignature.current = '';
     if (!executor) {
+      setCatalogRefreshing(false);
       setCatalog({ configOptions: [], input: [], slashCommands: [] });
       setCatalogExecutor(null);
       return;
     }
     const cached = getCatalogCached(executor, agentId);
+    setCatalogRefreshing(true);
     if (cached) {
       setCatalog(cached);
       setCatalogExecutor(executor);
       const fromCatalog = modelsFromCatalog(optionByRole(cached.configOptions, 'model'));
       if (fromCatalog.length > 0) setModels(fromCatalog);
-      return;
     }
-    setCatalogExecutor(null);
+    if (!cached) setCatalogExecutor(null);
     let alive = true;
-    void fetchCatalogCached(executor, agentId)
+    // Reopening creation or changing the Agent's Proxy/CLI must read the
+    // current catalog, even if the earlier version left a permanent cache.
+    void fetchCatalogCached(executor, agentId, { refresh: true })
       .then(next => {
         if (!alive) return;
         setCatalog(next);
         setCatalogExecutor(executor);
+        setCatalogRefreshing(false);
         const fromCatalog = modelsFromCatalog(optionByRole(next.configOptions, 'model'));
         if (fromCatalog.length > 0) setModels(fromCatalog);
       })
@@ -742,10 +752,11 @@ function SessionCreateForm({
         if (alive) {
           setCatalog({ configOptions: [], input: [], slashCommands: [] });
           setCatalogExecutor(executor);
+          setCatalogRefreshing(false);
         }
       });
     return () => { alive = false; };
-  }, [executor, agentId]);
+  }, [executor, agentId, catalogSourceKey]);
 
   useEffect(() => {
     if (
@@ -1170,6 +1181,7 @@ function SessionCreateForm({
     && !creating
     && !checkingTranslation
     && !preparingAttachments
+    && !catalogRefreshing
     && !createUnknown;
 
   async function translationSetupReady(): Promise<boolean> {

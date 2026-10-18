@@ -1,21 +1,20 @@
-import { createContext, useCallback, useContext } from 'react';
+import { createContext, useCallback, useContext, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { ChatUiI18nContext } from '@gian/chat-ui';
 import type { Locale, MessageKey } from './messages.js';
 import { EN } from './en.js';
 import { ZH } from './zh.js';
 
+/** The UI locale follows the Host: `state.snapshot.host.locale` lands in
+ *  `RemoteUiState.locale` and App re-binds this provider to it. Before the
+ *  first snapshot (pairing, enrollment) — and against Hosts predating
+ *  `wire.host_locale` — the fallback is 'en'. index.html keeps `lang="en"`
+ *  as the pre-boot default; the provider syncs `<html lang>` from here.
+ *  Conversation, Task, Repo, and Host names remain user data and are never
+ *  translated. */
 interface LocaleCtx {
   locale: Locale;
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
-}
-
-/** Remote Web intentionally ships with one product language. Conversation,
- * Task, Repo, and Host names remain user data and are never translated. */
-export const REMOTE_WEB_LOCALE: Locale = 'en';
-
-export function resolveRemoteWebLocale(_search = ''): Locale {
-  return REMOTE_WEB_LOCALE;
 }
 
 function interpolate(template: string, vars?: Record<string, string | number>): string {
@@ -43,6 +42,9 @@ export function LocaleProvider({
       interpolate(messages[k] ?? EN[k] ?? k, vars),
     [messages],
   );
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
   // chat-ui components read copy through their own context; feed them the
   // same translator (remote-web's table is a superset of the chat-ui keys).
   return (

@@ -53,6 +53,15 @@ describe('normalizeRisk / mapApprovalDecision / formatAnsweredWith', () => {
     expect(mapApprovalDecision('keep_planning')).toBe('declined');
     expect(mapApprovalDecision('approved-session')).toBe('approved-session');
     expect(mapApprovalDecision('allow')).toBe('approved-once');
+    // Plan accepts are legitimate affirmative outcomes (the session-mode flip
+    // is applied by the Host, not the card status).
+    expect(mapApprovalDecision('accept_with_ask')).toBe('approved-once');
+    expect(mapApprovalDecision('accept_with_auto')).toBe('approved-once');
+    // Unknown strings — including reject-flavored ones — never fall into an
+    // allow bucket; only the explicit enums above claim a decision.
+    expect(mapApprovalDecision('reject_session')).toBe('resolved');
+    expect(mapApprovalDecision('')).toBe('resolved');
+    expect(mapApprovalDecision('opaque-action-id')).toBe('resolved');
   });
 
   it('flattens AskUserQuestion answers and rejects junk', () => {

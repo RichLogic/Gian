@@ -6,6 +6,7 @@ import type { Executor, ProxyModeCapabilities, Session } from '@gian/shared';
 import { Composer } from '../src/components/Composer.js';
 import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
 import { LocaleProvider } from '../src/i18n/index.js';
+import { projectedCatalog } from '../../proxies/antigravity-proxy/test/fixtures/config-options.js';
 
 const CODEX_MODES: ProxyModeCapabilities[] = [
   { id: 'plan', label: 'Plan', description: 'Plan before making changes', isDefault: false },
@@ -116,6 +117,30 @@ describe('Composer mode dropdown from proxy capabilities', () => {
     localStorage.clear();
     clearComposerCapabilityCaches();
     loadProxyCapabilitiesMock.mockReset();
+  });
+
+  it('maps the real Antigravity projection to independent Model, Thinking and native Mode controls', async () => {
+    const catalog = projectedCatalog();
+    // This case isolates generic control mapping, not asynchronous resolution.
+    loadProxyCapabilitiesMock.mockResolvedValue({ ...catalog, capabilities: { 'catalog.modeSemantics': 1 } });
+    const callbacks = renderComposer(makeSession('io.gian.antigravity', {
+      model: 'gemini-3.8-flash', thinking_effort: 'high', approval_mode: null,
+      turn_config: { model: 'gemini-3.8-flash', thinking: 'high', mode: 'default' },
+    }));
+    await waitFor(() => expect(screen.getByTestId('composer-model-chip')).toHaveTextContent('Gemini 3.8 Flash'));
+    expect(screen.getByTestId('composer-thinking-chip')).toHaveTextContent('High');
+    expect(document.querySelector('.cmp-approval-btn')).toHaveTextContent('Default');
+    await userEvent.click(screen.getByTestId('composer-thinking-chip'));
+    await userEvent.click(await screen.findByText('Low', { selector: '.think-pop .mp-row-title' }));
+    expect(callbacks.onSetEffort).toHaveBeenCalledWith('low');
+    await userEvent.click(document.querySelector('.cmp-approval-btn')!);
+    await userEvent.click(await screen.findByText('Auto Edit', { selector: '.approval-pop .mp-row-title' }));
+    expect(callbacks.onSetTurnConfig).toHaveBeenCalledWith('mode', 'auto_edit');
+    expect(callbacks.onSetMode).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByTestId('composer-model-chip'));
+    expect(screen.queryByText('Gemini 3.8 Flash (High)', { selector: '.model-pop .mp-row-title' })).toBeNull();
+    await userEvent.click(await screen.findByText('Gemini Fixed', { selector: '.model-pop .mp-row-title' }));
+    expect(callbacks.onSetModel).toHaveBeenCalledWith('gemini-fixed');
   });
 
   // NOTE: the mode cache in composer/capabilities.ts is module-level, so this

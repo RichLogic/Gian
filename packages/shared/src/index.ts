@@ -5,6 +5,31 @@ export * from './official-catalog-source.js';
 export * from './proxy-catalog-projection.js';
 export * from './model.js';
 export * from './inbox.js';
+export {
+  ATTENTION_EVENTS,
+  ATTENTION_EVENT_LABELS,
+  ATTENTION_EVENT_KINDS,
+  ATTENTION_SESSION_NAME_MAX,
+  ATTENTION_LOOKUP_MAX,
+  safeAttentionSessionName,
+  attentionSessionName,
+  isAttentionInboxRef,
+  isAttentionNavigationTarget,
+  isAttentionMessage,
+  isScheduleConfirmationAttentionMessage,
+  isAttentionControlMessage,
+  isAttentionLookupMessage,
+} from './attention.js';
+export type {
+  AttentionEvent,
+  SessionAttentionMessage,
+  ScheduleConfirmationAttentionMessage,
+  AttentionInboxRef,
+  AttentionNavigationTarget,
+  AttentionControlItem,
+  AttentionControlMessage,
+  AttentionLookupMessage,
+} from './attention.js';
 export * from './action.js';
 export * from './manager.js';
 export * from './proxy.js';
@@ -27,5 +52,7 @@ export * from './operations.js';
 export * from './tool.js';
 export * from './context.js';
 export * from './schedule.js';
+export * from './search.js';
+export * from './search-text.js';
 export type { RemoteSettingsSnapshot, RemoteSettingsPairing, RemoteSettingsAuditEntry } from './remote-settings.js';
 export * from './translation.js';

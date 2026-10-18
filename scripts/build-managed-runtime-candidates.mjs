@@ -17,8 +17,10 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { proxyReleaseMetadata } from './proxy-release-metadata.mjs';
+import { shippingProxyIds } from './build-proxy-artifacts.mjs';
 import { stageZcodeRuntime } from './build-zcode-runtime.mjs';
 import { validateZcodeRuntimeSource, zcodeRuntimeSource } from './zcode-runtime-source.mjs';
+import { buildAntigravityRuntimeCandidate } from './build-antigravity-runtime.mjs';
 
 const execFileAsync = promisify(execFile);
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -30,36 +32,36 @@ export const ZCODE_RUNTIME_ASSET_NAME = 'zcode.tar.gz';
 
 export const upstreamRuntimeCandidates = Object.freeze({
   claude: Object.freeze({
-    version: '2.1.285',
+    version: '2.1.302',
     format: 'raw',
     entryRelativePath: 'bin/claude',
-    url: 'https://downloads.claude.ai/claude-code-releases/2.1.285/darwin-arm64/claude',
-    sha256: '51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4',
-    size: 223821616,
+    url: 'https://downloads.claude.ai/claude-code-releases/2.1.302/darwin-arm64/claude',
+    sha256: '5262ce9de86243fed0d21edc39b271555d56780d0112e2b194439fe1c6662d37',
+    size: 267956720,
   }),
   codex: Object.freeze({
-    version: '0.161.0',
+    version: '0.163.0',
     format: 'tar.gz',
     entryRelativePath: 'bin/codex',
-    url: 'https://github.com/openai/codex/releases/download/rust-v0.161.0/codex-package-aarch64-apple-darwin.tar.gz',
-    sha256: 'f0feee8537daf8dd6b4e0a36e764549ad14afdbb419d8775aeab9feb20182313',
-    size: 131714490,
+    url: 'https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-package-aarch64-apple-darwin.tar.gz',
+    sha256: 'b0344fc2e41f15e0071147e5869008047b8ff4bf2c4a8897975d3bae3f103b34',
+    size: 133412281,
   }),
   kimi: Object.freeze({
-    version: '2.1.1',
+    version: '2.2.0',
     format: 'tar.gz',
     entryRelativePath: 'kimi',
-    url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.1.1/kimi-code-darwin-arm64.tar.gz',
-    sha256: '8c3bad99571b16abd113ab5d511a98a36b852c0d5493991842a67b8c2bc4ecd0',
-    size: 62296524,
+    url: 'https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%402.2.0/kimi-code-darwin-arm64.tar.gz',
+    sha256: '034b37fee68e242b8d1800470c502d5870602fb54e1597d99d20d9e9f3fa8f59',
+    size: 62493391,
   }),
   grok: Object.freeze({
-    version: '1.0.46',
+    version: '1.0.62',
     format: 'raw',
     entryRelativePath: 'bin/grok',
-    url: 'https://x.ai/cli/grok-1.0.46-macos-aarch64',
-    sha256: 'e8daa302364c9c3b6a5546d511cfbd1ab5e5d407a9b04282f660665ea405f9f3',
-    size: 150374256,
+    url: 'https://x.ai/cli/grok-1.0.62-macos-aarch64',
+    sha256: 'ec434e831afdcfce87780f2815fd732b1df8a4a8de96a491716ad75d13605a4e',
+    size: 175577200,
     publish: true,
   }),
 });
@@ -295,14 +297,24 @@ export function validateRuntimeCandidateDefinitions() {
 }
 
 export function selectRuntimeProviders(providers = null) {
-  const supported = [...Object.keys(upstreamRuntimeCandidates), 'dsh', 'zcode'];
-  if (providers === null) return supported;
+  const supported = [...Object.keys(upstreamRuntimeCandidates), 'dsh', 'zcode', 'antigravity'];
+  if (providers === null) return supported.filter(provider => shippingProxyIds.includes(provider));
   if (!Array.isArray(providers) || providers.length === 0
     || new Set(providers).size !== providers.length
     || providers.some(provider => !supported.includes(provider))) {
     throw new Error('Invalid explicit Runtime provider selection.');
   }
   return [...providers];
+}
+
+export function withPublishedRuntimeAsset(candidate) {
+  const metadata = proxyReleaseMetadata(candidate.provider);
+  if (!metadata.runtime.verifiedVersions.includes(candidate.version) || candidate.asset.name !== basename(candidate.asset.name)
+    || !/^[a-f0-9]{64}$/.test(candidate.asset.sha256) || !Number.isSafeInteger(candidate.asset.size) || candidate.asset.size <= 0) {
+    throw new Error('Published Runtime candidate identity is invalid.');
+  }
+  return { ...candidate, asset: { ...candidate.asset, publish: true,
+    url: `https://github.com/RichLogic/Gian/releases/download/${metadata.tag}/${candidate.asset.name}` } };
 }
 
 export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = null, providers = null }) {
@@ -316,7 +328,13 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   const candidates = [];
   for (const provider of selected) {
-    if (provider === 'dsh') candidates.push(await buildDshRuntimeCandidate(target, workDir));
+    if (provider === 'antigravity') {
+      const candidate = await buildAntigravityRuntimeCandidate(target, workDir);
+      const entry = await readFile(candidate.candidateBin);
+      candidates.push({ ...withPublishedRuntimeAsset(candidate), probe: { kind: 'proxy' },
+        entry: { version: candidate.version, sha256: digest(entry), size: entry.length } });
+    }
+    else if (provider === 'dsh') candidates.push(await buildDshRuntimeCandidate(target, workDir));
     else if (provider === 'zcode') candidates.push(await buildZcode(target, workDir));
     else candidates.push(await buildUpstream(provider, upstreamRuntimeCandidates[provider], target, workDir));
   }
@@ -330,7 +348,7 @@ export async function buildManagedRuntimeCandidates({ outputDir, githubEnv = nul
   };
   await writeFile(join(target, 'runtime-candidates.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   if (githubEnv) {
-    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', grok: 'GROK_BIN', dsh: 'DSH_BIN', zcode: 'ZCODE_BIN' };
+    const envNames = { claude: 'CLAUDE_BIN', codex: 'CODEX_BIN', kimi: 'KIMI_BIN', grok: 'GROK_BIN', dsh: 'DSH_BIN', zcode: 'ZCODE_BIN', antigravity: 'ANTIGRAVITY_BIN' };
     const body = candidates.map(candidate => `${envNames[candidate.provider]}=${candidate.candidateBin}`).join('\n');
     await writeFile(resolve(githubEnv), `${body}\n`, { flag: 'a' });
   }

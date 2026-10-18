@@ -1,6 +1,7 @@
 import { ProxyProtocolError } from '@gian/proxy-protocol';
 import type { Hono } from 'hono';
 import { resolvePluginIdInput } from '@gian/shared';
+import { logCapabilityFailure } from '../../logging/redact.js';
 import type { SessionManager } from '../../session/manager.js';
 import type { Db } from '../../storage/db.js';
 
@@ -57,7 +58,12 @@ export function registerProxyRoutes(
         capabilities: sessions.getProtocolCapabilities(executor, cliPath) ?? {},
       });
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+      const failure = logCapabilityFailure(executor, error);
+      return c.json({
+        error: failure.message,
+        code: failure.code,
+        ...(failure.reason ? { reason: failure.reason } : {}),
+      }, 500);
     }
   });
 

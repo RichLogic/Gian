@@ -1,8 +1,56 @@
 {
   "schemaVersion": 1,
   "pluginId": "ai.deepseek.harness",
-  "currentVersion": "0.3.3",
+  "currentVersion": "0.3.5",
   "entries": [
+    {
+      "version": "0.3.5",
+      "firstPublishedAt": "2026-10-11T05:51:54Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-dsh-v0.3.5",
+          "publishedAt": "2026-10-11T05:51:54Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.5",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.5/gian-proxy-dsh-0.3.5-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "9f5546cd00b50f0848490ad88493af3af12356f93647ca9191cd7a82c57371b9",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-dsh-v0.3.5/gian-proxy-dsh-0.3.5-darwin-arm64.tar.gz",
+            "sha256": "3aad1cd02c7b6fd221ba584b9eb79372e9c70b3501f2f7433615eea05fc796a1",
+            "size": 170875
+          },
+          "runtimeDeclaration": {
+            "id": "deepseek-harness",
+            "versions": [
+              "0.2.0-rc.2"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [
+            {
+              "id": "@gian/dsh-bridge",
+              "version": "0.1.6",
+              "basis": "bundled-package-source"
+            }
+          ],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "适配 DeepSeek Harness 0.2.0-rc.2：会话日志升到 V4，已删除的模型选择回退到当前默认模型并提示重选；新增 Side Chat 与原生会话 Fork。随包内置 Bridge 0.1.6。本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-dsh-v0.3.5",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-dsh-v0.3.5/packages/proxies/dsh-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.3.3",
       "firstPublishedAt": "2026-09-26T12:20:54Z",

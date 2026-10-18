@@ -41,14 +41,14 @@ function controller(): TranslationController {
   return { state: initial, ready: true, error: '', saving: false, sending: null,
     toggle: vi.fn(), read: vi.fn(), result: () => ({ pending: false }),
     isReadExpanded: () => false, toggleRead: vi.fn(),
-    refresh: vi.fn(), retrySend: vi.fn(), finishSend: vi.fn(), prepareSend: vi.fn(), select: vi.fn(),
+    refresh: vi.fn(), retrySend: vi.fn(), finishSend: vi.fn(), reclaimSend: vi.fn(), prepareSend: vi.fn(), select: vi.fn(),
   } as unknown as TranslationController;
 }
 const wrap = (children: React.ReactNode) => <LocaleProvider locale="en">
   <ChatUiI18nProvider t={key => EN[key] ?? key}>{children}</ChatUiI18nProvider>
 </LocaleProvider>;
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); wireMessageEchoSink(null); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); wireMessageEchoSink(null); localStorage.clear(); });
 
 describe('translation surfaces', () => {
   it('substitutes the reading language in the translation action label', () => {
@@ -195,28 +195,49 @@ describe('translation surfaces', () => {
     expect(container.querySelector('.translation-dots')!.getAttribute('aria-hidden')).toBe('true');
   });
 
+  it('renders CJK-adjacent bold in the reading translation bubble, not literal **', () => {
+    const cjkRecord: TranslationRecord = {
+      ...record, text: '**智能体的表现具有随机性。**每个任务运行 k 次',
+    };
+    const { container } = render(wrap(
+      <TranslationResult value={{ pending: false, record: cjkRecord }} expanded onRetry={() => {}} />,
+    ));
+    const bubble = container.querySelector('.translation-bubble')!;
+    expect(bubble.querySelector('strong')?.textContent).toBe('智能体的表现具有随机性。');
+    expect(bubble.textContent).not.toContain('**');
+  });
+
   it('shows only the indicator while a reply translation is pending — no duplicated heading (2026-10-09)', () => {
     const { container } = render(wrap(<TranslationResult value={{ pending: true }} expanded onRetry={() => {}} />));
     expect(container.querySelector('.translation-pending')).not.toBeNull();
     expect(container.querySelector('.translation-heading')).toBeNull();
   });
 
-  it('the send row offers Send original while translating and Retry / Send original on failure', () => {
+  it('the send row offers Send original while translating and Retry / Send original / Take text back on failure', () => {
     const translation = controller();
-    translation.sending = { pending: true };
+    translation.sending = { phase: 'translating' };
     const { rerender } = render(wrap(<TranslationSendRow controller={translation} />));
     expect(screen.getByText('Translating')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Send original' }));
     expect(translation.finishSend).toHaveBeenCalledWith(true);
     expect(screen.queryByRole('button', { name: 'Retry translation' })).toBeNull();
 
-    translation.sending = { pending: false, error: 'offline' };
+    translation.sending = { phase: 'failed', error: 'offline', timedOut: false };
     rerender(wrap(<TranslationSendRow controller={translation} />));
     expect(screen.getByText('offline')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Retry translation' }));
     expect(translation.retrySend).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Send original' }));
     expect(translation.finishSend).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Take text back' }));
+    expect(translation.reclaimSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('the send row renders the shared timeout message for a timed-out failure', () => {
+    const translation = controller();
+    translation.sending = { phase: 'failed', error: 'whatever', timedOut: true };
+    render(wrap(<TranslationSendRow controller={translation} />));
+    expect(screen.getByText('Translation timed out after 45s.')).toBeTruthy();
   });
 
   it('retains a failed send until the user explicitly chooses the original', async () => {
@@ -226,7 +247,7 @@ describe('translation surfaces', () => {
     await waitFor(() => expect(result.current.ready).toBe(true));
     let sent!: Promise<TranslationRecord | 'original'>;
     act(() => { sent = result.current.prepareSend('original')!; });
-    await waitFor(() => expect(result.current.sending?.error).toContain('offline'));
+    await waitFor(() => expect(result.current.sending).toMatchObject({ phase: 'failed', error: expect.stringContaining('offline') }));
     let completed = false;
     void sent.then(() => { completed = true; });
     expect(completed).toBe(false);
@@ -257,7 +278,7 @@ describe('translation surfaces', () => {
     act(() => { first = result.current.prepareSend('first')!; });
     // The in-flight send is cancelled by the unmount cleanup — swallow it.
     void first.catch(() => {});
-    await waitFor(() => expect(result.current.sending?.pending).toBe(true));
+    await waitFor(() => expect(result.current.sending?.phase).toBe('translating'));
     expect(result.current.prepareSend('second')).toBeNull();
   });
 

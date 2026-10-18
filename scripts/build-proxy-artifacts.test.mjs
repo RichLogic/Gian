@@ -19,8 +19,8 @@ import { prepareDevProxyPackages } from './prepare-dev-package-inputs.mjs';
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('the default release set follows all six self-describing shipping Proxies', () => {
-  assert.deepEqual([...shippingProxyIds].sort(), ['claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode']);
+test('the candidate set follows all seven self-describing Proxy packages', () => {
+  assert.deepEqual([...shippingProxyIds].sort(), ['antigravity', 'claude', 'codex', 'dsh', 'grok', 'kimi', 'zcode']);
   assert.equal(proxyDefinitions.find(item => item.id === 'grok')?.shipping, true);
 });
 

@@ -58,6 +58,24 @@ interface SessionSurfaceProps {
   /** Timer open-run request. The transcript owns whether a matching row exists. */
   scheduleFocus?: { runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  /** Exact message navigation (Issue #168) — same contract as SessionMain. */
+  messageFocus?: {
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+    turnId?: string;
+    documentId?: string;
+    textRevision?: string;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  onLoadMessageContext?: (focus: {
+    turnId?: string;
+    turn?: number;
+    documentId?: string;
+    textRevision?: string;
+  }) => Promise<boolean>;
+  onReturnToLatest?: () => void;
 }
 
 export function SessionSurface({
@@ -89,6 +107,10 @@ export function SessionSurface({
   sideChatControl,
   scheduleFocus,
   onConsumeScheduleFocus,
+  messageFocus,
+  onConsumeMessageFocus,
+  onLoadMessageContext,
+  onReturnToLatest,
 }: SessionSurfaceProps) {
   const linkBehavior = useMemo<LinkBehavior>(() => ({
     openWebUrl: null,
@@ -154,6 +176,10 @@ export function SessionSurface({
                 sideChatControl={sideChatControl}
                 scheduleFocus={scheduleFocus}
                 onConsumeScheduleFocus={onConsumeScheduleFocus}
+                messageFocus={messageFocus}
+                onConsumeMessageFocus={onConsumeMessageFocus}
+                onLoadMessageContext={onLoadMessageContext}
+                onReturnToLatest={onReturnToLatest}
               />
             </ChatPanelOpenContext.Provider>
           </PlanOpenContext.Provider>

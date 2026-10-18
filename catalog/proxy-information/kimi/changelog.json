@@ -1,8 +1,92 @@
 {
   "schemaVersion": 1,
   "pluginId": "kimi",
-  "currentVersion": "0.4.5",
+  "currentVersion": "0.4.7",
   "entries": [
+    {
+      "version": "0.4.7",
+      "firstPublishedAt": "2026-10-15T10:55:26Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-kimi-v0.4.7",
+          "publishedAt": "2026-10-15T10:55:26Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.7",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.7/gian-proxy-kimi-0.4.7-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "643626cb3d2b3076765c4680a39a9d9bd64aa5e05ba328b63162c966997f4805",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.7/gian-proxy-kimi-0.4.7-darwin-arm64.tar.gz",
+            "sha256": "34a522cdd1c6cadfc570f8342678e0ad11bf2684f8459ee2646d42c69214af1d",
+            "size": 161171
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "2.2.0"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "将 Kimi Code Runtime 更新至 2.2.0（与官方 @moonshot-ai/kimi-code@2.2.0 GitHub 资产摘要一致）。2.1.1 到 2.2.0 的 server-api 参考差异仅为新增（Remote Control 端点与可选字段），实况 2.2.0 /openapi.json 与 /asyncapi.json 探测确认本 Proxy 使用的全部 REST 路由与 WebSocket 消息类型。适配器与线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.7",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.7/packages/proxies/kimi-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
+    {
+      "version": "0.4.6",
+      "firstPublishedAt": "2026-10-11T05:51:34Z",
+      "evidenceCoverage": "detailed",
+      "distributions": [
+        {
+          "repository": "RichLogic/Gian-Proxies",
+          "tag": "proxy-kimi-v0.4.6",
+          "publishedAt": "2026-10-11T05:51:34Z",
+          "releaseUrl": "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.6",
+          "manifestUrl": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.6/gian-proxy-kimi-0.4.6-darwin-arm64.tar.gz.manifest.json",
+          "manifestSha256": "5bdc74c96a6f7ec9de90f3361d7782e17b4c1e4dc9676b53a0f44d7710f27279",
+          "archive": {
+            "url": "https://github.com/RichLogic/Gian-Proxies/releases/download/proxy-kimi-v0.4.6/gian-proxy-kimi-0.4.6-darwin-arm64.tar.gz",
+            "sha256": "87929ef946c2dbb635e85766cd3229874c20479e923b36cfcd95891ab06502c7",
+            "size": 161170
+          },
+          "runtimeDeclaration": {
+            "id": "kimi",
+            "versions": [
+              "2.1.1"
+            ],
+            "basis": "verified-declaration"
+          },
+          "companionDeclarations": [],
+          "protocolRange": ">=2.2 <3.0",
+          "manifestSchema": 4,
+          "processScope": "shared"
+        }
+      ],
+      "changes": [
+        {
+          "category": "changed",
+          "text": "Runtime 断连后保留并恢复 Turn：新流绑定重置通知计数、事件从持久游标继续，仅子进程退出视为运行时下线；确认类交互明确声明可省略答案的取消动作。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，Kimi Code Runtime 仍为 2.1.1。本次发行未运行真实模型 Turn。",
+          "evidence": [
+            "https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.6",
+            "https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.6/packages/proxies/kimi-proxy/README.md"
+          ]
+        }
+      ],
+      "unknowns": []
+    },
     {
       "version": "0.4.5",
       "firstPublishedAt": "2026-10-07T07:19:00Z",

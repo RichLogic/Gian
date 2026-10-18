@@ -63,6 +63,9 @@ export async function discoverProxyDefinitions(repoRoot = root) {
       || !ACCEPTANCE_SETUPS.has(release.realAcceptance.setup)
       || (release.realAcceptance.proxyBinaryArg !== undefined
         && !/^--[a-z][a-z0-9-]+$/.test(release.realAcceptance.proxyBinaryArg))
+      || (release.runtimeQualification !== undefined
+        && (!canonicalRelativePath(release.runtimeQualification.module)
+          || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(release.runtimeQualification.export ?? '')))
     ) {
       throw new Error(`${directory} has invalid package.json gianProxy metadata`);
     }
@@ -86,6 +89,7 @@ export async function discoverProxyDefinitions(repoRoot = root) {
       sourceEntry: join(proxiesDir, directory, packageMetadata.main),
       bundlePackages: release.bundlePackages ?? [],
       shipping: release.shipping,
+      runtimeQualification: release.runtimeQualification ?? null,
       realAcceptance: release.realAcceptance,
       displayName: manifest.displayName,
       processScope: manifest.process.scope,
@@ -229,7 +233,7 @@ export async function copyManifestReference(definition, packageDir, reference) {
   await copyFile(source, destination);
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), options = {}) {
   const args = parseArgs(argv);
   const requestedPlugin = args.get('plugin');
   if (requestedPlugin && !proxyDefinitions.some(definition => definition.id === requestedPlugin)) {
@@ -238,6 +242,10 @@ export async function main(argv = process.argv.slice(2)) {
   const selectedDefinitions = requestedPlugin
     ? proxyDefinitions.filter(definition => definition.id === requestedPlugin)
     : proxyDefinitions.filter(definition => definition.shipping);
+  if (options.ownerAuthorizedNoTests && (selectedDefinitions.length !== 1
+    || selectedDefinitions[0].id !== 'claude' || !['0.3.4', '0.3.5'].includes(selectedDefinitions[0].pluginVersion))) {
+    throw new Error('The Owner-selected no-test packaging exception is limited to the approved Claude fixes');
+  }
   const outputDir = resolve(root, args.get('output') ?? 'artifacts/proxies');
   await mkdir(outputDir, { recursive: true });
 
@@ -283,7 +291,7 @@ export async function main(argv = process.argv.slice(2)) {
       for (const reference of references) {
         await copyManifestReference(definition, packageDir, reference);
       }
-      await assertProxySelfTest(proxyEntry, manifest);
+      if (!options.ownerAuthorizedNoTests) await assertProxySelfTest(proxyEntry, manifest);
       const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
       await writeFile(join(packageDir, 'manifest.json'), manifestJson);
       await writeFile(manifestAssetPath, manifestJson);

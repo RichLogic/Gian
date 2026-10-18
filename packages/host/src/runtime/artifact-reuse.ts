@@ -74,6 +74,54 @@ export function runtimeReceiptPath(root: string, directory: string): string {
   return join(root, 'receipts', `${key}.json`);
 }
 
+export interface RuntimeArtifactReceipt {
+  schemaVersion: 1;
+  artifactSha256: string;
+  entryRelativePath: string;
+  files: FileIdentity[];
+}
+
+function parseRuntimeArtifactReceipt(value: unknown): RuntimeArtifactReceipt | null {
+  if (!value || typeof value !== 'object') return null;
+  const receipt = value as RuntimeArtifactReceipt;
+  if (receipt.schemaVersion !== 1 || !/^[0-9a-f]{64}$/.test(receipt.artifactSha256 ?? '')) return null;
+  if (!safeReceiptPath(receipt.entryRelativePath) || !Array.isArray(receipt.files)) return null;
+  if (receipt.files.length > 65_536) return null;
+  for (const file of receipt.files) {
+    if (!file || typeof file !== 'object') return null;
+    if (!safeReceiptPath(file.path) || typeof file.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(file.sha256)) return null;
+    if (!Number.isSafeInteger(file.size) || file.size < 0 || typeof file.executable !== 'boolean') return null;
+  }
+  return receipt;
+}
+
+function safeReceiptPath(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 1_024
+    && !value.startsWith('/')
+    && !value.includes('\\')
+    && !value.split('/').some(part => part === '' || part === '.' || part === '..');
+}
+
+/** Host-owned install receipt for one generation directory. A missing,
+ * swapped, or unbounded receipt is not an identity. */
+export async function readRuntimeArtifactReceipt(
+  root: string,
+  directory: string,
+): Promise<RuntimeArtifactReceipt | null> {
+  try {
+    if (!await ownedRuntimeDirectory(root, directory)) return null;
+    if (!await ownedRuntimeDirectory(root, join(root, 'receipts'))) return null;
+    const path = runtimeReceiptPath(root, directory);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024 * 1024) return null;
+    return parseRuntimeArtifactReceipt(JSON.parse(await readFile(path, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
 export async function verifiedRuntimeReuse(
   root: string, directory: string, artifactSha256: string, entryRelativePath: string,
 ): Promise<boolean> {

@@ -26,8 +26,9 @@ import type {
   StartTurnParams,
 } from '../src/proxy/types.js';
 import { QueueManager } from '../src/queue/index.js';
-import { AttentionDispatcher } from '../src/session/attention.js';
+import { AttentionDispatcher, publishFreshSessionAttention } from '../src/session/attention.js';
 import { SessionManager } from '../src/session/manager.js';
+import { makeWsHandlers } from '../src/web/ws-handler.js';
 import { openDatabase, type Db } from '../src/storage/db.js';
 import { saveConfig } from '../src/storage/config.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
@@ -153,6 +154,7 @@ class InboxProxyClient implements ProxyClient {
   readonly startTurnCalls: StartTurnParams[] = [];
   echoHostTurnId = true;
   failNextRespond = 0;
+  beforeRespond: (() => void | Promise<void>) | null = null;
   closeGate: Promise<void> | null = null;
 
   isExited() { return false; }
@@ -176,6 +178,7 @@ class InboxProxyClient implements ProxyClient {
       this.failNextRespond -= 1;
       throw new Error('transport down');
     }
+    await this.beforeRespond?.();
   }
   async closeSession() {
     if (this.closeGate) await this.closeGate;
@@ -2398,6 +2401,118 @@ test('a large terminal backlog drains in continuation batches without error budg
   }
 });
 
+test('fresh session occurrences emit one semantic attention and do not replay it', async () => {
+  const context = setup();
+  let adapter: SessionInboxAdapter | undefined;
+  try {
+    let allowAttention = true;
+    adapter = new SessionInboxAdapter(context.db, context.inbox, undefined, (fresh) => {
+      publishFreshSessionAttention({
+        db: context.db,
+        claim: (id, generation) => context.inbox.claimNotification(id, generation),
+        broadcast: message => context.broadcaster.broadcast(message),
+        gate: () => allowAttention,
+        fresh,
+      });
+    });
+    context.sessions.setSessionInbox(adapter);
+    const named = await boot(context, 'Design notes');
+    const hidden = await boot(context, '/tmp/secret');
+    context.broadcaster.messages.length = 0;
+
+    const secret = 'rm -rf /Users/alice/secret';
+    named.client.fire(requested(named.session.id, named.turnId, 'bash-1', 'bash-event-1', 1, {
+      title: 'Run tests',
+      description: secret,
+      presentation: { kind: 'permission', tone: 'danger' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'Bash', inputPreview: secret }, ...KINDS },
+    }));
+    await waitFor(() => context.approvals.getPending('bash-1', named.session.id) !== undefined);
+    named.client.fire(requested(named.session.id, named.turnId, 'bash-1', 'bash-event-2', 2, {
+      title: 'Run tests',
+      description: secret,
+      presentation: { kind: 'permission', tone: 'danger' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'Bash', inputPreview: secret }, ...KINDS },
+    }));
+    named.client.fire(requested(named.session.id, named.turnId, 'plan-1', 'plan-event-1', 3, {
+      title: 'Plan',
+      description: 'Review the plan',
+      presentation: { kind: 'permission', tone: 'warning' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'ExitPlanMode' } },
+    }));
+    named.client.fire(requested(named.session.id, named.turnId, 'question-1', 'question-event-1', 4, {
+      title: 'Which file?',
+      description: 'Pick one',
+      presentation: { kind: 'question' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'AskUserQuestion' }, ...KINDS },
+    }));
+    const opaqueId = `${'问'.repeat(400)}\u0000id /with space`;
+    named.client.fire(requested(named.session.id, named.turnId, opaqueId, 'opaque-event-1', 5, {
+      title: 'Opaque',
+      description: 'Keep the provider id',
+      presentation: { kind: 'permission', tone: 'danger' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'Bash' }, ...KINDS },
+    }));
+    hidden.client.fire(requested(hidden.session.id, hidden.turnId, 'hidden-1', 'hidden-event-1', 1, {
+      title: 'Hidden path',
+      description: secret,
+      presentation: { kind: 'permission', tone: 'danger' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'Bash' }, ...KINDS },
+    }));
+    await waitFor(() => (
+      context.approvals.getPending('plan-1', named.session.id) !== undefined
+      && context.approvals.getPending('question-1', named.session.id) !== undefined
+      && context.approvals.getPending(opaqueId, named.session.id) !== undefined
+      && context.approvals.getPending('hidden-1', hidden.session.id) !== undefined
+    ));
+
+    const attentions = context.broadcaster.messages.filter(
+      (message): message is Extract<ServerToClientMessage, { type: 'attention' }> => message.type === 'attention',
+    );
+    assert.deepEqual(attentions.map(message => message.event), [
+      'approval_needed',
+      'plan_review_needed',
+      'answer_needed',
+      'approval_needed',
+      'approval_needed',
+    ]);
+    assert.equal(attentions[0]?.title, 'Design notes');
+    assert.equal(attentions[0]?.session_name, 'Design notes');
+    assert.equal(attentions[0]?.body, 'Approval needed');
+    assert.equal(attentions[0]?.inbox_ref?.generation, 1);
+    assert.equal(attentions[0]?.target?.type, 'session');
+    assert.equal(attentions[3]?.target?.type === 'session' ? attentions[3].target.interaction_id : null, opaqueId);
+    assert.equal(attentions[4]?.session_name, '');
+    assert.equal(attentions[4]?.title, '');
+    assert.doesNotMatch(JSON.stringify(attentions), /rm -rf|\/Users\/alice|secret/);
+    assert.equal(inboxItem(context.db, named.session.id, 'bash-1')?.notified_generation, 1);
+    const before = attentions.length;
+    allowAttention = false;
+    named.client.fire(requested(named.session.id, named.turnId, 'gated-1', 'gated-event-1', 6, {
+      title: 'Gated',
+      description: 'Still collected',
+      presentation: { kind: 'permission', tone: 'danger' },
+      actions: ACTIONS,
+      context: { subject: { toolName: 'Bash' }, ...KINDS },
+    }));
+    await waitFor(() => context.approvals.getPending('gated-1', named.session.id) !== undefined);
+    assert.equal(
+      context.broadcaster.messages.filter(message => message.type === 'attention').length,
+      before,
+    );
+    assert.equal(inboxItem(context.db, named.session.id, 'gated-1')?.notified_generation, 1);
+  } finally {
+    adapter?.dispose();
+    finish(context);
+  }
+});
+
 test('migration 087 persists fact source and owner generation with a source-scoped key', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gian-session-inbox-087-'));
   const db = openDatabase(dir);
@@ -2729,6 +2844,441 @@ test('a native event id equal to the host terminal synthesis still closes once a
     assert.equal(active.client.approvalCalls.length, 0);
   } finally {
     fresh?.dispose();
+    finish(context);
+  }
+});
+
+function inboxRowId(db: Db, sessionId: string, interactionId: string): string {
+  const rows = db.prepare('SELECT id, target_json FROM inbox_items').all() as Array<{
+    id: string;
+    target_json: string;
+  }>;
+  const match = rows.find((row) => {
+    const target = JSON.parse(row.target_json) as { session_id?: string; interaction_id?: string };
+    return target.session_id === sessionId && target.interaction_id === interactionId;
+  });
+  if (!match) throw new Error(`missing inbox item for ${interactionId}`);
+  return match.id;
+}
+
+function isPrecondition(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 'PRECONDITION_FAILED';
+}
+
+test('expected inbox generation is checked before resolve and a stale one does not respond', async () => {
+  const context = setup();
+  try {
+    const active = await boot(context, 'expected-inbox');
+    const interactionId = 'occ-expect';
+    active.client.fire(requested(active.session.id, active.turnId, interactionId, 'expect-open-1', 1, PERMISSION));
+    await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.generation === 1);
+    await context.sessions.respondApproval(active.session.id, interactionId, 'decline', undefined, 'deny');
+    active.client.fire(resolved(active.session.id, active.turnId, interactionId, 'expect-close-1', 2, 'submitted', 'deny'));
+    await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.status === 'rejected');
+
+    active.client.fire(completed(active.session.id, active.turnId, 'expect-turn-done', 3));
+    await context.sessions.sendMessage(active.session.id, 'second occurrence');
+    const secondTurnId = active.client.startTurnCalls.at(-1)?.turnId;
+    assert.ok(secondTurnId);
+    active.client.fire(requested(active.session.id, secondTurnId, interactionId, 'expect-open-2', 4, PERMISSION));
+    await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.generation === 2);
+    const itemId = inboxRowId(context.db, active.session.id, interactionId);
+    const calls = active.client.approvalCalls.length;
+
+    await assert.rejects(
+      () => context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        'decline',
+        undefined,
+        'deny',
+        'web',
+        { id: itemId, generation: 1 },
+      ),
+      isPrecondition,
+    );
+    await assert.rejects(
+      () => context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        'decline',
+        undefined,
+        'deny',
+        'web',
+        { id: itemId, generation: 1.5 },
+      ),
+      isPrecondition,
+    );
+    assert.throws(
+      () => context.sessions.assertExpectedInbox(active.session.id, interactionId, null),
+      isPrecondition,
+    );
+    assert.throws(
+      () => context.sessions.assertExpectedInbox(active.session.id, interactionId, { id: itemId }),
+      isPrecondition,
+    );
+    await assert.rejects(
+      () => context.sessions.respondApproval(
+        `${active.session.id}-other`,
+        interactionId,
+        'decline',
+        undefined,
+        'deny',
+        'web',
+        { id: itemId, generation: 2 },
+      ),
+      isPrecondition,
+    );
+
+    const moved = context.db.prepare(
+      `UPDATE inbox_projection_facts
+          SET turn_id = 'not-this-turn'
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = 2
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).run(active.session.id, interactionId);
+    assert.equal(moved.changes, 1);
+    await assert.rejects(
+      () => context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        'decline',
+        undefined,
+        'deny',
+        'web',
+        { id: itemId, generation: 2 },
+      ),
+      isPrecondition,
+    );
+    assert.equal(active.client.approvalCalls.length, calls);
+    assert.ok(context.approvals.getPending(interactionId, active.session.id));
+    assert.equal(context.approvals.peekResolutionSource(interactionId, active.session.id), undefined);
+    assert.equal(inboxItem(context.db, active.session.id, interactionId)?.status, 'pending');
+    assert.equal(inboxItem(context.db, active.session.id, interactionId)?.generation, 2);
+
+    context.db.prepare(
+      `UPDATE inbox_projection_facts
+          SET turn_id = ?
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = 2
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).run(secondTurnId, active.session.id, interactionId);
+    await context.sessions.respondApproval(
+      active.session.id,
+      interactionId,
+      'decline',
+      undefined,
+      'deny',
+      'web',
+      { id: itemId, generation: 2 },
+    );
+    assert.equal(active.client.approvalCalls.length, calls + 1);
+    assert.equal(active.client.approvalCalls.at(-1)?.interactionId, interactionId);
+  } finally {
+    finish(context);
+  }
+});
+
+test('a remote-owned expected inbox resolve is not forwarded', async () => {
+  const context = setup();
+  try {
+    const active = await boot(context, 'expected-remote');
+    const interactionId = 'remote-1';
+    active.client.fire(requested(active.session.id, active.turnId, interactionId, 'remote-open', 1, PERMISSION));
+    await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.status === 'pending');
+    const itemId = inboxRowId(context.db, active.session.id, interactionId);
+    const forwarded: string[] = [];
+    const remote = {
+      owns(sessionId: string) { return sessionId === active.session.id; },
+      async handleMessage() {
+        forwarded.push('approval');
+        return true;
+      },
+      setTranslationService() {},
+    };
+    context.sessions.setRemoteController(remote as never);
+    const expected = { id: itemId, generation: 1 };
+    await assert.rejects(
+      () => context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        'decline',
+        undefined,
+        'deny',
+        'web',
+        expected,
+      ),
+      isPrecondition,
+    );
+    assert.equal(forwarded.length, 0);
+
+    const recorder = {
+      sent: [] as ServerToClientMessage[],
+      add() {},
+      remove() {},
+      send(_ws: unknown, message: ServerToClientMessage) { this.sent.push(message); },
+      broadcast(message: ServerToClientMessage) { this.sent.push(message); },
+      get size() { return 0; },
+    };
+    const handlers = makeWsHandlers({
+      sessions: context.sessions,
+      broadcaster: recorder as never,
+      remoteController: remote as never,
+    });
+    const ws = { close() {} };
+    handlers.onOpen({} as Event, ws as never);
+    await handlers.onMessage(
+      { data: JSON.stringify({ type: 'auth', token: 'dev-token' }) } as never,
+      ws as never,
+    );
+    recorder.sent.length = 0;
+    await handlers.onMessage(
+      { data: JSON.stringify({
+        type: 'approval:resolve',
+        session_id: active.session.id,
+        approval_id: interactionId,
+        decision: 'decline',
+        native_option_id: 'deny',
+        expected_inbox: expected,
+      }) } as never,
+      ws as never,
+    );
+    const error = recorder.sent.find((message) => message.type === 'error');
+    assert.equal(error && 'code' in error ? error.code : undefined, 'PRECONDITION_FAILED');
+    assert.equal(forwarded.length, 0);
+    assert.equal(active.client.approvalCalls.length, 0);
+    assert.ok(context.approvals.getPending(interactionId, active.session.id));
+    assert.equal(context.approvals.peekResolutionSource(interactionId, active.session.id), undefined);
+  } finally {
+    finish(context);
+  }
+});
+
+const EXIT_PLAN = {
+  title: 'Plan',
+  description: 'Review the plan',
+  presentation: { kind: 'permission', tone: 'warning' },
+  actions: ACTIONS,
+  context: { subject: { toolName: 'ExitPlanMode' }, ...KINDS },
+};
+
+test('same-occurrence resolved before respond returns still exits plan mode', async () => {
+  const context = setup();
+  try {
+    const cases = [
+      ['accept_with_auto', 'auto'],
+      ['accept_with_ask', 'ask'],
+    ] as const;
+    for (const [decision, mode] of cases) {
+      const active = await boot(context, `plan-exit-${mode}`);
+      const interactionId = `plan-exit-${mode}`;
+      context.sessions.setApprovalMode(active.session.id, 'plan');
+      active.client.fire(requested(
+        active.session.id,
+        active.turnId,
+        interactionId,
+        `${interactionId}-open`,
+        1,
+        EXIT_PLAN,
+      ));
+      await waitFor(() => (
+        context.approvals.getPending(interactionId, active.session.id)?.category === 'exit_plan_mode'
+        && inboxItem(context.db, active.session.id, interactionId)?.status === 'pending'
+      ));
+      const pending = context.approvals.getPending(interactionId, active.session.id);
+      assert.equal(pending?.nativeOptions?.length ?? 0, 0);
+      assert.equal(context.sessions.getSession(active.session.id).approval_mode, 'plan');
+      const itemId = inboxRowId(context.db, active.session.id, interactionId);
+      active.client.beforeRespond = () => {
+        active.client.fire(resolved(
+          active.session.id,
+          active.turnId,
+          interactionId,
+          `${interactionId}-resolved`,
+          2,
+          'submitted',
+          'allow',
+        ));
+      };
+      await context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        decision,
+        undefined,
+        undefined,
+        'web',
+        { id: itemId, generation: 1 },
+      );
+      active.client.beforeRespond = null;
+      assert.equal(context.sessions.getSession(active.session.id).approval_mode, mode);
+      assert.equal(inboxItem(context.db, active.session.id, interactionId)?.generation, 1);
+      assert.notEqual(inboxItem(context.db, active.session.id, interactionId)?.status, 'pending');
+      assert.equal(context.approvals.getPending(interactionId, active.session.id), undefined);
+      assert.equal(active.client.approvalCalls.length, 1);
+    }
+  } finally {
+    finish(context);
+  }
+});
+
+test('a newer host turn during plan exit does not change that turn mode', async () => {
+  const context = setup();
+  try {
+    const active = await boot(context, 'plan-replaced');
+    const interactionId = 'plan-replaced';
+    context.sessions.setApprovalMode(active.session.id, 'plan');
+    active.client.fire(requested(
+      active.session.id,
+      active.turnId,
+      interactionId,
+      'plan-replaced-open',
+      1,
+      EXIT_PLAN,
+    ));
+    await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.generation === 1);
+    const itemId = inboxRowId(context.db, active.session.id, interactionId);
+    let replacedTurnId = '';
+    active.client.beforeRespond = async () => {
+      active.client.fire(resolved(
+        active.session.id,
+        active.turnId,
+        interactionId,
+        'plan-replaced-resolved',
+        2,
+        'submitted',
+        'allow',
+      ));
+      active.client.fire(completed(active.session.id, active.turnId, 'plan-replaced-done', 3));
+      await context.sessions.sendMessage(active.session.id, 'next plan turn');
+      const secondTurnId = active.client.startTurnCalls.at(-1)?.turnId;
+      assert.ok(secondTurnId);
+      assert.notEqual(secondTurnId, active.turnId);
+      active.client.fire(requested(
+        active.session.id,
+        secondTurnId,
+        interactionId,
+        'plan-replaced-open-2',
+        4,
+        EXIT_PLAN,
+      ));
+      await waitFor(() => inboxItem(context.db, active.session.id, interactionId)?.generation === 2);
+      replacedTurnId = secondTurnId;
+    };
+    await context.sessions.respondApproval(
+      active.session.id,
+      interactionId,
+      'accept_with_auto',
+      undefined,
+      undefined,
+      'web',
+      { id: itemId, generation: 1 },
+    );
+    assert.equal(context.sessions.getSession(active.session.id).approval_mode, 'plan');
+    assert.equal(inboxItem(context.db, active.session.id, interactionId)?.status, 'pending');
+    assert.equal(inboxItem(context.db, active.session.id, interactionId)?.generation, 2);
+    assert.equal(context.approvals.getPending(interactionId, active.session.id)?.turnId, replacedTurnId);
+    assert.equal(active.client.approvalCalls.length, 1);
+  } finally {
+    finish(context);
+  }
+});
+
+test('a later host turn without a new approval does not exit plan mode', async () => {
+  const context = setup();
+  try {
+    // The later turn neither reuses the interaction id nor opens an approval.
+    // One case leaves it running; the other finishes it before the check, so
+    // the guard cannot treat "no active turn" as the original turn.
+    const cases = ['running', 'finished'] as const;
+    for (const later of cases) {
+      const active = await boot(context, `plan-later-${later}`);
+      const interactionId = `plan-later-${later}`;
+      context.sessions.setApprovalMode(active.session.id, 'plan');
+      active.client.fire(requested(
+        active.session.id,
+        active.turnId,
+        interactionId,
+        `${interactionId}-open`,
+        1,
+        EXIT_PLAN,
+      ));
+      await waitFor(() => (
+        context.approvals.getPending(interactionId, active.session.id)?.category === 'exit_plan_mode'
+        && inboxItem(context.db, active.session.id, interactionId)?.status === 'pending'
+      ));
+      const itemId = inboxRowId(context.db, active.session.id, interactionId);
+      let laterTurnId = '';
+      active.client.beforeRespond = async () => {
+        active.client.fire(resolved(
+          active.session.id,
+          active.turnId,
+          interactionId,
+          `${interactionId}-resolved`,
+          2,
+          'submitted',
+          'allow',
+        ));
+        active.client.fire(completed(
+          active.session.id,
+          active.turnId,
+          `${interactionId}-done`,
+          3,
+        ));
+        await context.sessions.sendMessage(active.session.id, `later ${later}`);
+        const started = active.client.startTurnCalls.at(-1)?.turnId;
+        assert.ok(started);
+        assert.notEqual(started, active.turnId);
+        laterTurnId = started;
+        if (later === 'finished') {
+          active.client.fire(completed(
+            active.session.id,
+            started,
+            `${interactionId}-later-done`,
+            4,
+          ));
+        }
+      };
+      await context.sessions.respondApproval(
+        active.session.id,
+        interactionId,
+        'accept_with_auto',
+        undefined,
+        undefined,
+        'web',
+        { id: itemId, generation: 1 },
+      );
+      active.client.beforeRespond = null;
+      const latest = context.db.prepare(
+        `SELECT id, status
+           FROM turns
+          WHERE session_id = ?
+          ORDER BY turn_number DESC
+          LIMIT 1`,
+      ).get(active.session.id) as { id: string; status: string };
+      assert.equal(latest.id, laterTurnId);
+      assert.equal(latest.status, later === 'finished' ? 'completed' : 'running');
+      assert.equal(
+        context.sessions.getActiveTurn(active.session.id)?.id,
+        later === 'finished' ? undefined : laterTurnId,
+      );
+      assert.equal(context.sessions.getSession(active.session.id).approval_mode, 'plan');
+      assert.equal(inboxItem(context.db, active.session.id, interactionId)?.generation, 1);
+      assert.notEqual(inboxItem(context.db, active.session.id, interactionId)?.status, 'pending');
+      assert.equal(context.approvals.getPending(interactionId, active.session.id), undefined);
+      assert.equal(requestRows(context.db, active.session.id, interactionId), 1);
+      assert.equal(active.client.approvalCalls.length, 1);
+    }
+  } finally {
     finish(context);
   }
 });

@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  executorIdForPluginId,
   productExecutorForPluginId,
   type ProxyCatalogItem,
   type UserAgentStatus,
@@ -14,7 +13,7 @@ import { DialogShell } from './workspace-dialog.js';
 export interface CreateAgentDialogInput {
   pluginId: string;
   name: string;
-  home?: { kind: 'managed' } | { kind: 'custom'; path: string };
+  home?: { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default'; expectedPath: string };
   /** ADR-0102: present only for Custom integrations; the Host probes the path
    *  before persisting the Agent. */
   runtime?: { kind: 'custom'; path: string };
@@ -30,6 +29,14 @@ export const CUSTOM_INTEGRATION = '__custom__';
 export interface AgentDialogFieldErrors {
   runtime?: string;
   home?: string;
+}
+
+/** Stable across a new catalog object. A ready runtime still refetches when
+ *  its path or version changes. */
+function runtimeRefreshKey(
+  runtime: { state?: string; path?: string | null; version?: string | null } | undefined,
+): string {
+  return [runtime?.state ?? 'missing', runtime?.path ?? '', runtime?.version ?? ''].join('\0');
 }
 
 function nextAgentName(base: string, agents: UserAgentStatus[]): string {
@@ -75,6 +82,8 @@ export function AgentDialog({
   const [homeMode, setHomeMode] = useState<'default' | 'managed' | 'custom'>('managed');
   const [customHome, setCustomHome] = useState('');
   const [defaultHome, setDefaultHome] = useState('');
+  const [defaultUnavailable, setDefaultUnavailable] = useState(false);
+  const [defaultProbeCode, setDefaultProbeCode] = useState('');
   const [homeSupported, setHomeSupported] = useState(true);
   const [checkingHome, setCheckingHome] = useState(false);
   // Custom mode (ADR-0102): the Proxy is one of the installed Integrations;
@@ -82,6 +91,15 @@ export function AgentDialog({
   // (owner design 2026-09-30) — they are re-validated on submit instead.
   const [customProxyId, setCustomProxyId] = useState(customIntegrations[0]?.pluginId ?? '');
   const [runtimePath, setRuntimePath] = useState('');
+  // 'auto' until the user clicks a HOME radio. A runtime refresh may
+  // replace an automatic choice; an explicit one stays put.
+  const homeChoiceRef = useRef<'auto' | 'explicit'>('auto');
+  const loadedPluginRef = useRef<string | null>(null);
+  const homeModeRef = useRef(homeMode);
+  function selectHome(mode: 'default' | 'managed' | 'custom') {
+    homeModeRef.current = mode;
+    setHomeMode(mode);
+  }
 
   const isCustom = pluginId === CUSTOM_INTEGRATION;
 
@@ -96,40 +114,82 @@ export function AgentDialog({
     setCustomProxyId(customIntegrations[0]?.pluginId ?? '');
   }, [customIntegrations, customProxyId]);
 
+  // Scalar only. A new integrations array on an ordinary parent render
+  // must not refetch; a ready runtime whose path or version changed must.
+  const runtimeReadiness = isCustom
+    ? 'custom'
+    : runtimeRefreshKey(integrations.find(item => item.pluginId === pluginId)?.runtime);
+
   useEffect(() => {
     let alive = true;
+    const pluginChanged = loadedPluginRef.current !== pluginId;
+    loadedPluginRef.current = pluginId;
+    if (pluginChanged) homeChoiceRef.current = 'auto';
     // Custom mode keeps the typed HOME across Proxy switches; the
     // managed/default radios only exist for plain Integrations.
     if (isCustom) {
-      setHomeMode('managed');
+      selectHome('managed');
       setDefaultHome('');
+      setDefaultUnavailable(false);
+      setDefaultProbeCode('');
       setHomeSupported(true);
       setCheckingHome(false);
       return () => { alive = false; };
     }
-    setHomeMode('managed');
-    setCustomHome('');
-    setDefaultHome('');
-    const executor = executorIdForPluginId(pluginId);
-    if (!executor) {
-      setHomeSupported(true);
-      setCheckingHome(false);
-      return () => { alive = false; };
+    // A plugin switch starts over. A runtime refresh of the same plugin
+    // keeps an explicit managed/custom choice and the typed path.
+    if (pluginChanged) {
+      selectHome('managed');
+      setCustomHome('');
+      setDefaultHome('');
+      setDefaultUnavailable(false);
+      setDefaultProbeCode('');
     }
     setCheckingHome(true);
-    void loadAgentDraftDefaults(executor)
+    void loadAgentDraftDefaults(pluginId)
       .then(defaults => {
         if (!alive) return;
-        setHomeSupported(defaults.home !== null);
-        const path = defaults.home?.path ?? '';
+        const preserveChoice = homeChoiceRef.current === 'explicit';
+        if (defaults.home === null) {
+          setHomeSupported(false);
+          setDefaultHome('');
+          setDefaultUnavailable(false);
+          setDefaultProbeCode('');
+          return;
+        }
+        setHomeSupported(true);
+        const path = defaults.home?.kind === 'default' ? defaults.home.path : '';
+        if (!path) {
+          setDefaultHome('');
+          setDefaultUnavailable(defaults.home?.kind === 'unavailable');
+          setDefaultProbeCode(
+            defaults.home?.kind === 'unavailable' ? defaults.home.reason?.code ?? '' : '',
+          );
+          // Selected default stays selected when it disappears, so submit
+          // stays blocked. An automatic managed choice can still move.
+          if (!preserveChoice && homeModeRef.current !== 'default') selectHome('managed');
+          return;
+        }
+        setDefaultUnavailable(false);
+        setDefaultProbeCode('');
         setDefaultHome(path);
-        setHomeMode(path && !agents.some(agent => agent.home?.path === path)
-          ? 'default' : 'managed');
+        if (!preserveChoice) {
+          selectHome(agents.some(agent => agent.home?.path === path) ? 'managed' : 'default');
+        }
       })
-      .catch(() => { if (alive) setHomeSupported(true); })
+      .catch(() => {
+        if (!alive) return;
+        setHomeSupported(true);
+        setDefaultHome('');
+        setDefaultUnavailable(true);
+        setDefaultProbeCode('');
+        if (homeChoiceRef.current !== 'explicit' && homeModeRef.current !== 'default') {
+          selectHome('managed');
+        }
+      })
       .finally(() => { if (alive) setCheckingHome(false); });
     return () => { alive = false; };
-  }, [pluginId, isCustom]);
+  }, [pluginId, isCustom, runtimeReadiness]);
 
   const selected = isCustom
     ? customIntegrations.find(item => item.pluginId === customProxyId) ?? null
@@ -156,10 +216,12 @@ export function AgentDialog({
     onSubmit({
       pluginId: selected.pluginId,
       name: nextAgentName(selected.displayName, agents),
-      ...(homeSupported && homeMode !== 'default'
-        ? { home: homeMode === 'managed'
-          ? { kind: 'managed' as const }
-          : { kind: 'custom' as const, path: customHome.trim() } }
+      ...(homeSupported
+        ? homeMode === 'default'
+          ? { home: { kind: 'default' as const, expectedPath: defaultHome } }
+          : homeMode === 'managed'
+            ? { home: { kind: 'managed' as const } }
+            : { home: { kind: 'custom' as const, path: customHome.trim() } }
         : {}),
     });
   }
@@ -276,22 +338,31 @@ export function AgentDialog({
                   <label className="home-custom">
                     <input type="radio" name="agent-home-mode" value="default"
                            checked={homeMode === 'default'} disabled={busy || checkingHome || defaultHomeInUse}
-                           onChange={() => setHomeMode('default')} />
+                           onChange={() => { homeChoiceRef.current = 'explicit'; selectHome('default'); }} />
                     {t('agents.add.dialog.defaultHome')} <span className="mono">{defaultHome}</span>
                   </label>
                   {defaultHomeInUse && <p className="s2-help">{t('agents.add.dialog.defaultInUse')}</p>}
                 </>
               )}
+              {defaultUnavailable && !defaultHome && (
+                defaultProbeCode
+                  ? <p className="field-error" role="alert" data-testid="agent-default-probe-reason">
+                      {t(defaultProbeCode === 'RUNTIME_FINGERPRINT_BUDGET'
+                        ? 'agents.add.dialog.runtimeBudget'
+                        : 'agents.add.dialog.probeFailed')}
+                    </p>
+                  : <p className="s2-help">{t('agents.add.dialog.defaultUnavailable')}</p>
+              )}
               <label className="home-custom">
                 <input type="radio" name="agent-home-mode" value="managed"
                        checked={homeMode === 'managed'} disabled={busy || checkingHome}
-                       onChange={() => setHomeMode('managed')} />
+                       onChange={() => { homeChoiceRef.current = 'explicit'; selectHome('managed'); }} />
                 {t('agents.add.dialog.newHome')}
               </label>
               <label className="home-custom">
                 <input type="radio" name="agent-home-mode" value="custom"
                        checked={homeMode === 'custom'} disabled={busy || checkingHome}
-                       onChange={() => setHomeMode('custom')} />
+                       onChange={() => { homeChoiceRef.current = 'explicit'; selectHome('custom'); }} />
                 {t('agents.add.dialog.existingHome')}
               </label>
               {homeMode === 'custom' && (
@@ -314,6 +385,13 @@ export function AgentDialog({
             </>
           )}
         </div>
+
+        {!isCustom && fieldErrors?.runtime && (
+          <p className="field-error" role="alert" data-testid="agent-runtime-error">{fieldErrors.runtime}</p>
+        )}
+        {!isCustom && fieldErrors?.home && (
+          <p className="field-error" role="alert" data-testid="agent-home-error">{fieldErrors.home}</p>
+        )}
 
         {error && <p className="spaces-error" role="alert">{error}</p>}
         <div className="wsn-actions">

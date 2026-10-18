@@ -6,7 +6,7 @@
  */
 
 import { useEffect } from 'react';
-import { useT } from './i18n/index.js';
+import { LocaleProvider, useT } from './i18n/index.js';
 import { resolveTheme, useSystemDark } from './theme.js';
 import { useRemoteActions, useRemoteState } from './ui/controller-context.js';
 import { ConnectionBanner, DeviceRevokedPage } from './ui/banners.js';
@@ -271,5 +271,12 @@ function Shell() {
 }
 
 export function App() {
-  return <Shell />;
+  // The locale is Host-driven (state snapshot), not a boot-time constant, so
+  // the provider must live under the controller and rebind on state change.
+  const state = useRemoteState();
+  return (
+    <LocaleProvider locale={state.locale}>
+      <Shell />
+    </LocaleProvider>
+  );
 }

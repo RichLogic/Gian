@@ -2,11 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { ChatEvent, NotificationPreferences, ServerToClientMessage } from '@gian/shared';
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '@gian/shared';
-import {
-  ATTENTION_BODY_MAX_BYTES,
-  ATTENTION_TITLE_MAX_BYTES,
-  attentionMessageForEvent,
-} from '../src/session/event-coordinator.js';
+import { attentionMessageForEvent } from '../src/session/event-coordinator.js';
 import {
   AttentionDispatcher,
   attentionGateForPreferences,
@@ -86,12 +82,35 @@ test('attention maps completion, approval/question, and error display projection
     'question',
     'error',
   ]);
-  assert.deepEqual(attentions.map(message => message?.body), [
-    'The agent finished turn 7.',
-    'The agent needs permission to run a command.',
-    'The agent is waiting for your answer.',
-    'Open Gian to review the error and retry.',
+  assert.deepEqual(attentions.map(message => message?.event), [
+    'turn_complete',
+    'approval_needed',
+    'answer_needed',
+    'turn_failed',
   ]);
+  assert.deepEqual(attentions.map(message => message?.body), [
+    'Turn complete',
+    'Approval needed',
+    'Answer needed',
+    'Turn failed',
+  ]);
+  assert.deepEqual(attentions.map(message => message?.title), ['', '', '', '']);
+  assert.deepEqual(attentions.map(message => message?.session_name), ['', '', '', '']);
+  assert.equal(attentions[0]?.inbox_ref, undefined);
+  assert.equal(attentionMessageForEvent(events[0]!, 'Design notes')?.title, 'Design notes');
+  assert.equal(attentionMessageForEvent(events[0]!, '/tmp/secret')?.session_name, '');
+  assert.equal(attentionMessageForEvent(events[1]!, 'Design notes')?.event, 'approval_needed');
+  const approvalEvent = events[1]!;
+  if (approvalEvent.display?.type !== 'interaction.approval') throw new Error('approval fixture');
+  const plan = attentionMessageForEvent({
+    ...approvalEvent,
+    display: {
+      type: 'interaction.approval',
+      data: { ...approvalEvent.display.data, category: 'exit_plan_mode' },
+    },
+  }, 'Design notes');
+  assert.equal(plan?.event, 'plan_review_needed');
+  assert.equal(plan?.body, 'Plan review needed');
   assert.match(attentions[0]?.id ?? '', /^gian:attention:[A-Za-z0-9_-]{43}$/u);
   assert.equal(attentions[0]?.id, attentionMessageForEvent(events[0]!)?.id);
   for (const attention of attentions) {
@@ -153,21 +172,23 @@ test('attention strips action blocks, commands, paths, raw payloads, and caps UT
     },
   };
 
-  const attention = attentionMessageForEvent(event);
+  const attention = attentionMessageForEvent(event, 'Design notes');
   assert.ok(attention);
-  assert.ok(Buffer.byteLength(attention.title, 'utf8') <= ATTENTION_TITLE_MAX_BYTES);
-  assert.ok(Buffer.byteLength(attention.body, 'utf8') <= ATTENTION_BODY_MAX_BYTES);
-  assert.equal(attention.body, 'The agent finished turn 7.');
-  assert.doesNotMatch(attention.body, /gian:action|submit_step|rm -rf|\/Users\/alice/);
-  assert.doesNotMatch(attention.body, /\ufffd/);
+  assert.equal(attention.title, 'Design notes');
+  assert.equal(attention.body, 'Turn complete');
+  assert.equal(attention.session_name, 'Design notes');
+  assert.doesNotMatch(attention.body, /gian:action|submit_step|rm -rf|\/Users\/alice|turn 7/);
   const wire = JSON.stringify(attention);
-  assert.doesNotMatch(wire, /must-not-cross|rawSecret|file_path|private-project/);
+  assert.doesNotMatch(wire, /must-not-cross|rawSecret|file_path|private-project|gian:action|submit_step/);
   assert.deepEqual(Object.keys(attention).sort(), [
     'body',
+    'event',
     'id',
     'kind',
     'provider',
     'session_id',
+    'session_name',
+    'target',
     'timestamp',
     'title',
     'turn',
@@ -199,7 +220,9 @@ test('approval attention never copies the command/path subject', () => {
   assert.ok(attention);
   const wire = JSON.stringify(attention);
   assert.doesNotMatch(wire, /SECRET_TOKEN|deploy \/Users|private-project|nested|cwd/);
-  assert.equal(attention.body, 'The agent needs permission to run a command.');
+  assert.equal(attention.body, 'Approval needed');
+  assert.equal(attention.event, 'approval_needed');
+  assert.equal(attention.inbox_ref, undefined);
 });
 
 test('attention identity is bounded and never exposes a provider call id', () => {
@@ -309,10 +332,60 @@ test('a disabled kind is gated while other kinds still broadcast', () => {
   assert.deepEqual(messages, [errorAttention]);
 });
 
-test('a dispatcher without a gate broadcasts everything (legacy construction)', () => {
+test('a dispatcher without a gate still broadcasts completion', () => {
   const { messages, broadcaster } = capturingBroadcaster();
   const dispatcher = new AttentionDispatcher(broadcaster);
   const live = dispatcher.broadcast(completionEvent('ungated'));
   assert.ok(live);
+  assert.equal(live.inbox_ref, undefined);
   assert.deepEqual(messages, [live]);
+});
+
+test('approval and question attention is not broadcast before a fresh inbox occurrence', () => {
+  const { messages, broadcaster } = capturingBroadcaster();
+  const dispatcher = new AttentionDispatcher(broadcaster);
+  const approval: ChatEvent<'interaction.approval'> = {
+    ...base,
+    call_id: 'approval-live',
+    display: {
+      type: 'interaction.approval',
+      data: {
+        approvalId: 'approval-live',
+        category: 'command',
+        risk: 'low',
+        title: 'Approve command execution',
+        description: 'Run the project checks.',
+        subject: 'pnpm test',
+        scopeOptions: ['once'],
+      },
+    },
+  };
+  const question: ChatEvent<'interaction.question'> = {
+    ...base,
+    call_id: 'question-live',
+    display: {
+      type: 'interaction.question',
+      data: {
+        approvalId: 'question-live',
+        category: 'question',
+        risk: 'low',
+        title: 'Question',
+        description: '',
+        scopeOptions: ['once'],
+        questions: [{ question: 'Which option?', multiSelect: false, options: [] }],
+      },
+    },
+  };
+
+  assert.equal(dispatcher.broadcast(approval), null);
+  assert.equal(dispatcher.broadcast(question), null);
+  assert.equal(attentionMessageForEvent(approval)?.inbox_ref, undefined);
+  assert.equal(attentionMessageForEvent(question)?.event, 'answer_needed');
+  assert.equal(messages.length, 0, 'pre-inbox approval and question events do not notify');
+
+  const completion = dispatcher.broadcast(completionEvent('still-live'));
+  assert.ok(completion);
+  assert.equal(completion.event, 'turn_complete');
+  assert.equal(completion.inbox_ref, undefined);
+  assert.deepEqual(messages, [completion]);
 });

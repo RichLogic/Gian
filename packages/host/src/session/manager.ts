@@ -3,6 +3,7 @@ import { compactHistoryEnvelopes } from './history-store.js';
 import { DEFAULT_TRANSLATION_PREFERENCES } from '@gian/shared';
 import type {
   ApprovalMode,
+  AttentionInboxRef,
   AgentProxyDefaults,
   SessionRuntimeProfile,
   ConfigOption,
@@ -37,6 +38,7 @@ import { locateCcJsonl, appendCcCustomTitle } from '../native/locate-jsonl.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { GianSessionHostServiceIssuer } from '../tool/session-host-services.js';
 import { advertisedTurnValue } from './advertised-turn-value.js';
+import { resolveSendCatalog } from './resolve-send-catalog.js';
 import { SessionRepository } from './repository.js';
 import type { RemoteControllerHub } from '../remote/controller-hub.js';
 import { localRemoteTurnId } from '../remote/execution-journal.js';
@@ -899,6 +901,192 @@ export class SessionManager {
     return true;
   }
 
+  /**
+   * Fail closed unless `expected` is the live pending Inbox occurrence for
+   * this session, interaction, and Host turn. A remote-owned session cannot
+   * carry the seen occurrence, so it is rejected before any forward.
+   */
+  assertExpectedInbox(sessionId: string, approvalId: string, expected: unknown): void {
+    const ref = expectedInboxRef(expected);
+    if (!ref) throw preconditionFailed('expected inbox ref must be an id and a generation');
+    if (this.remoteController?.owns(sessionId)) {
+      throw preconditionFailed('remote approval cannot prove the seen inbox occurrence');
+    }
+    const row = this.db.prepare(
+      `SELECT source_kind, status, generation, tombstone, target_json
+         FROM inbox_items
+        WHERE id = ?`,
+    ).get(ref.id) as {
+      source_kind: string;
+      status: string;
+      generation: number;
+      tombstone: number;
+      target_json: string;
+    } | undefined;
+    if (
+      !row
+      || row.status !== 'pending'
+      || row.generation !== ref.generation
+      || row.tombstone !== 0
+      || (row.source_kind !== 'session.question' && row.source_kind !== 'session.approval')
+    ) {
+      throw preconditionFailed('inbox occurrence is not the pending generation');
+    }
+    let target: { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+    try {
+      target = JSON.parse(row.target_json) as { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+    } catch {
+      throw preconditionFailed('inbox occurrence target is not readable');
+    }
+    if (
+      target.type !== 'session'
+      || target.session_id !== sessionId
+      || target.interaction_id !== approvalId
+    ) {
+      throw preconditionFailed('inbox occurrence does not match this approval');
+    }
+    const facts = this.db.prepare(
+      `SELECT turn_id AS turnId
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).all(sessionId, approvalId, ref.generation) as Array<{ turnId: string }>;
+    if (facts.length !== 1) {
+      throw preconditionFailed('inbox occurrence host turn is missing or ambiguous');
+    }
+    const turnId = facts[0]?.turnId;
+    const pending = this.approvals.getPending(approvalId, sessionId);
+    if (!pending || pending.sessionId !== sessionId || pending.turnId !== turnId) {
+      throw preconditionFailed('pending approval is not this inbox occurrence');
+    }
+  }
+
+  /**
+   * Re-check after the provider response. The same occurrence may already be
+   * terminal because this response's resolved event ran first. A newer
+   * generation, a later Host turn, or a changed approval mode still blocks
+   * the plan-mode exit. The current turn is the latest persisted `turns` row,
+   * so a later turn that has already finished still blocks. The in-memory
+   * active turn is checked as well and is not the only signal.
+   */
+  private assertPlanExitStillCurrent(
+    sessionId: string,
+    approvalId: string,
+    expected: AttentionInboxRef,
+    seen: PlanExitSeen,
+  ): void {
+    const ref = expectedInboxRef(expected);
+    if (!ref) throw preconditionFailed('expected inbox ref must be an id and a generation');
+    if (this.remoteController?.owns(sessionId)) {
+      throw preconditionFailed('remote approval cannot prove the seen inbox occurrence');
+    }
+    const row = this.loadExpectedInboxRow(ref.id);
+    if (
+      !row
+      || row.generation !== ref.generation
+      || row.tombstone !== 0
+      || (row.source_kind !== 'session.question' && row.source_kind !== 'session.approval')
+      || !inboxTargetMatches(row.target_json, sessionId, approvalId)
+    ) {
+      throw preconditionFailed('inbox occurrence changed before plan-mode exit');
+    }
+    const facts = this.db.prepare(
+      `SELECT turn_id AS turnId
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND generation = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND user_pending = 1
+          AND provider_event_id = occurrence_event_id`,
+    ).all(sessionId, approvalId, ref.generation) as Array<{ turnId: string }>;
+    if (facts.length !== 1 || facts[0]?.turnId !== seen.turnId) {
+      throw preconditionFailed('inbox occurrence host turn changed before plan-mode exit');
+    }
+    const newer = this.db.prepare(
+      `SELECT 1 AS ok
+         FROM inbox_projection_facts
+        WHERE session_id = ?
+          AND interaction_id = ?
+          AND direction = 'open'
+          AND bound = 1
+          AND generation > ?
+          AND provider_event_id = occurrence_event_id
+        LIMIT 1`,
+    ).get(sessionId, approvalId, ref.generation);
+    if (newer) throw preconditionFailed('a newer inbox occurrence is open');
+    // A later turn can start without reusing this interaction id and without
+    // opening an approval. Its row remains after it finishes, when no active
+    // turn is left to compare.
+    const latest = this.db.prepare(
+      `SELECT id
+         FROM turns
+        WHERE session_id = ?
+        ORDER BY turn_number DESC
+        LIMIT 1`,
+    ).get(sessionId) as { id: string } | undefined;
+    if (!latest || latest.id !== seen.turnId) {
+      throw preconditionFailed('a later host turn started before plan-mode exit');
+    }
+    const active = this.turns.get(sessionId);
+    if (active && active.id !== seen.turnId) {
+      throw preconditionFailed('the active host turn changed before plan-mode exit');
+    }
+    const pending = this.approvals.getPending(approvalId, sessionId);
+    if (pending && (pending.sessionId !== sessionId || pending.turnId !== seen.turnId)) {
+      throw preconditionFailed('pending approval moved to another host turn');
+    }
+    if (row.status === 'pending' && !pending) {
+      throw preconditionFailed('pending approval disappeared before the occurrence closed');
+    }
+    const session = this.getSession(sessionId);
+    const configured = session.turn_config?.[seen.optionId];
+    if (
+      session.approval_mode !== seen.approvalMode
+      || seen.optionId !== this.optionIdForRole(session.executor, 'approval_mode', session)
+      || JSON.stringify(configured ?? null) !== seen.turnConfigMode
+    ) {
+      throw preconditionFailed('approval mode changed before plan-mode exit');
+    }
+  }
+
+  private capturePlanExit(sessionId: string, turnId: string): PlanExitSeen {
+    const session = this.getSession(sessionId);
+    const optionId = this.optionIdForRole(session.executor, 'approval_mode', session);
+    return {
+      turnId,
+      approvalMode: session.approval_mode,
+      optionId,
+      turnConfigMode: JSON.stringify(session.turn_config?.[optionId] ?? null),
+    };
+  }
+
+  private loadExpectedInboxRow(id: string): {
+    source_kind: string;
+    status: string;
+    generation: number;
+    tombstone: number;
+    target_json: string;
+  } | undefined {
+    return this.db.prepare(
+      `SELECT source_kind, status, generation, tombstone, target_json
+         FROM inbox_items
+        WHERE id = ?`,
+    ).get(id) as {
+      source_kind: string;
+      status: string;
+      generation: number;
+      tombstone: number;
+      target_json: string;
+    } | undefined;
+  }
+
   async respondApproval(
     sessionId: string,
     approvalId: string,
@@ -906,7 +1094,14 @@ export class SessionManager {
     answers?: Record<string, string | boolean | string[]>,
     nativeOptionId?: string,
     resolvedBy: import('@gian/shared').ApprovalResolvedBy = 'web',
+    expectedInbox?: AttentionInboxRef,
   ): Promise<void> {
+    // Synchronous until the first await below. The check reads the Inbox row,
+    // the canonical open fact, and the live pending record before any
+    // resolve, resolution source, or provider respond.
+    if (expectedInbox !== undefined) {
+      this.assertExpectedInbox(sessionId, approvalId, expectedInbox);
+    }
     if (this.remoteController?.owns(sessionId)) {
       await this.remoteController.handleMessage({ type: 'approval:resolve', session_id: sessionId,
         approval_id: approvalId, decision, answers, native_option_id: nativeOptionId });
@@ -1015,6 +1210,14 @@ export class SessionManager {
         values,
       });
       savedResponseId = responseId;
+      // Snapshot before the provider can close this occurrence. The first
+      // check already required a live pending row; this snapshot is only the
+      // turn and mode that a later replacement is not allowed to overwrite.
+      const planExitSeen = pending
+        && pending.category === 'exit_plan_mode'
+        && expectedInbox !== undefined
+        ? this.capturePlanExit(sessionId, pending.turnId)
+        : null;
       await client.respondInteraction({
         sessionId: proxySessionId,
         interactionId: approvalId,
@@ -1026,7 +1229,19 @@ export class SessionManager {
 
       // Plan-mode-exit decisions get mapped to plain allow/deny on the proxy
       // wire; the auto/ask flip happens only after the response succeeds.
+      // The provider response already left this turn, so a later Host turn
+      // skips the mode flip and leaves the successful response in place.
+      // This response's own resolved event may already have made the seen
+      // occurrence terminal. That is not a later turn, so it still flips.
       if (pending?.category === 'exit_plan_mode') {
+        if (expectedInbox !== undefined && planExitSeen) {
+          try {
+            this.assertPlanExitStillCurrent(sessionId, approvalId, expectedInbox, planExitSeen);
+          } catch (error) {
+            console.warn('[approval] skipped plan-mode exit because the seen inbox occurrence changed', error);
+            return;
+          }
+        }
         const session = this.db
           .prepare('SELECT approval_mode FROM sessions WHERE id = ?')
           .get(sessionId) as { approval_mode: ApprovalMode } | undefined;
@@ -1274,10 +1489,11 @@ export class SessionManager {
     const proxySessionId = await this.proxySessions.ensure(session);
     const client = this.proxy.get(sessionId);
     if (!client) throw new Error(`no proxy for session: ${sessionId}`);
-    // A new/restored client has only its default-model Catalog. Resolve the
-    // actual next-Turn draft on that same live connection before its strict
-    // validator admits turn.start; UI-only resolution belongs to another
-    // connection and is not proof of this session's advertised values.
+    // client.catalog() can still be the process catalog cached before
+    // session.create, while the attached session has a newer native fence.
+    // Resolve on that fence. One pre-dispatch Catalog-changed CONFLICT
+    // reloads the canonical catalog and resolves once more. turn.start is
+    // later and is not used to recover a rejected resolve.
     if (client.resolveCatalog && this.proxySessions.getProtocolCapabilities(
       session.executor, this.agentResolver?.cliPathForSession(session),
     )?.['catalog.resolve'] !== undefined) {
@@ -1299,7 +1515,7 @@ export class SessionManager {
           ?? roleValue;
         if (value !== undefined && value !== null && value !== '') turnDraft[option.id] = value;
       }
-      const resolved = await client.resolveCatalog({ catalogRevision: catalog.catalogRevision, sessionConfig, turnConfig: turnDraft });
+      const resolved = await resolveSendCatalog(client, { sessionConfig, turnConfig: turnDraft }, catalog.catalogRevision);
       const options = resolved.configOptions.filter((option) => option.binding === 'turn');
       const revision = `turn-config-${createHash('sha256').update(JSON.stringify(options)).digest('hex').slice(0, 24)}`;
       this.persistTurnConfigOptions(sessionId, options, revision);
@@ -2818,6 +3034,41 @@ function exitPlanWireActions(
   return typeof allow === 'string' && allow && typeof deny === 'string' && deny
     ? { allow, deny }
     : null;
+}
+
+interface PlanExitSeen {
+  turnId: string;
+  approvalMode: Session['approval_mode'];
+  optionId: string;
+  turnConfigMode: string;
+}
+
+function inboxTargetMatches(targetJson: string, sessionId: string, approvalId: string): boolean {
+  let target: { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+  try {
+    target = JSON.parse(targetJson) as { type?: unknown; session_id?: unknown; interaction_id?: unknown };
+  } catch {
+    return false;
+  }
+  return target.type === 'session'
+    && target.session_id === sessionId
+    && target.interaction_id === approvalId;
+}
+
+function preconditionFailed(message: string): Error {
+  const error = new Error(message);
+  (error as Error & { code: string }).code = 'PRECONDITION_FAILED';
+  return error;
+}
+
+function expectedInboxRef(value: unknown): { id: string; generation: number } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as { id?: unknown; generation?: unknown };
+  const generation = candidate.generation;
+  if (typeof candidate.id !== 'string') return null;
+  if (candidate.id.length < 1 || candidate.id.length > 128 || candidate.id.includes('\0')) return null;
+  if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) return null;
+  return { id: candidate.id, generation };
 }
 
 function providerNativeSessionId(session: { nativeSession?: { id?: string } }): string | null {

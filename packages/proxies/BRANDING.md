@@ -10,6 +10,7 @@ endorsement.
 | Codex | [OpenAI Codex](https://openai.com/codex/), OpenAI knot used by the official product page | black on light, white on dark |
 | Kimi Code | [Kimi Brand Book](https://www.kimi.com/resources/kimi-brand), official `Logomark` PNGs | black tile on light, white tile on dark |
 | DeepSeek Harness | [DeepSeek](https://www.deepseek.com/), official whale favicon | official blue mark for both themes |
+| Antigravity | [Antigravity](https://antigravity.google/), site favicon retrieved unmodified through Google's favicon service on 2026-10-12 | official 128 px color mark for both themes |
 
-Assets were retrieved on 2026-08-25 and resized losslessly to at most 256 px.
+Unless dated separately above, assets were retrieved on 2026-08-25 and resized losslessly to at most 256 px.
 The original names and marks remain trademarks of their respective owners.

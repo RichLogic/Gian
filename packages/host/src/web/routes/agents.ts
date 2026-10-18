@@ -12,7 +12,7 @@ import { catalogModeSemantics, executorIdForPluginId, isApprovalMode, isProductE
 import type { AgentManager } from '../../agents/manager.js';
 import { AgentCreateError, AgentNameTakenError, PluginIdImmutableError, mergeAgentProxyDefaults } from '../../agents/manager.js';
 import { AgentHomeError } from '../../agents/home.js';
-import { isProxyPluginId, parseProxyPluginId, pluginIdForExecutorId, resolvePluginIdInput } from '@gian/shared';
+import { isProxyPluginId, parseProxyPluginId, resolvePluginIdInput } from '@gian/shared';
 import { RuntimeResolverError, type RuntimeResolver } from '../../runtime/resolver.js';
 import { RuntimeControlError, type RuntimeControlPlane } from '../../runtime/control-plane.js';
 import { ManagedRuntimeDeliveryError, type ManagedRuntimeDeliveryService } from '../../runtime/delivery-service.js';
@@ -362,7 +362,8 @@ function normalizeDefaultsPatch(
 
 function normalizeHome(
   value: unknown,
-): { kind: 'managed' } | { kind: 'custom'; path: string } | undefined | { error: string } {
+  allowDefault = false,
+): { kind: 'managed' } | { kind: 'custom'; path: string } | { kind: 'default'; expectedPath: string } | undefined | { error: string } {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { error: 'home must be an object' };
@@ -376,6 +377,16 @@ function normalizeHome(
     return keys.length === 2 && typeof home.path === 'string'
       ? { kind: 'custom', path: home.path }
       : { error: 'custom home requires kind and path' };
+  }
+  if (home.kind === 'default') {
+    if (!allowDefault) return { error: 'home.kind must be managed or custom' };
+    if (keys.length !== 2 || typeof home.expectedPath !== 'string') {
+      return { error: 'default home requires kind and expectedPath' };
+    }
+    if (!isCanonicalAbsolutePath(home.expectedPath)) {
+      return { error: 'default home expectedPath must be a canonical absolute path' };
+    }
+    return { kind: 'default', expectedPath: home.expectedPath };
   }
   return { error: 'home.kind must be managed or custom' };
 }
@@ -750,7 +761,7 @@ export function registerAgentRoutes(
       if (cliPath !== undefined && cliPath !== null && typeof cliPath !== 'string') {
         return c.json({ error: 'cliPath must be a string or null' }, 400);
       }
-      const home = normalizeHome(body.home);
+      const home = normalizeHome(body.home, true);
       if (home && 'error' in home) return c.json({ error: home.error }, 400);
       const runtime = normalizeRuntime(body.runtime);
       if (runtime && 'error' in runtime) return c.json({ error: runtime.error }, 400);
@@ -1009,20 +1020,10 @@ export function registerAgentRoutes(
   // Kind default draft helpers: name/color/path the client can prefill a
   // draft card with before the Agent exists.
   app.get('/api/proxies/:id/draft-defaults', async c => {
-    const kind = executor(c.req.param('id'));
-    if (!kind) return c.json({ error: 'unknown proxy' }, 404);
-    const pluginId = pluginIdForExecutorId(kind);
-    const existing = options.agents.listAgents().filter(agent => agent.pluginId === pluginId);
-    return c.json({
-      name: options.agents.nextAgentName(kind),
-      home: {
-        kind: 'default',
-        path: options.agents.defaultAgentHomePath(kind),
-      },
-      // Read-only active Runtime path. Never PATH-scan or accept it back on
-      // Agent create/update.
-      cliPath: existing.find(agent => agent.cliPath !== null)?.cliPath
-        ?? await options.agents.scannedCliPath(kind),
-    });
+    try {
+      return c.json(await options.agents.integrationDraftDefaults(c.req.param('id')));
+    } catch (error) {
+      return c.json(errorResponse(error), agentErrorStatus(error));
+    }
   });
 }

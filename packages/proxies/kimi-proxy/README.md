@@ -37,12 +37,15 @@ stored transcripts are not rewritten.
 
 ## Runtime baseline
 
-- Kimi Code CLI `2.1.1` (the Manifest and certified Runtime candidate select
+- Kimi Code CLI `2.2.0` (the Manifest and certified Runtime candidate select
   the same exact official archive). Evidence baseline: the
   server's own OpenAPI 3.0.3 (`/openapi.json`) and AsyncAPI 3.1.0
   (`/asyncapi.json`) documents, plus `packages/kap-server` sources embedded in
   the official binary (`protocol/error-codes.ts`, `transport/ws/*`,
-  `middleware/*`).
+  `middleware/*`). Re-verified for 2.2.0: the published server-api reference
+  diff from 2.1.1 is purely additive (Remote Control endpoints, optional
+  fields) and a live 2.2.0 `/openapi.json` + `/asyncapi.json` probe confirms
+  every REST route and WS message type this proxy uses.
 - The proxy spawns its own dedicated server instance on a proxy-chosen free
   port (loopback only, `--no-open --log-level silent`). The bearer token comes
   from `$KIMI_CODE_HOME/server/server.token` (persisted by the CLI; rotated
@@ -79,7 +82,7 @@ dependency.
 
 ## Capability map
 
-### Supported (all evidenced against the 2.1.1 server surface)
+### Supported (all evidenced against the 2.2.0 server surface)
 
 | Capability | Mechanism |
 |---|---|
@@ -148,6 +151,6 @@ re-anchors on the session's `last_seq`.
   schema conformance (`proxyNotificationSchema`) for projected streams.
 - `pnpm -F @gian/kimi-proxy typecheck`.
 - NOT RUN: real-server acceptance (`KIMI_BIN` against a logged-in
-  `kimi web 2.1.1`). The fake encodes the researched upstream surface, but
+  `kimi web 2.2.0`). The fake encodes the researched upstream surface, but
   steer-into-active-turn timing, `:delete` permanence for child sessions, and
   `blocked` prompt admission deserve a real-server pass before shipping.

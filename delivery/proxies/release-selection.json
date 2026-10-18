@@ -1,8 +1,7 @@
 {
   "schema": 1,
   "providers": [
-    "kimi",
-    "grok"
+    "antigravity"
   ],
-  "baseCatalogTag": "catalog-v1.19.0"
+  "baseCatalogTag": "catalog-v1.28.0"
 }

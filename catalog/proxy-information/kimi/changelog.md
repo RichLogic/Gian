@@ -2,7 +2,29 @@
 
 本文件由 changelog.json 的结构化记录投影，按 Proxy 版本倒序。首次发布日期与新仓库分发日期分别记录；未知历史不会用当前版本说明回填。
 
-本次发布组合快照：Proxy **0.4.5**，Runtime **2.1.1**。这是发布目标，不表示当前机器已安装。
+本次发布组合快照：Proxy **0.4.7**，Runtime **2.2.0**。这是发布目标，不表示当前机器已安装。
+
+## 0.4.7
+
+首次公开发布：2026-10-15T10:55:26Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.7)：2026-10-15T10:55:26Z。
+- 对应 CLI：2.2.0（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- 将 Kimi Code Runtime 更新至 2.2.0（与官方 @moonshot-ai/kimi-code@2.2.0 GitHub 资产摘要一致）。2.1.1 到 2.2.0 的 server-api 参考差异仅为新增（Remote Control 端点与可选字段），实况 2.2.0 /openapi.json 与 /asyncapi.json 探测确认本 Proxy 使用的全部 REST 路由与 WebSocket 消息类型。适配器与线协议范围不变。产物经过托管认证；本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.7) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.7/packages/proxies/kimi-proxy/README.md)
+
+## 0.4.6
+
+首次公开发布：2026-10-11T05:51:34Z（UTC）。
+
+- [RichLogic/Gian-Proxies 分发](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.6)：2026-10-11T05:51:34Z。
+- 对应 CLI：2.1.1（Manifest 兼容声明，不是本机状态）。
+
+### 变更
+
+- Runtime 断连后保留并恢复 Turn：新流绑定重置通知计数、事件从持久游标继续，仅子进程退出视为运行时下线；确认类交互明确声明可省略答案的取消动作。独立包使用公开 Proxy Protocol SDK 1.0.2，线协议范围不变，Kimi Code Runtime 仍为 2.1.1。本次发行未运行真实模型 Turn。 [依据1](https://github.com/RichLogic/Gian-Proxies/releases/tag/proxy-kimi-v0.4.6) [依据2](https://github.com/RichLogic/Gian-Proxies/blob/proxy-kimi-v0.4.6/packages/proxies/kimi-proxy/README.md)
 
 ## 0.4.5
 

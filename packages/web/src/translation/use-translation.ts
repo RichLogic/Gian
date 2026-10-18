@@ -3,14 +3,44 @@ import { DEFAULT_TRANSLATION_PREFERENCES, isTranslationConfigured, type Composer
 import { cancelTranslation, loadTranslationState, setAutoTranslation, translateText, type TranslationState } from '../operations/translation.js';
 import { useOperationDispatchOptional } from '../operations/use-operations.js';
 import { useT } from '../i18n/index.js';
+import { injectComposerDraft } from '../components/Composer.js';
+import { toast } from '../feedback.js';
+import { SEND_TRANSLATE_TIMEOUT_MS, withSendTimeout } from './send-timeout.js';
 
 export interface ReadingTranslation { pending: boolean; record?: TranslationRecord; error?: string }
 /** Resolved once a translated send may dispatch: the TranslationRecord whose
  *  id the Host expects, or 'original' when the user chose to skip translation. */
 export type SendOutcome = TranslationRecord | 'original';
+/** Explicit send-gate phase: the send promise stays unsettled across
+ *  'translating' and 'failed' — only the user (retry / send original /
+ *  reclaim) or a successful translation settles it. */
+export type SendPhase = { phase: 'translating' } | { phase: 'failed'; error: string; timedOut: boolean };
 interface SendRequest {
   text: string; document?: ComposerDocument;
   resolve: (outcome: SendOutcome) => void; reject: (error: Error) => void;
+}
+
+/** Durability for the composed text while a translated send is gated: the
+ *  record survives session switches and crashes so a later mount can restore
+ *  it into the composer draft (restore-exactly-once, then the key is gone). */
+const PENDING_SEND_KEY_PREFIX = 'gian.translation.pending-send.v1.';
+const pendingSendKey = (sessionId: string) => `${PENDING_SEND_KEY_PREFIX}${sessionId}`;
+interface PendingSendRecord { text: string; document?: ComposerDocument; at: number }
+function writePendingSend(sessionId: string, record: PendingSendRecord): void {
+  try { localStorage.setItem(pendingSendKey(sessionId), JSON.stringify(record)); } catch { /* ephemeral */ }
+}
+function clearPendingSend(sessionId: string): void {
+  try { localStorage.removeItem(pendingSendKey(sessionId)); } catch { /* ephemeral */ }
+}
+function readPendingSend(sessionId: string): PendingSendRecord | null {
+  try {
+    const raw = localStorage.getItem(pendingSendKey(sessionId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingSendRecord>;
+    return typeof parsed.text === 'string' && parsed.text
+      ? { text: parsed.text, document: parsed.document, at: typeof parsed.at === 'number' ? parsed.at : 0 }
+      : null;
+  } catch { return null; }
 }
 
 export function useTranslation(sessionId: string) {
@@ -28,7 +58,7 @@ export function useTranslation(sessionId: string) {
    *  even for auto-translated replies); a manual click overrides in either
    *  direction until the session remounts. */
   const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({});
-  const [sending, setSending] = useState<{ pending: boolean; error?: string } | null>(null);
+  const [sending, setSending] = useState<SendPhase | null>(null);
   const sendRef = useRef<SendRequest | null>(null);
   const requests = useRef(new Map<string, AbortController>());
   const sendId = useRef<string | null>(null);
@@ -50,6 +80,15 @@ export function useTranslation(sessionId: string) {
     // every session) and ephemeral by design — a fresh mount returns to the
     // auto-translate default.
     setExpandOverride({});
+    // Crash / session-switch recovery: a send gated on a translation that
+    // never settled left its composed text behind. Hand it back to the
+    // composer exactly once (the key is removed before any later mount).
+    const pendingSend = readPendingSend(sessionId);
+    if (pendingSend) {
+      injectComposerDraft(sessionId, pendingSend.text);
+      toast({ kind: 'info', message: t('translation.draftRestored') });
+      clearPendingSend(sessionId);
+    }
     void refresh();
     window.addEventListener('gian:translation-settings', refresh);
     window.addEventListener('focus', refresh);
@@ -97,13 +136,38 @@ export function useTranslation(sessionId: string) {
   async function retrySend() {
     const current = sendRef.current;
     if (!current || sendId.current) return;
-    setSending({ pending: true });
+    setSending({ phase: 'translating' });
+    // Hard timeout: a hung translation provider must not gate the dispatch
+    // forever. On expiry the request is aborted + cancelled Host-side and the
+    // send drops to the failed phase — the send promise stays unsettled so the
+    // user (not the timer) decides what happens to the text. The request is
+    // evicted from the in-flight maps so a retry can start immediately; its
+    // late settle is guarded out below (`timedOut` / `sendRef` checks).
+    let timedOut = false;
+    const timeout = withSendTimeout(() => {
+      if (!alive.current || sendRef.current !== current) return;
+      timedOut = true;
+      const id = sendId.current;
+      if (id) {
+        requests.current.get(id)?.abort();
+        requests.current.delete(id);
+        if (sendId.current === id) sendId.current = null;
+        void cancelTranslation(sessionId, id, dispatch).catch(() => undefined);
+      }
+      setSending({ phase: 'failed', timedOut: true,
+        error: t('translation.sendTimeout').replace('{s}', String(SEND_TRANSLATE_TIMEOUT_MS / 1000)) });
+    });
     try {
       const record = await request(current.text, 'send', undefined, current.document);
-      if (!alive.current || sendRef.current !== current) return;
-      sendRef.current = null; setSending(null); current.resolve(record);
+      if (!alive.current || sendRef.current !== current || timedOut) return;
+      sendRef.current = null; setSending(null); clearPendingSend(sessionId); current.resolve(record);
     } catch (error) {
-      if (alive.current && sendRef.current === current) setSending({ pending: false, error: String(error) });
+      if (timedOut) return;
+      if (alive.current && sendRef.current === current) {
+        setSending({ phase: 'failed', error: String(error), timedOut: false });
+      }
+    } finally {
+      timeout.clear();
     }
   }
   /**
@@ -123,6 +187,9 @@ export function useTranslation(sessionId: string) {
     if (sendRef.current) return null;
     return new Promise((resolve, reject) => {
       sendRef.current = { text, document, resolve, reject };
+      // Durability first: if this tab dies or the session unmounts before the
+      // send resolves, the text is recoverable on the next mount.
+      writePendingSend(sessionId, { text, document, at: Date.now() });
       void retrySend();
     });
   }
@@ -134,8 +201,25 @@ export function useTranslation(sessionId: string) {
       void cancelTranslation(sessionId, sendId.current, dispatch).catch(() => undefined);
     }
     setSending(null);
+    clearPendingSend(sessionId);
     if (original) current?.resolve('original');
     else current?.reject(new Error('Translation cancelled.'));
+  }
+  /** Give the gated text back to the composer: abort the in-flight send
+   *  translation, restore the draft, drop the durable record, and reject the
+   *  send promise (the caller's .catch removes the optimistic echo). */
+  function reclaimSend() {
+    const current = sendRef.current;
+    if (!current) return;
+    sendRef.current = null;
+    if (sendId.current) {
+      requests.current.get(sendId.current)?.abort();
+      void cancelTranslation(sessionId, sendId.current, dispatch).catch(() => undefined);
+    }
+    clearPendingSend(sessionId);
+    injectComposerDraft(sessionId, current.text);
+    setSending(null);
+    current.reject(new Error('Translation send reclaimed.'));
   }
   async function read(text: string, sourceId: string): Promise<void> {
     if (reading[sourceId]?.pending) return;
@@ -178,7 +262,7 @@ export function useTranslation(sessionId: string) {
       controller.abort(); void cancelTranslation(sessionId, requestId, dispatch).catch(() => undefined);
     } };
   }
-  return { state, ready, error, saving, toggle, sending, prepareSend, retrySend, finishSend, read, result, isReadExpanded, toggleRead, refresh, select };
+  return { state, ready, error, saving, toggle, sending, prepareSend, retrySend, finishSend, reclaimSend, read, result, isReadExpanded, toggleRead, refresh, select };
 }
 
 export type TranslationController = ReturnType<typeof useTranslation>;

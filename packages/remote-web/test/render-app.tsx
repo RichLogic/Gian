@@ -1,6 +1,7 @@
 /**
  * Shared render helper: mount the App against a fixture controller with a
- * pinned locale + viewport mode.
+ * pinned locale + viewport mode. The locale rides the fixture controller
+ * state, exactly where the production snapshot puts it.
  */
 
 import { act, render } from '@testing-library/react';
@@ -10,7 +11,6 @@ import type { FixtureController, FixtureScenario } from '../src/controller/fixtu
 import { createFixtureController } from '../src/controller/fixture.js';
 import type { RemoteUiActions } from '../src/controller/types.js';
 import { ControllerProvider } from '../src/ui/controller-context.js';
-import { LocaleProvider } from '../src/i18n/index.js';
 import type { Locale } from '../src/i18n/index.js';
 import { ViewportProvider } from '../src/ui/viewport.js';
 import type { ViewportMode } from '../src/ui/viewport.js';
@@ -38,7 +38,10 @@ export function renderApp(options: {
   locale?: Locale;
   viewport?: ViewportMode;
 }): RenderResult & { controller: FixtureController } {
-  const raw = createFixtureController(options.scenario ?? {});
+  const raw = createFixtureController({
+    ...options.scenario,
+    locale: options.locale ?? options.scenario?.locale ?? 'zh-CN',
+  });
   const controller: FixtureController = new Proxy(raw, {
     get(obj, prop, receiver) {
       if (prop === 'actions') return actWrapped(obj.actions as RemoteUiActions);
@@ -47,13 +50,11 @@ export function renderApp(options: {
     },
   });
   const result = render(
-    <LocaleProvider locale={options.locale ?? 'zh-CN'}>
-      <ViewportProvider value={options.viewport ?? 'wide'}>
-        <ControllerProvider controller={controller}>
-          <App />
-        </ControllerProvider>
-      </ViewportProvider>
-    </LocaleProvider>,
+    <ViewportProvider value={options.viewport ?? 'wide'}>
+      <ControllerProvider controller={controller}>
+        <App />
+      </ControllerProvider>
+    </ViewportProvider>,
   );
   return { ...result, controller };
 }

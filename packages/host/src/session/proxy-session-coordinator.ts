@@ -63,6 +63,8 @@ export interface BringUpProxySessionInput {
   sessionConfig?: Record<string, string | boolean | number | null>;
   hostServiceIdentity?: Omit<GianSessionHostServiceIdentity, 'sessionId'>;
   preparedLaunch?: PreparedSessionLaunch;
+  /** Creation policy must validate this connection's facts before native create. */
+  validateCatalog?: (catalog: ProxyCatalog, capabilities: Record<string, unknown>) => void;
 }
 
 export interface BringUpProxySessionResult {
@@ -104,7 +106,7 @@ function nativeOptionsFromCatalog(
     id: option.id,
     name: option.displayName,
     type: option.control,
-    currentValue: values[option.id] ?? option.defaultValue,
+    currentValue: Object.hasOwn(values, option.id) ? values[option.id]! : option.defaultValue,
     scope: option.binding,
     ...(option.role ? { category: option.role } : {}),
     ...(option.choices ? {
@@ -456,6 +458,7 @@ export class ProxySessionCoordinator {
     this.rememberProtocolCapabilities(cacheKey, initialized);
     const catalog = await client.catalog();
     this.catalogByExecutor.set(cacheKey, catalog);
+    args.validateCatalog?.(catalog, initialized.capabilities);
 
     const adoptParams: {
       nativeSessionId?: string;
@@ -481,7 +484,7 @@ export class ProxySessionCoordinator {
         ? args.model
         : option.role === 'effort'
           ? args.executorDefaults?.thinking
-          : option.role === 'approval_mode'
+          : option.role === 'approval_mode' || option.role === 'execution_mode'
             ? args.executorDefaults?.mode
             : undefined;
       const supportedRoleValue = byRole === undefined || byRole === null
@@ -498,8 +501,9 @@ export class ProxySessionCoordinator {
         || !option.choices || option.choices.some(choice => Object.is(choice.value, byAgentOption))
         ? byAgentOption
         : undefined;
-      const value = args.sessionConfig?.[option.id]
-        ?? persisted
+      const value = args.sessionConfig && Object.hasOwn(args.sessionConfig, option.id)
+        ? args.sessionConfig[option.id]
+        : persisted
         ?? supportedRoleValue
         ?? supportedAgentValue
         ?? option.defaultValue;

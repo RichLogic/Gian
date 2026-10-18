@@ -1,7 +1,7 @@
 import type { Context, Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { ScheduleErrorCode, ScheduleStatus } from '@gian/shared';
-import { REST_IDEMPOTENCY_KEY_BYTES } from '@gian/shared';
+import { isScheduleConfirmationResolveRequest, REST_IDEMPOTENCY_KEY_BYTES } from '@gian/shared';
 import type { ScheduleCommandLedger } from '../../schedule/command-ledger.js';
 import { scheduleCommandHash } from '../../schedule/command-ledger.js';
 import { ScheduleError, scheduleHttpStatus } from '../../schedule/errors.js';
@@ -290,13 +290,21 @@ export function registerScheduleRoutes(app: Hono, deps: ScheduleRouteDependencie
 
   app.post('/api/schedule-confirmations/:id/resolve', async c => {
     try {
-      const body = await c.req.json<Record<string, unknown>>();
-      if (body.decision !== 'approve' && body.decision !== 'reject') {
+      const body: unknown = await c.req.json();
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
         throw new ScheduleError('INVALID_ARGUMENT', "decision must be 'approve' or 'reject'");
+      }
+      const decision = (body as { decision?: unknown }).decision;
+      if (decision !== 'approve' && decision !== 'reject') {
+        throw new ScheduleError('INVALID_ARGUMENT', "decision must be 'approve' or 'reject'");
+      }
+      if (!isScheduleConfirmationResolveRequest(body)) {
+        throw new ScheduleError('INVALID_ARGUMENT', 'expected_inbox must be an inbox id and generation');
       }
       const confirmation = service.resolveConfirmation({
         confirmationId: c.req.param('id'),
         decision: body.decision,
+        ...(body.expected_inbox ? { expectedInbox: body.expected_inbox } : {}),
       });
       return c.json(confirmation);
     } catch (error) {

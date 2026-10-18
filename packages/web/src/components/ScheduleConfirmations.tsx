@@ -14,6 +14,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { ScheduleConfirmation } from '@gian/shared';
 import { useT } from '../i18n/index.js';
 import {
+  clearScheduleConfirmationFocus,
   getScheduleConfirmationsSnapshot,
   hydrateScheduleConfirmations,
   pendingScheduleConfirmations,
@@ -34,17 +35,36 @@ export function ScheduleConfirmationHost() {
     getScheduleConfirmationsSnapshot,
   );
   const queue = pendingScheduleConfirmations(snapshot);
-  const current = queue[0] ?? null;
+  // A deep-link focus surfaces exactly that confirmation; without one the
+  // queue keeps oldest-first. A focus whose id left pending clears itself.
+  const focused = snapshot.focus
+    ? queue.find(entry => entry.id === snapshot.focus!.id) ?? null
+    : null;
+  useEffect(() => {
+    if (snapshot.focus && !focused) clearScheduleConfirmationFocus(snapshot.focus.id);
+  }, [snapshot.focus, focused]);
+  const current = focused ?? queue[0] ?? null;
   if (!current) return null;
-  return <ScheduleConfirmationCard key={current.id} confirmation={current} remaining={queue.length - 1} />;
+  return (
+    <ScheduleConfirmationCard
+      key={current.id}
+      confirmation={current}
+      remaining={queue.length - 1}
+      expectedInbox={snapshot.focus?.id === current.id ? snapshot.focus.inboxRef : undefined}
+    />
+  );
 }
 
 function ScheduleConfirmationCard({
   confirmation,
   remaining,
+  expectedInbox,
 }: {
   confirmation: ScheduleConfirmation;
   remaining: number;
+  /** Observed Inbox ref from the deep link — the resolve binds exactly the
+   *  generation the user saw (Host precondition). */
+  expectedInbox?: { id: string; generation: number };
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
@@ -62,6 +82,7 @@ function ScheduleConfirmationCard({
       // The resolved record replaces the pending one; a non-pending status
       // drops the card from the queue (the next pending card appears).
       upsertScheduleConfirmation(run.result as ScheduleConfirmation);
+      clearScheduleConfirmationFocus(confirmation.id);
       setRunId(undefined);
     } else if (run.phase === 'failed' || run.phase === 'timed-out') {
       // Keep the card and allow retry — the Tool call is still blocked
@@ -89,6 +110,7 @@ function ScheduleConfirmationCard({
     setRunId(dispatch('schedule.resolveConfirmation', {
       confirmationId: confirmation.id,
       decision,
+      ...(expectedInbox ? { expectedInbox } : {}),
     }).id);
   }
 

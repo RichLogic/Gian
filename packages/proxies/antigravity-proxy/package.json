@@ -1,0 +1,36 @@
+{
+  "name": "@gian/antigravity-proxy",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/cli/spawn.js",
+  "gianProxy": {
+    "releaseId": "antigravity",
+    "shipping": true,
+    "runtimeQualification": {
+      "module": "dist/src/runtime/discover.js",
+      "export": "probeAntigravityRuntime"
+    },
+    "realAcceptance": {
+      "binaryEnv": "ANTIGRAVITY_BIN",
+      "proxyBinaryArg": "--antigravity-bin",
+      "setup": "default"
+    }
+  },
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/src/cli/spawn.js",
+    "test": "pnpm run build && node --test dist/test/*.test.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.23.0",
+    "@gian/proxy-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

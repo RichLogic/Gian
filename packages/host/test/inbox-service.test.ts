@@ -727,11 +727,44 @@ test('session expiry strips the target without claiming a read, and attention so
       now: () => '2026-10-09T03:00:00.000Z',
       createId: () => 'item-wire',
       broadcast: message => broadcaster.broadcast(message),
+      onAttentionControl: message => broadcaster.broadcast(message),
     });
     wired.applySignal(question('q-wire', 1, 'Wire', 'Body', 'sess-9'));
-    assert.deepEqual(attention, []);
-    assert.equal(JSON.parse(full[0]!).type, 'inbox:changed');
+    assert.deepEqual(attention.map(frame => JSON.parse(frame).type), ['attention:control']);
+    const control = JSON.parse(attention[0]!) as {
+      items: Array<{ id: string; read: boolean; terminal: boolean }>;
+    };
+    assert.equal(control.items[0]?.id, 'item-wire');
+    assert.equal(control.items[0]?.read, false);
+    assert.equal(control.items[0]?.terminal, false);
+    assert.equal(attention[0]!.includes('Wire'), false);
+    assert.equal(attention[0]!.includes('Body'), false);
+    assert.deepEqual(full.map(frame => JSON.parse(frame).type), ['attention:control', 'inbox:changed']);
     assert.equal(full.some(frame => JSON.parse(frame).type === 'attention'), false);
+  } finally {
+    handle.close();
+  }
+});
+
+test('attention lookup returns exact generation state and does not claim a user read', () => {
+  const handle = open();
+  try {
+    const created = mustItem(handle.service.applySignal(question('q-1')));
+    handle.service.markRead(created.id, created.generation);
+    assert.deepEqual(handle.service.attentionControl([
+      { id: created.id, generation: created.generation },
+      { id: created.id, generation: created.generation + 1 },
+      { id: 'missing', generation: 1 },
+    ]), [
+      { id: created.id, generation: created.generation, revision: 2, read: true, terminal: false },
+      { id: created.id, generation: created.generation + 1, revision: 0, read: false, terminal: true },
+      { id: 'missing', generation: 1, revision: 0, read: false, terminal: true },
+    ]);
+    assert.equal(handle.service.get(created.id).summary.includes('Choose'), true);
+    assert.throws(
+      () => handle.service.attentionControl([{ id: created.id, generation: 0 }]),
+      (error: unknown) => error instanceof InboxError,
+    );
   } finally {
     handle.close();
   }

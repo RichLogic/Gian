@@ -261,18 +261,20 @@ export const OPERATION_POLICIES = {
 /**
  * WS message types that mutate Host state — every `ClientToServerMessage`
  * except the protocol exceptions (proposal §4.4): authentication bootstrap,
- * event subscription, terminal byte streaming, and replay request.
+ * event subscription, terminal byte streaming, replay request, and the
+ * read-only attention reconciliation lookup (0.6.7 — it is a query against
+ * stored refs, never a state change).
  */
 export type MutatingWsType = Exclude<
   ClientToServerMessage['type'],
-  'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request'
+  'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request' | 'attention:lookup'
 >;
 
 /** The mutating members of `ClientToServerMessage` — every one carries the
  *  optional `request_id` correlation field (proposal §4.4). */
 export type MutatingClientMessage = Exclude<
   ClientToServerMessage,
-  { type: 'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request' }
+  { type: 'auth' | 'events:subscribe' | 'term:input' | 'term:resize' | 'term:replay-request' | 'attention:lookup' }
 >;
 
 /**

@@ -27,7 +27,7 @@ import {
   loadSettings,
 } from '../src/api.js';
 import { LocaleProvider } from '../src/i18n/index.js';
-import { clearComposerCapabilityCaches } from '../src/components/composer/capabilities.js';
+import { catalogFromCapabilities, clearComposerCapabilityCaches, fetchCatalogCached, getCatalogCached, getModelsCached } from '../src/components/composer/capabilities.js';
 import { remoteRequest, type RemoteEnvironmentCatalog } from '../src/remote-environments.js';
 import {
   clearNewSessionDraft,
@@ -43,6 +43,7 @@ import {
   OperationDispatcherProvider,
   OperationStoreProvider,
 } from '../src/operations/use-operations.js';
+import { projectedCatalog } from '../../proxies/antigravity-proxy/test/fixtures/config-options.js';
 
 const { pickResourcesMock, screenshotStartMock, desktopResourcesAvailable, desktopScreenshotAvailable } = vi.hoisted(() => ({
   pickResourcesMock: vi.fn(),
@@ -225,6 +226,45 @@ describe('NewSessionView', () => {
       createObjectURL: { configurable: true, value: vi.fn(() => 'blob:new-session-screenshot') },
       revokeObjectURL: { configurable: true, value: vi.fn() },
     });
+  });
+
+  it('retains the real Antigravity triplet across draft reopen and maps native Mode into turn_config', async () => {
+    const agy = {
+      ...agent('io.gian.antigravity', 'Antigravity'), proxy: null,
+      defaults: { model: 'gemini-3.8-flash', thinking: 'high', mode: 'default' },
+    };
+    vi.mocked(loadAgents).mockResolvedValue([agy]);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue(projectedCatalog({}, '') as unknown as Awaited<ReturnType<typeof loadProxyCapabilities>>);
+    vi.mocked(loadResolvedProxyCatalog).mockImplementation(async (_executor, request) => {
+      const wire = projectedCatalog(request.turnConfig, '');
+      // Host normalizes specialCatalogs before serving this API response.
+      return { ...wire, configOptions: catalogFromCapabilities(wire).configOptions };
+    });
+    const first = renderView({ initialAgentId: agy.id });
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-model-chip')).toHaveTextContent('Gemini 3.8 Flash');
+      expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('High');
+      expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Default');
+    });
+    await userEvent.click(screen.getByTestId('ns-thinking-chip'));
+    await userEvent.click(await screen.findByText('Low', { selector: '.think-pop .mp-row-title' }));
+    await waitFor(() => expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low'));
+    await userEvent.click(screen.getByTestId('ns-mode-chip'));
+    await userEvent.click(await screen.findByText('Auto Edit', { selector: '.approval-pop .mp-row-title' }));
+    await waitFor(() => expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Auto Edit'));
+    first.unmount();
+    const reopened = renderView({ initialAgentId: agy.id });
+    await waitFor(() => {
+      expect(screen.getByTestId('ns-thinking-chip')).toHaveTextContent('Low');
+      expect(screen.getByTestId('ns-mode-chip')).toHaveTextContent('Auto Edit');
+    });
+    typeInlineComposer(screen.getByTestId('ns-message-input'), 'use this exact pair and mode');
+    await userEvent.click(screen.getByTestId('ns-send'));
+    expect(reopened.onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: agy.id, executor: 'io.gian.antigravity', model: 'gemini-3.8-flash', thinkingEffort: 'low',
+      turnConfig: { model: 'gemini-3.8-flash', thinking: 'low', mode: 'auto_edit' },
+    }));
+    expect(reopened.onCreate.mock.calls[0]?.[0].approvalMode).toBeUndefined();
   });
 
   it('places the Host picker before Agent and workspace, with connection controls inside its popover', async () => {
@@ -557,6 +597,47 @@ describe('NewSessionView', () => {
 
     expect(await screen.findByTestId('new-session-attachment-error'))
       .toHaveTextContent('A screenshot is already in progress.');
+  });
+
+  it('reopening creation refreshes the selected Agent model catalog after a Proxy update', async () => {
+    const selected = agent('claude', 'Claude Code');
+    vi.mocked(loadAgents).mockResolvedValue([selected]);
+    const capabilities = (revision: string, names: string[]) => ({
+      protocolVersion: '2.2', catalogRevision: revision,
+      input: [{ type: 'text' as const }], slashCommands: [], modes: [], models: [],
+      configOptions: [{
+        id: 'model', role: 'model', displayName: 'Model', binding: 'turn' as const,
+        control: 'select' as const, required: false, defaultValue: names[0] ?? null,
+        choices: names.map(value => ({ value, displayName: value })),
+      }],
+    });
+    vi.mocked(loadProxyCapabilities).mockResolvedValue(capabilities('old-menu', ['Opus']));
+    await fetchCatalogCached('claude', selected.id);
+    vi.mocked(loadProxyCapabilities).mockResolvedValue(capabilities('current-menu', ['Opus', 'Fable', 'Sonnet', 'Haiku']));
+    const view = renderView();
+    try {
+      await waitFor(() => expect(getCatalogCached('claude', selected.id)?.catalogRevision).toBe('current-menu'));
+      expect(getModelsCached('claude', selected.id)?.map(model => model.displayName))
+        .toEqual(['Opus', 'Fable', 'Sonnet', 'Haiku']);
+      expect(screen.getByText('Opus')).toBeInTheDocument();
+    } finally { view.unmount(); }
+  });
+
+  it('a late capability response cannot overwrite a refreshed model catalog', async () => {
+    let resolveOld!: (value: Awaited<ReturnType<typeof loadProxyCapabilities>>) => void;
+    const old = new Promise<Awaited<ReturnType<typeof loadProxyCapabilities>>>(resolve => { resolveOld = resolve; });
+    const capabilities = (revision: string) => ({
+      protocolVersion: '2.2', catalogRevision: revision, input: [], configOptions: [],
+      slashCommands: [], models: [], modes: [],
+    });
+    vi.mocked(loadProxyCapabilities).mockReturnValueOnce(old);
+    const pending = fetchCatalogCached('claude', 'race-agent');
+    await Promise.resolve();
+    vi.mocked(loadProxyCapabilities).mockResolvedValueOnce(capabilities('refreshed'));
+    await fetchCatalogCached('claude', 'race-agent', { refresh: true });
+    resolveOld(capabilities('obsolete'));
+    await pending;
+    expect(getCatalogCached('claude', 'race-agent')?.catalogRevision).toBe('refreshed');
   });
 
   it('calls catalog.resolve only after a Proxy-advertised option changes', async () => {

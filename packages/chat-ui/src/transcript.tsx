@@ -468,6 +468,9 @@ export function Transcript({
   renderInlineEventDetails,
   scheduleFocus = null,
   onConsumeScheduleFocus,
+  messageFocus = null,
+  onConsumeMessageFocus,
+  findActive = false,
 }: {
   items: TranscriptItem[];
   pending: boolean;
@@ -507,6 +510,21 @@ export function Transcript({
   /** Scroll request for the canonical message carrying a Schedule Run id. */
   scheduleFocus?: { runId: string } | null;
   onConsumeScheduleFocus?: () => void;
+  /** Scroll+flash request for one exact transcript location (search / find /
+   *  Inbox navigation, 0.6.7): a message identity, an interaction card
+   *  anchor, or a turn number. The web layer loads the bounded context
+   *  window first; while the target is absent this effect waits — the web
+   *  layer consumes the focus itself on failure. */
+  messageFocus?: {
+    messageId?: string;
+    interactionId?: string;
+    turn?: number;
+    nonce: number;
+  } | null;
+  onConsumeMessageFocus?: () => void;
+  /** True while conversation find owns the scroll position: a new user
+   *  message or streaming delta must not re-pin the view to the bottom. */
+  findActive?: boolean;
 }) {
   const t = useChatUiT();
   const ref = useRef<HTMLDivElement>(null);
@@ -604,9 +622,10 @@ export function Transcript({
       return () => window.cancelAnimationFrame(id);
     }
     // A new session (first item changed) or a freshly sent user message
-    // re-pins to the bottom regardless of where the user had scrolled.
+    // re-pins to the bottom regardless of where the user had scrolled —
+    // except while conversation find owns the scroll position.
     if (previousIds.firstId !== firstId || previousIds.lastUserId !== lastUserId) {
-      atBottomRef.current = true;
+      if (!findActive) atBottomRef.current = true;
     }
     idsRef.current = { firstId, lastUserId };
     if (!atBottomRef.current) return;
@@ -616,7 +635,7 @@ export function Transcript({
       scroller.scrollTop = scroller.scrollHeight;
     });
     return () => window.cancelAnimationFrame(id);
-  }, [items.length, tailLen, pending, extras?.length, firstId, lastUserId]);
+  }, [items.length, tailLen, pending, extras?.length, firstId, lastUserId, findActive]);
 
   useEffect(() => {
     if (!scheduleFocus) return;
@@ -638,6 +657,31 @@ export function Transcript({
     // loadOlder is intentionally driven by the current paging state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scheduleFocus, items, hasOlder, loadingOlder, hydrated]);
+
+  // Exact message/interaction navigation (0.6.7 search/find/Inbox): the web
+  // layer has already ensured the bounded window containing the target is
+  // loaded (or will arrive via `items`); while absent, wait — the web layer
+  // consumes the focus itself on a failed context load.
+  useEffect(() => {
+    if (!messageFocus) return;
+    const el = ref.current;
+    if (!el) return;
+    const target = messageFocus.messageId
+      ? el.querySelector(`[data-transcript-source-id="${CSS.escape(messageFocus.messageId)}"]`)
+      : messageFocus.interactionId
+        ? el.querySelector(`[data-transcript-interaction-id="${CSS.escape(messageFocus.interactionId)}"]`)
+        : messageFocus.turn !== undefined
+          ? el.querySelector(`[data-transcript-turn="${messageFocus.turn}"]`)
+          : null;
+    if (!target) return;
+    atBottomRef.current = false;
+    target.scrollIntoView({ block: 'center' });
+    target.classList.add('find-target-flash');
+    window.setTimeout(() => target.classList.remove('find-target-flash'), 1600);
+    onConsumeMessageFocus?.();
+    // `items` re-fires the effect after the context window folds in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageFocus, items]);
 
   // Find the most recent user message — that's the "current" turn's user input.
   const currentUser = useMemo(() => {

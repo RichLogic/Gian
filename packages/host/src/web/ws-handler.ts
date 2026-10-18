@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ClientToServerMessage, InboxSyncSnapshot, StateSyncMessage } from '@gian/shared';
+import { isAttentionLookupMessage } from '@gian/shared';
 import type { WSContext, WSMessageReceive } from 'hono/ws';
 import type { SessionManager } from '../session/manager.js';
 import type { TaskManager } from '../task/manager.js';
@@ -33,7 +34,16 @@ export interface WsHandlerDeps {
   approvals?: ApprovalManager;
   term?: WorkbenchTerminalManager;
   db?: Db;
-  inbox?: { syncSnapshot(): InboxSyncSnapshot };
+  inbox?: {
+    syncSnapshot(): InboxSyncSnapshot;
+    attentionControl(refs: readonly { id: string; generation: number }[]): Array<{
+      id: string;
+      generation: number;
+      revision: number;
+      read: boolean;
+      terminal: boolean;
+    }>;
+  };
 }
 
 interface ClientState {
@@ -144,6 +154,19 @@ export function makeWsHandlers({ sessions, tasks, broadcaster, approvals, term, 
       }
 
       if (state.mode === 'attention') {
+        const kind = (parsed as { type?: unknown }).type;
+        if (kind === 'attention:lookup') {
+          if (!isAttentionLookupMessage(parsed)) {
+            ws.close(4002, 'invalid_attention_lookup');
+            broadcaster.remove(ws);
+            return;
+          }
+          broadcaster.send(ws, {
+            type: 'attention:control',
+            items: inbox?.attentionControl(parsed.refs) ?? [],
+          });
+          return;
+        }
         ws.close(4003, 'attention_read_only');
         broadcaster.remove(ws);
         return;
@@ -273,6 +296,12 @@ async function dispatch(
   remoteController?: RemoteControllerHub,
 ): Promise<{ result?: import('@gian/shared').OperationResultMessage['result'] } | void> {
   if (msg.type === 'events:subscribe') broadcaster.subscribeToEvents(ws, msg.session_id);
+  // A seen Inbox occurrence is rejected before a remote-owned session can
+  // forward its live interaction revision. Remote handleMessage returns
+  // before respondApproval, so this assert has to run first.
+  if (msg.type === 'approval:resolve' && msg.expected_inbox !== undefined) {
+    sessions.assertExpectedInbox(msg.session_id, msg.approval_id, msg.expected_inbox);
+  }
   if (remoteController && await remoteController.handleMessage(msg)) return;
   switch (msg.type) {
     case 'events:subscribe': {
@@ -429,6 +458,8 @@ async function dispatch(
         msg.decision,
         msg.answers,
         msg.native_option_id,
+        'web',
+        msg.expected_inbox,
       );
       return;
     }

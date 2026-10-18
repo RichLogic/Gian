@@ -9,6 +9,7 @@ import {
   parseRemoteControlMessage,
   RemoteProtocolError,
   REMOTE_METHOD_RESULTS,
+  remoteStateSnapshotSchema,
   splitSnapshotParts,
 } from '../src/index.js';
 import { sampleSnapshot } from './helpers.js';
@@ -58,6 +59,28 @@ test('duplicate conflicting, missing, oversize, and hash-mismatched parts fail c
     ...first,
     extra: true,
   }));
+});
+
+test('snapshot host locale is optional, round-trips, and stays closed', async () => {
+  const snapshot = sampleSnapshot({ host: { ...sampleSnapshot().host, locale: 'zh-CN' } });
+  const parts = await splitSnapshotParts(snapshot, 64);
+  const assembly = createSnapshotPartAssembly(parts[0]!);
+  for (const part of parts.slice(1)) addSnapshotPart(assembly, part);
+  const restored = await finalizeSnapshotParts(assembly);
+  assert.equal(restored.host.locale, 'zh-CN');
+  assert.deepEqual(restored, snapshot);
+  // Old Hosts omit the field entirely; it stays absent after a round trip.
+  const plain = sampleSnapshot();
+  assert.equal('locale' in plain.host, false);
+  assert.deepEqual(remoteStateSnapshotSchema.parse(plain).host.locale, undefined);
+  // Closed on both ends: unknown locale values and unknown host fields fail.
+  assert.equal(remoteStateSnapshotSchema.safeParse({
+    ...plain, host: { ...plain.host, locale: 'fr' },
+  }).success, false);
+  assert.equal(remoteStateSnapshotSchema.safeParse({
+    ...plain, host: { ...plain.host, extra: true },
+  }).success, false);
+  assert.equal(remoteStateSnapshotSchema.safeParse({ ...plain, extra: true }).success, false);
 });
 
 test('StatePatch requires matching base revision and contiguous event_sequence', () => {

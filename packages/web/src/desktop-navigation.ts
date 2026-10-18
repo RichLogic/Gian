@@ -118,6 +118,29 @@ export interface SessionNavigationContext {
   requestedListMode?: ConversationListMode | null;
   /** Null when the id is not in the active read model. */
   session: { task_id: string | null; archived?: 0 | 1 } | null;
+  /** Search/Inbox/notification deep links may open an archived session
+   *  read-only (Issue #168): the session renders with send/approval
+   *  disabled; canonical archive state is never changed by opening it. */
+  allowArchivedReadOnly?: boolean;
+}
+
+/**
+ * List mode that makes the workbench sheet visible.
+ *
+ * Current Tasks or Repos wins. Otherwise the last explicit choice. Agents,
+ * Timer, and Custom with no explicit choice use Repos. The startup Tasks
+ * default is not a choice — callers must not pass it as `explicitListMode`.
+ */
+export function workbenchListMode(context: {
+  mode: Mode;
+  explicitListMode?: ConversationListMode | null;
+}): ConversationListMode {
+  const surface = conversationSurface({
+    mode: context.mode,
+    explicitListMode: context.explicitListMode ?? null,
+    session: null,
+  });
+  return surface === 'tasks' ? 'tasks' : 'sessions';
 }
 
 function conversationSurface(
@@ -136,8 +159,10 @@ function conversationSurface(
  *
  * Repos and Tasks each keep their own surface. Any other page uses the last
  * explicit Repos/Tasks choice, or Repos when that choice was never recorded.
- * A missing or archived target is unavailable in every surface: it is not
- * the 未分配 group and it is not another session.
+ * A missing target is unavailable in every surface. An archived target is
+ * unavailable unless the caller opted into read-only opening (search/Inbox/
+ * notification deep links) — it then selects like an active session and the
+ * transcript renders read-only.
  */
 export function resolveSessionNavigation(
   target: { sessionId: string },
@@ -146,7 +171,7 @@ export function resolveSessionNavigation(
   if (!context.session) {
     return { kind: 'unavailable', sessionId: target.sessionId, reason: 'missing' };
   }
-  if (context.session.archived === 1) {
+  if (context.session.archived === 1 && !context.allowArchivedReadOnly) {
     return { kind: 'unavailable', sessionId: target.sessionId, reason: 'archived' };
   }
   const taskId = context.session.task_id || null;

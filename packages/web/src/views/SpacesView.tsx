@@ -228,6 +228,9 @@ export function SpaceDetail({
   onSessionAdopted,
   onDeleted,
   onOpenClaudeMd,
+  focusTreeId,
+  focusNonce,
+  focusVisible,
 }: {
   workspace: Workspace | null;
   allSessions: Session[];
@@ -236,6 +239,11 @@ export function SpaceDetail({
   onSessionAdopted: (session: Session) => void;
   onDeleted: () => void;
   onOpenClaudeMd: () => void;
+  /** Search deep link: exact working-tree inventory id for the Git pane. */
+  focusTreeId?: string | null;
+  focusNonce?: number;
+  /** False while the owning sheet is hidden. */
+  focusVisible?: boolean;
 }) {
   const t = useT();
   const dispatch = useOperationDispatch();
@@ -371,6 +379,9 @@ export function SpaceDetail({
                 ws={ws}
                 onOpenClaudeMd={onOpenClaudeMd}
                 onChange={onChange}
+                focusTreeId={focusTreeId}
+                focusNonce={focusNonce}
+                focusVisible={focusVisible}
               />
             </>
           )}

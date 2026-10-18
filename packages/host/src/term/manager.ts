@@ -168,7 +168,8 @@ export class WorkbenchTerminalManager extends EventEmitter<WorkbenchTerminalEven
       : null;
     const cwd = target?.cwd ?? resolveCwd(opts.cwd);
     const shell = target?.executable ?? resolveShell(opts.shell);
-    const args = target?.args ?? [];
+    // Login shells load the user's profile even when a GUI Host has a minimal PATH.
+    const args = target?.args ?? ['-l'];
 
     const pty = await this.ptyFactory();
     let proc: IPty;
