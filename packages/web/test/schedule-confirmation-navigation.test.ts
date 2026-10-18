@@ -102,9 +102,13 @@ describe('hydrate freshness', () => {
 
   it('a WS terminal mid-flight discards the stale pending response (terminal is one-way)', async () => {
     const gate = deferred<Response>();
+    let reads = 0;
     mockFetch(async input => {
       const url = typeof input === 'string' ? input : input.url;
-      if (url.includes('/api/schedule-confirmations')) return gate.promise;
+      if (url.includes('/api/schedule-confirmations')) {
+        reads += 1;
+        return reads === 1 ? gate.promise : pendingGet([]);
+      }
       return Response.json({ error: 'not_found' }, { status: 404 });
     });
     const hydratePromise = hydrateScheduleConfirmations();
@@ -112,10 +116,29 @@ describe('hydrate freshness', () => {
     upsertScheduleConfirmation(makeConfirmation({ id: 'conf-1', status: 'approved' }));
     gate.resolve(pendingGet([makeConfirmation({ id: 'conf-1', status: 'pending' })]));
     expect(await hydratePromise).toBe(true);
+    expect(reads).toBe(2);
+    expect(getScheduleConfirmationsSnapshot().hydrated).toBe(true);
     // The stale response was discarded and re-pulled; terminal stands.
     expect(
       getScheduleConfirmationsSnapshot().confirmations.find(entry => entry.id === 'conf-1')?.status,
-    ).not.toBe('pending');
+    ).toBe('approved');
+  });
+
+  it('a failed re-pull reports false without reopening the mid-flight terminal', async () => {
+    const gate = deferred<Response>();
+    let reads = 0;
+    mockFetch(async () => {
+      reads += 1;
+      return reads === 1 ? gate.promise : Response.json({ error: 'offline' }, { status: 500 });
+    });
+    const pending = hydrateScheduleConfirmations();
+    upsertScheduleConfirmation(makeConfirmation({ id: 'conf-1', status: 'rejected' }));
+    gate.resolve(pendingGet([makeConfirmation({ id: 'conf-1', status: 'pending' })]));
+    expect(await pending).toBe(false);
+    expect(reads).toBe(2);
+    expect(getScheduleConfirmationsSnapshot().confirmations).toEqual([
+      makeConfirmation({ id: 'conf-1', status: 'rejected' }),
+    ]);
   });
 
   it('a NEW pending arriving via WS mid-flight is not dropped by the older response', async () => {

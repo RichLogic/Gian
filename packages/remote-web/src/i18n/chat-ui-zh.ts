@@ -33,6 +33,7 @@ export const CHAT_UI_ZH: Record<string, string> = {
   'transcript.approval.mediumRisk': '中风险',
   'transcript.approval.openReconnect': '打开重新连接页面',
   'transcript.approval.confirmReconnect': '我已重新连接',
+  'transcript.approval.resolved': '已处理',
   'transcript.approval.resolving': '处理中…',
   'transcript.auto.action': '操作',
   'transcript.auto.block': 'Auto 阻止',

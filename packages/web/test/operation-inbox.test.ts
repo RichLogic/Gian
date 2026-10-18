@@ -69,15 +69,39 @@ describe('Inbox mutations use real registered operations', () => {
     const item = makeInboxItem();
     seed(item);
     const response = deferredResponse();
+    const canonical = { ...item, revision: 2, unread: false, read_at: item.updated_at };
     const post = vi.fn(async () => response.promise);
-    mockFetch(post);
+    const get = vi.fn(async () => Response.json({
+      items: [canonical], next_cursor: null, pending_count: 1, inbox_revision: 11,
+    }));
+    mockFetch(async (input, init) => {
+      const url = new URL(String(input), 'http://fixture.local');
+      if (init?.method === 'POST') {
+        expect(url.pathname).toBe(`/api/inbox/${item.id}/read`);
+        expect(JSON.parse(String(init.body))).toEqual({ generation: item.generation });
+        return post();
+      }
+      expect(init?.method ?? 'GET').toBe('GET');
+      expect(url.pathname).toBe('/api/inbox');
+      expect(url.searchParams.get('status')).toBe('pending');
+      return get();
+    });
     const first = markInboxItemRead(item);
     const second = markInboxItemRead(item);
     expect(post).toHaveBeenCalledTimes(1);
     expect(dispatcher.store.getPendingRuns()).toHaveLength(1);
-    response.resolve(Response.json({ ...item, revision: 2, unread: false, read_at: item.updated_at }));
+    response.resolve(Response.json(canonical));
     expect(await Promise.all([first, second])).toEqual(['ok', 'ok']);
+    await vi.waitFor(() => {
+      expect(getInboxSnapshot().refreshing).toBe(false);
+      expect(getInboxSnapshot().inboxRevision).toBe(11);
+    });
     expect(post).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(dispatcher.store.getPendingRuns()).toHaveLength(0);
+    expect(getInboxSnapshot().pendingItems).toEqual([canonical]);
+    expect(getInboxSnapshot().pendingCount).toBe(1);
+    expect(getInboxSnapshot().error).toBe(false);
   });
 
   it.each([false, true])('preserves the occurrence/write-epoch fence when a WS echo advances generation: %s', async advances => {
@@ -115,13 +139,20 @@ describe('Inbox mutations use real registered operations', () => {
   });
 
   it('leaves a timeout unknown, refreshes and ignores a late REST body without another mutation', async () => {
+    unwire();
+    dispatcher.dispose();
     vi.useFakeTimers();
+    // The dispatcher captures timer functions at construction.
+    dispatcher = createOperationDispatcher();
+    unwire = wireInboxOperations(dispatcher, invalidateInbox);
     const item = makeInboxItem();
     seed(item);
     const response = deferredResponse();
     const posts = vi.fn();
+    const gets = vi.fn();
     mockFetch(async (_input, init) => {
       if (init?.method === 'POST') { posts(); return response.promise; }
+      gets();
       return Response.json({ items: [item], next_cursor: null, pending_count: 1, inbox_revision: 11 });
     });
     const result = markInboxItemRead(item);
@@ -129,10 +160,16 @@ describe('Inbox mutations use real registered operations', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await result).toBe('error');
     expect(dispatcher.store.getRun(run!.id)?.phase).toBe('timed-out');
+    expect(gets).toHaveBeenCalledTimes(1);
+    expect(getInboxSnapshot().inboxRevision).toBe(11);
+    expect(getInboxSnapshot().refreshing).toBe(false);
+    expect(getInboxSnapshot().error).toBe(false);
     response.resolve(Response.json({ ...item, revision: 2, unread: false, read_at: item.updated_at }));
     await vi.advanceTimersByTimeAsync(0);
     expect(dispatcher.store.getRun(run!.id)?.phase).toBe('timed-out');
+    expect(dispatcher.store.getRun(run!.id)?.result).toBeUndefined();
     expect(getInboxSnapshot().pendingItems[0]!.unread).toBe(true);
     expect(posts).toHaveBeenCalledTimes(1);
+    expect(gets).toHaveBeenCalledTimes(1);
   });
 });

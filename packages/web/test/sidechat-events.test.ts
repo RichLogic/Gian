@@ -161,7 +161,48 @@ describe('projectSideChatSnapshot', () => {
     expect(kinds).toContain('approval');
     expect(kinds).toContain('diff');
     const approval = items.find(item => item.kind === 'approval');
-    expect(approval).toMatchObject({ approvalId: 'i-1', status: 'approved-once' });
+    // The legacy "allow" id is not a verified native option kind. A
+    // submitted transport outcome alone cannot claim that permission won.
+    expect(approval).toMatchObject({ approvalId: 'i-1', nativeOptionId: 'allow', status: 'resolved' });
+  });
+
+  it.each([
+    ['allow_once', 'Reject', 'approved-once'],
+    ['allow_always', 'Reject', 'approved-session'],
+    ['reject_once', 'Allow', 'declined'],
+    ['allow', 'Allow', 'resolved'],
+    ['opaque-allow_once', 'Allow', 'resolved'],
+    ['reject_future', 'Reject', 'resolved'],
+  ])('projects native kind %s honestly and keeps its terminal state on replay', (optionId, label, status) => {
+    const request = notify('interaction.requested', {
+      interactionId: 'i-native',
+      presentation: { kind: 'permission' },
+      actions: [{ id: optionId, label }],
+    }, 'pt-1', '2026-08-20T08:01:00.000Z');
+    const resolved = notify('interaction.resolved', {
+      interactionId: 'i-native', actionId: optionId, outcome: 'submitted',
+    }, 'pt-1', '2026-08-20T08:02:00.000Z');
+    const snap = snapshot({ events: [request, resolved] });
+    const items = projectSideChatSnapshot(snap, 'claude', OPTIONS);
+    const approval = items.find(item => item.kind === 'approval');
+    expect(approval).toMatchObject({ approvalId: 'i-native', nativeOptionId: optionId, status });
+    expect(projectSideChatSnapshot(JSON.parse(JSON.stringify(snap)) as SideChatInfo, 'claude', OPTIONS))
+      .toEqual(items);
+
+    const replay = projectSideChatSnapshot(snapshot({ events: [
+      request,
+      resolved,
+      notify('interaction.requested', {
+        interactionId: 'i-native', presentation: { kind: 'permission' }, actions: [{ id: optionId, label }],
+      }, 'pt-1', '2026-08-20T08:03:00.000Z'),
+      notify('interaction.resolved', {
+        interactionId: 'i-native', outcome: 'cancelled',
+      }, 'pt-1', '2026-08-20T08:04:00.000Z'),
+    ] }), 'claude', OPTIONS);
+    expect(replay.filter(item => item.kind === 'approval')).toHaveLength(1);
+    expect(replay.find(item => item.kind === 'approval')).toMatchObject({
+      approvalId: 'i-native', nativeOptionId: optionId, status,
+    });
   });
 
   it('skips trace-only and unknown notifications (step/request updated, catalog.changed)', () => {

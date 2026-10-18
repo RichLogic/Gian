@@ -129,10 +129,14 @@ describe('inbox store', () => {
       makeInboxItem({ id: 'a', generation: 1, revision: 5, unread: false, read_at: '2026-10-12T04:00:00.000Z' }),
     ));
     const result = await markInboxItemRead(makeInboxItem({ id: 'a', generation: 1, revision: 5 }));
-    expect(result).toBe('ok');
+    expect(result).toBe('stale');
     const row = getInboxSnapshot().pendingItems[0]!;
     expect(row.generation).toBe(2);
+    expect(row.revision).toBe(6);
     expect(row.unread).toBe(true);
+    expect(row.read_at).toBeNull();
+    expect(row.status).toBe('pending');
+    expect(getInboxSnapshot().pendingCount).toBe(1);
     // The mutation response carries no collection revision — it must not move one.
     expect(getInboxSnapshot().inboxRevision).toBe(11);
   });
@@ -333,11 +337,12 @@ describe('inbox store', () => {
       id: 'a', generation: 1, revision: 5, unread: false, read_at: '2026-10-12T04:00:00.000Z',
     })));
     const result = await markInboxItemRead(makeInboxItem({ id: 'a', generation: 1, revision: 5 }));
-    expect(result).toBe('ok');
+    expect(result).toBe('stale');
     // The stale row is NOT resurrected by the high-water fence surviving
     // snapshot replacement.
     expect(getInboxSnapshot().pendingItems).toEqual([]);
     expect(getInboxSnapshot().pendingCount).toBe(0);
+    expect(getInboxSnapshot().inboxRevision).toBe(20);
   });
 
   it('drops a stale snapshot wholesale and never lowers the per-item fence', () => {
@@ -476,6 +481,8 @@ describe('inbox store', () => {
     expect(result).toBe('ok');
     expect(seen).toEqual([{ id: 'a', body: { generation: 3 } }]);
     expect(getInboxSnapshot().pendingItems[0]!.unread).toBe(false);
+    expect(getInboxSnapshot().pendingItems[0]!.status).toBe('pending');
+    expect(getInboxSnapshot().pendingItems[0]!.generation).toBe(3);
     expect(getInboxSnapshot().pendingCount).toBe(1);
   });
 
@@ -485,7 +492,12 @@ describe('inbox store', () => {
     mockFetch(async input => {
       const url = typeof input === 'string' ? input : input.url;
       if (url.endsWith('/read')) return new Promise<Response>(resolve => { resolveRead = resolve; });
-      return pageResponse({ items: [], pending_count: 0, inbox_revision: 11 });
+      return pageResponse({
+        items: [makeInboxItem({
+          id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z',
+        })],
+        pending_count: 1, inbox_revision: 11,
+      });
     });
     const pending = markInboxItemRead(makeInboxItem({ id: 'a', generation: 3 }));
     // The WS echo of this very read lands BEFORE the REST response — the
@@ -499,7 +511,10 @@ describe('inbox store', () => {
     ));
     const result = await pending;
     expect(result).toBe('ok');
+    await vi.waitFor(() => expect(getInboxSnapshot().refreshing).toBe(false));
     expect(getInboxSnapshot().pendingItems[0]!.unread).toBe(false);
+    expect(getInboxSnapshot().pendingItems[0]!.status).toBe('pending');
+    expect(getInboxSnapshot().pendingItems[0]!.generation).toBe(3);
     expect(getInboxSnapshot().pendingCount).toBe(1);
   });
 
@@ -537,15 +552,19 @@ describe('inbox store', () => {
     });
     const pending = markInboxItemRead(makeInboxItem({ id: 'a', generation: 3 }));
     applyInboxItemChanged(
-      makeInboxItem({ id: 'a', status: 'resolved', revision: 2, closed_at: '2026-10-12T06:30:00.000Z' }),
+      makeInboxItem({ id: 'a', generation: 3, status: 'resolved', revision: 2, closed_at: '2026-10-12T06:30:00.000Z' }),
       21,
     );
+    expect(getInboxSnapshot().pendingItems).toEqual([]);
+    expect(getInboxSnapshot().pendingCount).toBe(0);
     resolveRead!(Response.json(
       makeInboxItem({ id: 'a', generation: 3, revision: 2, unread: false, read_at: '2026-10-12T06:00:00.000Z' }),
     ));
     const result = await pending;
     expect(result).toBe('stale');
+    await vi.waitFor(() => expect(getInboxSnapshot().refreshing).toBe(false));
     expect(getInboxSnapshot().pendingItems).toEqual([]);
+    expect(getInboxSnapshot().pendingCount).toBe(0);
   });
 
   it('a stale generation refreshes canonical state and never retries the old generation', async () => {

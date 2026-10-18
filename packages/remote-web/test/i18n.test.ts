@@ -99,6 +99,8 @@ describe('i18n tables', () => {
     expect(ZH['common.cancel']).toBe('取消');
     expect(ZH['transcript.approval.allowOnce']).toBe(EN['transcript.approval.allowOnce'] ? ZH['transcript.approval.allowOnce'] : undefined);
     expect(ZH['transcript.approval.allowOnce']).toBeTruthy();
+    expect(ZH['transcript.approval.resolved']).toBe('已处理');
+    expect(ZH['transcript.approval.resolved']).not.toMatch(/批准|允许/);
   });
 
   it('remote zh copy does not mix in English product terms for core actions', () => {
