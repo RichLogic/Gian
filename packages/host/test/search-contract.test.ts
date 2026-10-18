@@ -191,12 +191,16 @@ test('cursors reject non-finite rank, count, and schema', () => {
     () => encodeSearchCursor({ ...base, counted: Number.NaN }),
     (error: unknown) => error instanceof SearchContractError && error.code === 'invalid_argument',
   );
+  const baseJson = JSON.stringify(base);
+  const nonFiniteSchema = baseJson.replace(`"schema":${SEARCH_SCHEMA_VERSION}`, '"schema":1e400');
+  assert.notEqual(nonFiniteSchema, baseJson, 'non-finite schema fixture must replace the current schema');
+  assert.equal(JSON.parse(nonFiniteSchema).schema, Number.POSITIVE_INFINITY);
   const rawCursors = [
     JSON.stringify({ ...base, counted: -1 }),
     JSON.stringify({ ...base, rank: 1.5 }),
     JSON.stringify({ ...base, schema: -1 }),
     JSON.stringify(base).replace('"counted":0', '"counted":1e400'),
-    JSON.stringify(base).replace('"schema":1', '"schema":1e400'),
+    nonFiniteSchema,
   ];
   for (const raw of rawCursors) {
     assert.throws(

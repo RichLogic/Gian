@@ -6,9 +6,9 @@
 //                  "intentionally not displayed" whitelist with a reason.
 //
 // Mirrors `contract-001-client-message-parity.test.ts`: parse the
-// declared union members in shared/web.ts at test time, then grep the
-// `packages/web/src/` tree for `case '<type>':` and direct type comparisons
-// arms. Anything declared-but-unconsumed must be on the whitelist; any
+// declared union members across web.ts and attention.ts, then scan Web
+// case/comparison arms and Desktop's typed attention-channel guards.
+// Anything declared-but-unconsumed must be on the whitelist; any
 // arm referencing a wire type the shared file doesn't list is also a
 // contract violation.
 
@@ -16,73 +16,29 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { guardedWireMessageTypes, readWireMessageTypes } from './helpers/wire-message-types.js';
 
 const WEB_TS = resolve('../shared/src/web.ts');
+const ATTENTION_TS = resolve('../shared/src/attention.ts');
 const WEB_SRC_ROOT = resolve('../web/src');
+const DESKTOP_ATTENTION_TS = resolve('../desktop/src/attention-client.ts');
 
 // ---------------------------------------------------------------------------
 // Every declared server message has a consumer.
 // ---------------------------------------------------------------------------
 
-const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [
-  // `attention` moved out of this list: since the notification overhaul the
-  // web client consumes it in use-app-socket (renderer fallback delivery).
-  // Keep entries here only for types genuinely never consumed by the web
-  // client, each with a justification.
-  {
-    type: 'inbox:changed',
-    reason: 'P5 has not mounted an Inbox consumer. The Host emits one changed row for a later client.',
-  },
-  {
-    type: 'inbox:invalidated',
-    reason: 'P5 has not mounted an Inbox consumer. Bulk reconcile emits this frame so a later client refetches.',
-  },
-];
+const NOT_DISPLAYED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> = [];
 
 // ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------
 
 function declaredServerMessageTypes(): Set<string> {
-  const text = readFileSync(WEB_TS, 'utf8');
-  const unionMatch = text.match(/export type ServerToClientMessage[\s\S]*?;/);
-  assert.ok(unionMatch, 'failed to locate ServerToClientMessage union in shared/src/web.ts');
-  const unionBody = unionMatch![0];
-  const memberNames = Array.from(unionBody.matchAll(/\|\s*(\w+Message)/g), m => m[1]!);
-  assert.ok(memberNames.length > 0,
-    'ServerToClientMessage union appears to have no members; parse pattern broken');
-
-  const types = new Set<string>();
-  for (const name of memberNames) {
-    // Allow `extends Foo` between the name and the opening brace —
-    // EventMessage / EventEnvelope use that pattern.
-    const ifaceMatch = text.match(
-      new RegExp(`export interface ${name}\\b[^{]*\\{[\\s\\S]*?\\}`, 'm'),
-    );
-    if (!ifaceMatch) assert.fail(`could not locate interface ${name} in shared/src/web.ts`);
-    const lit = ifaceMatch![0].match(/type:\s*'([^']+)'/);
-    if (!lit) assert.fail(`interface ${name} has no \`type: '<literal>';\` discriminator`);
-    types.add(lit![1]!);
-  }
-  return types;
+  return readWireMessageTypes('ServerToClientMessage', [WEB_TS, ATTENTION_TS]);
 }
 
 function declaredClientMessageTypes(): Set<string> {
-  const text = readFileSync(WEB_TS, 'utf8');
-  const unionMatch = text.match(/export type ClientToServerMessage[\s\S]*?;/);
-  assert.ok(unionMatch, 'failed to locate ClientToServerMessage union in shared/src/web.ts');
-  const memberNames = Array.from(unionMatch![0].matchAll(/\|\s*(\w+Message)/g), m => m[1]!);
-  const types = new Set<string>();
-  for (const name of memberNames) {
-    const ifaceMatch = text.match(
-      new RegExp(`export interface ${name}\\b[^{]*\\{[\\s\\S]*?\\}`, 'm'),
-    );
-    if (!ifaceMatch) assert.fail(`could not locate interface ${name} in shared/src/web.ts`);
-    const lit = ifaceMatch![0].match(/type:\s*'([^']+)'/);
-    if (!lit) assert.fail(`interface ${name} has no \`type: '<literal>';\` discriminator`);
-    types.add(lit![1]!);
-  }
-  return types;
+  return readWireMessageTypes('ClientToServerMessage', [WEB_TS, ATTENTION_TS]);
 }
 
 /**
@@ -120,6 +76,12 @@ function consumedServerMessageTypes(): Set<string> {
       consumed.add(m[1]!);
     }
   }
+  // Native withdrawal control is consumed by Desktop's dedicated attention
+  // socket, not the full Web reducer. Resolve its real shared type predicates.
+  for (const type of guardedWireMessageTypes(readFileSync(DESKTOP_ATTENTION_TS, 'utf8'), new Map([
+    [WEB_TS, readFileSync(WEB_TS, 'utf8')],
+    [ATTENTION_TS, readFileSync(ATTENTION_TS, 'utf8')],
+  ]))) consumed.add(type);
   return consumed;
 }
 
@@ -129,9 +91,18 @@ function consumedServerMessageTypes(): Set<string> {
 
 test('CONTRACT-002: ServerToClientMessage parser locates at least the well-known wire types', () => {
   const declared = declaredServerMessageTypes();
-  for (const must of ['state_sync', 'event', 'session:created', 'queue:updated', 'error']) {
+  for (const must of ['state_sync', 'event', 'session:created', 'queue:updated', 'error',
+    'attention', 'attention:control', 'inbox:changed', 'inbox:invalidated']) {
     assert.ok(declared.has(must),
       `parser missed expected ServerToClientMessage type "${must}"`);
+  }
+});
+
+test('CONTRACT-002: Inbox and attention control have real consumers, not design exceptions', () => {
+  const consumed = consumedServerMessageTypes();
+  for (const type of ['inbox:changed', 'inbox:invalidated', 'attention:control']) {
+    assert.ok(consumed.has(type), `missing actual consumer for ${type}`);
+    assert.ok(!NOT_DISPLAYED_BY_DESIGN.some(entry => entry.type === type));
   }
 });
 
@@ -147,7 +118,7 @@ test('CONTRACT-002: every declared ServerToClientMessage type is consumed somewh
     orphans.push(t);
   }
   assert.deepEqual(orphans, [],
-    `Found declared ServerToClientMessage types with no consumer in packages/web/src and no whitelist entry: ${orphans.join(', ')}.\n` +
+    `Found declared ServerToClientMessage types with no Web/attention consumer and no whitelist entry: ${orphans.join(', ')}.\n` +
     `Either consume the message in the appropriate component OR add an entry to NOT_DISPLAYED_BY_DESIGN with a justification.`);
 });
 

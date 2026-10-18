@@ -24,6 +24,7 @@ import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
 import { compileContextIntoInput, decompileContextFromText } from '../src/session/context-items.js';
+import { LEGACY_APPROVAL_CATALOG } from './helpers/protocol-v2-stub.js';
 
 // ---------------------------------------------------------------------------
 // Deterministic fakes — no real proxy spawn, no I/O outside the tmp DB.
@@ -48,7 +49,7 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async catalog() {
-    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
+    return LEGACY_APPROVAL_CATALOG;
   }
   async createSession(params: CreateSessionParams) {
     this.lastCreateParams = params;
@@ -87,7 +88,8 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async closeSession() { /* no-op */ }
-  async shutdown() { /* no-op */ }
+  shutdownCalls = 0;
+  async shutdown() { this.shutdownCalls += 1; }
   forceKill() { /* no-op */ }
   onNotification(handler: NotificationHandler) {
     this.notificationHandlers.push(handler);
@@ -105,14 +107,21 @@ class FakeProxyClient implements ProxyClient {
 
 class FakeProxyManager {
   client: FakeProxyClient;
+  acquiredSessionIds: string[] = [];
+  disposeCalls: string[] = [];
   constructor(client?: FakeProxyClient) {
     this.client = client ?? new FakeProxyClient();
   }
-  async getOrCreate(): Promise<ProxyClient> {
+  async getOrCreate(sessionId?: string): Promise<ProxyClient> {
+    if (sessionId !== undefined) this.acquiredSessionIds.push(sessionId);
     return this.client;
   }
   get(): ProxyClient {
     return this.client;
+  }
+  async dispose(sessionId: string): Promise<void> {
+    this.disposeCalls.push(sessionId);
+    await this.client.shutdown();
   }
   async closeAll(): Promise<void> { /* no-op */ }
 }
@@ -209,6 +218,27 @@ function teardown(ctx: { dir: string; db: ReturnType<typeof openDatabase> }) {
 
 // Wait one microtask tick so fire-and-forget chains in handleLifecycle settle.
 async function tick() { await new Promise(r => setTimeout(r, 0)); }
+
+test('queue fixture rejects unadvertised modes before create and disposes its acquired client', async () => {
+  const ctx = setup();
+  try {
+    await assert.rejects(ctx.sessions.createSession({
+      workspace_id: ctx.wsId,
+      executor: 'claude',
+      turn_config: { approval_mode: 'not-advertised' },
+    }), (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'CONFIG_VALUE_INVALID' && /not advertised/.test(error.message));
+    assert.equal(ctx.proxyMgr.acquiredSessionIds.length, 1);
+    assert.deepEqual(ctx.proxyMgr.disposeCalls, ctx.proxyMgr.acquiredSessionIds);
+    assert.equal(ctx.proxyMgr.client.shutdownCalls, 1);
+    assert.equal(ctx.proxyMgr.client.notificationHandlers.length, 0);
+    assert.equal(ctx.proxyMgr.client.lastCreateParams, null);
+    assert.equal(ctx.proxyMgr.client.startTurnCalls.length, 0);
+    assert.equal((ctx.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n, 0);
+  } finally {
+    teardown(ctx);
+  }
+});
 
 // Only the user-set completion flag closes a session for input. A finalized
 // worktree outcome (merged/discarded) is legacy metadata: the product no

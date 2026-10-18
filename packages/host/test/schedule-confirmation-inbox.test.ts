@@ -756,9 +756,14 @@ test('a new unread confirmation publishes approval attention without a turn', ()
     fx.service.reconcileConfirmationInbox();
     fx.service.syncConfirmationInbox(confirmation.id);
     fx.service.getConfirmation(confirmation.id);
-    fx.service.resolveConfirmation({ confirmationId: confirmation.id, decision: 'reject' });
     assert.equal(sent.length, 1);
     assert.equal(confirmationCount(fx.broadcaster.messages, confirmation.id), 1);
+    fx.service.resolveConfirmation({ confirmationId: confirmation.id, decision: 'reject' });
+    assert.equal(sent.length, 1);
+    assert.deepEqual(fx.broadcaster.messages.flatMap(message => (
+      message.type === 'schedule:confirmation' && message.confirmation.id === confirmation.id
+        ? [message.confirmation.status] : []
+    )), ['pending', 'rejected']);
   } finally {
     dispose(fx);
   }

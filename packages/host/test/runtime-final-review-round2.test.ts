@@ -396,7 +396,9 @@ test('createAgent bypasses are rejected without a partial agents.json row', asyn
   const bin = join(root, 'bin', 'claude');
   await writeExecutable(bin, '#!/bin/sh\necho claude 2.1.159\n');
   const bad = join(root, 'bin', 'old');
-  await writeExecutable(bad, '#!/bin/sh\necho claude 0.1.0\n');
+  const probeArgs = join(root, 'old-runtime-probe-args');
+  const sensitive = 'https://probe.invalid/token?code=PRIVATE_RUNTIME_DETAIL';
+  await writeExecutable(bad, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(probeArgs)}\necho claude 0.1.0\nprintf '%s\\n' '${sensitive}' >&2\n`);
   const dataDir = join(root, 'data');
   const fixtureEntry = await countingProxy(
     join(root, 'fixture-pkg'),
@@ -457,8 +459,20 @@ test('createAgent bypasses are rejected without a partial agents.json row', asyn
   );
   await assert.rejects(
     () => manager.createAgent({ name: 'Old', proxy: 'claude', cliPath: bad }),
-    /incompatible/i,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentCreateError);
+      assert.equal(error.code, 'RUNTIME_INVALID');
+      assert.equal(error.status, 400);
+      assert.equal(error.message, 'Runtime probe failed.');
+      assert.equal(error.cause, undefined);
+      assert.equal(JSON.stringify(error).includes(sensitive), false);
+      assert.equal(error.message.includes(bad), false);
+      assert.equal(error.message.includes('0.1.0'), false);
+      return true;
+    },
   );
+  assert.deepEqual((await readFile(probeArgs, 'utf8')).trim().split('\n'), ['--version']);
+  assert.equal(manager.listAgents().length, 0);
   assert.deepEqual(await persistedAgents(dataDir), []);
 
   const app = new Hono();

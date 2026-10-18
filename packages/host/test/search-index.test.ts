@@ -8,21 +8,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Hono } from 'hono';
-import { GIAN_ACTION_CLOSE, GIAN_ACTION_OPEN, GIAN_ROLE_CLOSE, GIAN_ROLE_OPEN } from '../../shared/src/action.js';
-import { MANAGER_SYS_CLOSE, MANAGER_SYS_OPEN } from '../../shared/src/manager.js';
 import {
+  GIAN_ACTION_CLOSE,
+  GIAN_ACTION_OPEN,
+  GIAN_ROLE_CLOSE,
+  GIAN_ROLE_OPEN,
+  MANAGER_SYS_CLOSE,
+  MANAGER_SYS_OPEN,
+  SEARCH_SCHEMA_VERSION,
   SearchContractError,
   parseContextQuery,
   parseFindQuery,
   parseGlobalSearchQuery,
   type SearchPage,
   type SearchResult,
-} from '../../shared/src/search.js';
+} from '@gian/shared';
 import { EventStore } from '../src/session/event-store.js';
 import { createSearchModule } from '../src/search/module.js';
 import { drainSearchOnce, type MaintainLimits } from '../src/search/maintain.js';
 import { findInSession, readContext, searchGlobal } from '../src/search/query.js';
-import { SEARCH_SCAN_BUDGET, dirtyCount, readState } from '../src/search/store.js';
+import { SEARCH_SCAN_BUDGET, dirtyCount, ensureSearchSchema, readState } from '../src/search/store.js';
 import type { SearchWorkingTreeSource } from '../src/search/types.js';
 import { openDatabase, type Db } from '../src/storage/db.js';
 
@@ -31,6 +36,8 @@ const LIMITS: MaintainLimits = { dirtyPage: 10, sourcePage: 40, turnPage: 5 };
 function openDb(): { dir: string; db: Db; close: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'gian-search-'));
   const db = openDatabase(dir);
+  ensureSearchSchema(db);
+  assert.equal(readState(db).schema_version, SEARCH_SCHEMA_VERSION);
   return {
     dir,
     db,
@@ -236,7 +243,8 @@ test('index and query canonical history without leaking hidden or archived rows'
       MANAGER_SYS_OPEN,
       'secret-system',
       MANAGER_SYS_CLOSE,
-      '你好世界 xe\u0301y look [Attached image: /api/sessions/sess-main/attachments/pic.png] here',
+      '你好世界 xe\u0301y look [Attached image: /tmp/gian/attachments/sess-main/pic.png] here',
+      'Keep literal [Attached image: /tmp/other/keep.png] and non-image [Attached image: /tmp/gian/attachments/sess-main/notes.txt]',
     ].join('\n'));
     user('t1', 'user-pair', 'pair-token and pair-token');
     assistant('t1', 'link-1', 'item-link', 'See [docs](https://secret.example/hidden) and `/tmp/secret-file`', false);
@@ -346,7 +354,12 @@ test('index and query canonical history without leaking hidden or archived rows'
     for (const trigger of triggers) assert.equal(trigger.sql.includes('search_fts'), false);
     assert.ok(dirtyCount(db) > 0);
 
+    const originalMessages = db.prepare('SELECT id, data FROM events WHERE turn_id = ? ORDER BY id').all('t1');
     await settle(db, dir, trees);
+    assert.deepEqual(
+      db.prepare('SELECT id, data FROM events WHERE turn_id = ? ORDER BY id').all('t1'),
+      originalMessages,
+    );
     const indexed = db.prepare(
       "SELECT search_text FROM search_documents WHERE kind = 'message'",
     ).all() as Array<{ search_text: string }>;
@@ -362,6 +375,9 @@ test('index and query canonical history without leaking hidden or archived rows'
     assert.equal(joined.includes('replaced-snapshot'), true);
     assert.equal(joined.includes('hello-delta'), false);
     assert.equal(joined.includes('pic.png'), false);
+    assert.equal(joined.includes('/tmp/gian/attachments/sess-main/pic.png'), false);
+    assert.equal(joined.includes('/tmp/other/keep.png'), true);
+    assert.equal(joined.includes('/tmp/gian/attachments/sess-main/notes.txt'), true);
     assert.equal(joined.includes('secret-reasoning-token'), false);
     assert.equal(joined.includes('secret-tool-token'), false);
     assert.equal(joined.includes('你好世界'), true);

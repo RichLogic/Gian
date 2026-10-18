@@ -32,7 +32,7 @@ import { makeWsHandlers } from '../src/web/ws-handler.js';
 import { openDatabase, type Db } from '../src/storage/db.js';
 import { saveConfig } from '../src/storage/config.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
-import { EMPTY_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
+import { LEGACY_APPROVAL_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
 
 interface StoredInbox {
   status: string;
@@ -159,7 +159,7 @@ class InboxProxyClient implements ProxyClient {
 
   isExited() { return false; }
   async initialize() { return stubInitialize(this.executor); }
-  async catalog() { return EMPTY_CATALOG; }
+  async catalog() { return LEGACY_APPROVAL_CATALOG; }
   async createSession(params: { cwd: string; nativeSessionId?: string | null }) {
     const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
     return { session: stubSession(nativeSessionId, params.cwd), nativeSessionId };

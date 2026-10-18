@@ -7,8 +7,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { SEARCH_SCHEMA_VERSION, parseContextQuery, parseFindQuery, parseGlobalSearchQuery, SearchContractError } from '../../shared/src/search.js';
-import { normalizeSearchText, projectComposerSearchText, projectSearchText } from '../../shared/src/search-text.js';
+import {
+  SEARCH_SCHEMA_VERSION,
+  SearchContractError,
+  normalizeSearchText,
+  parseContextQuery,
+  parseFindQuery,
+  parseGlobalSearchQuery,
+  projectComposerSearchText,
+  projectSearchText,
+} from '@gian/shared';
 import { EventStore } from '../src/session/event-store.js';
 import { drainSearchOnce, type MaintainLimits } from '../src/search/maintain.js';
 import { createSearchModule } from '../src/search/module.js';

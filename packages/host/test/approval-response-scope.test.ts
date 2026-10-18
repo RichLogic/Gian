@@ -19,7 +19,7 @@ import { QueueManager } from '../src/queue/index.js';
 import { SessionManager } from '../src/session/manager.js';
 import { openDatabase } from '../src/storage/db.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
-import { EMPTY_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
+import { LEGACY_APPROVAL_CATALOG, stubInitialize, stubSession } from './helpers/protocol-v2-stub.js';
 
 const NATIVE = 'shared-native';
 
@@ -57,7 +57,7 @@ class ScopedProxyClient implements ProxyClient {
 
   isExited() { return false; }
   async initialize() { return stubInitialize(this.executor); }
-  async catalog() { return EMPTY_CATALOG; }
+  async catalog() { return LEGACY_APPROVAL_CATALOG; }
   async createSession(params: { cwd: string; nativeSessionId?: string | null }) {
     const nativeSessionId = params.nativeSessionId ?? `cc_${randomUUID()}`;
     return { session: stubSession(nativeSessionId, params.cwd), nativeSessionId };

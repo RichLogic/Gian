@@ -25,6 +25,7 @@ import { openDatabase } from '../src/storage/db.js';
 import { TaskManager } from '../src/task/manager.js';
 import { GianToolService } from '../src/tool/service.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
+import { LEGACY_APPROVAL_CATALOG } from './helpers/protocol-v2-stub.js';
 
 const CLAUDE: UserAgent = {
   id: 'agent-claude-review',
@@ -67,6 +68,7 @@ class FakeProxyClient implements ProxyClient {
       catalogRevision: 'tool-test',
       input: [{ type: 'text' as const }],
       configOptions: [
+        ...LEGACY_APPROVAL_CATALOG.configOptions,
         {
           id: 'model', displayName: 'Model', binding: 'turn' as const, role: 'model',
           control: 'select' as const, required: true, defaultValue: this.executor === 'codex' ? 'gpt-5' : 'sonnet',

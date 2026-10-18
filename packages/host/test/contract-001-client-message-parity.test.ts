@@ -5,9 +5,9 @@
 //                  appear in the explicit "unimplemented by design"
 //                  whitelist with a justification.
 //
-// The test is a runtime parse of both files: declared `type: '<name>'`
-// literals from `web.ts`, vs `case '<name>':` arms in `ws-handler.ts`'s
-// dispatch switch. Anything in only one of the two sets is a drift signal
+// The test resolves web.ts wire unions plus imported attention declarations,
+// then compares dispatch cases and the dedicated attention-channel guards.
+// Anything in only one of the two sets is a drift signal
 // — either the handler stopped getting touched, or someone added a wire
 // type without wiring its server side.
 //
@@ -17,8 +17,10 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { declaredWireMessageTypes, guardedWireMessageTypes, readWireMessageTypes } from './helpers/wire-message-types.js';
 
 const WEB_TS = resolve('../shared/src/web.ts');
+const ATTENTION_TS = resolve('../shared/src/attention.ts');
 const WS_HANDLER_TS = resolve('src/web/ws-handler.ts');
 
 // ---------------------------------------------------------------------------
@@ -31,39 +33,8 @@ const UNIMPLEMENTED_BY_DESIGN: ReadonlyArray<{ type: string; reason: string }> =
 // Extractors
 // ---------------------------------------------------------------------------
 
-/**
- * Pull every `type: '<literal>'` line out of an interface block in web.ts.
- * The shared file is hand-written and uses single-quote literals for every
- * message type discriminator, e.g. `type: 'session:create';`.
- */
 function declaredClientMessageTypes(): Set<string> {
-  const text = readFileSync(WEB_TS, 'utf8');
-  // Find the ClientToServerMessage union and reverse-engineer the member
-  // names by walking each interface that appears in it.
-  const unionMatch = text.match(/export type ClientToServerMessage[\s\S]*?;/);
-  assert.ok(unionMatch, 'failed to locate ClientToServerMessage union in shared/src/web.ts');
-  const unionBody = unionMatch![0];
-  // Pull `| InterfaceName` entries.
-  const memberNames = Array.from(unionBody.matchAll(/\|\s*(\w+Message)/g), (m) => m[1]!);
-  assert.ok(memberNames.length > 0,
-    'ClientToServerMessage union appears to have no members; parse pattern broken');
-
-  // For each Interface name, find its declaration and pluck the `type: '<...>'` literal.
-  const types = new Set<string>();
-  for (const name of memberNames) {
-    const ifaceMatch = text.match(
-      new RegExp(`export interface ${name}\\s*\\{[\\s\\S]*?\\}`, 'm'),
-    );
-    if (!ifaceMatch) {
-      assert.fail(`could not locate interface ${name} body in shared/src/web.ts`);
-    }
-    const typeLiteral = ifaceMatch![0].match(/type:\s*'([^']+)'/);
-    if (!typeLiteral) {
-      assert.fail(`interface ${name} has no \`type: '<literal>';\` discriminator`);
-    }
-    types.add(typeLiteral![1]!);
-  }
-  return types;
+  return readWireMessageTypes('ClientToServerMessage', [WEB_TS, ATTENTION_TS]);
 }
 
 /**
@@ -80,6 +51,11 @@ function handledMessageTypes(): Set<string> {
   for (const m of body.matchAll(/case\s+'([^']+)'\s*:/g)) {
     handled.add(m[1]!);
   }
+  // Attention reconciliation is validated and handled before full-session dispatch.
+  for (const type of guardedWireMessageTypes(text, new Map([
+    [WEB_TS, readFileSync(WEB_TS, 'utf8')],
+    [ATTENTION_TS, readFileSync(ATTENTION_TS, 'utf8')],
+  ]))) handled.add(type);
   return handled;
 }
 
@@ -89,11 +65,43 @@ function handledMessageTypes(): Set<string> {
 
 test('CONTRACT-001: ClientToServerMessage parser locates at least the well-known wire types', () => {
   const declared = declaredClientMessageTypes();
-  // Smoke-check the parser itself before we lean on it — if the regex
+  // Smoke-check the parser itself before we lean on it — if discovery
   // breaks, every downstream assertion will silently pass.
-  for (const must of ['auth', 'session:create', 'message:send', 'queue:add']) {
+  for (const must of ['auth', 'session:create', 'message:send', 'queue:add', 'attention:lookup']) {
     assert.ok(declared.has(must), `parser missed expected wire type "${must}"`);
   }
+});
+
+test('CONTRACT-001: declaration discovery follows cross-file unions and inherited discriminators', () => {
+  const sources = new Map([
+    ['web.ts', `export type Wire = LookupMessage | AttentionMessage;`],
+    ['attention.ts', `
+      export interface LookupMessage { type: 'attention:lookup'; refs: string[] }
+      interface Fields { type: 'attention'; id: string }
+      export interface SessionMessage extends Fields { turn: number }
+      export interface ConfirmationMessage extends Fields { confirmationId: string }
+      export type AttentionMessage = SessionMessage | ConfirmationMessage;
+    `],
+  ]);
+  assert.deepEqual([...declaredWireMessageTypes('Wire', sources)].sort(), ['attention', 'attention:lookup']);
+});
+
+test('CONTRACT-001: missing and nonliteral declarations cannot silently shrink coverage', () => {
+  assert.throws(() => declaredWireMessageTypes('Wire', new Map([
+    ['web.ts', `export type Wire = MissingMessage;`],
+  ])), /could not locate wire declaration MissingMessage/);
+  assert.throws(() => declaredWireMessageTypes('Wire', new Map([
+    ['web.ts', `export type Wire = OpenMessage; interface OpenMessage { type: string }`],
+  ])), /only string literals/);
+});
+
+test('CONTRACT-001: attention guard discovery resolves declared predicates rather than trusting guard names', () => {
+  const sources = new Map([['attention.ts', `
+    interface Lookup { type: 'attention:lookup' }
+    export function validate(value: unknown): value is Lookup { return true }
+  `]]);
+  assert.deepEqual([...guardedWireMessageTypes('if (!validate(frame)) return;', sources)], ['attention:lookup']);
+  assert.deepEqual([...guardedWireMessageTypes('if (unrelated(frame)) return;', sources)], []);
 });
 
 test('CONTRACT-001: every declared ClientToServerMessage type is either handled or whitelisted', () => {

@@ -24,6 +24,7 @@ import type { ProxyClient, NotificationHandler } from '../src/proxy/types.js';
 import type { WsBroadcaster } from '../src/web/ws-broadcast.js';
 import { ApprovalManager } from '../src/approval/index.js';
 import { QueueManager } from '../src/queue/index.js';
+import { LEGACY_APPROVAL_CATALOG } from './helpers/protocol-v2-stub.js';
 import { makeWsHandlers } from '../src/web/ws-handler.js';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ class FakeProxyClient implements ProxyClient {
     };
   }
   async catalog() {
-    return { catalogRevision: 'test', input: [{ type: 'text' as const }], configOptions: [], slashCommands: [] };
+    return LEGACY_APPROVAL_CATALOG;
   }
   async createSession(params: { cwd: string; nativeSessionId?: string }) {
     if (this.failNextCreate) {
