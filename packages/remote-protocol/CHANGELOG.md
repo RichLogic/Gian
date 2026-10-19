@@ -1,5 +1,17 @@
 # Remote Protocol package
 
+## [1.3.0]
+
+- Adds an optional `host.locale` field to state snapshots so Remote Web can
+  follow the Host's configured UI language (`en` / `zh-CN`). Hosts send it
+  only to connections that negotiated the new `wire.host_locale` capability;
+  closed-schema peers never receive the field, and new clients treat a
+  missing locale as `en`.
+- Hello negotiation maximum minor version is now 2 (minimum stays 1): legacy
+  and minor-1 connections are unchanged.
+- Backward compatible with 1.2.0 peers: no existing schema, method or
+  capability shape changed.
+
 ## [1.2.0]
 
 - Adds verified GitHub account admission schemas and account-bound Host enrollment.
